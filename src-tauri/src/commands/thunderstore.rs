@@ -1,0 +1,51 @@
+use crate::services::thunderstore::ThunderStoreService;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+use once_cell::sync::Lazy;
+
+static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> = Lazy::new(|| AsyncMutex::new(None));
+
+async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> {
+    let mut service = THUNDERSTORE_SERVICE.lock().await;
+    if service.is_none() {
+        *service = Some(Arc::new(ThunderStoreService::new()));
+    }
+    Ok(service.as_ref().unwrap().clone())
+}
+
+#[tauri::command]
+pub async fn search_thunderstore_packages(
+    game_id: String,
+    runtime: String,
+    query: Option<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let service = get_thunderstore_service().await?;
+    service.search_packages_filtered_by_runtime(&game_id, &runtime, query.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_thunderstore_package(package_uuid: String) -> Result<Option<serde_json::Value>, String> {
+    let service = get_thunderstore_service().await?;
+    service.get_package(&package_uuid)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn download_thunderstore_package(package_uuid: String) -> Result<String, String> {
+    let service = get_thunderstore_service().await?;
+    let bytes = service.download_package(&package_uuid)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Save to temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("thunderstore-{}.zip", package_uuid));
+    tokio::fs::write(&temp_file, bytes).await
+        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+
+    Ok(temp_file.to_string_lossy().to_string())
+}
+

@@ -1,0 +1,9 @@
+/target
+/node_modules
+package-lock.json
+/dist
+/assets/plan
+/depots
+# Encrypted credential files (never commit these)
+**/credentials.enc
+**/github_token.enc

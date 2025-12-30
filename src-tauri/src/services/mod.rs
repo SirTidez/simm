@@ -1,0 +1,21 @@
+pub mod depot_downloader;
+pub mod environment;
+pub mod settings;
+pub mod auth;
+pub mod melon_loader;
+pub mod mods;
+pub mod plugins;
+pub mod fomod;
+pub mod userlibs;
+pub mod game_version;
+pub mod update_check;
+pub mod mod_update;
+pub mod nexus_mods;
+pub mod thunderstore;
+pub mod github_releases;
+pub mod filesystem;
+pub mod filesystem_watcher;
+pub mod logger;
+pub mod logs;
+pub mod steam;
+

@@ -1,0 +1,152 @@
+use anyhow::{Context, Result};
+use reqwest::Client;
+use serde_json::Value;
+
+const THUNDERSTORE_API_BASE: &str = "https://thunderstore.io/api/v1";
+
+#[derive(Clone)]
+pub struct ThunderStoreService {
+    client: Client,
+}
+
+impl ThunderStoreService {
+    pub fn new() -> Self {
+        Self {
+            client: Client::builder()
+                .user_agent("Schedule-I-DevEnvManager/1.0.0")
+                .build()
+                .unwrap_or_else(|_| Client::new()),
+        }
+    }
+
+    pub async fn search_packages_filtered_by_runtime(
+        &self,
+        game_id: &str,
+        runtime: &str,
+        query: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        // Use community-specific endpoint for Schedule I
+        let base_url = if game_id == "schedule-i" {
+            format!("https://thunderstore.io/c/{}/api/v1/package/", game_id)
+        } else {
+            format!("{}/package/", THUNDERSTORE_API_BASE)
+        };
+
+        let mut url = base_url;
+        if let Some(q) = query {
+            url = format!("{}?q={}", url, urlencoding::encode(q));
+        }
+
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to search Thunderstore packages")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Thunderstore API returned {}", response.status()));
+        }
+
+        let mut packages: Vec<Value> = response.json().await
+            .context("Failed to parse Thunderstore response")?;
+
+        // Filter by runtime if specified
+        if runtime != "unknown" {
+            let runtime_lower = runtime.to_lowercase();
+            let other_runtime = if runtime_lower == "il2cpp" { "mono" } else { "il2cpp" };
+            
+            packages.retain(|pkg| {
+                let name = pkg.get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let full_name = pkg.get("latest")
+                    .and_then(|l| l.get("full_name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                
+                // Exclude if explicitly mentions other runtime
+                if name.contains(&other_runtime) || full_name.contains(&other_runtime) {
+                    return false;
+                }
+                
+                // Include if mentions target runtime, or if no runtime specified (assume compatible)
+                name.contains(&runtime_lower) || full_name.contains(&runtime_lower) || 
+                (!name.contains("il2cpp") && !name.contains("mono") && 
+                 !full_name.contains("il2cpp") && !full_name.contains("mono"))
+            });
+        }
+
+        // Filter out deprecated packages
+        packages.retain(|pkg| {
+            !pkg.get("is_deprecated").and_then(|d| d.as_bool()).unwrap_or(false) &&
+            !pkg.get("latest")
+                .and_then(|l| l.get("is_deprecated"))
+                .and_then(|d| d.as_bool())
+                .unwrap_or(false)
+        });
+
+        Ok(packages)
+    }
+
+    pub async fn get_package(&self, package_uuid: &str) -> Result<Option<serde_json::Value>> {
+        let url = format!("{}/package/{}/", THUNDERSTORE_API_BASE, package_uuid);
+        
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to fetch Thunderstore package")?;
+
+        if response.status() == 404 {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Thunderstore API returned {}", response.status()));
+        }
+
+        let package: Value = response.json().await
+            .context("Failed to parse Thunderstore package")?;
+
+        Ok(Some(package))
+    }
+
+    pub async fn download_package(&self, package_uuid: &str) -> Result<Vec<u8>> {
+        // First get package info to find download URL
+        let package = self.get_package(package_uuid).await?
+            .ok_or_else(|| anyhow::anyhow!("Package not found"))?;
+
+        // Get latest version download URL
+        let download_url = package
+            .get("latest")
+            .and_then(|l| l.get("versions"))
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("download_url"))
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Download URL not found"))?;
+
+        let response = self.client
+            .get(download_url)
+            .send()
+            .await
+            .context("Failed to download package")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to download package: {}", response.status()));
+        }
+
+        let bytes = response.bytes().await
+            .context("Failed to read response body")?;
+
+        Ok(bytes.to_vec())
+    }
+}
+
+impl Default for ThunderStoreService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
