@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
+import { useSettingsStore } from '../stores/settingsStore';
 import { logger } from '../services/logger';
 import { lastUpdateCheckTimeRef } from './EnvironmentList';
+import { CustomThemeEditor } from './CustomThemeEditor';
 
 // Version injected at build time by Vite
 declare const __APP_VERSION__: string;
@@ -9,8 +11,12 @@ const APP_VERSION = __APP_VERSION__;
 
 export function Footer() {
   const { environments, checkAllUpdates } = useEnvironmentStore();
+  const { settings, updateSettings } = useSettingsStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
+  const [themeDropdownOpen, setThemeDropdownOpen] = useState(false);
+  const [showThemeEditor, setShowThemeEditor] = useState(false);
+  const themeDropdownRef = useRef<HTMLDivElement>(null);
   
   // Update current time every 30 seconds to refresh the "Last check" display
   useEffect(() => {
@@ -20,6 +26,23 @@ export function Footer() {
     
     return () => clearInterval(interval);
   }, []);
+
+  // Close theme dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (themeDropdownRef.current && !themeDropdownRef.current.contains(event.target as Node)) {
+        setThemeDropdownOpen(false);
+      }
+    };
+
+    if (themeDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [themeDropdownOpen]);
   
   // Recalculate most recent check whenever environments change
 
@@ -141,6 +164,31 @@ export function Footer() {
     }
   };
 
+  const handleThemeChange = async (theme: 'light' | 'dark' | 'modern-blue' | 'custom') => {
+    try {
+      await updateSettings({ theme });
+      setThemeDropdownOpen(false);
+      logger.info(`Theme changed to: ${theme}`);
+    } catch (err) {
+      logger.error(`Failed to change theme: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleCustomThemeEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setThemeDropdownOpen(false);
+    setShowThemeEditor(true);
+  };
+
+  const getThemeDisplayName = (theme: string) => {
+    switch (theme) {
+      case 'light': return 'Light';
+      case 'dark': return 'Dark';
+      case 'modern-blue': return 'Modern Blue';
+      default: return 'Dark';
+    }
+  };
+
   return (
     <footer className="app-footer">
       <div className="footer-content">
@@ -197,11 +245,68 @@ export function Footer() {
           </div>
         </div>
         <div className="footer-section footer-copyright">
+          <div className="footer-theme-selector" ref={themeDropdownRef}>
+            <button
+              type="button"
+              className="btn btn-icon-small footer-theme-btn"
+              onClick={() => setThemeDropdownOpen(!themeDropdownOpen)}
+              title="Change theme"
+              aria-label="Change theme"
+            >
+              <i className="fas fa-palette"></i>
+            </button>
+            {themeDropdownOpen && (
+              <div className="footer-theme-dropdown">
+                <button
+                  type="button"
+                  className={`footer-theme-option ${settings?.theme === 'modern-blue' ? 'active' : ''}`}
+                  onClick={() => handleThemeChange('modern-blue')}
+                >
+                  <i className="fas fa-adjust" style={{ marginRight: '0.5rem' }}></i>
+                  Modern Blue
+                </button>
+                <button
+                  type="button"
+                  className={`footer-theme-option ${settings?.theme === 'dark' ? 'active' : ''}`}
+                  onClick={() => handleThemeChange('dark')}
+                >
+                  <i className="fas fa-moon" style={{ marginRight: '0.5rem' }}></i>
+                  Dark
+                </button>
+                <button
+                  type="button"
+                  className={`footer-theme-option ${settings?.theme === 'light' ? 'active' : ''}`}
+                  onClick={() => handleThemeChange('light')}
+                >
+                  <i className="fas fa-sun" style={{ marginRight: '0.5rem' }}></i>
+                  Light
+                </button>
+                <div className="footer-theme-divider"></div>
+                <button
+                  type="button"
+                  className={`footer-theme-option footer-theme-custom ${settings?.theme === 'custom' ? 'active' : ''}`}
+                  onClick={() => handleThemeChange('custom')}
+                >
+                  <i className="fas fa-paint-brush" style={{ marginRight: '0.5rem' }}></i>
+                  Custom
+                  <button
+                    type="button"
+                    className="footer-theme-edit-btn"
+                    onClick={handleCustomThemeEdit}
+                    title="Edit Custom Theme"
+                  >
+                    <i className="fas fa-edit"></i>
+                  </button>
+                </button>
+              </div>
+            )}
+          </div>
           <p>
             Copyright (c) 2025 SirTidez | <span className="footer-app-name">Schedule I Mod Manager</span> v{APP_VERSION}
           </p>
         </div>
       </div>
+      <CustomThemeEditor isOpen={showThemeEditor} onClose={() => setShowThemeEditor(false)} />
     </footer>
   );
 }

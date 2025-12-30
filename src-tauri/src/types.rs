@@ -137,6 +137,7 @@ pub struct Settings {
     pub thunderstore_game_id: Option<String>,
     pub auto_update_mods: Option<bool>,
     pub mod_update_check_interval: Option<u32>, // minutes
+    pub custom_theme: Option<CustomTheme>,
     // Note: github_token is NOT stored here - it's stored encrypted separately
 }
 
@@ -145,6 +146,49 @@ pub struct Settings {
 pub enum Theme {
     Light,
     Dark,
+    #[serde(rename = "modern-blue")]
+    ModernBlue,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTheme {
+    pub app_bg_color: String,
+    pub app_text_color: String,
+    pub header_bg_color: String,
+    pub border_color: String,
+    pub card_bg_color: String,
+    pub card_border_color: String,
+    pub text_secondary: String,
+    pub input_bg_color: String,
+    pub input_border_color: String,
+    pub input_text_color: String,
+    pub btn_secondary_bg: String,
+    pub btn_secondary_hover: String,
+    pub btn_secondary_text: String,
+    pub btn_secondary_border: String,
+    pub info_box_bg: String,
+    pub info_box_border: String,
+    pub warning_box_bg: String,
+    pub warning_box_border: String,
+    pub info_panel_bg: String,
+    pub info_panel_border: String,
+    pub modal_overlay: String,
+    pub bg_gradient: String,
+    pub bg_pattern: String,
+    pub badge_gray: String,
+    pub badge_blue: String,
+    pub badge_orange_red: String,
+    pub badge_yellow: String,
+    pub badge_green: String,
+    pub badge_red: String,
+    pub badge_orange: String,
+    pub badge_cyan: String,
+    pub update_version_color: String,
+    pub update_version_bg: String,
+    pub primary_btn_color: String,
+    pub primary_btn_hover: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

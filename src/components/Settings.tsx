@@ -13,7 +13,7 @@ export function Settings() {
     maxConcurrentDownloads: 2,
     platform: 'windows' as 'windows' | 'macos' | 'linux',
     language: 'english',
-    theme: 'dark' as 'light' | 'dark',
+    theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue',
     melonLoaderZipPath: '',
     autoInstallMelonLoader: false,
     updateCheckInterval: 60,
@@ -30,6 +30,26 @@ export function Settings() {
   const [browsing, setBrowsing] = useState(false);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Handle escape key to close modal
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isOpen) {
+        setIsOpen(false);
+      }
+    };
+    
+    if (isOpen) {
+      document.addEventListener('keydown', handleEscape);
+      // Prevent body scroll when modal is open
+      document.body.style.overflow = 'hidden';
+    }
+    
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+      document.body.style.overflow = '';
+    };
+  }, [isOpen]);
+
   useEffect(() => {
     if (settings) {
       setFormData({
@@ -37,7 +57,7 @@ export function Settings() {
         maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
         platform: settings.platform || 'windows',
         language: settings.language || 'english',
-        theme: settings.theme || 'dark',
+        theme: settings.theme || 'modern-blue',
         melonLoaderZipPath: settings.melonLoaderZipPath || '',
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
         updateCheckInterval: settings.updateCheckInterval || 60,
@@ -154,8 +174,25 @@ export function Settings() {
       </button>
 
       {isOpen && (
-        <div className="modal-overlay" onClick={() => setIsOpen(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div 
+          className="modal-overlay" 
+          onClick={() => setIsOpen(false)}
+          style={{ 
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            width: '100vw',
+            height: '100vh',
+            zIndex: 10000
+          }}
+        >
+          <div 
+            className="modal-content" 
+            onClick={(e) => e.stopPropagation()}
+            style={{ zIndex: 10001 }}
+          >
             <div className="modal-header">
               <h2>Settings</h2>
               <button className="modal-close" onClick={() => setIsOpen(false)}>×</button>
@@ -349,6 +386,7 @@ export function Settings() {
                   >
                     <option value="light">Light</option>
                     <option value="dark">Dark</option>
+                    <option value="modern-blue">Modern Blue</option>
                   </select>
                 </div>
               </div>

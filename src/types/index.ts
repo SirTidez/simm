@@ -72,7 +72,8 @@ export interface Settings {
   maxConcurrentDownloads: number;
   platform: 'windows' | 'macos' | 'linux';
   language: string;
-  theme: 'light' | 'dark';
+  theme: 'light' | 'dark' | 'modern-blue' | 'custom';
+  customTheme?: CustomTheme;
   melonLoaderZipPath?: string;
   autoInstallMelonLoader?: boolean;
   updateCheckInterval?: number;
@@ -84,5 +85,43 @@ export interface Settings {
   autoUpdateMods?: boolean;
   modUpdateCheckInterval?: number;
   // Note: githubToken is NOT stored here - it's stored encrypted separately
+}
+
+export interface CustomTheme {
+  appBgColor: string;
+  appTextColor: string;
+  headerBgColor: string;
+  borderColor: string;
+  cardBgColor: string;
+  cardBorderColor: string;
+  textSecondary: string;
+  inputBgColor: string;
+  inputBorderColor: string;
+  inputTextColor: string;
+  btnSecondaryBg: string;
+  btnSecondaryHover: string;
+  btnSecondaryText: string;
+  btnSecondaryBorder: string;
+  infoBoxBg: string;
+  infoBoxBorder: string;
+  warningBoxBg: string;
+  warningBoxBorder: string;
+  infoPanelBg: string;
+  infoPanelBorder: string;
+  modalOverlay: string;
+  bgGradient: string;
+  bgPattern: string;
+  badgeGray: string;
+  badgeBlue: string;
+  badgeOrangeRed: string;
+  badgeYellow: string;
+  badgeGreen: string;
+  badgeRed: string;
+  badgeOrange: string;
+  badgeCyan: string;
+  updateVersionColor: string;
+  updateVersionBg: string;
+  primaryBtnColor: string;
+  primaryBtnHover: string;
 }
 

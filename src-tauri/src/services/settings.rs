@@ -132,7 +132,7 @@ impl SettingsService {
             max_concurrent_downloads: 2,
             platform,
             language: "english".to_string(),
-            theme: crate::types::Theme::Dark,
+            theme: crate::types::Theme::ModernBlue,
             melon_loader_zip_path: None,
             auto_install_melon_loader: Some(false),
             update_check_interval: Some(60),
@@ -143,6 +143,7 @@ impl SettingsService {
             thunderstore_game_id: Some("schedule-i".to_string()),
             auto_update_mods: None,
             mod_update_check_interval: None,
+            custom_theme: None,
         };
 
         self.settings = Some(default_settings.clone());
