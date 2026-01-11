@@ -46,6 +46,10 @@ impl SettingsService {
         self.data_dir.join("github_token.enc")
     }
 
+    fn nexus_mods_api_key_file(&self) -> PathBuf {
+        self.data_dir.join("nexus_mods_api_key.enc")
+    }
+
     fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
         let key_str = std::env::var("ENCRYPTION_KEY")
             .unwrap_or_else(|_| "default-key-change-in-production".to_string());
@@ -133,17 +137,19 @@ impl SettingsService {
             platform,
             language: "english".to_string(),
             theme: crate::types::Theme::ModernBlue,
-            melon_loader_zip_path: None,
+            melon_loader_version: None,
             auto_install_melon_loader: Some(false),
             update_check_interval: Some(60),
             auto_check_updates: Some(true),
             log_level: Some(crate::types::LogLevel::Info),
             nexus_mods_api_key: None,
             nexus_mods_game_id: Some("schedule1".to_string()),
+            nexus_mods_app_slug: None,
             thunderstore_game_id: Some("schedule-i".to_string()),
             auto_update_mods: None,
             mod_update_check_interval: None,
             custom_theme: None,
+            log_retention_days: Some(7), // Default to keeping 7 days of logs
         };
 
         self.settings = Some(default_settings.clone());
@@ -285,6 +291,52 @@ impl SettingsService {
             fs::write(&file_path, "")
                 .await
                 .context("Failed to clear GitHub token file")?;
+        }
+        Ok(())
+    }
+
+    /// Get NexusMods API key from encrypted storage
+    /// Returns None if API key is not set or cannot be decrypted
+    pub async fn get_nexus_mods_api_key(&self) -> Result<Option<String>> {
+        let file_path = self.nexus_mods_api_key_file();
+        
+        if !file_path.exists() {
+            return Ok(None);
+        }
+
+        let encrypted = fs::read_to_string(&file_path)
+            .await
+            .context("Failed to read NexusMods API key file")?;
+        
+        if encrypted.is_empty() {
+            return Ok(None);
+        }
+
+        // Decrypt the API key
+        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        Ok(Some(decrypted))
+    }
+
+    /// Save NexusMods API key to encrypted storage
+    /// The API key is encrypted and never logged
+    pub async fn save_nexus_mods_api_key(&self, api_key: String) -> Result<()> {
+        // Encrypt the API key
+        let encrypted = Self::encrypt_credentials(&api_key).await?;
+        
+        fs::write(self.nexus_mods_api_key_file(), encrypted)
+            .await
+            .context("Failed to write NexusMods API key file")?;
+        
+        Ok(())
+    }
+
+    /// Clear NexusMods API key from storage
+    pub async fn clear_nexus_mods_api_key(&self) -> Result<()> {
+        let file_path = self.nexus_mods_api_key_file();
+        if file_path.exists() {
+            fs::write(&file_path, "")
+                .await
+                .context("Failed to clear NexusMods API key file")?;
         }
         Ok(())
     }

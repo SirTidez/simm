@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use anyhow::{Context, Result};
 use tokio::fs;
-use regex::Regex;
 use chrono;
+use zip::ZipArchive;
 use crate::types::{ModMetadata, ModSource};
 
 #[derive(Clone)]
@@ -81,6 +83,262 @@ impl PluginsService {
         fs::write(&metadata_file, content).await
             .context("Failed to write plugin metadata file")?;
         Ok(())
+    }
+
+    fn extract_thunderstore_manifest(&self, zip_path: &Path) -> Option<serde_json::Value> {
+        // Try to extract and parse manifest.json from the ZIP
+        let file = File::open(zip_path).ok()?;
+        let mut archive = ZipArchive::new(file).ok()?;
+
+        // Look for manifest.json at root level
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).ok()?;
+            let file_name = file.name();
+
+            // Check if it's manifest.json at root (no directory prefix)
+            if file_name == "manifest.json" || file_name.ends_with("/manifest.json") {
+                let mut contents = String::new();
+                if file.read_to_string(&mut contents).is_ok() {
+                    if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&contents) {
+                        return Some(manifest);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    pub async fn install_zip_plugin(&self, game_dir: &str, zip_path: &str, metadata: Option<serde_json::Value>) -> Result<serde_json::Value> {
+        let plugins_directory = self.get_plugins_directory(game_dir);
+        fs::create_dir_all(&plugins_directory).await?;
+
+        // Check for Thunderstore manifest.json
+        let archive_path = Path::new(zip_path);
+        let thunderstore_manifest = self.extract_thunderstore_manifest(archive_path);
+
+        // If we found a Thunderstore manifest, use it
+        let mut effective_metadata = metadata.clone();
+        if let Some(ref manifest) = thunderstore_manifest {
+            eprintln!("[DEBUG] Found Thunderstore manifest.json in plugin ZIP");
+            eprintln!("[DEBUG] Manifest contents: {}", serde_json::to_string_pretty(manifest).unwrap_or_default());
+
+            // Override metadata with Thunderstore data
+            let mut ts_metadata = serde_json::Map::new();
+            ts_metadata.insert("source".to_string(), serde_json::Value::String("thunderstore".to_string()));
+
+            if let Some(name) = manifest.get("name").and_then(|v| v.as_str()) {
+                ts_metadata.insert("modName".to_string(), serde_json::Value::String(name.to_string()));
+            }
+
+            if let Some(version) = manifest.get("version_number").and_then(|v| v.as_str()) {
+                ts_metadata.insert("sourceVersion".to_string(), serde_json::Value::String(version.to_string()));
+            }
+
+            if let Some(author) = manifest.get("author").and_then(|v| v.as_str()) {
+                ts_metadata.insert("author".to_string(), serde_json::Value::String(author.to_string()));
+            }
+
+            if let Some(website) = manifest.get("website_url").and_then(|v| v.as_str()) {
+                ts_metadata.insert("sourceUrl".to_string(), serde_json::Value::String(website.to_string()));
+            }
+
+            // Create source ID from author/name
+            if let (Some(author), Some(name)) = (
+                manifest.get("author").and_then(|v| v.as_str()),
+                manifest.get("name").and_then(|v| v.as_str())
+            ) {
+                let source_id = format!("{}/{}", author, name);
+                ts_metadata.insert("sourceId".to_string(), serde_json::Value::String(source_id));
+            }
+
+            effective_metadata = Some(serde_json::Value::Object(ts_metadata));
+        }
+
+        // Create temp directory for extraction
+        let temp_dir = std::env::temp_dir()
+            .join(format!("plugin-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()));
+        fs::create_dir_all(&temp_dir).await
+            .context("Failed to create temp directory")?;
+
+        // Extract ZIP to temp directory (same pattern as mods)
+        let file = File::open(archive_path)
+            .context("Failed to open zip file")?;
+        let mut archive = ZipArchive::new(file)
+            .context("Failed to read zip archive")?;
+
+        // Extract all files to temp directory
+        // First, collect all file data synchronously (before any await)
+        let mut file_data = Vec::new();
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)
+                .context("Failed to read file from archive")?;
+
+            let file_name = file.name().to_string();
+            let is_dir = file_name.ends_with('/');
+
+            let mut buffer = Vec::new();
+            if !is_dir {
+                file.read_to_end(&mut buffer)
+                    .context("Failed to read file data from archive")?;
+            }
+
+            file_data.push((file_name, is_dir, buffer));
+        }
+
+        // Now do async operations with the collected data
+        for (file_name, is_dir, buffer) in file_data {
+            let outpath = temp_dir.join(&file_name);
+
+            if is_dir {
+                fs::create_dir_all(&outpath).await?;
+            } else {
+                if let Some(p) = outpath.parent() {
+                    fs::create_dir_all(p).await?;
+                }
+                let mut outfile = fs::File::create(&outpath).await?;
+                tokio::io::AsyncWriteExt::write_all(&mut outfile, &buffer).await?;
+            }
+        }
+
+        let mut installed_files = Vec::new();
+
+        // Look for Plugins/ directory in the extracted archive (Thunderstore structure)
+        let plugins_source_dir = temp_dir.join("Plugins");
+        let plugins_source_dir_lower = temp_dir.join("plugins");
+
+        // Check which plugins directory exists (case-insensitive)
+        let source_plugins_dir = if plugins_source_dir.exists() {
+            plugins_source_dir
+        } else if plugins_source_dir_lower.exists() {
+            plugins_source_dir_lower
+        } else {
+            // No Plugins folder, check root level for DLLs (legacy/local structure)
+            temp_dir.clone()
+        };
+
+        // Copy DLL files from source to plugins directory
+        if source_plugins_dir.is_dir() {
+            // Copy from Plugins/ folder
+            let mut entries = fs::read_dir(&source_plugins_dir).await
+                .context("Failed to read Plugins directory from archive")?;
+            
+            while let Some(entry) = entries.next_entry().await? {
+                let entry_path = entry.path();
+                if entry_path.is_file() {
+                    let file_name = entry_path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    
+                    if file_name.to_lowercase().ends_with(".dll") {
+                        let dest_path = plugins_directory.join(file_name);
+                        fs::copy(&entry_path, &dest_path).await
+                            .context("Failed to copy plugin file")?;
+                        installed_files.push(file_name.to_string());
+                    }
+                }
+            }
+        } else {
+            // Legacy structure: DLLs at root level
+            let mut entries = fs::read_dir(&source_plugins_dir).await
+                .context("Failed to read temp directory")?;
+            
+            while let Some(entry) = entries.next_entry().await? {
+                let entry_path = entry.path();
+                if entry_path.is_file() {
+                    let file_name = entry_path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    
+                    // Only root-level DLLs (not in subdirectories)
+                    if file_name.to_lowercase().ends_with(".dll") {
+                        let dest_path = plugins_directory.join(file_name);
+                        fs::copy(&entry_path, &dest_path).await
+                            .context("Failed to copy plugin file")?;
+                        installed_files.push(file_name.to_string());
+                    }
+                }
+            }
+        }
+
+        // Clean up temp directory
+        let _ = fs::remove_dir_all(&temp_dir).await;
+
+        if installed_files.is_empty() {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "No plugin DLL files found in ZIP archive. Expected files in Plugins/ folder or at root level."
+            }));
+        }
+
+        // Update plugin metadata
+        let mut plugin_metadata = self.load_plugin_metadata(&plugins_directory).await
+            .unwrap_or_else(|_| HashMap::new());
+
+        // Extract metadata from effective metadata
+        let source_str = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("source").and_then(|s| s.as_str()));
+
+        let mod_source = match source_str {
+            Some("thunderstore") => Some(ModSource::Thunderstore),
+            Some("nexusmods") => Some(ModSource::Nexusmods),
+            Some("unknown") => Some(ModSource::Unknown),
+            _ => Some(ModSource::Local),
+        };
+
+        let source_id = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceId").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_version = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceVersion").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_url = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let mod_name = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let author = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+
+        // Update metadata for all installed files
+        for file_name in &installed_files {
+            plugin_metadata.insert(file_name.clone(), ModMetadata {
+                source: mod_source.clone(),
+                source_id: source_id.clone(),
+                source_version: source_version.clone(),
+                author: author.clone(),
+                mod_name: mod_name.clone(),
+                source_url: source_url.clone(),
+                installed_version: None,
+                installed_at: Some(chrono::Utc::now()),
+                last_update_check: None,
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: None,
+                symlink_paths: None,
+            });
+        }
+
+        self.save_plugin_metadata(&plugins_directory, &plugin_metadata).await?;
+
+        let response_source = match mod_source {
+            Some(ModSource::Thunderstore) => "thunderstore",
+            Some(ModSource::Nexusmods) => "nexusmods",
+            Some(ModSource::Unknown) => "unknown",
+            Some(ModSource::Local) => "local",
+            _ => "unknown",
+        };
+
+        Ok(serde_json::json!({
+            "success": true,
+            "installedFiles": installed_files,
+            "source": response_source
+        }))
     }
 
     pub async fn list_plugins(&self, game_dir: &str) -> Result<serde_json::Value> {
@@ -317,6 +575,8 @@ impl PluginsService {
             remote_version: None,
             detected_runtime: None,
             runtime_match: None,
+            mod_storage_id: None,
+            symlink_paths: None,
         };
 
         metadata.insert("MLVScan.dll".to_string(), mlvscan_metadata);

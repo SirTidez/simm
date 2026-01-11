@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use tauri::Emitter;
+use crate::events;
 
 pub struct FileSystemWatcherService {
     watchers: Arc<RwLock<std::collections::HashMap<String, RecommendedWatcher>>>,
@@ -47,19 +47,16 @@ impl FileSystemWatcherService {
         let mut watcher = notify::recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
             match res {
                 Ok(_event) => {
-                    // Emit Tauri event for file changes
+                    // Emit Tauri event for file changes using event emitter functions
                     if let Some(app_arc) = app_handle_clone.as_ref() {
-                        let event_name = match watch_type_clone.as_str() {
-                            "mods" => "mods_changed",
-                            "plugins" => "plugins_changed",
-                            "userlibs" => "userlibs_changed",
-                            _ => return,
+                        // Use Arc::as_ref() to get &AppHandle
+                        let app_ref: &tauri::AppHandle = app_arc.as_ref();
+                        let _ = match watch_type_clone.as_str() {
+                            "mods" => events::emit_mods_changed(app_ref, environment_id_clone.clone()),
+                            "plugins" => events::emit_plugins_changed(app_ref, environment_id_clone.clone()),
+                            "userlibs" => events::emit_userlibs_changed(app_ref, environment_id_clone.clone()),
+                            _ => Ok(()),
                         };
-                        
-                        // Arc<AppHandle> implements Deref to AppHandle, so we can call emit directly
-                        let _ = app_arc.emit(event_name, serde_json::json!({
-                            "environmentId": environment_id_clone
-                        }));
                     }
                 }
                 Err(e) => {

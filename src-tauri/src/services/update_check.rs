@@ -20,6 +20,8 @@ impl UpdateCheckService {
     }
 
     pub async fn check_update_for_environment(&self, env: &Environment) -> Result<UpdateCheckResult> {
+        log::info!("Checking for updates: {} (branch: {})", env.name, env.branch);
+
         let mut result = UpdateCheckResult {
             update_available: false,
             current_manifest_id: env.last_manifest_id.clone(),
@@ -36,35 +38,39 @@ impl UpdateCheckService {
         // Extract current game version if environment is completed (but don't fail if this doesn't work)
         if matches!(env.status, crate::types::EnvironmentStatus::Completed) {
             if let Ok(Some(version)) = self.game_version_service.extract_game_version(&env.output_dir).await {
+                log::info!("Extracted current game version: {}", version);
                 result.current_game_version = Some(version.clone());
             }
         }
 
         // For Steam environments, skip DepotDownloader and only check version
         if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
-            eprintln!("[UpdateCheck] Steam environment detected, skipping DepotDownloader update check");
+            log::info!("Steam environment detected, skipping DepotDownloader update check");
             
             // Still check for remote manifest ID to compare versions, but don't trigger downloads
             match self.get_manifest_id_from_depot_downloader(&env.app_id, &env.branch).await {
                 Ok(manifest_id) => {
                     result.remote_manifest_id = Some(manifest_id.clone());
-                    
+                    log::info!("Remote manifest ID: {}", manifest_id);
+
                     // Compare manifest IDs - only show update if we have a stored manifest ID to compare against
                     if let Some(ref current_manifest) = env.last_manifest_id {
                         // Only show update if manifest IDs are different
                         result.update_available = current_manifest != &manifest_id;
                         if result.update_available {
-                            eprintln!("[UpdateCheck] Steam environment has update available (manifest ID changed), but Steam will handle the update");
+                            log::info!("Update available for Steam environment (manifest changed: {} -> {})", current_manifest, manifest_id);
+                        } else {
+                            log::info!("No update available (manifest ID unchanged: {})", manifest_id);
                         }
                     } else {
                         // For Steam environments without stored manifest ID, don't assume update
                         result.update_available = false;
-                        eprintln!("[UpdateCheck] Steam environment has no stored manifest ID, cannot determine if update is available");
+                        log::warn!("Steam environment has no stored manifest ID, cannot determine if update is available");
                     }
                 }
                 Err(e) => {
                     // For Steam environments, errors in manifest check are not critical
-                    eprintln!("[UpdateCheck] Could not check remote manifest for Steam environment: {}", e);
+                    log::warn!("Could not check remote manifest for Steam environment: {}", e);
                     result.error = Some(format!("Could not check for updates (Steam will handle updates): {}", e));
                 }
             }
@@ -73,23 +79,28 @@ impl UpdateCheckService {
             match self.get_manifest_id_from_depot_downloader(&env.app_id, &env.branch).await {
                 Ok(manifest_id) => {
                     result.remote_manifest_id = Some(manifest_id.clone());
-                    
+                    log::info!("Remote manifest ID: {}", manifest_id);
+
                     // Compare manifest IDs - only show update if we have a stored manifest ID to compare against
                     if let Some(ref current_manifest) = env.last_manifest_id {
                         // Only show update if manifest IDs are different
                         result.update_available = current_manifest != &manifest_id;
+                        if result.update_available {
+                            log::info!("Update available (manifest changed: {} -> {})", current_manifest, manifest_id);
+                        } else {
+                            log::info!("No update available (manifest ID unchanged: {})", manifest_id);
+                        }
                     } else {
                         // If no previous manifest ID stored, don't assume an update is available
                         // The manifest ID will be stored after the first successful download
                         // This prevents false positives for newly created environments
                         result.update_available = false;
-                        eprintln!("[UpdateCheck] No stored manifest ID for {} (branch: {}), cannot determine if update is available. Manifest ID will be stored after next download.", env.app_id, env.branch);
+                        log::warn!("No stored manifest ID for {} (branch: {}), cannot determine if update is available", env.app_id, env.branch);
                     }
                 }
                 Err(e) => {
                     result.error = Some(e.to_string());
-                    // Log the error for debugging
-                    eprintln!("[UpdateCheck] Failed to get manifest ID for {} (branch: {}): {}", env.app_id, env.branch, e);
+                    log::error!("Failed to get manifest ID for {} (branch: {}): {}", env.app_id, env.branch, e);
                 }
             }
         }
@@ -98,6 +109,7 @@ impl UpdateCheckService {
     }
 
     pub async fn check_all_environments(&self, envs: &[Environment]) -> Result<HashMap<String, UpdateCheckResult>> {
+        log::info!("Checking for updates on {} environment(s)", envs.len());
         let mut results = HashMap::new();
 
         for env in envs {
@@ -106,6 +118,7 @@ impl UpdateCheckService {
                     results.insert(env.id.clone(), result);
                 }
                 Err(e) => {
+                    log::error!("Error checking updates for {}: {}", env.name, e);
                     // Create error result
                     results.insert(env.id.clone(), UpdateCheckResult {
                         update_available: false,
@@ -153,7 +166,11 @@ impl UpdateCheckService {
             .or_else(|| settings.steam_username.clone())
             .ok_or_else(|| anyhow::anyhow!("Steam authentication required. Please authenticate first."))?;
 
-        eprintln!("[UpdateCheck] Checking Steam for app_id={}, branch={}, username={}", app_id, branch, username);
+        log::info!("Fetching manifest ID from Steam: app_id={}, branch={}, username={}", app_id, branch, username);
+
+        // Get depots directory from SIMM folder
+        let depots_dir = crate::utils::directory_init::get_depots_dir()
+            .context("Failed to get depots directory")?;
 
         // Build command with authentication
         let mut cmd = Command::new(&depot_downloader_path);
@@ -163,8 +180,9 @@ impl UpdateCheckService {
             .arg(branch)
             .arg("-username")
             .arg(&username)
-            .arg("-manifest-only");
-        
+            .arg("-manifest-only")
+            .current_dir(&depots_dir); // Set working directory to SIMM/depots
+
         // Use -remember-password on Windows if credentials are saved
         if cfg!(target_os = "windows") && credentials.is_some() {
             cmd.arg("-remember-password");
@@ -177,8 +195,10 @@ impl UpdateCheckService {
         let error_str = String::from_utf8_lossy(&output.stderr);
         let all_output = format!("{}{}", output_str, error_str);
 
-        eprintln!("[UpdateCheck] DepotDownloader stdout: {}", output_str);
-        eprintln!("[UpdateCheck] DepotDownloader stderr: {}", error_str);
+        log::info!("DepotDownloader stdout: {}", output_str);
+        if !error_str.is_empty() {
+            log::info!("DepotDownloader stderr: {}", error_str);
+        }
 
         // Check if command failed
         if !output.status.success() {
@@ -193,7 +213,7 @@ impl UpdateCheckService {
         if let Some(caps) = manifest_id_pattern.captures(&all_output) {
             if let Some(manifest_id) = caps.get(1) {
                 let manifest_id_str = manifest_id.as_str().to_string();
-                eprintln!("[UpdateCheck] Found manifest ID: {}", manifest_id_str);
+                log::info!("Found manifest ID: {}", manifest_id_str);
                 return Ok(manifest_id_str);
             }
         }
@@ -205,7 +225,7 @@ impl UpdateCheckService {
         if let Some(caps) = alt_pattern.captures(&all_output) {
             if let Some(manifest_id) = caps.get(1) {
                 let manifest_id_str = manifest_id.as_str().to_string();
-                eprintln!("[UpdateCheck] Found manifest ID (alt pattern): {}", manifest_id_str);
+                log::info!("Found manifest ID (alt pattern): {}", manifest_id_str);
                 return Ok(manifest_id_str);
             }
         }
@@ -217,10 +237,12 @@ impl UpdateCheckService {
         if let Some(caps) = number_pattern.captures(&all_output) {
             if let Some(manifest_id) = caps.get(1) {
                 let manifest_id_str = manifest_id.as_str().to_string();
-                eprintln!("[UpdateCheck] Found manifest ID (number pattern): {}", manifest_id_str);
+                log::info!("Found manifest ID (number pattern): {}", manifest_id_str);
                 return Ok(manifest_id_str);
             }
         }
+
+        log::error!("Could not parse manifest ID from DepotDownloader output");
 
         Err(anyhow::anyhow!("Could not parse manifest ID from DepotDownloader output. Output: {}", all_output))
     }

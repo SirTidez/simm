@@ -127,17 +127,19 @@ pub struct Settings {
     pub platform: Platform,
     pub language: String,
     pub theme: Theme,
-    pub melon_loader_zip_path: Option<String>,
+    pub melon_loader_version: Option<String>,
     pub auto_install_melon_loader: Option<bool>,
     pub update_check_interval: Option<u32>, // minutes
     pub auto_check_updates: Option<bool>,
     pub log_level: Option<LogLevel>,
     pub nexus_mods_api_key: Option<String>,
     pub nexus_mods_game_id: Option<String>,
+    pub nexus_mods_app_slug: Option<String>,
     pub thunderstore_game_id: Option<String>,
     pub auto_update_mods: Option<bool>,
     pub mod_update_check_interval: Option<u32>, // minutes
     pub custom_theme: Option<CustomTheme>,
+    pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
     // Note: github_token is NOT stored here - it's stored encrypted separately
 }
 
@@ -261,6 +263,8 @@ pub struct ModMetadata {
     pub remote_version: Option<String>,
     pub detected_runtime: Option<Runtime>,
     pub runtime_match: Option<bool>,
+    pub mod_storage_id: Option<String>,
+    pub symlink_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,7 +3,8 @@ import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { onModsChanged } from '../services/events';
 import { useSettingsStore } from '../stores/settingsStore';
-import type { Environment } from '../types';
+import type { Environment, NexusMod, NexusModFile } from '../types';
+import { open } from '@tauri-apps/plugin-dialog';
 
 interface ModInfo {
   name: string;
@@ -11,6 +12,7 @@ interface ModInfo {
   path: string;
   version?: string;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
+  sourceUrl?: string;
   disabled?: boolean;
 }
 
@@ -31,33 +33,21 @@ interface ThunderstorePackage {
   rating_score: number;
   is_pinned: boolean;
   is_deprecated: boolean;
-  total_downloads: number;
   categories?: string[];
-  latest: {
+  full_name: string;
+  versions: Array<{
     name: string;
     full_name: string;
-    owner: string;
-    package_url: string;
     date_created: string;
     date_updated: string;
     uuid4: string;
-    rating_score: number;
-    is_pinned: boolean;
-    is_deprecated: boolean;
-    versions: Array<{
-      name: string;
-      full_name: string;
-      date_created: string;
-      date_updated: string;
-      uuid4: string;
-      version_number: string;
-      dependencies: string[];
-      download_url: string;
-      downloads: number;
-      file_size: number;
-      description?: string;
-    }>;
-  };
+    version_number: string;
+    dependencies: string[];
+    download_url: string;
+    downloads: number;
+    file_size: number;
+    description?: string;
+  }>;
 }
 
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: Props) {
@@ -70,8 +60,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
   const [enablingMod, setEnablingMod] = useState<string | null>(null);
   const [disablingMod, setDisablingMod] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<{ file: File; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [pendingUpload, setPendingUpload] = useState<{ file: null; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
   
   // Search state
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -80,9 +69,19 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
   const [searching, setSearching] = useState(false);
   const [installingPackage, setInstallingPackage] = useState<string | null>(null);
   const [showSearchResults, setShowSearchResults] = useState(false);
+  const [searchSource, setSearchSource] = useState<'thunderstore' | 'nexusmods'>('thunderstore');
+  
+  // NexusMods search state
+  const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState<string>('');
+  const [nexusModsSearchResults, setNexusModsSearchResults] = useState<NexusMod[]>([]);
+  const [searchingNexusMods, setSearchingNexusMods] = useState(false);
+  const [installingNexusMod, setInstallingNexusMod] = useState<{ modId: number; fileId: number } | null>(null);
+  const [showNexusModsResults, setShowNexusModsResults] = useState(false);
+  const [nexusModsFiles, setNexusModsFiles] = useState<Map<number, NexusModFile[]>>(new Map());
   
   // Mod updates state
   const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
+  const [checkingModUpdates, setCheckingModUpdates] = useState(false);
   
   // S1API state
   const [s1apiStatus, setS1apiStatus] = useState<{
@@ -150,6 +149,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setSearchQuery('');
       setSearchResults([]);
       setShowSearchResults(false);
+      setSearchSource('thunderstore');
+      setNexusModsSearchQuery('');
+      setNexusModsSearchResults([]);
+      setShowNexusModsResults(false);
+      setNexusModsFiles(new Map());
       setModUpdates(new Map());
       setS1apiStatus(null);
       setS1apiLatestRelease(null);
@@ -158,6 +162,17 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setSelectedS1APIVersion('');
     }
   }, [isOpen, environmentId]);
+
+  // Auto-load files for NexusMods search results
+  useEffect(() => {
+    if (showNexusModsResults && nexusModsSearchResults.length > 0) {
+      nexusModsSearchResults.forEach((mod) => {
+        if (!nexusModsFiles.has(mod.mod_id)) {
+          handleLoadNexusModFiles(mod.mod_id);
+        }
+      });
+    }
+  }, [showNexusModsResults, nexusModsSearchResults]);
 
   const loadEnvironment = async () => {
     try {
@@ -184,26 +199,63 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setModsDirectory(result.modsDirectory);
       
       // Load update information
-      try {
-        const updates = await ApiService.checkModUpdates(environmentId);
-        const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
-        updates.forEach(update => {
-          updatesMap.set(update.modFileName, {
-            updateAvailable: update.updateAvailable,
-            currentVersion: update.currentVersion,
-            latestVersion: update.latestVersion
-          });
-        });
-        setModUpdates(updatesMap);
-      } catch (updateErr) {
-        // Fail silently - updates are nice to have but not critical
-        console.warn('Failed to load mod updates:', updateErr);
-      }
+      await checkModUpdates();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load mods');
       setMods([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const checkModUpdates = async (showErrors: boolean = false) => {
+    try {
+      const updates = await ApiService.checkModUpdates(environmentId);
+      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
+      updates.forEach(update => {
+        updatesMap.set(update.modFileName, {
+          updateAvailable: update.updateAvailable,
+          currentVersion: update.currentVersion,
+          latestVersion: update.latestVersion
+        });
+      });
+      setModUpdates(updatesMap);
+    } catch (updateErr) {
+      if (showErrors) {
+        throw updateErr; // Re-throw if called manually so we can show error
+      } else {
+        // Fail silently - updates are nice to have but not critical
+        console.warn('Failed to check mod updates:', updateErr);
+      }
+    }
+  };
+
+  const handleCheckModUpdates = async () => {
+    setCheckingModUpdates(true);
+    setError(null);
+    try {
+      await checkModUpdates(true); // Show errors when manually triggered
+      // Reload mods to refresh the display (but don't check updates again to avoid double-checking)
+      setLoading(true);
+      try {
+        const result = await ApiService.getMods(environmentId);
+        const filteredMods = result.mods.filter(mod => {
+          const lowerName = mod.fileName.toLowerCase();
+          return !(lowerName === 's1api.mono.melonloader.dll' ||
+                   lowerName === 's1api.il2cpp.melonloader.dll' ||
+                   (lowerName.startsWith('s1api') && lowerName.includes('.') && lowerName.endsWith('.dll')));
+        });
+        setMods(filteredMods);
+        setModsDirectory(result.modsDirectory);
+      } catch (err) {
+        console.error('Failed to reload mods after update check:', err);
+      } finally {
+        setLoading(false);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to check for mod updates');
+    } finally {
+      setCheckingModUpdates(false);
     }
   };
 
@@ -391,27 +443,209 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
     }
   };
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click();
+  const extractModNameFromFileName = (fileName: string): string => {
+    // Remove file extensions
+    let modName = fileName.replace(/\.(dll|zip|rar)$/i, '');
+    
+    // Remove common version patterns (e.g., "ModName-1.2.3", "ModName_v1.0", "ModName 2.0")
+    modName = modName.replace(/[-_ ]?v?\d+\.\d+(\.\d+)?([-_ ].*)?$/i, '');
+    modName = modName.replace(/[-_ ]?\d+\.\d+\.\d+.*$/i, '');
+    
+    // Remove common suffixes like "-IL2CPP", "-Mono", etc.
+    modName = modName.replace(/[-_ ]?(il2cpp|mono|beta|alpha|release).*$/i, '');
+    
+    // Remove numeric IDs at the start (e.g., "12345-ModName")
+    modName = modName.replace(/^\d+-/, '');
+    
+    // Trim and clean up
+    modName = modName.trim().replace(/[-_]+/g, ' ').trim();
+    
+    return modName || fileName.replace(/\.(dll|zip|rar)$/i, '');
   };
 
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const fuzzyMatchModName = (searchName: string, modName: string): number => {
+    // Simple fuzzy matching score (0-1)
+    const searchLower = searchName.toLowerCase().trim();
+    const modLower = modName.toLowerCase().trim();
+    
+    // Exact match
+    if (modLower === searchLower) return 1.0;
+    
+    // Contains match
+    if (modLower.includes(searchLower) || searchLower.includes(modLower)) {
+      return 0.8;
+    }
+    
+    // Word-based matching
+    const searchWords = searchLower.split(/\s+/);
+    const modWords = modLower.split(/\s+/);
+    let matchedWords = 0;
+    
+    for (const searchWord of searchWords) {
+      if (modWords.some(modWord => modWord.includes(searchWord) || searchWord.includes(modWord))) {
+        matchedWords++;
+      }
+    }
+    
+    if (matchedWords > 0) {
+      return matchedWords / Math.max(searchWords.length, modWords.length) * 0.6;
+    }
+    
+    return 0;
+  };
+
+  const detectModSource = async (filePath: string, fileName: string): Promise<{
+    source: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
+    sourceUrl?: string;
+    modName?: string;
+    author?: string;
+    sourceId?: string;
+    sourceVersion?: string;
+  }> => {
+    const fileNameLower = fileName.toLowerCase();
+    
+    // Check for Thunderstore indicators
+    // Thunderstore mods often have specific naming patterns or contain manifest.json
+    if (fileNameLower.includes('thunderstore') || 
+        fileNameLower.includes('thunder') ||
+        fileNameLower.match(/^[a-z0-9_-]+-[a-z0-9_-]+-\d+\.\d+\.\d+\.zip$/i)) {
+      // Try to extract mod info from filename (format: modname-version.zip)
+      const match = fileName.match(/^(.+?)-(\d+\.\d+\.\d+)/);
+      if (match) {
+        return {
+          source: 'thunderstore',
+          modName: match[1],
+          sourceVersion: match[2],
+        };
+      }
+      return { source: 'thunderstore' };
+    }
+    
+    // Check for Nexus Mods indicators
+    // Nexus mods often have numeric IDs in filename or specific patterns
+    if (fileNameLower.includes('nexus') || 
+        fileNameLower.match(/^\d+-\d+/) || // Pattern like "12345-67890" (modId-fileId)
+        fileNameLower.includes('nexusmods')) {
+      // Try to extract mod ID from filename
+      const match = fileName.match(/(\d+)-(\d+)/);
+      if (match) {
+        return {
+          source: 'nexusmods',
+          sourceId: match[1],
+          sourceUrl: `https://www.nexusmods.com/schedule1/mods/${match[1]}`,
+        };
+      }
+      return { source: 'nexusmods' };
+    }
+    
+    // If not clearly Thunderstore or Nexus, try searching Nexus Mods
+    // Extract a clean mod name from the filename
+    const cleanModName = extractModNameFromFileName(fileName);
+    
+    // Only search if we have a reasonable mod name (at least 3 characters)
+    if (cleanModName.length >= 3) {
+      try {
+        // Check if Nexus Mods API key is available
+        const hasApiKey = await ApiService.hasNexusModsApiKey();
+        
+        if (hasApiKey) {
+          // Search Nexus Mods for this mod name
+          const searchResults = await ApiService.searchNexusMods('schedule1', cleanModName);
+          
+          if (searchResults.mods && searchResults.mods.length > 0) {
+            // Find the best matching mod using fuzzy matching
+            let bestMatch: NexusMod | null = null;
+            let bestScore = 0;
+            
+            for (const mod of searchResults.mods) {
+              const score = fuzzyMatchModName(cleanModName, mod.name);
+              if (score > bestScore && score >= 0.6) { // Require at least 60% match
+                bestScore = score;
+                bestMatch = mod;
+              }
+            }
+            
+            if (bestMatch) {
+              return {
+                source: 'nexusmods',
+                sourceId: bestMatch.mod_id.toString(),
+                sourceUrl: `https://www.nexusmods.com/schedule1/mods/${bestMatch.mod_id}`,
+                modName: bestMatch.name,
+                author: bestMatch.author,
+                sourceVersion: bestMatch.version,
+              };
+            }
+          }
+        }
+      } catch (err) {
+        // If search fails, silently fall through to unknown
+        console.warn('Failed to search Nexus Mods for mod:', cleanModName, err);
+      }
+    }
+    
+    // Default to unknown for manual uploads
+    return { source: 'unknown' };
+  };
+
+  const handleUploadClick = async () => {
+    if (!environment) {
+      setError('Environment not loaded');
+      return;
+    }
 
     setUploading(true);
     setError(null);
 
     try {
-      const result = await ApiService.uploadMod(environmentId, file);
+      // Use Tauri dialog to select file
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'Mod Files',
+          extensions: ['dll', 'zip', 'rar']
+        }],
+        title: 'Select Mod File',
+      });
+
+      if (!selected) {
+        // User cancelled
+        setUploading(false);
+        return;
+      }
+
+      // Handle both string path and FileEntry object
+      let filePath: string;
+      let fileName: string;
+      
+      if (typeof selected === 'string') {
+        filePath = selected;
+        fileName = selected.split(/[/\\]/).pop() || 'unknown';
+      } else {
+        // FileEntry object
+        filePath = selected.path;
+        fileName = selected.name || filePath.split(/[/\\]/).pop() || 'unknown';
+      }
+
+      // Detect source
+      const sourceInfo = await detectModSource(filePath, fileName);
+
+      // Call upload with file path and metadata
+      const result = await ApiService.uploadMod(
+        environmentId,
+        filePath,
+        fileName,
+        environment.runtime,
+        sourceInfo
+      );
       
       if (result.success) {
-        // Check for runtime mismatch - mod is already installed, just show warning
+        // Check for runtime mismatch
         if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
           // Store the mismatch info to show confirmation dialog
-          setPendingUpload({ file, runtimeMismatch: result.runtimeMismatch });
-          // Mod is already installed, so we can proceed with success handling
-          // but show the warning dialog first
+          setPendingUpload({ 
+            file: null as any, // Not needed anymore since we use file path
+            runtimeMismatch: result.runtimeMismatch 
+          });
         } else {
           // No mismatch - proceed with success handling
           await handleUploadSuccess();
@@ -433,10 +667,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
     if (onModsChanged) {
       onModsChanged();
     }
-    // Clear file input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
     setUploading(false);
     setPendingUpload(null);
   };
@@ -452,6 +682,94 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
     // Still reload mods since it was installed
     setPendingUpload(null);
     handleUploadSuccess();
+  };
+
+  // Filter mods to ensure they are for Schedule I, match the runtime, and match the search query
+  const filterModsForScheduleI = (
+    packages: ThunderstorePackage[],
+    runtime: 'IL2CPP' | 'Mono',
+    searchQuery: string
+  ): ThunderstorePackage[] => {
+    const runtimeLower = runtime.toLowerCase();
+    const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
+    const searchLower = searchQuery.toLowerCase().trim();
+
+    return packages.filter((pkg) => {
+      // 1. Check if it's for Schedule I - verify package URL contains schedule-i
+      // Since we're using the Schedule I endpoint, all results should be for Schedule I,
+      // but we verify this client-side as requested
+      const packageUrl = (pkg.package_url || '').toLowerCase();
+      const isScheduleI =
+        packageUrl.includes('schedule-i') ||
+        packageUrl.includes('c/schedule-i') ||
+        packageUrl.includes('/schedule-i/');
+
+      if (!isScheduleI) {
+        // If no URL available, we can't verify, so exclude to be safe
+        // (though in practice, if the API endpoint is correct, all results should have the URL)
+        return false;
+      }
+
+      // 2. Check runtime compatibility
+      const name = (pkg.name || '').toLowerCase();
+      const fullName = (pkg.full_name || '').toLowerCase();
+      const categories = (pkg.categories || []).map(c => c.toLowerCase());
+
+      // Check categories for runtime tags
+      const hasTargetRuntimeCategory = categories.some(c => c === runtimeLower);
+      const hasOtherRuntimeCategory = categories.some(c => c === otherRuntime);
+
+      // If it has the target runtime category, include it (even if it also has the other)
+      if (hasTargetRuntimeCategory) {
+        // Package supports this runtime, continue to search query check
+      } else if (hasOtherRuntimeCategory) {
+        // Has only the other runtime category, exclude
+        return false;
+      }
+
+      // For name-based checking (when no categories match)
+      // Check if explicitly mentions the other runtime in name (exclude)
+      const mentionsOtherRuntimeInName =
+        name.includes(otherRuntime) ||
+        fullName.includes(otherRuntime);
+
+      if (mentionsOtherRuntimeInName && !hasTargetRuntimeCategory) {
+        return false;
+      }
+
+      // Check if it mentions the target runtime in name or has no runtime specified (assume compatible)
+      const mentionsTargetRuntime =
+        name.includes(runtimeLower) ||
+        fullName.includes(runtimeLower) ||
+        hasTargetRuntimeCategory;
+
+      const noRuntimeSpecified =
+        !name.includes('il2cpp') &&
+        !name.includes('mono') &&
+        !fullName.includes('il2cpp') &&
+        !fullName.includes('mono') &&
+        !categories.some(c => c.includes('il2cpp') || c.includes('mono'));
+
+      // Must either mention target runtime or have no runtime specified
+      if (!mentionsTargetRuntime && !noRuntimeSpecified) {
+        return false;
+      }
+
+      // 3. Check if it matches the search query
+      if (searchLower) {
+        const matchesSearch =
+          name.includes(searchLower) ||
+          fullName.includes(searchLower) ||
+          (pkg.versions?.[0]?.description || '').toLowerCase().includes(searchLower) ||
+          (pkg.owner || '').toLowerCase().includes(searchLower);
+
+        if (!matchesSearch) {
+          return false;
+        }
+      }
+
+      return true;
+    });
   };
 
   const handleSearch = async () => {
@@ -471,7 +789,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
         searchQuery.trim(),
         environment.runtime
       );
-      setSearchResults(result.packages || []);
+      
+      // Apply client-side filtering to ensure only Schedule I mods for the correct runtime are shown
+      const filteredResults = filterModsForScheduleI(
+        result.packages || [],
+        environment.runtime,
+        searchQuery.trim()
+      );
+      
+      setSearchResults(filteredResults);
       setShowSearchResults(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to search Thunderstore';
@@ -490,6 +816,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
     setInstallingPackage(pkg.uuid4);
     setError(null);
     try {
+      console.log(`Installing Thunderstore mod: ${pkg.name} (${pkg.uuid4})`);
       const result = await ApiService.installThunderstoreMod(environmentId, pkg.uuid4);
       
       if (result.success) {
@@ -502,6 +829,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
           }
         }
         
+        console.log(`Successfully installed mod: ${pkg.name}`);
+        
         // Reload mods after installation
         await loadMods();
         if (onModsChanged) {
@@ -512,10 +841,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
         setShowSearchResults(false);
         setSearchQuery('');
       } else {
-        setError(result.error || 'Failed to install mod');
+        const errorMsg = result.error || 'Failed to install mod';
+        console.error(`Failed to install mod ${pkg.name}:`, errorMsg);
+        setError(errorMsg);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to install mod');
+      const errorMsg = err instanceof Error ? err.message : 'Failed to install mod';
+      console.error(`Error installing mod ${pkg.name}:`, err);
+      setError(errorMsg);
     } finally {
       setInstallingPackage(null);
     }
@@ -523,7 +856,150 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      handleSearch();
+      if (searchSource === 'thunderstore') {
+        handleSearch();
+      } else {
+        handleSearchNexusMods();
+      }
+    }
+  };
+
+  const handleSearchNexusMods = async () => {
+    if (!nexusModsSearchQuery.trim() || !environment) {
+      return;
+    }
+
+    // Check if API key is set
+    const hasKey = await ApiService.hasNexusModsApiKey();
+    if (!hasKey) {
+      setError('NexusMods API key is not set. Please set it in the Accounts portal.');
+      return;
+    }
+
+    const gameId = 'schedule1';
+
+    setSearchingNexusMods(true);
+    setError(null);
+    setShowNexusModsResults(false);
+    try {
+      const result = await ApiService.searchNexusMods(
+        gameId,
+        nexusModsSearchQuery.trim()
+      );
+      
+      setNexusModsSearchResults(result.mods || []);
+      setShowNexusModsResults(true);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to search NexusMods';
+      setError(errorMessage);
+      setNexusModsSearchResults([]);
+      setShowNexusModsResults(false);
+      console.error('Error searching NexusMods:', err);
+    } finally {
+      setSearchingNexusMods(false);
+    }
+  };
+
+  const handleLoadNexusModFiles = async (modId: number) => {
+    if (nexusModsFiles.has(modId)) {
+      return; // Already loaded
+    }
+
+    try {
+      const files = await ApiService.getNexusModsModFiles('schedule1', modId);
+      setNexusModsFiles(prev => new Map(prev).set(modId, files));
+    } catch (err) {
+      console.error('Failed to load NexusMods mod files:', err);
+    }
+  };
+
+  const handleInstallNexusModsMod = async (modId: number, fileId?: number) => {
+    if (!environment) return;
+
+    // Load files if not already loaded
+    if (!nexusModsFiles.has(modId)) {
+      await handleLoadNexusModFiles(modId);
+    }
+
+    const files = nexusModsFiles.get(modId) || [];
+    
+    // Filter files by runtime type if fileId not specified
+    // NexusMods uses separate files for IL2CPP and Mono, so we filter by file name
+    let targetFile;
+    if (fileId) {
+      targetFile = files.find((f: any) => f.file_id === fileId);
+    } else {
+      // Filter files by runtime type based on file name
+      const runtimeLower = environment.runtime.toLowerCase();
+      const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
+      
+      // First, try to find files that match the current runtime
+      const runtimeFiles = files.filter((f: any) => {
+        const fileName = (f.file_name || f.name || '').toLowerCase();
+        return fileName.includes(runtimeLower);
+      });
+      
+      if (runtimeFiles.length > 0) {
+        // Prefer primary file if it matches runtime, otherwise use first match
+        targetFile = runtimeFiles.find((f: any) => f.is_primary) || runtimeFiles[0];
+      } else {
+        // No exact runtime match, exclude files that explicitly mention the other runtime
+        const compatibleFiles = files.filter((f: any) => {
+          const fileName = (f.file_name || f.name || '').toLowerCase();
+          return !fileName.includes(otherRuntime);
+        });
+        targetFile = compatibleFiles.find((f: any) => f.is_primary) || compatibleFiles[0] || files[0];
+      }
+    }
+
+    if (!targetFile) {
+      setError('No file available to install for your runtime type');
+      return;
+    }
+
+    setInstallingNexusMod({ modId, fileId: targetFile.file_id });
+    setError(null);
+    try {
+      console.log(`Installing NexusMods mod: ${modId} file: ${targetFile.file_id}`);
+      const result = await ApiService.installNexusModsMod(environmentId, modId, targetFile.file_id);
+      
+      if (result.success) {
+        // Check for runtime mismatch
+        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
+          // Show confirmation dialog
+          if (!confirm(result.runtimeMismatch.warning)) {
+            setInstallingNexusMod(null);
+            return;
+          }
+        }
+        
+        console.log(`Successfully installed mod: ${modId}`);
+        
+        // Reload mods after installation
+        await loadMods();
+        if (onModsChanged) {
+          onModsChanged();
+        }
+        
+        // Close search results
+        setShowNexusModsResults(false);
+        setNexusModsSearchQuery('');
+      } else {
+        const errorMsg = result.error || 'Failed to install mod';
+        console.error(`Failed to install mod ${modId}:`, errorMsg);
+        setError(errorMsg);
+      }
+    } catch (err) {
+      // Log the full error object to see its structure
+      console.error(`Error installing mod ${modId} - Full error object:`, err);
+      console.error(`Error type:`, typeof err);
+      console.error(`Error keys:`, err ? Object.keys(err) : 'null');
+
+      const errorMsg = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Failed to install mod');
+      console.error(`Extracted error message:`, errorMsg);
+      setError(errorMsg);
+    } finally {
+      setInstallingNexusMod(null);
     }
   };
 
@@ -580,16 +1056,67 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
             </div>
           )}
 
-          {/* Thunderstore Search Bar */}
+          {/* Mod Search Bar */}
           {environment && (
             <div style={{ padding: '0 1.25rem', marginBottom: '1rem', borderBottom: '1px solid #3a3a3a', paddingBottom: '1rem' }}>
+              {/* Source Tabs */}
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <button
+                  onClick={() => {
+                    setSearchSource('thunderstore');
+                    setShowSearchResults(false);
+                    setShowNexusModsResults(false);
+                  }}
+                  className="btn"
+                  style={{
+                    flex: 1,
+                    backgroundColor: searchSource === 'thunderstore' ? '#4a90e2' : '#2a2a2a',
+                    color: searchSource === 'thunderstore' ? '#fff' : '#888',
+                    border: `1px solid ${searchSource === 'thunderstore' ? '#4a90e2' : '#3a3a3a'}`,
+                    padding: '0.5rem',
+                    fontSize: '0.875rem'
+                  }}
+                >
+                  <i className="fas fa-cloud-download-alt" style={{ marginRight: '0.5rem' }}></i>
+                  Thunderstore
+                </button>
+                <button
+                  onClick={() => {
+                    setSearchSource('nexusmods');
+                    setShowSearchResults(false);
+                    setShowNexusModsResults(false);
+                  }}
+                  className="btn"
+                  style={{
+                    flex: 1,
+                    backgroundColor: searchSource === 'nexusmods' ? '#ea4335' : '#2a2a2a',
+                    color: searchSource === 'nexusmods' ? '#fff' : '#888',
+                    border: `1px solid ${searchSource === 'nexusmods' ? '#ea4335' : '#3a3a3a'}`,
+                    padding: '0.5rem',
+                    fontSize: '0.875rem'
+                  }}
+                >
+                  <i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>
+                  NexusMods
+                </button>
+              </div>
+
+              {/* Search Input */}
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                 <div style={{ flex: 1, position: 'relative' }}>
                   <input
                     type="text"
-                    placeholder={`Search Thunderstore for ${environment.runtime} mods...`}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder={searchSource === 'thunderstore' 
+                      ? `Search Thunderstore for ${environment.runtime} mods...`
+                      : `Search NexusMods for ${environment.runtime} mods...`}
+                    value={searchSource === 'thunderstore' ? searchQuery : nexusModsSearchQuery}
+                    onChange={(e) => {
+                      if (searchSource === 'thunderstore') {
+                        setSearchQuery(e.target.value);
+                      } else {
+                        setNexusModsSearchQuery(e.target.value);
+                      }
+                    }}
                     onKeyDown={handleSearchKeyDown}
                     style={{
                       width: '100%',
@@ -611,16 +1138,17 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                       color: '#888',
                       cursor: 'pointer'
                     }}
-                    onClick={handleSearch}
+                    onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
                   ></i>
                 </div>
                 <button
-                  onClick={handleSearch}
+                  onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
                   className="btn btn-primary"
-                  disabled={searching || !searchQuery.trim()}
+                  disabled={(searchSource === 'thunderstore' ? searching : searchingNexusMods) || 
+                           (searchSource === 'thunderstore' ? !searchQuery.trim() : !nexusModsSearchQuery.trim())}
                   style={{ whiteSpace: 'nowrap' }}
                 >
-                  {searching ? (
+                  {(searchSource === 'thunderstore' ? searching : searchingNexusMods) ? (
                     <>
                       <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
                       Searching...
@@ -632,12 +1160,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                     </>
                   )}
                 </button>
-                {showSearchResults && (
+                {(showSearchResults || showNexusModsResults) && (
                   <button
                     onClick={() => {
                       setShowSearchResults(false);
+                      setShowNexusModsResults(false);
                       setSearchQuery('');
+                      setNexusModsSearchQuery('');
                       setSearchResults([]);
+                      setNexusModsSearchResults([]);
                     }}
                     className="btn btn-secondary"
                     style={{ whiteSpace: 'nowrap' }}
@@ -656,14 +1187,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
           )}
 
           {/* Search Results - Loading State */}
-          {searching && (
+          {(searching || searchingNexusMods) && (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
               <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
-              <p>Searching Thunderstore...</p>
+              <p>Searching {searchSource === 'thunderstore' ? 'Thunderstore' : 'NexusMods'}...</p>
             </div>
           )}
 
-          {/* Search Results */}
+          {/* Thunderstore Search Results */}
           {!searching && showSearchResults && searchResults.length > 0 && (
             <div style={{ padding: '0 1.25rem', marginBottom: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
               <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
@@ -686,7 +1217,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                   >
                     <div style={{ flex: 1 }}>
                       <h4 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1rem', color: '#fff' }}>
-                        {pkg.name || (pkg.latest?.full_name ? pkg.latest.full_name.split('-').slice(1).join('-') : 'Unknown Mod')}
+                        {pkg.name || (pkg.full_name ? pkg.full_name.split('-').slice(1).join('-') : 'Unknown Mod')}
                       </h4>
                       <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', fontSize: '0.875rem', color: '#888', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
                         <span>
@@ -695,12 +1226,21 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                         </span>
                         <span>
                           <i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>
-                          {(pkg.total_downloads || 0).toLocaleString()} downloads
+                          {(() => {
+                            // Sum all version downloads (API doesn't provide total_downloads)
+                            if (pkg.versions && Array.isArray(pkg.versions)) {
+                              const totalDownloads = pkg.versions.reduce((sum: number, v: any) => {
+                                return sum + (v.downloads || 0);
+                              }, 0);
+                              return totalDownloads.toLocaleString();
+                            }
+                            return '0';
+                          })()} downloads
                         </span>
-                        {pkg.latest?.versions?.[0]?.version_number && (
+                        {pkg.versions?.[0]?.version_number && (
                           <span>
                             <i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>
-                            v{pkg.latest.versions[0].version_number}
+                            v{pkg.versions[0].version_number}
                           </span>
                         )}
                         <span>
@@ -758,21 +1298,37 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                         })()}
                       </div>
                       {/* Description */}
-                      {(pkg.latest?.versions?.[0]?.description && pkg.latest.versions[0].description.trim()) && (
-                        <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.875rem', color: '#aaa', lineHeight: '1.4' }}>
-                          {pkg.latest.versions[0].description.length > 150 
-                            ? pkg.latest.versions[0].description.substring(0, 150) + '...' 
-                            : pkg.latest.versions[0].description}
-                        </p>
-                      )}
+                      {(() => {
+                        // Description is in the first version (latest)
+                        const description = pkg.versions?.[0]?.description;
+                        
+                        if (description && typeof description === 'string' && description.trim()) {
+                          const maxLength = 200;
+                          const truncated = description.length > maxLength 
+                            ? description.substring(0, maxLength).trim() + '...' 
+                            : description;
+                          return (
+                            <p style={{ 
+                              margin: '0.5rem 0 0.75rem 0', 
+                              fontSize: '0.875rem', 
+                              color: '#ccc', 
+                              lineHeight: '1.5',
+                              maxWidth: '100%'
+                            }}>
+                              {truncated}
+                            </p>
+                          );
+                        }
+                        return null;
+                      })()}
                       <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', fontSize: '0.75rem', color: '#888', flexWrap: 'wrap' }}>
-                        {pkg.latest?.versions?.[0]?.file_size && (
+                        {pkg.versions?.[0]?.file_size && (
                           <span>
-                            Size: {(pkg.latest.versions[0].file_size / 1024 / 1024).toFixed(2)} MB
+                            Size: {(pkg.versions[0].file_size / 1024 / 1024).toFixed(2)} MB
                           </span>
                         )}
-                        {(pkg.date_updated || pkg.latest?.date_updated) && (() => {
-                          const updateDate = new Date(pkg.date_updated || pkg.latest?.date_updated || '');
+                        {pkg.date_updated && (() => {
+                          const updateDate = new Date(pkg.date_updated);
                           const now = new Date();
                           const diffMs = now.getTime() - updateDate.getTime();
                           const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
@@ -809,7 +1365,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                         onClick={() => handleInstallThunderstoreMod(pkg)}
                         className="btn btn-primary btn-small"
                         disabled={installingPackage === pkg.uuid4}
-                        title={`Install ${pkg.latest?.full_name || pkg.name || 'mod'}`}
+                        title={`Install ${pkg.full_name || pkg.name || 'mod'}`}
                       >
                         {installingPackage === pkg.uuid4 ? (
                           <>
@@ -824,14 +1380,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                         )}
                       </button>
                       <a
-                        href={pkg.package_url || pkg.latest?.package_url || '#'}
+                        href={pkg.package_url || '#'}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="btn btn-secondary btn-small"
                         style={{ textDecoration: 'none', textAlign: 'center' }}
                         title="View on Thunderstore"
                         onClick={(e) => {
-                          if (!pkg.package_url && !pkg.latest?.package_url) {
+                          if (!pkg.package_url) {
                             e.preventDefault();
                           }
                         }}
@@ -853,6 +1409,240 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
             </div>
           )}
 
+          {/* NexusMods Search Results - Loading State */}
+          {searchingNexusMods && (
+            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
+              <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <p>Searching NexusMods...</p>
+            </div>
+          )}
+
+          {/* NexusMods Search Results */}
+          {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length > 0 && (() => {
+            const runtimeLower = environment?.runtime?.toLowerCase() || '';
+            const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
+
+            // Filter mods to only show those with installable files for current runtime
+            const compatibleMods = nexusModsSearchResults.filter((mod) => {
+              const files = nexusModsFiles.get(mod.mod_id) || [];
+
+              const runtimeFiles = files.filter((f: any) => {
+                const fileName = (f.file_name || f.name || '').toLowerCase();
+
+                // Define runtime-specific keywords:
+                // IL2CPP: il2cpp, main, beta
+                // Mono: mono, alternate, alternatebeta
+                if (runtimeLower === 'il2cpp') {
+                  // For IL2CPP, file must contain: il2cpp, main, or beta
+                  return fileName.includes('il2cpp') || fileName.includes('main') || fileName.includes('beta');
+                } else {
+                  // For Mono, file must contain: mono, alternate, or alternatebeta
+                  return fileName.includes('mono') || fileName.includes('alternate');
+                }
+              });
+
+              // Only include mods that have at least one compatible file
+              return runtimeFiles.length > 0;
+            });
+
+            return compatibleMods.length > 0 ? (
+              <div style={{ padding: '0 1.25rem', marginBottom: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
+                <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
+                  Search Results ({compatibleMods.length})
+                </h3>
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  {compatibleMods.map((mod) => {
+                    const files = nexusModsFiles.get(mod.mod_id) || [];
+
+                    // Check if mod is already installed
+                    const isAlreadyInstalled = mods.some(installedMod => {
+                      // Check by source URL or mod name + author
+                      const sourceUrl = `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`;
+                      return installedMod.sourceUrl === sourceUrl ||
+                             (installedMod.name === mod.name && installedMod.source === 'nexusmods');
+                    });
+
+                    // Filter files to ONLY show runtime-compatible files with valid naming
+                    const runtimeFiles = files.filter((f: any) => {
+                      const fileName = (f.file_name || f.name || '').toLowerCase();
+
+                      // Define runtime-specific keywords:
+                      // IL2CPP: il2cpp, main, beta
+                      // Mono: mono, alternate, alternatebeta
+                      if (runtimeLower === 'il2cpp') {
+                        // For IL2CPP, file must contain: il2cpp, main, or beta
+                        return fileName.includes('il2cpp') || fileName.includes('main') || fileName.includes('beta');
+                      } else {
+                        // For Mono, file must contain: mono, alternate, or alternatebeta
+                        return fileName.includes('mono') || fileName.includes('alternate');
+                      }
+                    });
+
+                  // Find the best matching file for current runtime
+                  const bestFile = runtimeFiles.find((f: any) => {
+                    const fileName = (f.file_name || f.name || '').toLowerCase();
+                    return fileName.includes(runtimeLower);
+                  }) || runtimeFiles.find((f: any) => f.is_primary) || runtimeFiles[0];
+                  
+                  return (
+                    <div
+                      key={mod.mod_id}
+                      style={{
+                        backgroundColor: '#2a2a2a',
+                        border: '1px solid #3a3a3a',
+                        borderRadius: '8px',
+                        padding: '1rem',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '0.75rem'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+                        <div style={{ flex: 1 }}>
+                          <h4 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1rem', color: '#fff' }}>
+                            {mod.name || 'Unknown Mod'}
+                          </h4>
+                          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', fontSize: '0.875rem', color: '#888', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+                            <span>
+                              <i className="fas fa-user" style={{ marginRight: '0.25rem' }}></i>
+                              {mod.author || 'Unknown'}
+                            </span>
+                            <span>
+                              <i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>
+                              {mod.mod_downloads?.toLocaleString() || '0'} downloads
+                            </span>
+                            {mod.version && (
+                              <span>
+                                <i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>
+                                v{mod.version}
+                              </span>
+                            )}
+                            <span>
+                              <i className="fas fa-thumbs-up" style={{ marginRight: '0.25rem', color: '#4a90e2' }}></i>
+                              {mod.endorsement_count?.toLocaleString() || '0'} endorsements
+                            </span>
+                          </div>
+                          {mod.summary && (
+                            <p style={{ 
+                              margin: '0.5rem 0 0.75rem 0', 
+                              fontSize: '0.875rem', 
+                              color: '#ccc', 
+                              lineHeight: '1.5'
+                            }}>
+                              {mod.summary.length > 200 ? mod.summary.substring(0, 200) + '...' : mod.summary}
+                            </p>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', gap: '0.5rem', flexDirection: 'column' }}>
+                          <button
+                            onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
+                            className={isAlreadyInstalled ? "btn btn-secondary btn-small" : "btn btn-primary btn-small"}
+                            disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled}
+                            title={isAlreadyInstalled ? 'This mod is already installed' : bestFile ? `Install ${bestFile.file_name || bestFile.name || 'mod'}` : 'Loading files...'}
+                          >
+                            {installingNexusMod?.modId === mod.mod_id ? (
+                              <>
+                                <i className="fas fa-spinner fa-spin"></i>
+                                <span style={{ marginLeft: '0.5rem' }}>Installing...</span>
+                              </>
+                            ) : isAlreadyInstalled ? (
+                              <>
+                                <i className="fas fa-check"></i>
+                                <span style={{ marginLeft: '0.5rem' }}>Installed</span>
+                              </>
+                            ) : (
+                              <>
+                                <i className="fas fa-download"></i>
+                                <span style={{ marginLeft: '0.5rem' }}>Install</span>
+                              </>
+                            )}
+                          </button>
+                          <a
+                            href={`https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="btn btn-secondary btn-small"
+                            style={{ textDecoration: 'none', textAlign: 'center' }}
+                            title="View on NexusMods"
+                          >
+                            <i className="fas fa-external-link-alt"></i>
+                            <span style={{ marginLeft: '0.5rem' }}>View</span>
+                          </a>
+                        </div>
+                      </div>
+                      {runtimeFiles.length > 0 && (
+                        <div style={{
+                          padding: '0.75rem',
+                          backgroundColor: '#1a1a1a',
+                          borderRadius: '4px',
+                          fontSize: '0.875rem'
+                        }}>
+                          <div style={{ color: '#888', marginBottom: '0.5rem' }}>
+                            <i className="fas fa-file-archive" style={{ marginRight: '0.5rem' }}></i>
+                            Available files for {environment?.runtime} ({runtimeFiles.length}):
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                            {runtimeFiles.map((file: any) => {
+                              const fileName = file.file_name || file.name || 'Unknown';
+                              const isRuntimeMatch = fileName.toLowerCase().includes(runtimeLower);
+                              const isBestFile = bestFile?.file_id === file.file_id;
+                              return (
+                                <div
+                                  key={file.file_id}
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    padding: '0.5rem',
+                                    backgroundColor: isBestFile ? '#2a4a6a' : 'transparent',
+                                    borderRadius: '4px',
+                                    border: isBestFile ? '1px solid #4a90e2' : '1px solid transparent'
+                                  }}
+                                >
+                                  <span style={{ color: isRuntimeMatch ? '#4a90e2' : '#ccc', flex: 1 }}>
+                                    {fileName}
+                                    {isBestFile && (
+                                      <span style={{ marginLeft: '0.5rem', color: '#4a90e2', fontSize: '0.75rem' }}>
+                                        (Recommended for {environment?.runtime})
+                                      </span>
+                                    )}
+                                  </span>
+                                  {file.file_id !== bestFile?.file_id && (
+                                    <button
+                                      onClick={() => handleInstallNexusModsMod(mod.mod_id, file.file_id)}
+                                      className="btn btn-secondary btn-small"
+                                      disabled={installingNexusMod?.modId === mod.mod_id}
+                                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                                    >
+                                      Install
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            ) : (
+              <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
+                <i className="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+                <p>No compatible mods found for {environment?.runtime} runtime</p>
+              </div>
+            );
+          })()}
+
+          {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length === 0 && (
+            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
+              <i className="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <p>No mods found matching your search</p>
+            </div>
+          )}
+
           <div className="mods-actions" style={{ padding: '0 1.25rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
             <div style={{ flex: 1 }}>
               {modsDirectory && (
@@ -863,18 +1653,29 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
               )}
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".dll,.zip"
-                onChange={handleFileChange}
-                style={{ display: 'none' }}
-              />
+              <button
+                onClick={handleCheckModUpdates}
+                className="btn btn-secondary"
+                disabled={checkingModUpdates}
+                title="Check for mod and plugin updates"
+              >
+                {checkingModUpdates ? (
+                  <>
+                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                    Checking...
+                  </>
+                ) : (
+                  <>
+                    <i className="fas fa-sync-alt" style={{ marginRight: '0.5rem' }}></i>
+                    Check Updates
+                  </>
+                )}
+              </button>
               <button
                 onClick={handleUploadClick}
                 className="btn btn-primary"
                 disabled={uploading}
-                title="Upload a mod file (.dll or .zip)"
+                title="Upload a mod file (.dll, .zip, or .rar)"
               >
                 {uploading ? (
                   <>
@@ -1125,18 +1926,50 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                           );
                         })()}
                         {mod.source && (
-                          <span style={{ 
-                            display: 'inline-flex', 
-                            alignItems: 'center', 
-                            padding: '0.25rem 0.5rem', 
-                            borderRadius: '4px', 
-                            backgroundColor: `${getSourceColor(mod.source)}20`,
-                            color: getSourceColor(mod.source),
-                            border: `1px solid ${getSourceColor(mod.source)}40`
-                          }}>
-                            <i className="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }}></i>
-                            {getSourceLabel(mod.source)}
-                          </span>
+                          (mod.source === 'thunderstore' || mod.source === 'nexusmods') && mod.sourceUrl ? (
+                            <a
+                              href={mod.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '0.25rem 0.5rem',
+                                borderRadius: '4px',
+                                backgroundColor: `${getSourceColor(mod.source)}20`,
+                                color: getSourceColor(mod.source),
+                                border: `1px solid ${getSourceColor(mod.source)}40`,
+                                textDecoration: 'none',
+                                cursor: 'pointer',
+                                transition: 'all 0.2s'
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.backgroundColor = `${getSourceColor(mod.source)}30`;
+                                e.currentTarget.style.textDecoration = 'underline';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.backgroundColor = `${getSourceColor(mod.source)}20`;
+                                e.currentTarget.style.textDecoration = 'none';
+                              }}
+                              title={`View ${mod.name} on ${mod.source === 'thunderstore' ? 'Thunderstore' : 'NexusMods'}`}
+                            >
+                              <i className="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }}></i>
+                              {getSourceLabel(mod.source)}
+                            </a>
+                          ) : (
+                            <span style={{ 
+                              display: 'inline-flex', 
+                              alignItems: 'center', 
+                              padding: '0.25rem 0.5rem', 
+                              borderRadius: '4px', 
+                              backgroundColor: `${getSourceColor(mod.source)}20`,
+                              color: getSourceColor(mod.source),
+                              border: `1px solid ${getSourceColor(mod.source)}40`
+                            }}>
+                              <i className="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }}></i>
+                              {getSourceLabel(mod.source)}
+                            </span>
+                          )
                         )}
                       </div>
                     </div>

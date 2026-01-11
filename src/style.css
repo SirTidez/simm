@@ -916,6 +916,15 @@ body::after {
   isolation: isolate;
 }
 
+/* Nested modal overlay for modals within modals */
+.modal-overlay-nested {
+  z-index: 20000;
+}
+
+.modal-content-nested {
+  z-index: 20001;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -1267,6 +1276,10 @@ body::after {
 
 .settings-section {
   margin-bottom: 1.25rem;
+  padding: clamp(1rem, 2vw, 1.25rem);
+  background-color: rgba(42, 42, 42, 0.3);
+  border: 1px solid rgba(58, 58, 58, 0.4);
+  border-radius: clamp(0.5rem, 1vw, 0.75rem);
 }
 
 .settings-section:last-child {
@@ -1278,6 +1291,7 @@ body::after {
   margin-bottom: clamp(0.6rem, 1.5vw, 0.75rem);
   font-size: clamp(0.95rem, 2vw, 1rem);
   font-weight: 600;
+  color: var(--app-text-color, #ffffff);
 }
 
 .info-box,
@@ -1289,13 +1303,13 @@ body::after {
 }
 
 .info-box {
-  background-color: var(--info-box-bg, #1e3a5f);
-  border: 1px solid var(--info-box-border, #2a4a6f);
+  background-color: var(--info-box-bg, rgba(30, 58, 95, 0.4));
+  border: 1px solid var(--info-box-border, rgba(42, 74, 111, 0.5));
 }
 
 .warning-box {
-  background-color: var(--warning-box-bg, #5a3a1e);
-  border: 1px solid var(--warning-box-border, #6a4a2f);
+  background-color: var(--warning-box-bg, rgba(90, 58, 30, 0.4));
+  border: 1px solid var(--warning-box-border, rgba(106, 74, 47, 0.5));
 }
 
 .info-box p,

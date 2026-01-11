@@ -1,0 +1,6 @@
+# DepotDownloader cache and manifests
+depots/
+.DepotDownloader/
+
+# Cargo build artifacts
+target/

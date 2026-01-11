@@ -1,0 +1,64 @@
+use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+use crate::utils::directory_init;
+use crate::services::filesystem_watcher::FileSystemWatcherService;
+use crate::services::environment::EnvironmentService;
+use tauri::{AppHandle, Manager};
+
+/// Initialize SIMM directory and return whether it was just created
+pub fn initialize_simm_directory() -> Result<bool> {
+    match directory_init::initialize_simm_directory() {
+        Ok((simm_dir, was_created)) => {
+            log::info!("SIMM directory initialized at: {:?} (was_created: {})", simm_dir, was_created);
+            Ok(was_created)
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize SIMM directory: {}", e);
+            Ok(false)
+        }
+    }
+}
+
+/// Initialize services (async part)
+pub async fn initialize_services(app: AppHandle) -> Result<()> {
+    // Initialize the LoggerService for the global logger (starts background thread)
+    log::info!("Initializing LoggerService for global logger");
+    crate::utils::global_logger::init_logger_service();
+    log::info!("LoggerService initialized - logs will now be written to file");
+
+    // Initialize filesystem watcher service
+    let mut watcher = FileSystemWatcherService::new();
+    watcher.set_app_handle(app.clone());
+    // Store watcher in app state (wrapped in Arc<AsyncMutex> for thread safety)
+    let watcher_arc = Arc::new(AsyncMutex::new(watcher));
+    app.manage(watcher_arc.clone());
+    log::info!("FileSystem watcher service initialized");
+
+    // Start watching existing environments
+    if let Ok(env_service) = EnvironmentService::new() {
+        if let Ok(environments) = env_service.get_environments().await {
+            let env_count = environments.len();
+            log::info!("Found {} existing environment(s) to watch", env_count);
+
+            let watcher_guard = watcher_arc.lock().await;
+            for env in &environments {
+                if !env.output_dir.is_empty() {
+                    let mods_dir = std::path::Path::new(&env.output_dir).join("Mods");
+                    let plugins_dir = std::path::Path::new(&env.output_dir).join("Plugins");
+                    let userlibs_dir = std::path::Path::new(&env.output_dir).join("UserLibs");
+
+                    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
+                    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
+                    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+                }
+            }
+            log::info!("Started watching {} environment(s)", env_count);
+        }
+    }
+
+    log::info!("Application initialization complete");
+
+    Ok(())
+}
+

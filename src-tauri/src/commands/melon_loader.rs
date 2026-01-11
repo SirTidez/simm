@@ -2,6 +2,8 @@ use crate::services::melon_loader::MelonLoaderService;
 use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
+use crate::events;
+use tauri::AppHandle;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
@@ -67,8 +69,18 @@ pub async fn get_melon_loader_status(environment_id: String) -> Result<serde_jso
 }
 
 #[tauri::command]
-pub async fn install_melon_loader(environment_id: String, version_tag: String) -> Result<serde_json::Value, String> {
+pub async fn install_melon_loader(
+    app: AppHandle,
+    environment_id: String, 
+    version_tag: String
+) -> Result<serde_json::Value, String> {
     eprintln!("[install_melon_loader] Starting installation for environment: {}, version: {}", environment_id, version_tag);
+    
+    // Generate a download_id for tracking this installation
+    let download_id = format!("melonloader-{}-{}", environment_id, chrono::Utc::now().timestamp_millis());
+    
+    // Emit installing event
+    let _ = events::emit_melonloader_installing(&app, download_id.clone(), format!("Starting MelonLoader {} installation...", version_tag));
     
     // Helper to return error as JSON
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
@@ -188,9 +200,62 @@ pub async fn install_melon_loader(environment_id: String, version_tag: String) -
     // The service returns Ok(serde_json::Value) with success/error fields
     // So we just return it directly
     match result {
-        Ok(json_result) => Ok(json_result),
-        Err(e) => error_json(format!("Installation failed: {}", e))
+        Ok(json_result) => {
+            // Check if installation was successful
+            if let Some(success) = json_result.get("success").and_then(|s| s.as_bool()) {
+                if success {
+                    // Extract version from result if available
+                    let version = json_result.get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    
+                    let _ = events::emit_melonloader_installed(
+                        &app,
+                        download_id.clone(),
+                        format!("MelonLoader {} installed successfully", version_tag),
+                        version
+                    );
+                } else {
+                    // Installation failed
+                    let error_msg = json_result.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("Installation failed")
+                        .to_string();
+                    
+                    let _ = events::emit_melonloader_error(&app, download_id.clone(), error_msg.clone());
+                }
+            }
+            Ok(json_result)
+        },
+        Err(e) => {
+            let error_msg = format!("Installation failed: {}", e);
+            let _ = events::emit_melonloader_error(&app, download_id.clone(), error_msg.clone());
+            error_json(error_msg)
+        }
     }
+}
+
+#[tauri::command]
+pub async fn get_available_melonloader_versions() -> Result<Vec<serde_json::Value>, String> {
+    let github_service = get_github_service().await?;
+
+    let releases = github_service.get_all_releases("LavaGang", "MelonLoader", false)
+        .await
+        .map_err(|e| format!("Failed to fetch MelonLoader releases: {}", e))?;
+
+    // Map to simplified version objects
+    let versions: Vec<serde_json::Value> = releases.into_iter()
+        .map(|release| {
+            serde_json::json!({
+                "tag": release.get("tag_name").and_then(|t| t.as_str()).unwrap_or(""),
+                "name": release.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                "publishedAt": release.get("published_at"),
+                "prerelease": release.get("prerelease").and_then(|p| p.as_bool()).unwrap_or(false),
+            })
+        })
+        .collect();
+
+    Ok(versions)
 }
 
 #[tauri::command]

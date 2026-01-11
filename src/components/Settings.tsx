@@ -14,7 +14,7 @@ export function Settings() {
     platform: 'windows' as 'windows' | 'macos' | 'linux',
     language: 'english',
     theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue',
-    melonLoaderZipPath: '',
+    melonLoaderVersion: '',
     autoInstallMelonLoader: false,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
@@ -22,12 +22,11 @@ export function Settings() {
   });
   const [error, setError] = useState<string | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
-  const [showFilePicker, setShowFilePicker] = useState(false);
   const [directoryPath, setDirectoryPath] = useState('');
-  const [filePickerPath, setFilePickerPath] = useState('');
   const [directoryList, setDirectoryList] = useState<Array<{ name: string; path: string }>>([]);
-  const [fileList, setFileList] = useState<Array<{ name: string; path: string; type: 'directory' | 'file' }>>([]);
   const [browsing, setBrowsing] = useState(false);
+  const [melonLoaderVersions, setMelonLoaderVersions] = useState<Array<{ tag: string; name: string }>>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Handle escape key to close modal
@@ -55,10 +54,10 @@ export function Settings() {
       setFormData({
         defaultDownloadDir: settings.defaultDownloadDir || '',
         maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
-        platform: settings.platform || 'windows',
-        language: settings.language || 'english',
+        platform: 'windows' as 'windows' | 'macos' | 'linux', // Always Windows
+        language: 'english', // Always English
         theme: settings.theme || 'modern-blue',
-        melonLoaderZipPath: settings.melonLoaderZipPath || '',
+        melonLoaderVersion: settings.melonLoaderVersion || '',
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
@@ -66,6 +65,24 @@ export function Settings() {
       });
     }
   }, [settings]);
+
+  // Load available MelonLoader versions when modal opens
+  useEffect(() => {
+    if (isOpen && melonLoaderVersions.length === 0) {
+      setLoadingVersions(true);
+      ApiService.getAvailableMelonLoaderVersions()
+        .then(versions => {
+          setMelonLoaderVersions(versions);
+        })
+        .catch(err => {
+          console.error('Failed to load MelonLoader versions:', err);
+          setError('Failed to load MelonLoader versions');
+        })
+        .finally(() => {
+          setLoadingVersions(false);
+        });
+    }
+  }, [isOpen, melonLoaderVersions.length]);
 
   // Auto-save with debouncing
   useEffect(() => {
@@ -80,7 +97,8 @@ export function Settings() {
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         setError(null);
-        await updateSettings(formData);
+        // Always set platform to 'windows' and language to 'english' since they're not user-configurable
+        await updateSettings({ ...formData, platform: 'windows', language: 'english' });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to save settings');
       }
@@ -136,29 +154,9 @@ export function Settings() {
     }
   };
 
-  const loadFiles = async (path: string) => {
-    if (!path) return;
-    setBrowsing(true);
-    try {
-      const result = await ApiService.browseFiles(path, '.zip');
-      setFilePickerPath(result.currentPath);
-      setFileList(result.items);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to browse files');
-      setFileList([]);
-    } finally {
-      setBrowsing(false);
-    }
-  };
-
   const handleDirectorySelect = (selectedPath: string) => {
     setFormData({ ...formData, defaultDownloadDir: selectedPath });
     setShowDirectoryPicker(false);
-  };
-
-  const handleFileSelect = (selectedPath: string) => {
-    setFormData({ ...formData, melonLoaderZipPath: selectedPath });
-    setShowFilePicker(false);
   };
   
   return (
@@ -260,60 +258,30 @@ export function Settings() {
                     max="10"
                   />
                 </div>
-                <div className="form-group">
-                  <label>Platform</label>
-                  <select
-                    value={formData.platform}
-                    onChange={(e) => setFormData({ ...formData, platform: e.target.value as any })}
-                  >
-                    <option value="windows">Windows</option>
-                    <option value="macos">macOS</option>
-                    <option value="linux">Linux</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label>Language</label>
-                  <input
-                    type="text"
-                    value={formData.language}
-                    onChange={(e) => setFormData({ ...formData, language: e.target.value })}
-                    placeholder="english"
-                  />
-                </div>
               </div>
 
               <div className="settings-section">
                 <h3>MelonLoader</h3>
                 <div className="form-group">
-                  <label>MelonLoader Zip File Path</label>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <input
-                      type="text"
-                      value={formData.melonLoaderZipPath || ''}
-                      onChange={(e) => setFormData({ ...formData, melonLoaderZipPath: e.target.value })}
-                      placeholder="C:\\SirTidez\\Downloads\\MelonLoader.x64 (1).zip"
-                      style={{ flex: 1 }}
-                    />
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        // Extract directory from current path or use default
-                        const currentPath = formData.melonLoaderZipPath || '';
-                        const dirPath = currentPath ? currentPath.substring(0, currentPath.lastIndexOf('\\') || currentPath.lastIndexOf('/')) : (settings?.defaultDownloadDir || '');
-                        setFilePickerPath(dirPath || '');
-                        setShowFilePicker(true);
-                        if (dirPath) {
-                          await loadFiles(dirPath);
-                        }
-                      }}
-                      className="btn btn-secondary"
-                      style={{ whiteSpace: 'nowrap' }}
-                    >
-                      Browse...
-                    </button>
-                  </div>
+                  <label>Preferred MelonLoader Version</label>
+                  <select
+                    value={formData.melonLoaderVersion || ''}
+                    onChange={(e) => setFormData({ ...formData, melonLoaderVersion: e.target.value })}
+                    disabled={loadingVersions}
+                  >
+                    <option value="">None (Manual Installation)</option>
+                    {loadingVersions ? (
+                      <option disabled>Loading versions...</option>
+                    ) : (
+                      melonLoaderVersions.map(version => (
+                        <option key={version.tag} value={version.tag}>
+                          {version.name}
+                        </option>
+                      ))
+                    )}
+                  </select>
                   <small style={{ color: '#888', display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
-                    Path to the MelonLoader zip file to automatically install after downloads
+                    Select a version to automatically install when creating new environments
                   </small>
                 </div>
                 <div className="form-group">
@@ -373,21 +341,6 @@ export function Settings() {
                   >
                     {checkingAllUpdates ? 'Checking...' : 'Check All Updates Now'}
                   </button>
-                </div>
-              </div>
-
-              <div className="settings-section">
-                <h3>Appearance</h3>
-                <div className="form-group">
-                  <label>Theme</label>
-                  <select
-                    value={formData.theme}
-                    onChange={(e) => setFormData({ ...formData, theme: e.target.value as any })}
-                  >
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
-                    <option value="modern-blue">Modern Blue</option>
-                  </select>
                 </div>
               </div>
 
@@ -512,110 +465,6 @@ export function Settings() {
                   disabled={!directoryPath}
                 >
                   Select This Directory
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* File Picker Modal */}
-      {showFilePicker && (
-        <div className="modal-overlay" onClick={() => setShowFilePicker(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
-            <div className="modal-header">
-              <h2>Select MelonLoader Zip File</h2>
-              <button className="modal-close" onClick={() => setShowFilePicker(false)}>×</button>
-            </div>
-
-            <div style={{ padding: '1rem 1.25rem' }}>
-              <div style={{ marginBottom: '1rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem' }}>Current Path:</label>
-                <input
-                  type="text"
-                  value={filePickerPath}
-                  onChange={(e) => setFilePickerPath(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      loadFiles(filePickerPath);
-                    }
-                  }}
-                  style={{ width: '100%', padding: '0.5rem', fontSize: '0.85rem' }}
-                  placeholder="C:\Users\YourName\Downloads"
-                />
-                <button
-                  onClick={() => loadFiles(filePickerPath)}
-                  className="btn btn-primary"
-                  style={{ marginTop: '0.5rem', width: '100%' }}
-                  disabled={browsing}
-                >
-                  {browsing ? 'Loading...' : 'Go to Path'}
-                </button>
-              </div>
-
-              <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid #3a3a3a', borderRadius: '4px', padding: '0.5rem' }}>
-                {browsing ? (
-                  <p style={{ color: '#888', textAlign: 'center', padding: '2rem' }}>Loading...</p>
-                ) : (
-                  <>
-                    {getParentPath(filePickerPath) && (
-                      <div
-                        onClick={() => {
-                          const parent = getParentPath(filePickerPath);
-                          if (parent) {
-                            loadFiles(parent);
-                          }
-                        }}
-                        style={{
-                          padding: '0.75rem',
-                          cursor: 'pointer',
-                          borderRadius: '4px',
-                          marginBottom: '0.5rem',
-                          backgroundColor: '#3a3a3a',
-                          border: '1px solid #4a4a4a'
-                        }}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#4a4a4a'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#3a3a3a'}
-                      >
-                        <i className="fas fa-arrow-up" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-                        <strong>.. (Parent Directory)</strong>
-                      </div>
-                    )}
-                    {fileList.length === 0 ? (
-                      <p style={{ color: '#888', textAlign: 'center', padding: '2rem' }}>No files or directories found</p>
-                    ) : (
-                      fileList.map((item) => (
-                        <div
-                          key={item.path}
-                          onClick={() => {
-                            if (item.type === 'directory') {
-                              loadFiles(item.path);
-                            } else {
-                              handleFileSelect(item.path);
-                            }
-                          }}
-                          style={{
-                            padding: '0.75rem',
-                            cursor: 'pointer',
-                            borderRadius: '4px',
-                            marginBottom: '0.25rem',
-                            backgroundColor: '#3a3a3a'
-                          }}
-                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#4a4a4a'}
-                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#3a3a3a'}
-                        >
-                          <i className={`fas ${item.type === 'directory' ? 'fa-folder' : 'fa-file-archive'}`} style={{ marginRight: '0.5rem', color: item.type === 'directory' ? '#646cff' : '#ffaa00' }}></i>
-                          {item.name}
-                        </div>
-                      ))
-                    )}
-                  </>
-                )}
-              </div>
-
-              <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                <button onClick={() => setShowFilePicker(false)} className="btn btn-secondary">
-                  Cancel
                 </button>
               </div>
             </div>

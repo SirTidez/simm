@@ -26,17 +26,17 @@ pub async fn search_thunderstore_packages(
 }
 
 #[tauri::command]
-pub async fn get_thunderstore_package(package_uuid: String) -> Result<Option<serde_json::Value>, String> {
+pub async fn get_thunderstore_package(package_uuid: String, game_id: Option<String>) -> Result<Option<serde_json::Value>, String> {
     let service = get_thunderstore_service().await?;
-    service.get_package(&package_uuid)
+    service.get_package(&package_uuid, game_id.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn download_thunderstore_package(package_uuid: String) -> Result<String, String> {
+pub async fn download_thunderstore_package(package_uuid: String, game_id: Option<String>) -> Result<String, String> {
     let service = get_thunderstore_service().await?;
-    let bytes = service.download_package(&package_uuid)
+    let bytes = service.download_package(&package_uuid, game_id.as_deref())
         .await
         .map_err(|e| e.to_string())?;
 

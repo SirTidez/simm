@@ -188,62 +188,94 @@ pub async fn upload_plugin(
     }
 
     let plugins_service = get_plugins_service().await?;
-    
-    // Plugins are always DLL files
+
+    // Check if file is ZIP or DLL
     let file_path_lower = file_path.to_lowercase();
-    if !file_path_lower.ends_with(".dll") {
-        return Err("Only .dll files are supported for plugins".to_string());
+    if file_path_lower.ends_with(".zip") {
+        // Handle ZIP files (may contain Thunderstore manifest)
+        plugins_service.install_zip_plugin(&env.output_dir, &file_path, metadata)
+            .await
+            .map_err(|e| e.to_string())
+    } else if file_path_lower.ends_with(".dll") {
+        // Handle DLL files
+        let plugins_directory = Path::new(&env.output_dir).join("Plugins");
+        tokio::fs::create_dir_all(&plugins_directory).await
+            .map_err(|e| format!("Failed to create plugins directory: {}", e))?;
+
+        let source_path = Path::new(&file_path);
+        let dest_path = plugins_directory.join(&original_file_name);
+        tokio::fs::copy(source_path, &dest_path).await
+            .map_err(|e| format!("Failed to copy plugin file: {}", e))?;
+
+        // Extract metadata
+        let source_str = metadata
+            .as_ref()
+            .and_then(|m| m.get("source").and_then(|s| s.as_str()));
+
+        let mod_source = match source_str {
+            Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
+            Some("nexusmods") => Some(crate::types::ModSource::Nexusmods),
+            Some("unknown") => Some(crate::types::ModSource::Unknown),
+            _ => Some(crate::types::ModSource::Local),
+        };
+
+        let source_id = metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceId").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_version = metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceVersion").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_url = metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let mod_name = metadata
+            .as_ref()
+            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let author = metadata
+            .as_ref()
+            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+
+        // Update plugin metadata
+        let mut plugin_metadata = plugins_service.load_plugin_metadata(&plugins_directory).await
+            .map_err(|e| e.to_string())?;
+
+        plugin_metadata.insert(original_file_name.clone(), crate::types::ModMetadata {
+            source: mod_source.clone(),
+            source_id,
+            source_version,
+            author,
+            mod_name,
+            source_url,
+            installed_version: None,
+            installed_at: Some(chrono::Utc::now()),
+            last_update_check: None,
+            update_available: None,
+            remote_version: None,
+            detected_runtime: None,
+            runtime_match: None,
+            mod_storage_id: None,
+            symlink_paths: None,
+        });
+
+        plugins_service.save_plugin_metadata(&plugins_directory, &plugin_metadata).await
+            .map_err(|e| e.to_string())?;
+
+        let response_source = match mod_source {
+            Some(crate::types::ModSource::Thunderstore) => "thunderstore",
+            Some(crate::types::ModSource::Nexusmods) => "nexusmods",
+            Some(crate::types::ModSource::Unknown) => "unknown",
+            Some(crate::types::ModSource::Local) => "local",
+            _ => "unknown",
+        };
+
+        Ok(serde_json::json!({
+            "success": true,
+            "fileName": original_file_name,
+            "source": response_source
+        }))
+    } else {
+        Err("Only .dll and .zip files are supported for plugins".to_string())
     }
-
-    // Use mods service to install DLL (plugins use same structure)
-    let _mods_service = get_mods_service().await?;
-    let source = metadata
-        .and_then(|m| m.get("source").and_then(|s| s.as_str()).map(|s| s.to_string()))
-        .unwrap_or_else(|| "local".to_string());
-    
-    // Install to plugins directory instead
-    let plugins_directory = Path::new(&env.output_dir).join("Plugins");
-    tokio::fs::create_dir_all(&plugins_directory).await
-        .map_err(|e| format!("Failed to create plugins directory: {}", e))?;
-
-    let source_path = Path::new(&file_path);
-    let dest_path = plugins_directory.join(&original_file_name);
-    tokio::fs::copy(source_path, &dest_path).await
-        .map_err(|e| format!("Failed to copy plugin file: {}", e))?;
-
-    // Update plugin metadata
-    let mut plugin_metadata = plugins_service.load_plugin_metadata(&plugins_directory).await
-        .map_err(|e| e.to_string())?;
-
-    let mod_source = match source.as_str() {
-        "thunderstore" => crate::types::ModSource::Thunderstore,
-        "nexusmods" => crate::types::ModSource::Nexusmods,
-        _ => crate::types::ModSource::Local,
-    };
-
-    plugin_metadata.insert(original_file_name.clone(), crate::types::ModMetadata {
-        source: Some(mod_source),
-        source_id: None,
-        source_version: None,
-        author: None,
-        mod_name: None,
-        source_url: None,
-        installed_version: None,
-        installed_at: Some(chrono::Utc::now()),
-        last_update_check: None,
-        update_available: None,
-        remote_version: None,
-        detected_runtime: None,
-        runtime_match: None,
-    });
-
-    plugins_service.save_plugin_metadata(&plugins_directory, &plugin_metadata).await
-        .map_err(|e| e.to_string())?;
-
-    Ok(serde_json::json!({
-        "success": true,
-        "fileName": original_file_name
-    }))
 }
 
 #[tauri::command]

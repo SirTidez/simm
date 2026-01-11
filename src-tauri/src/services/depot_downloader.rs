@@ -321,9 +321,14 @@ impl DepotDownloaderService {
         // Build command
         let args = self.build_command_args(&options);
 
-        // Spawn process
+        // Get depots directory from SIMM folder
+        let depots_dir = crate::utils::directory_init::get_depots_dir()
+            .context("Failed to get depots directory")?;
+
+        // Spawn process with working directory set to depots folder
         let mut child = Command::new(&executable_path)
             .args(&args)
+            .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

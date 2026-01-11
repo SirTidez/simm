@@ -159,10 +159,29 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       console.log('EnvironmentStore: checkAllUpdates called');
       const results = await ApiService.checkAllUpdates();
       console.log(`EnvironmentStore: API call completed, got ${results?.length || 0} result(s)`, { results });
-      // Refresh environments to get the updated state from backend
-      console.log('EnvironmentStore: Refreshing environments...');
-      await refreshEnvironments();
-      console.log('EnvironmentStore: Environments refreshed');
+      
+      // Update environments in place without triggering loading state
+      // This prevents the page from appearing to refresh
+      setEnvironments(prev => {
+        const updated = prev.map(env => {
+          const result = results.find(r => r.environmentId === env.id);
+          if (result) {
+            return {
+              ...env,
+              lastUpdateCheck: result.checkedAt,
+              updateAvailable: result.updateAvailable,
+              remoteManifestId: result.remoteManifestId,
+              remoteBuildId: result.remoteBuildId,
+              ...(result.currentGameVersion ? { currentGameVersion: result.currentGameVersion } : {}),
+              ...(result.updateGameVersion ? { updateGameVersion: result.updateGameVersion } : {})
+            };
+          }
+          return env;
+        });
+        return updated;
+      });
+      
+      console.log('EnvironmentStore: Environments updated in place');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       console.error(`EnvironmentStore: checkAllUpdates failed - ${errorMessage}`, { 
@@ -171,7 +190,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       });
       throw err;
     }
-  }, [refreshEnvironments]);
+  }, []);
 
   // Load environments on mount
   useEffect(() => {

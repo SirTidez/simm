@@ -290,10 +290,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       const branchNameRegex = new RegExp(`[/\\\\]${selectedBranch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
                       currentBase = currentBase.replace(branchNameRegex, '').replace(/[/\\]+$/, '');
                     }
+                    // If no base directory, use the default download directory from settings
+                    if (!currentBase && settings?.defaultDownloadDir) {
+                      currentBase = settings.defaultDownloadDir;
+                    }
                     setDirectoryPath(currentBase);
                     setShowDirectoryPicker(true);
                     if (currentBase) {
                       await loadDirectory(currentBase);
+                    } else {
+                      // If still no path, loadDirectory will handle the default (home/SIMM) via the API
+                      await loadDirectory('');
                     }
                   }}
                   className="btn btn-secondary"
@@ -444,8 +451,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
       {/* Directory Picker Modal */}
       {showDirectoryPicker && (
-        <div className="modal-overlay" onClick={() => setShowDirectoryPicker(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+        <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDirectoryPicker(false)}>
+          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
             <div className="modal-header">
               <h2>Select Base Directory</h2>
               <button className="modal-close" onClick={() => setShowDirectoryPicker(false)}>×</button>

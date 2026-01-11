@@ -1,8 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::fs;
+use tokio::sync::RwLock;
+use tokio::time::{sleep, Duration};
 use chrono::{DateTime, Utc};
 use regex::Regex;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogFile {
@@ -14,18 +18,35 @@ pub struct LogFile {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogLine {
     pub line_number: usize,
     pub content: String,
     pub level: Option<String>,
     pub timestamp: Option<String>,
+    pub mod_tag: Option<String>,
+    pub category: LogCategory,
 }
 
-pub struct LogsService;
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogCategory {
+    MelonLoader,
+    Mod,
+    General,
+}
+
+pub struct LogsService {
+    watching: Arc<RwLock<bool>>,
+    last_position: Arc<RwLock<u64>>,
+}
 
 impl LogsService {
     pub fn new() -> Self {
-        Self
+        Self {
+            watching: Arc::new(RwLock::new(false)),
+            last_position: Arc::new(RwLock::new(0)),
+        }
     }
 
     pub fn get_melonloader_logs_dir(&self, game_dir: &str) -> PathBuf {
@@ -148,22 +169,24 @@ impl LogsService {
         let mut log_lines = Vec::new();
         for (idx, line) in lines.iter().enumerate().skip(start_line) {
             let line_number = idx + 1;
-            let content = line.to_string();
-            
-            // Parse log level from common formats:
-            // [INFO] message
-            // [WARN] message
-            // [ERROR] message
-            // [DEBUG] message
-            // [00:00:00.000] [INFO] message
-            let level = Self::extract_log_level(&content);
-            let timestamp = Self::extract_timestamp(&content);
+            let raw_content = line.to_string();
+
+            // Parse MelonLoader log format
+            let timestamp = Self::extract_melonloader_timestamp(&raw_content);
+            let mod_tag = Self::extract_mod_tag(&raw_content);
+            let level = Self::extract_log_level(&raw_content);
+            let category = Self::categorize_log(&raw_content, &mod_tag);
+
+            // Strip timestamp and mod tag from content
+            let content = Self::strip_timestamp_and_tag(&raw_content, &timestamp, &mod_tag);
 
             log_lines.push(LogLine {
                 line_number,
                 content,
                 level,
                 timestamp,
+                mod_tag,
+                category,
             });
         }
 
@@ -183,25 +206,106 @@ impl LogsService {
         None
     }
 
-    fn extract_timestamp(line: &str) -> Option<String> {
-        // Try to match timestamp patterns like:
-        // [00:00:00.000]
-        // 2024-01-01 00:00:00
-        // ISO format timestamps
-        let timestamp_patterns = [
-            r"\[\d{2}:\d{2}:\d{2}\.\d{3}\]",  // [00:00:00.000]
-            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",  // 2024-01-01 00:00:00
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",  // ISO format
-        ];
+    fn extract_melonloader_timestamp(line: &str) -> Option<String> {
+        // Extract MelonLoader timestamp format: [HH:MM:SS.mmm]
+        let pattern = r"^\[(\d{2}:\d{2}:\d{2}\.\d{3})\]";
+        if let Ok(re) = Regex::new(pattern) {
+            if let Some(captures) = re.captures(line) {
+                return captures.get(1).map(|m| m.as_str().to_string());
+            }
+        }
+        None
+    }
 
-        for pattern in &timestamp_patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if let Some(captures) = re.find(line) {
-                    return Some(captures.as_str().to_string());
+    fn extract_mod_tag(line: &str) -> Option<String> {
+        // Extract mod tag from format: [timestamp] [ModTag] message
+        // or just [ModTag] message
+        // Skip after timestamp if present
+        let mut search_line = line;
+        if let Some(timestamp_end) = line.find(']') {
+            if line.starts_with('[') && line[1..timestamp_end].contains(':') {
+                search_line = &line[timestamp_end + 1..];
+            }
+        }
+
+        let pattern = r"^\s*\[([^\]]+)\]";
+        if let Ok(re) = Regex::new(pattern) {
+            if let Some(captures) = re.captures(search_line) {
+                if let Some(tag) = captures.get(1) {
+                    let tag_str = tag.as_str().trim();
+
+                    // Skip if it's a log level or timestamp
+                    if ["INFO", "WARN", "ERROR", "DEBUG", "FATAL", "TRACE"].contains(&tag_str)
+                        || tag_str.contains(':') {
+                        return None;
+                    }
+
+                    // Skip MelonLoader system tags
+                    let melonloader_system_tags = [
+                        "Il2CppAssemblyGenerator",
+                        "Il2CppInterop",
+                        "StoragePatches",
+                    ];
+
+                    if melonloader_system_tags.iter().any(|&sys_tag| tag_str == sys_tag) {
+                        return None;
+                    }
+
+                    return Some(tag_str.to_string());
                 }
             }
         }
         None
+    }
+
+    fn strip_timestamp_and_tag(line: &str, timestamp: &Option<String>, mod_tag: &Option<String>) -> String {
+        let mut cleaned = line.to_string();
+
+        // Remove timestamp if present
+        if timestamp.is_some() {
+            let pattern = r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s*";
+            if let Ok(re) = Regex::new(pattern) {
+                cleaned = re.replace(&cleaned, "").to_string();
+            }
+        }
+
+        // Remove mod tag if present
+        if let Some(tag) = mod_tag {
+            let pattern_str = format!(r"^\s*\[{}\]\s*", regex::escape(tag));
+            if let Ok(re) = Regex::new(&pattern_str) {
+                cleaned = re.replace(&cleaned, "").to_string();
+            }
+        }
+
+        cleaned
+    }
+
+    fn categorize_log(line: &str, mod_tag: &Option<String>) -> LogCategory {
+        // MelonLoader system logs
+        let melonloader_tags = [
+            "Il2CppAssemblyGenerator",
+            "Il2CppInterop",
+            "StoragePatches",
+            "PhoneApp",
+        ];
+
+        if let Some(tag) = mod_tag {
+            if melonloader_tags.iter().any(|&ml_tag| tag.contains(ml_tag)) {
+                return LogCategory::MelonLoader;
+            }
+            return LogCategory::Mod;
+        }
+
+        // Check if line contains MelonLoader-specific text
+        if line.contains("MelonLoader") || line.contains("Unity") || line.contains("Game Name:")
+            || line.contains("Game Developer:") || line.contains("Loading Plugins...")
+            || line.contains("Loading Mods...") || line.contains("Melon Assembly loaded:")
+            || line.contains("SHA256 Hash:") || line.contains("Support Module Loaded:")
+            || line.contains("Scene loaded:") {
+            return LogCategory::MelonLoader;
+        }
+
+        LogCategory::General
     }
 
     pub async fn export_logs(
@@ -213,7 +317,7 @@ impl LogsService {
     ) -> Result<()> {
         let log_lines = self.read_log_file(log_path, None).await?;
 
-        let mut filtered_lines = log_lines.iter()
+        let filtered_lines = log_lines.iter()
             .filter(|line| {
                 // Filter by level
                 if let Some(level) = filter_level {
@@ -259,6 +363,96 @@ impl LogsService {
             .context("Failed to write export file")?;
 
         Ok(())
+    }
+
+    pub async fn watch_log_file(&self, log_path: &str, app_handle: AppHandle) -> Result<()> {
+        let path = Path::new(log_path).to_path_buf();
+
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Log file does not exist: {}", log_path));
+        }
+
+        // Set watching flag
+        *self.watching.write().await = true;
+
+        // Get initial file size
+        let metadata = fs::metadata(&path).await?;
+        *self.last_position.write().await = metadata.len();
+
+        let watching = Arc::clone(&self.watching);
+        let last_position = Arc::clone(&self.last_position);
+
+        // Watch loop
+        while *watching.read().await {
+            sleep(Duration::from_millis(500)).await;
+
+            let metadata = match fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            let current_size = metadata.len();
+            let last_pos = *last_position.read().await;
+
+            // Check if file has new content
+            if current_size > last_pos {
+                // Read new content
+                if let Ok(file_content) = fs::read_to_string(&path).await {
+                    let lines: Vec<&str> = file_content.lines().collect();
+
+                    // Calculate which lines are new
+                    let all_content_up_to_last = file_content
+                        .chars()
+                        .take(last_pos as usize)
+                        .collect::<String>();
+                    let last_line_count = all_content_up_to_last.lines().count();
+
+                    let new_lines: Vec<_> = lines.iter().skip(last_line_count).collect();
+
+                    if !new_lines.is_empty() {
+                        let mut log_lines = Vec::new();
+                        for (idx, line) in new_lines.iter().enumerate() {
+                            let line_number = last_line_count + idx + 1;
+                            let raw_content = line.to_string();
+
+                            let timestamp = Self::extract_melonloader_timestamp(&raw_content);
+                            let mod_tag = Self::extract_mod_tag(&raw_content);
+                            let level = Self::extract_log_level(&raw_content);
+                            let category = Self::categorize_log(&raw_content, &mod_tag);
+
+                            // Strip timestamp and mod tag from content
+                            let content = Self::strip_timestamp_and_tag(&raw_content, &timestamp, &mod_tag);
+
+                            log_lines.push(LogLine {
+                                line_number,
+                                content,
+                                level,
+                                timestamp,
+                                mod_tag,
+                                category,
+                            });
+                        }
+
+                        // Emit event with new log lines
+                        let _ = app_handle.emit("log-update", serde_json::json!({
+                            "lines": log_lines,
+                        }));
+                    }
+                }
+
+                *last_position.write().await = current_size;
+            } else if current_size < last_pos {
+                // File was truncated or replaced, reset position
+                *last_position.write().await = 0;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn stop_watching(&self) {
+        *self.watching.write().await = false;
+        *self.last_position.write().await = 0;
     }
 }
 

@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "identifier": "com.s1devenvmanager.app",
   "build": {
-    "beforeDevCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -11,7 +12,6 @@
     "windows": [
       {
         "label": "main",
-        "url": "index.html",
         "fullscreen": false,
         "resizable": true,
         "title": "Schedule I Mod Manager",

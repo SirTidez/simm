@@ -6,6 +6,9 @@ import type {
   DownloadProgress,
   AppConfig,
   UpdateCheckResult,
+  ConfigFile,
+  ConfigSection,
+  ConfigUpdate,
 } from '../types';
 
 export class ApiService {
@@ -158,6 +161,10 @@ export class ApiService {
     return { success: true };
   }
 
+  static async removeGitHubToken(): Promise<{ success: boolean }> {
+    return this.clearGitHubToken();
+  }
+
   // Directory browser
   static async browseDirectory(path: string): Promise<{
     currentPath: string;
@@ -274,7 +281,17 @@ export class ApiService {
 
   static async uploadMod(
     environmentId: string,
-    file: File
+    filePath: string,
+    originalFileName: string,
+    runtime: string,
+    metadata?: {
+      source?: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
+      sourceUrl?: string;
+      modName?: string;
+      author?: string;
+      sourceId?: string;
+      sourceVersion?: string;
+    }
   ): Promise<{
     success: boolean;
     message?: string;
@@ -288,10 +305,21 @@ export class ApiService {
       requiresConfirmation: boolean;
     };
   }> {
-    // File selection is handled by Tauri dialog on frontend
-    // This method should be called with the selected file path
-    // For now, return error - frontend should use Tauri dialog first
-    throw new Error('Use Tauri dialog to select file first, then call uploadMod with file path');
+    return invoke('upload_mod', {
+      environmentId,
+      filePath,
+      originalFileName,
+      runtime,
+      branch: '', // Not used for local uploads
+      metadata: metadata ? {
+        source: metadata.source || 'unknown',
+        sourceUrl: metadata.sourceUrl,
+        modName: metadata.modName,
+        author: metadata.author,
+        sourceId: metadata.sourceId,
+        sourceVersion: metadata.sourceVersion,
+      } : null,
+    });
   }
 
   // Plugins operations
@@ -346,7 +374,9 @@ export class ApiService {
 
   static async uploadPlugin(
     environmentId: string,
-    file: File
+    filePath: string,
+    originalFileName: string,
+    runtime: string
   ): Promise<{
     success: boolean;
     message?: string;
@@ -360,10 +390,15 @@ export class ApiService {
       requiresConfirmation: boolean;
     };
   }> {
-    // File selection is handled by Tauri dialog on frontend
-    // This method should be called with the selected file path
-    // For now, return error - frontend should use Tauri dialog first
-    throw new Error('Use Tauri dialog to select file first, then call uploadPlugin with file path');
+    return invoke('upload_plugin', {
+      environmentId,
+      filePath,
+      originalFileName,
+      runtime,
+      metadata: {
+        source: 'local',
+      },
+    });
   }
 
   // UserLibs operations
@@ -436,6 +471,13 @@ export class ApiService {
     }));
   }
 
+  static async getAvailableMelonLoaderVersions(): Promise<Array<{
+    tag: string;
+    name: string;
+  }>> {
+    return invoke('get_available_melonloader_versions');
+  }
+
   static async installMelonLoader(
     environmentId: string,
     versionTag: string
@@ -494,8 +536,8 @@ export class ApiService {
     success: boolean;
     message?: string;
   }> {
-    // Save API key via settings
-    await this.saveSettings({ nexusModsApiKey: apiKey });
+    // Save API key via encrypted storage
+    await invoke('save_nexus_mods_api_key', { apiKey });
     return { success: true };
   }
 
@@ -508,11 +550,82 @@ export class ApiService {
     return invoke('validate_nexus_mods_api_key', { apiKey });
   }
 
+  static async getNexusModsApiKey(): Promise<string | null> {
+    return invoke('get_nexus_mods_api_key');
+  }
+
+  static async hasNexusModsApiKey(): Promise<boolean> {
+    return invoke('has_nexus_mods_api_key');
+  }
+
+  static async removeNexusModsApiKey(): Promise<void> {
+    return invoke('clear_nexus_mods_api_key');
+  }
+
   static async getNexusModsRateLimits(): Promise<{
     daily: number;
     hourly: number;
   }> {
     return invoke('get_nexus_mods_rate_limits');
+  }
+
+  static async searchNexusMods(
+    gameId: string,
+    query: string
+  ): Promise<{ mods: any[] }> {
+    const mods = await invoke<any[]>('search_nexus_mods_mods', {
+      gameId,
+      query,
+    });
+
+    // Transform GraphQL field names to match frontend expectations
+    const transformedMods = mods.map((mod: any) => ({
+      mod_id: mod.modId,
+      name: mod.name,
+      summary: mod.summary,
+      picture_url: mod.pictureUrl,
+      thumbnail_url: mod.thumbnailUrl,
+      endorsement_count: mod.endorsements,
+      mod_downloads: mod.downloads,
+      version: mod.version,
+      author: mod.author || mod.uploader?.name,
+      updated_at: mod.updatedAt,
+      created_at: mod.createdAt,
+    }));
+
+    return { mods: transformedMods };
+  }
+
+  static async getNexusModsMod(gameId: string, modId: number): Promise<any> {
+    return invoke('get_nexus_mods_mod', { gameId, modId });
+  }
+
+  static async getNexusModsModFiles(gameId: string, modId: number): Promise<any[]> {
+    return invoke('get_nexus_mods_mod_files', { gameId, modId });
+  }
+
+  static async installNexusModsMod(
+    environmentId: string,
+    modId: number,
+    fileId: number
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    installedFiles?: string[];
+    source?: string;
+    error?: string;
+    runtimeMismatch?: {
+      detected: 'IL2CPP' | 'Mono' | 'unknown';
+      environment: 'IL2CPP' | 'Mono';
+      warning: string;
+      requiresConfirmation: boolean;
+    };
+  }> {
+    return invoke('install_nexus_mods_mod', {
+      environmentId,
+      modId,
+      fileId,
+    });
   }
 
   static async checkModUpdates(environmentId: string): Promise<Array<{
@@ -763,6 +876,7 @@ export class ApiService {
     installedFiles?: string[];
     source?: string;
     error?: string;
+    alreadyInstalled?: boolean;
     runtimeMismatch?: {
       detected: 'IL2CPP' | 'Mono' | 'unknown';
       environment: 'IL2CPP' | 'Mono';
@@ -770,21 +884,69 @@ export class ApiService {
       requiresConfirmation: boolean;
     };
   }> {
-    // Download package first
-    const zipPath = await invoke<string>('download_thunderstore_package', { packageUuid });
+    // Use hardcoded game ID for Schedule I
+    const gameId = 'schedule-i';
+    
+    // Fetch package info first to get metadata
+    const packageInfo = await invoke<any>('get_thunderstore_package', {
+      packageUuid,
+      gameId
+    });
+    
+    if (!packageInfo) {
+      throw new Error('Package not found');
+    }
+    
+    // Extract package metadata
+    const latestVersion = packageInfo.versions?.[0];
+    const packageUrl = packageInfo.package_url || '';
+    const modName = packageInfo.name || '';
+    const owner = packageInfo.owner || '';
+    const versionNumber = latestVersion?.version_number || '';
+    
+    // Check if mod is already installed before downloading
+    // Thunderstore mods use "owner/name" format for sourceId (matches manifest.json format)
+    const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
+    const checkResult = await invoke<any>('check_mod_installed', {
+      environmentId,
+      sourceId: sourceId,
+      sourceVersion: versionNumber
+    });
+    
+    if (checkResult.installed) {
+      console.log(`Mod ${modName} version ${versionNumber} is already installed, skipping download`);
+      return {
+        success: true,
+        message: 'Mod already installed',
+        alreadyInstalled: true
+      };
+    }
+    
+    // Download package
+    const zipPath = await invoke<string>('download_thunderstore_package', { 
+      packageUuid,
+      gameId 
+    });
     
     // Get environment to determine runtime
     const env = await this.getEnvironment(environmentId);
     const runtime = env.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
     
-    // Install using upload_mod
+    // Install using upload_mod with full metadata
     return invoke('upload_mod', {
       environmentId,
       filePath: zipPath,
       originalFileName: `${packageUuid}.zip`,
       runtime,
       branch: env.branch,
-      metadata: { source: 'thunderstore', sourceId: packageUuid },
+      metadata: {
+        source: 'thunderstore',
+        sourceId: packageUuid,
+        sourceVersion: versionNumber,
+        sourceUrl: packageUrl,
+        modName: modName,
+        author: owner,
+      },
     });
   }
 
@@ -804,8 +966,18 @@ export class ApiService {
     content: string;
     level: string | null;
     timestamp: string | null;
+    modTag: string | null;
+    category: 'melonloader' | 'mod' | 'general';
   }>> {
     return invoke('read_log_file', { logPath, maxLines });
+  }
+
+  static async watchLogFile(logPath: string): Promise<void> {
+    return invoke('watch_log_file', { logPath });
+  }
+
+  static async stopWatchingLog(): Promise<void> {
+    return invoke('stop_watching_log');
   }
 
   static async exportLogs(
@@ -820,6 +992,19 @@ export class ApiService {
       searchQuery,
       outputPath,
     });
+  }
+
+  // Config
+  static async getConfigFiles(environmentId: string): Promise<ConfigFile[]> {
+    return invoke('get_config_files', { environmentId });
+  }
+
+  static async getGroupedConfig(environmentId: string): Promise<Record<string, ConfigSection[]>> {
+    return invoke('get_grouped_config', { environmentId });
+  }
+
+  static async updateConfig(filePath: string, updates: ConfigUpdate[]): Promise<void> {
+    return invoke('update_config', { filePath, updates });
   }
 }
 

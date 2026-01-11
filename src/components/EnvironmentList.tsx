@@ -7,6 +7,7 @@ import { ModsOverlay } from './ModsOverlay';
 import { PluginsOverlay } from './PluginsOverlay';
 import { UserLibsOverlay } from './UserLibsOverlay';
 import { LogsOverlay } from './LogsOverlay';
+import { ConfigurationOverlay } from './ConfigurationOverlay';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
@@ -20,7 +21,10 @@ import {
   onMelonLoaderError,
   onComplete as onCompleteEvent,
   onUpdateAvailable,
-  onUpdateCheckComplete
+  onUpdateCheckComplete,
+  onModsChanged,
+  onPluginsChanged,
+  onUserLibsChanged
 } from '../services/events';
 
 // Shared ref to track last update check time (accessible across components)
@@ -43,10 +47,22 @@ export function EnvironmentList() {
   const [pluginsOverlay, setPluginsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [userLibsOverlay, setUserLibsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
+  const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [modsCounts, setModsCounts] = useState<Map<string, number>>(new Map());
   const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
   const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
   const [melonLoaderStatus, setMelonLoaderStatus] = useState<Map<string, { installed: boolean; version?: string }>>(new Map());
+  
+  // Debounce timers for filesystem change events
+  const modsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const pluginsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const userLibsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  
+  // Use refs to access latest environments without causing effect re-runs
+  const environmentsRef = useRef(environments);
+  useEffect(() => {
+    environmentsRef.current = environments;
+  }, [environments]);
   const [melonLoaderLatestRelease, setMelonLoaderLatestRelease] = useState<Map<string, {
     tag_name: string;
     name: string;
@@ -216,6 +232,9 @@ export function EnvironmentList() {
     let unlistenComplete: (() => void) | null = null;
     let unlistenUpdateAvailable: (() => void) | null = null;
     let unlistenUpdateCheckComplete: (() => void) | null = null;
+    let unlistenModsChanged: (() => void) | null = null;
+    let unlistenPluginsChanged: (() => void) | null = null;
+    let unlistenUserLibsChanged: (() => void) | null = null;
 
     const setupListeners = async () => {
       try {
@@ -350,6 +369,102 @@ export function EnvironmentList() {
           handleFirstUpdateEvent();
           handleUpdateEventComplete({ environmentId: data.environmentId });
         });
+
+        // Listen for filesystem change events (mods/plugins/userlibs)
+        // Debounce to avoid too many API calls when multiple file events fire rapidly
+        // Use refs to avoid closure issues and prevent unnecessary effect re-runs
+        unlistenModsChanged = await onModsChanged((data) => {
+          // Use ref to get latest environments without causing effect dependency
+          const env = environmentsRef.current.find(e => e.id === data.environmentId);
+          if (env && env.status === 'completed') {
+            // Clear existing timer for this environment
+            const existingTimer = modsRefreshTimers.current.get(data.environmentId);
+            if (existingTimer) {
+              clearTimeout(existingTimer);
+            }
+            
+            // Set new timer to refresh count after 500ms of no events
+            const timer = setTimeout(async () => {
+              try {
+                const result = await ApiService.getModsCount(data.environmentId);
+                // Only update the count state - no other side effects
+                setModsCounts(prev => {
+                  const next = new Map(prev);
+                  next.set(data.environmentId, result.count);
+                  return next;
+                });
+              } catch (err) {
+                console.error('Failed to refresh mods count:', err);
+              } finally {
+                modsRefreshTimers.current.delete(data.environmentId);
+              }
+            }, 500);
+            
+            modsRefreshTimers.current.set(data.environmentId, timer);
+          }
+        });
+
+        unlistenPluginsChanged = await onPluginsChanged((data) => {
+          // Use ref to get latest environments without causing effect dependency
+          const env = environmentsRef.current.find(e => e.id === data.environmentId);
+          if (env && env.status === 'completed') {
+            // Clear existing timer for this environment
+            const existingTimer = pluginsRefreshTimers.current.get(data.environmentId);
+            if (existingTimer) {
+              clearTimeout(existingTimer);
+            }
+            
+            // Set new timer to refresh count after 500ms of no events
+            const timer = setTimeout(async () => {
+              try {
+                const result = await ApiService.getPluginsCount(data.environmentId);
+                // Only update the count state - no other side effects
+                setPluginsCounts(prev => {
+                  const next = new Map(prev);
+                  next.set(data.environmentId, result.count);
+                  return next;
+                });
+              } catch (err) {
+                console.error('Failed to refresh plugins count:', err);
+              } finally {
+                pluginsRefreshTimers.current.delete(data.environmentId);
+              }
+            }, 500);
+            
+            pluginsRefreshTimers.current.set(data.environmentId, timer);
+          }
+        });
+
+        unlistenUserLibsChanged = await onUserLibsChanged((data) => {
+          // Use ref to get latest environments without causing effect dependency
+          const env = environmentsRef.current.find(e => e.id === data.environmentId);
+          if (env && env.status === 'completed') {
+            // Clear existing timer for this environment
+            const existingTimer = userLibsRefreshTimers.current.get(data.environmentId);
+            if (existingTimer) {
+              clearTimeout(existingTimer);
+            }
+            
+            // Set new timer to refresh count after 500ms of no events
+            const timer = setTimeout(async () => {
+              try {
+                const result = await ApiService.getUserLibsCount(data.environmentId);
+                // Only update the count state - no other side effects
+                setUserLibsCounts(prev => {
+                  const next = new Map(prev);
+                  next.set(data.environmentId, result.count);
+                  return next;
+                });
+              } catch (err) {
+                console.error('Failed to refresh userlibs count:', err);
+              } finally {
+                userLibsRefreshTimers.current.delete(data.environmentId);
+              }
+            }, 500);
+            
+            userLibsRefreshTimers.current.set(data.environmentId, timer);
+          }
+        });
       } catch (error) {
         console.error('Failed to set up event listeners:', error);
       }
@@ -377,6 +492,17 @@ export function EnvironmentList() {
       if (unlistenComplete) unlistenComplete();
       if (unlistenUpdateAvailable) unlistenUpdateAvailable();
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
+      if (unlistenModsChanged) unlistenModsChanged();
+      if (unlistenPluginsChanged) unlistenPluginsChanged();
+      if (unlistenUserLibsChanged) unlistenUserLibsChanged();
+      
+      // Clear all debounce timers
+      modsRefreshTimers.current.forEach(timer => clearTimeout(timer));
+      pluginsRefreshTimers.current.forEach(timer => clearTimeout(timer));
+      userLibsRefreshTimers.current.forEach(timer => clearTimeout(timer));
+      modsRefreshTimers.current.clear();
+      pluginsRefreshTimers.current.clear();
+      userLibsRefreshTimers.current.clear();
     };
   }, [authModal.isOpen, authModal.envId, environments, progress, launchDropdownOpen]);
 
@@ -600,6 +726,14 @@ export function EnvironmentList() {
     setLogsOverlay({ isOpen: false, envId: null });
   };
 
+  const handleOpenConfigOverlay = (envId: string) => {
+    setConfigOverlay({ isOpen: true, envId });
+  };
+
+  const handleCloseConfigOverlay = () => {
+    setConfigOverlay({ isOpen: false, envId: null });
+  };
+
   const handleUserLibsChanged = () => {
     // Refresh userlibs count when needed
     if (userLibsOverlay.envId) {
@@ -784,9 +918,6 @@ export function EnvironmentList() {
       <span 
         className="badge badge-blue"
         style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
           marginRight: '0.5rem'
         }}
         title="Steam-managed installation"
@@ -940,6 +1071,18 @@ export function EnvironmentList() {
             isOpen={logsOverlay.isOpen}
             onClose={handleCloseLogsOverlay}
             environmentId={logsOverlay.envId}
+            environment={env}
+          />
+        ) : null;
+      })()}
+
+      {configOverlay.envId && (() => {
+        const env = environments.find(e => e.id === configOverlay.envId);
+        return env ? (
+          <ConfigurationOverlay
+            isOpen={configOverlay.isOpen}
+            onClose={handleCloseConfigOverlay}
+            environmentId={configOverlay.envId}
             environment={env}
           />
         ) : null;
@@ -1343,7 +1486,7 @@ export function EnvironmentList() {
                 </div>
                 {env.status === 'completed' && (
                   <>
-                    <p style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
+                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
                       <strong>ML:</strong>
                       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
                         {melonLoaderStatus.get(env.id)?.installed ? (
@@ -1388,8 +1531,8 @@ export function EnvironmentList() {
                           </>
                         )}
                       </div>
-                    </p>
-                    <p style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
+                    </div>
+                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
                       <strong>Mods:</strong>
                       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
                         <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
@@ -1404,8 +1547,8 @@ export function EnvironmentList() {
                           <i className="fas fa-list" style={{ fontSize: '0.85rem' }}></i>
                         </button>
                       </div>
-                    </p>
-                    <p style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
+                    </div>
+                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
                       <strong>Plugins:</strong>
                       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
                         <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
@@ -1420,8 +1563,8 @@ export function EnvironmentList() {
                           <i className="fas fa-list" style={{ fontSize: '0.85rem' }}></i>
                         </button>
                       </div>
-                    </p>
-                    <p style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
+                    </div>
+                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
                       <strong>UserLibs:</strong>
                       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
                         <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
@@ -1436,8 +1579,8 @@ export function EnvironmentList() {
                           <i className="fas fa-list" style={{ fontSize: '0.85rem' }}></i>
                         </button>
                       </div>
-                    </p>
-                    <p style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
+                    </div>
+                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
                       <strong>Logs:</strong>
                       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
                         <button
@@ -1449,7 +1592,20 @@ export function EnvironmentList() {
                           <i className="fas fa-file-alt" style={{ fontSize: '0.85rem' }}></i>
                         </button>
                       </div>
-                    </p>
+                    </div>
+                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
+                      <strong>Configuration:</strong>
+                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                        <button
+                          onClick={() => handleOpenConfigOverlay(env.id)}
+                          className="btn btn-secondary btn-small"
+                          style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }}
+                          title="Edit mod configuration"
+                        >
+                          <i className="fas fa-cog" style={{ fontSize: '0.85rem' }}></i>
+                        </button>
+                      </div>
+                    </div>
                   </>
                 )}
                 {env.status === 'completed' && (

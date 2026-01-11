@@ -1,9 +1,11 @@
 use crate::services::environment::EnvironmentService;
+use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::types::{Environment, AppConfig, schedule_i_config};
 use crate::utils::validation::{validate_app_id, validate_branch_name, validate_environment_name, validate_directory_path};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
+use tauri::State;
 
 static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
@@ -69,6 +71,7 @@ pub async fn get_environment(id: String) -> Result<Option<Environment>, String> 
 
 #[tauri::command]
 pub async fn create_environment(
+    watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
     app_id: String,
     branch: String,
     output_dir: String,
@@ -94,15 +97,27 @@ pub async fn create_environment(
         .map_err(|e| e.to_string())?;
 
     let service = get_env_service().await?;
-    service.create_environment(
+    let env = service.create_environment(
         app_id,
         branch,
-        validated_dir,
+        validated_dir.clone(),
         name,
         description,
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // Start watching mods/plugins/userlibs directories
+    let watcher_guard = watcher.lock().await;
+    let mods_dir = std::path::Path::new(&validated_dir).join("Mods");
+    let plugins_dir = std::path::Path::new(&validated_dir).join("Plugins");
+    let userlibs_dir = std::path::Path::new(&validated_dir).join("UserLibs");
+    
+    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
+    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
+    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+
+    Ok(env)
 }
 
 #[tauri::command]
@@ -127,7 +142,15 @@ pub async fn update_environment(
 }
 
 #[tauri::command]
-pub async fn delete_environment(id: String) -> Result<bool, String> {
+pub async fn delete_environment(
+    watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
+    id: String,
+) -> Result<bool, String> {
+    // Stop watching directories before deleting
+    let watcher_guard = watcher.lock().await;
+    let _ = watcher_guard.stop_watching_environment(&id).await;
+    drop(watcher_guard);
+
     let service = get_env_service().await?;
     service.delete_environment(&id)
         .await
@@ -153,12 +176,25 @@ pub async fn detect_steam_installations() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub async fn create_steam_environment(
+    watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
     steam_path: String,
     name: Option<String>,
     description: Option<String>,
 ) -> Result<Environment, String> {
     let service = get_env_service().await?;
-    service.create_steam_environment(steam_path, name, description)
+    let env = service.create_steam_environment(steam_path.clone(), name, description)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Start watching mods/plugins/userlibs directories
+    let watcher_guard = watcher.lock().await;
+    let mods_dir = std::path::Path::new(&steam_path).join("Mods");
+    let plugins_dir = std::path::Path::new(&steam_path).join("Plugins");
+    let userlibs_dir = std::path::Path::new(&steam_path).join("UserLibs");
+    
+    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
+    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
+    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+
+    Ok(env)
 }

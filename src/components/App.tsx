@@ -1,17 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
 import { Settings } from './Settings';
 import { SteamAccountOverlay } from './SteamAccountOverlay';
 import { HelpOverlay } from './HelpOverlay';
+import { WelcomeOverlay } from './WelcomeOverlay';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
 import { SettingsStoreProvider } from '../stores/settingsStore';
+import { interceptConsole } from '../utils/logger';
+import { ErrorBoundary } from './ErrorBoundary';
 
 function AppContent() {
   const [showWizard, setShowWizard] = useState(false);
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(false);
+
+  // Initialize console logging interception after a short delay to avoid blocking startup
+  useEffect(() => {
+    // Defer console interception to not block initial render
+    const timer = setTimeout(() => {
+      interceptConsole();
+    }, 100); // Small delay to let app render first
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Check if SIMM directory was just created on app launch
+  useEffect(() => {
+    const checkWelcome = async () => {
+      try {
+        const wasCreated = await invoke<boolean>('was_simm_directory_just_created');
+        if (wasCreated) {
+          setShowWelcome(true);
+        }
+      } catch (error) {
+        console.error('Failed to check if SIMM directory was created:', error);
+      }
+    };
+    checkWelcome();
+  }, []);
   return (
     <div className="app">
       <header className="app-header">
@@ -64,17 +94,24 @@ function AppContent() {
         isOpen={showHelp}
         onClose={() => setShowHelp(false)}
       />
+
+      <WelcomeOverlay
+        isOpen={showWelcome}
+        onClose={() => setShowWelcome(false)}
+      />
     </div>
   );
 }
 
 export function App() {
   return (
-    <SettingsStoreProvider>
-      <EnvironmentStoreProvider>
-        <AppContent />
-      </EnvironmentStoreProvider>
-    </SettingsStoreProvider>
+    <ErrorBoundary>
+      <SettingsStoreProvider>
+        <EnvironmentStoreProvider>
+          <AppContent />
+        </EnvironmentStoreProvider>
+      </SettingsStoreProvider>
+    </ErrorBoundary>
   );
 }
 

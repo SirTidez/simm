@@ -12,28 +12,54 @@ mod events;
 use tauri::Manager;
 
 fn main() {
+    // Initialize global logger FIRST to capture all output
+    crate::utils::global_logger::init_global_logger();
+    log::info!("Initializing Tauri application...");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            eprintln!("Tauri app starting...");
+            log::info!("Tauri app starting - running setup");
+
+            // Initialize SIMM directory (synchronous)
+            let simm_was_created = crate::services::app_init::initialize_simm_directory()
+                .unwrap_or(false);
+
+            log::info!("SIMM directory initialized (was_created: {})", simm_was_created);
+
+            // Store flag in app state so frontend can check it
+            app.manage(tauri::async_runtime::Mutex::new(simm_was_created));
             
+            // Initialize services (async)
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::services::app_init::initialize_services(app_handle).await {
+                    log::error!("Error during service initialization: {}", e);
+                    // Continue anyway - some services may still work
+                }
+            });
+
             // Ensure window stays open even if frontend has errors
             if let Some(window) = app.get_webview_window("main") {
-                eprintln!("Window 'main' found");
+                log::info!("Main window found");
                 #[cfg(debug_assertions)]
                 {
                     window.open_devtools();
+                    log::info!("DevTools opened");
                 }
             } else {
-                eprintln!("WARNING: Window 'main' not found!");
+                log::warn!("Main window not found!");
             }
-            
-            eprintln!("Tauri setup complete");
+
+            log::info!("Tauri setup complete");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // App Init
+            commands::app_init::was_simm_directory_just_created,
+            commands::app_init::get_home_directory,
             // DepotDownloader
             commands::depotdownloader::detect_depot_downloader,
             // Settings
@@ -44,6 +70,10 @@ fn main() {
             commands::settings::set_github_token,
             commands::settings::has_github_token,
             commands::settings::clear_github_token,
+            commands::settings::save_nexus_mods_api_key,
+            commands::settings::get_nexus_mods_api_key,
+            commands::settings::has_nexus_mods_api_key,
+            commands::settings::clear_nexus_mods_api_key,
             // Environments
             commands::environments::get_environments,
             commands::environments::get_environment,
@@ -72,6 +102,8 @@ fn main() {
             commands::mods::enable_mod,
             commands::mods::disable_mod,
             commands::mods::open_mods_folder,
+            commands::mods::check_mod_installed,
+            commands::mods::cleanup_duplicate_mod_storage,
             commands::mods::get_s1api_installation_status,
             // Plugins
             commands::plugins::get_plugins,
@@ -94,6 +126,7 @@ fn main() {
             commands::melon_loader::get_melon_loader_status,
             commands::melon_loader::install_melon_loader,
             commands::melon_loader::uninstall_melon_loader,
+            commands::melon_loader::get_available_melonloader_versions,
             // GitHub Releases
             commands::github_releases::get_latest_melon_loader_release,
             commands::github_releases::get_all_melon_loader_releases,
@@ -104,6 +137,17 @@ fn main() {
             // NexusMods
             commands::nexus_mods::validate_nexus_mods_api_key,
             commands::nexus_mods::get_nexus_mods_rate_limits,
+            commands::nexus_mods::get_nexus_mods_games,
+            commands::nexus_mods::search_nexus_mods_mods,
+            commands::nexus_mods::get_nexus_mods_latest_added,
+            commands::nexus_mods::get_nexus_mods_latest_updated,
+            commands::nexus_mods::get_nexus_mods_trending,
+            commands::nexus_mods::get_nexus_mods_mod,
+            commands::nexus_mods::get_nexus_mods_mod_files,
+            commands::nexus_mods::download_nexus_mods_mod_file,
+            commands::nexus_mods::install_nexus_mods_mod,
+            commands::nexus_mods::check_nexus_mods_mod_update,
+            commands::nexus_mods::check_nexus_mods_for_updates,
             // Thunderstore
             commands::thunderstore::search_thunderstore_packages,
             commands::thunderstore::get_thunderstore_package,
@@ -111,10 +155,23 @@ fn main() {
             // Mod Updates
             commands::mod_update::check_mod_updates,
             commands::mod_update::update_mod,
-            // Logs
+            // Logs (game logs)
             commands::logs::get_log_files,
             commands::logs::read_log_file,
             commands::logs::export_logs,
+            commands::logs::watch_log_file,
+            commands::logs::stop_watching_log,
+            // App Logging
+            commands::logs::log_frontend_message,
+            commands::logs::set_app_log_level,
+            commands::logs::set_app_log_retention_days,
+            commands::logs::get_app_log_retention_days,
+            commands::logs::list_app_log_files,
+            commands::logs::read_app_log_file,
+            // Config
+            commands::config::get_config_files,
+            commands::config::get_grouped_config,
+            commands::config::update_config,
             // FOMOD
             commands::fomod::detect_fomod,
             commands::fomod::parse_fomod_xml,

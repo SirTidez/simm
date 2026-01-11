@@ -7,3 +7,8 @@ package-lock.json
 # Encrypted credential files (never commit these)
 **/credentials.enc
 **/github_token.enc
+
+# Auto Claude data directory
+.auto-claude/
+/.claude
+.claude_settings.json

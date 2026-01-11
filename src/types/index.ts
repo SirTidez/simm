@@ -74,7 +74,7 @@ export interface Settings {
   language: string;
   theme: 'light' | 'dark' | 'modern-blue' | 'custom';
   customTheme?: CustomTheme;
-  melonLoaderZipPath?: string;
+  melonLoaderVersion?: string;
   autoInstallMelonLoader?: boolean;
   updateCheckInterval?: number;
   autoCheckUpdates?: boolean;
@@ -125,3 +125,55 @@ export interface CustomTheme {
   primaryBtnHover: string;
 }
 
+export interface NexusMod {
+  mod_id: number;
+  name: string;
+  summary: string;
+  description: string;
+  picture_url?: string;
+  version: string;
+  author: string;
+  uploaded_time: string;
+  updated_time: string;
+  category_id: number;
+  contains_adult_content: boolean;
+  status: string;
+  endorsement_count: number;
+  unique_downloads: number;
+  mod_downloads: number;
+}export interface NexusModFile {
+  file_id: number;
+  name: string;
+  version: string;
+  category_id: number;
+  category_name: string;
+  is_primary: boolean;
+  size: number;
+  file_name: string;
+  uploaded_timestamp: number;
+  mod_version: string;
+}
+
+export interface ConfigEntry {
+  key: string;
+  value: string;
+  comment?: string;
+}export interface ConfigSection {
+  name: string;
+  entries: ConfigEntry[];
+}
+
+export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';
+
+export interface ConfigFile {
+  name: string;
+  path: string;
+  fileType: ConfigFileType;
+  sections: ConfigSection[];
+}
+
+export interface ConfigUpdate {
+  section: string;
+  key: string;
+  value: string;
+}

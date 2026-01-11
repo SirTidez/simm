@@ -53,8 +53,13 @@ impl AuthService {
             args.push(sg.clone());
         }
 
+        // Get depots directory from SIMM folder
+        let depots_dir = crate::utils::directory_init::get_depots_dir()
+            .context("Failed to get depots directory")?;
+
         let mut child = Command::new(&executable_path)
             .args(&args)
+            .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -160,6 +160,42 @@ pub async fn open_mods_folder(environment_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn check_mod_installed(
+    environment_id: String,
+    source_id: Option<String>,
+    source_version: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let env_service = get_env_service().await?;
+    let env = env_service.get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let mods_service = get_mods_service().await?;
+    match mods_service.find_existing_mod_installation(&env.output_dir, &source_id, &source_version).await {
+        Ok(Some(mod_storage_id)) => Ok(serde_json::json!({
+            "installed": true,
+            "modStorageId": mod_storage_id
+        })),
+        Ok(None) => Ok(serde_json::json!({
+            "installed": false
+        })),
+        Err(e) => Err(format!("Failed to check mod installation: {}", e))
+    }
+}
+
+#[tauri::command]
+pub async fn cleanup_duplicate_mod_storage() -> Result<serde_json::Value, String> {
+    let mods_service = get_mods_service().await?;
+    mods_service.cleanup_duplicate_mod_storage().await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_s1api_installation_status(environment_id: String) -> Result<serde_json::Value, String> {
     let env_service = get_env_service().await?;
     let env = env_service.get_environment(&environment_id)
@@ -206,14 +242,11 @@ pub async fn upload_mod(
     // Check if file is ZIP or DLL
     let file_path_lower = file_path.to_lowercase();
     if file_path_lower.ends_with(".zip") {
-        mods_service.install_zip_mod(&env.output_dir, &file_path, &original_file_name, &runtime, &branch)
+        mods_service.install_zip_mod(&env.output_dir, &file_path, &original_file_name, &runtime, &branch, metadata)
             .await
             .map_err(|e| e.to_string())
     } else if file_path_lower.ends_with(".dll") {
-        let source = metadata
-            .and_then(|m| m.get("source").and_then(|s| s.as_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| "local".to_string());
-        mods_service.install_dll_mod(&env.output_dir, &file_path, &source, &runtime)
+        mods_service.install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -256,6 +289,23 @@ pub async fn install_s1api(
         crate::types::Runtime::Il2cpp => "IL2CPP",
         crate::types::Runtime::Mono => "Mono",
     };
+
+    // Check if we already have this version installed before downloading
+    let mods_service = match get_mods_service().await {
+        Ok(service) => service,
+        Err(e) => return error_json(format!("Failed to get mods service: {}", e))
+    };
+    
+    let source_id = Some("ifBars/S1API".to_string());
+    let source_version = Some(version_tag.clone());
+    if let Ok(Some(existing_mod_id)) = mods_service.find_existing_mod_installation(&env.output_dir, &source_id, &source_version).await {
+        eprintln!("[install_s1api] S1API version {} already installed with storage_id: {}, skipping download", version_tag, existing_mod_id);
+        return Ok(serde_json::json!({
+            "success": true,
+            "message": "S1API already installed",
+            "alreadyInstalled": true
+        }));
+    }
 
     // Get GitHub service and fetch S1API releases
     eprintln!("[install_s1api] Getting GitHub service...");

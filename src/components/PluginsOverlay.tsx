@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 
@@ -25,8 +26,8 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
   const [pluginsDirectory, setPluginsDirectory] = useState<string>('');
   const [deletingPlugin, setDeletingPlugin] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<{ file: File; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [pendingUpload, setPendingUpload] = useState<{ file: null; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
+  const [environment, setEnvironment] = useState<import('../types').Environment | null>(null);
   
   // MLVScan state
   const [mlvscanStatus, setMlvscanStatus] = useState<{
@@ -57,6 +58,7 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
 
   useEffect(() => {
     if (isOpen && environmentId) {
+      loadEnvironment();
       loadPlugins();
       loadMlvscanStatus();
     } else {
@@ -69,8 +71,18 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
       setMlvscanReleases([]);
       setShowMlvscanVersionSelector(false);
       setSelectedMlvscanVersion('');
+      setEnvironment(null);
     }
   }, [isOpen, environmentId]);
+
+  const loadEnvironment = async () => {
+    try {
+      const env = await ApiService.getEnvironment(environmentId);
+      setEnvironment(env);
+    } catch (err) {
+      console.error('Failed to load environment:', err);
+    }
+  };
 
   const loadPlugins = async () => {
     setLoading(true);
@@ -243,25 +255,58 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
     }
   };
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  const handleUploadClick = async () => {
+    if (!environment) {
+      setError('Environment not loaded');
+      return;
+    }
 
     setUploading(true);
     setError(null);
 
     try {
-      const result = await ApiService.uploadPlugin(environmentId, file);
+      // Use Tauri dialog to select file
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'Plugin Files',
+          extensions: ['dll', 'zip']
+        }],
+        title: 'Select Plugin File',
+      });
+
+      if (!selected) {
+        // User cancelled
+        setUploading(false);
+        return;
+      }
+
+      // Handle both string path and FileEntry object
+      let filePath: string;
+      let fileName: string;
+      
+      if (typeof selected === 'string') {
+        filePath = selected;
+        fileName = selected.split(/[/\\]/).pop() || 'unknown';
+      } else {
+        // FileEntry object
+        filePath = selected.path;
+        fileName = selected.name || filePath.split(/[/\\]/).pop() || 'unknown';
+      }
+
+      // Call upload with file path and runtime
+      const result = await ApiService.uploadPlugin(
+        environmentId,
+        filePath,
+        fileName,
+        environment.runtime
+      );
       
       if (result.success) {
         // Check for runtime mismatch - plugin is already installed, just show warning
         if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
           // Store the mismatch info to show confirmation dialog
-          setPendingUpload({ file, runtimeMismatch: result.runtimeMismatch });
+          setPendingUpload({ file: null, runtimeMismatch: result.runtimeMismatch });
           // Plugin is already installed, so we can proceed with success handling
           // but show the warning dialog first
         } else {
@@ -284,10 +329,6 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
     // Notify parent that plugins changed
     if (onPluginsChanged) {
       onPluginsChanged();
-    }
-    // Clear file input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
     }
     setUploading(false);
     setPendingUpload(null);
@@ -369,18 +410,11 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
               )}
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".dll,.zip"
-                onChange={handleFileChange}
-                style={{ display: 'none' }}
-              />
               <button
                 onClick={handleUploadClick}
                 className="btn btn-primary"
                 disabled={uploading}
-                title="Upload a plugin file (.dll or .zip)"
+                title="Upload a plugin file (.dll, .zip, or .rar)"
               >
                 {uploading ? (
                   <>

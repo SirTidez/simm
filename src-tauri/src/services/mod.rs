@@ -18,4 +18,6 @@ pub mod filesystem_watcher;
 pub mod logger;
 pub mod logs;
 pub mod steam;
+pub mod config;
+pub mod app_init;
 

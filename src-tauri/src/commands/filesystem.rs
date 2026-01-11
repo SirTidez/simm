@@ -91,24 +91,50 @@ pub async fn launch_game(
 
 #[tauri::command]
 pub async fn browse_directory(path: Option<String>) -> Result<serde_json::Value, String> {
-    // Use the provided path or default to home directory
+    // Use the provided path or default to home/SIMM directory
     let start_path: PathBuf = if let Some(ref p) = path {
-        PathBuf::from(p)
+        if p.is_empty() {
+            // If empty string, use default home/SIMM
+            dirs::home_dir()
+                .map(|p| {
+                    let mut path = p.to_path_buf();
+                    path.push("SIMM");
+                    path
+                })
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            PathBuf::from(p)
+        }
     } else {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        // If None, use default home/SIMM
+        dirs::home_dir()
+            .map(|p| {
+                let mut path = p.to_path_buf();
+                path.push("SIMM");
+                path
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
     };
     
-    // If path doesn't exist, use parent or home
+    // If path doesn't exist, use parent or home/SIMM
+    let default_simm_path = dirs::home_dir()
+        .map(|p| {
+            let mut path = p.to_path_buf();
+            path.push("SIMM");
+            path
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    
     let browse_path: PathBuf = if start_path.exists() && start_path.is_dir() {
         start_path
     } else if let Some(parent) = start_path.parent() {
         if parent.exists() && parent.is_dir() {
             parent.to_path_buf()
         } else {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+            default_simm_path
         }
     } else {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        default_simm_path
     };
     
     // Read directory contents

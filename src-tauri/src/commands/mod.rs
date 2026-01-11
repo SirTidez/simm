@@ -1,3 +1,4 @@
+pub mod app_init;
 pub mod depotdownloader;
 pub mod environments;
 pub mod downloads;
@@ -16,4 +17,5 @@ pub mod thunderstore;
 pub mod mod_update;
 pub mod game_version;
 pub mod logs;
+pub mod config;
 
