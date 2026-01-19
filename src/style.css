@@ -1788,7 +1788,6 @@ textarea {
   width: 90%;
   max-height: calc(100vh - 120px);
   position: relative;
-  z-index: 1001;
   overflow: hidden;
   display: flex;
   flex-direction: column;

@@ -12,3 +12,6 @@ package-lock.json
 .auto-claude/
 /.claude
 .claude_settings.json
+.complexity-log.md
+.simmrust-project-structure.md
+.todos-report.md/.simmrust-todos-report.md
