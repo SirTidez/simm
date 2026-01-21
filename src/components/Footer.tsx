@@ -282,22 +282,25 @@ export function Footer() {
                   Light
                 </button>
                 <div className="footer-theme-divider"></div>
-                <button
-                  type="button"
-                  className={`footer-theme-option footer-theme-custom ${settings?.theme === 'custom' ? 'active' : ''}`}
-                  onClick={() => handleThemeChange('custom')}
-                >
-                  <i className="fas fa-paint-brush" style={{ marginRight: '0.5rem' }}></i>
-                  Custom
+                <div className="footer-theme-custom">
+                  <button
+                    type="button"
+                    className={`footer-theme-option ${settings?.theme === 'custom' ? 'active' : ''}`}
+                    onClick={() => handleThemeChange('custom')}
+                  >
+                    <i className="fas fa-paint-brush" style={{ marginRight: '0.5rem' }}></i>
+                    Custom
+                  </button>
                   <button
                     type="button"
                     className="footer-theme-edit-btn"
                     onClick={handleCustomThemeEdit}
                     title="Edit Custom Theme"
+                    aria-label="Edit Custom Theme"
                   >
                     <i className="fas fa-edit"></i>
                   </button>
-                </button>
+                </div>
               </div>
             )}
           </div>
