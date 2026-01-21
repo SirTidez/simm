@@ -19,3 +19,5 @@ package-lock.json
 .claude-dev-helper/open-files.json
 .session-summary.md
 CLAUDE.md
+bun.lock
+AGENTS.md
