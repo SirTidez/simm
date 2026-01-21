@@ -6,6 +6,16 @@ interface WelcomeOverlayProps {
   onClose: () => void;
 }
 
+/**
+ * Show a welcome modal that explains the created SIMM folder and displays its computed location.
+ *
+ * When the modal opens, the component attempts to detect the user's home directory and displays a normalized
+ * SIMM path; if detection fails, it shows "your home directory\\SIMM".
+ *
+ * @param isOpen - Whether the modal is visible
+ * @param onClose - Callback invoked to close the overlay
+ * @returns The modal's JSX when visible, or `null` when not visible
+ */
 export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
   const [homePath, setHomePath] = useState<string>('');
 
@@ -105,4 +115,3 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
     </div>
   );
 }
-

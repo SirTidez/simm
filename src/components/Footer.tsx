@@ -9,6 +9,16 @@ import { CustomThemeEditor } from './CustomThemeEditor';
 declare const __APP_VERSION__: string;
 const APP_VERSION = __APP_VERSION__;
 
+/**
+ * Renders the application footer with update status, theme controls, and version info.
+ *
+ * Displays counts for ready environments and available updates, shows the most recent update-check time,
+ * provides a "Check all updates" action, and exposes a theme selector (including a custom-theme editor).
+ * The component reads from environment and settings stores and updates settings or triggers update checks
+ * via those stores.
+ *
+ * @returns The footer JSX element for the application's UI
+ */
 export function Footer() {
   const { environments, checkAllUpdates } = useEnvironmentStore();
   const { settings, updateSettings } = useSettingsStore();
@@ -313,4 +323,3 @@ export function Footer() {
     </footer>
   );
 }
-
