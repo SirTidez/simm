@@ -188,6 +188,13 @@ impl UpdateCheckService {
             cmd.arg("-remember-password");
         }
 
+        // Hide console window on Windows
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW flag
+        }
+
         let output = cmd.output()
             .context("Failed to execute DepotDownloader")?;
 

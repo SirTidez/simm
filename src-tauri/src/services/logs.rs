@@ -313,9 +313,17 @@ impl LogsService {
         log_path: &str,
         filter_level: Option<&str>,
         search_query: Option<&str>,
+        filter_mod_tag: Option<&str>,
         output_path: &str,
     ) -> Result<()> {
         let log_lines = self.read_log_file(log_path, None).await?;
+
+        // Normalize mod tag for comparison (removes spaces and converts to lowercase)
+        let normalize_mod_tag = |tag: &str| -> String {
+            tag.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+        };
+
+        let normalized_filter_tag = filter_mod_tag.map(normalize_mod_tag);
 
         let filtered_lines = log_lines.iter()
             .filter(|line| {
@@ -323,6 +331,17 @@ impl LogsService {
                 if let Some(level) = filter_level {
                     if let Some(line_level) = &line.level {
                         if !line_level.eq_ignore_ascii_case(level) {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+
+                // Filter by mod tag (normalized comparison)
+                if let Some(ref filter_tag_normalized) = normalized_filter_tag {
+                    if let Some(ref line_tag) = line.mod_tag {
+                        if normalize_mod_tag(line_tag) != *filter_tag_normalized {
                             return false;
                         }
                     } else {
@@ -339,7 +358,30 @@ impl LogsService {
 
                 true
             })
-            .map(|line| line.content.clone())
+            .map(|line| {
+                // Reconstruct the full log line with timestamp and mod tag
+                let mut full_line = String::new();
+                
+                // Add timestamp if present
+                if let Some(ref timestamp) = line.timestamp {
+                    full_line.push_str(&format!("[{}] ", timestamp));
+                }
+                
+                // Add mod tag if present
+                if let Some(ref mod_tag) = line.mod_tag {
+                    full_line.push_str(&format!("[{}] ", mod_tag));
+                }
+                
+                // Add level if present
+                if let Some(ref level) = line.level {
+                    full_line.push_str(&format!("[{}] ", level));
+                }
+                
+                // Add content
+                full_line.push_str(&line.content);
+                
+                full_line
+            })
             .collect::<Vec<_>>();
 
         // Add header with filter/search info
@@ -349,6 +391,9 @@ impl LogsService {
         output.push_str(&format!("Exported: {}\n", Utc::now().to_rfc3339()));
         if let Some(level) = filter_level {
             output.push_str(&format!("Filter Level: {}\n", level));
+        }
+        if let Some(mod_tag) = filter_mod_tag {
+            output.push_str(&format!("Filter Mod: {}\n", mod_tag));
         }
         if let Some(query) = search_query {
             output.push_str(&format!("Search Query: {}\n", query));

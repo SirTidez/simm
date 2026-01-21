@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Command, Child};
@@ -326,6 +328,18 @@ impl DepotDownloaderService {
             .context("Failed to get depots directory")?;
 
         // Spawn process with working directory set to depots folder
+        #[cfg(target_os = "windows")]
+        let mut child = Command::new(&executable_path)
+            .args(&args)
+            .current_dir(&depots_dir) // Set working directory to SIMM/depots
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW flag to prevent console window from appearing
+            .spawn()
+            .context("Failed to spawn DepotDownloader process")?;
+
+        #[cfg(not(target_os = "windows"))]
         let mut child = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots

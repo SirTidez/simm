@@ -50,6 +50,18 @@ interface ThunderstorePackage {
   }>;
 }
 
+function safeExternalUrl(raw: string | null | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    // Prevent javascript:, data:, file:, etc.
+    if (u.protocol !== 'https:') return undefined;
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: Props) {
   const { settings } = useSettingsStore();
   const [mods, setMods] = useState<ModInfo[]>([]);
@@ -1380,14 +1392,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                         )}
                       </button>
                       <a
-                        href={pkg.package_url || '#'}
+                        href={safeExternalUrl(pkg.package_url)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="btn btn-secondary btn-small"
                         style={{ textDecoration: 'none', textAlign: 'center' }}
                         title="View on Thunderstore"
                         onClick={(e) => {
-                          if (!pkg.package_url) {
+                          if (!safeExternalUrl(pkg.package_url)) {
                             e.preventDefault();
                           }
                         }}
@@ -1928,7 +1940,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                         {mod.source && (
                           (mod.source === 'thunderstore' || mod.source === 'nexusmods') && mod.sourceUrl ? (
                             <a
-                              href={mod.sourceUrl}
+                              href={safeExternalUrl(mod.sourceUrl)}
                               target="_blank"
                               rel="noopener noreferrer"
                               style={{
@@ -1952,6 +1964,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                                 e.currentTarget.style.textDecoration = 'none';
                               }}
                               title={`View ${mod.name} on ${mod.source === 'thunderstore' ? 'Thunderstore' : 'NexusMods'}`}
+                              onClick={(e) => {
+                                if (!safeExternalUrl(mod.sourceUrl)) {
+                                  e.preventDefault();
+                                }
+                              }}
                             >
                               <i className="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }}></i>
                               {getSourceLabel(mod.source)}

@@ -37,6 +37,45 @@ interface ModCardData {
   errorCount: number;
 }
 
+function highlightText(text: string, query: string): React.ReactNode {
+  const q = query.trim();
+  if (!q) return text;
+
+  // Escape regex special chars in the query
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(escaped, 'gi');
+
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+
+  // matchAll requires a global or sticky regex; we use 'gi'
+  for (const match of text.matchAll(re)) {
+    const index = match.index ?? 0;
+    const matchedText = match[0] ?? '';
+
+    if (index > lastIndex) {
+      parts.push(text.slice(lastIndex, index));
+    }
+
+    parts.push(
+      <mark key={index} style={{ backgroundColor: '#ffaa00', color: '#000' }}>
+        {matchedText}
+      </mark>
+    );
+
+    lastIndex = index + matchedText.length;
+  }
+
+  // If no matches, return original string to avoid creating an empty array
+  if (parts.length === 0) return text;
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts;
+}
+
 export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Props) {
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
   const [selectedLogFile, setSelectedLogFile] = useState<LogFile | null>(null);
@@ -276,6 +315,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
         selectedLogFile.path,
         filterLevel === 'ALL' ? null : filterLevel,
         searchQuery.trim() || null,
+        (showModCard && selectedModTag) ? selectedModTag : null,
         filePath
       );
 
@@ -801,15 +841,9 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                           wordBreak: 'break-word',
                           whiteSpace: 'pre-wrap',
                         }}
-                        dangerouslySetInnerHTML={{
-                          __html: searchQuery.trim()
-                            ? line.content.replace(
-                                new RegExp(`(${searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
-                                '<mark style="background-color: #ffaa00; color: #000;">$1</mark>'
-                              )
-                            : line.content,
-                        }}
-                      />
+                      >
+                        {highlightText(line.content, searchQuery)}
+                      </span>
                     </div>
                   ))}
                 </div>

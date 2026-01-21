@@ -15,3 +15,7 @@ package-lock.json
 .complexity-log.md
 .simmrust-project-structure.md
 .todos-report.md/.simmrust-todos-report.md
+/.serena
+.claude-dev-helper/open-files.json
+.session-summary.md
+CLAUDE.md

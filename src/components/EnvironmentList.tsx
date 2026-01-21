@@ -27,6 +27,17 @@ import {
   onUserLibsChanged
 } from '../services/events';
 
+function safeExternalUrl(raw: string | null | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:') return undefined;
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 // Shared ref to track last update check time (accessible across components)
 // This is exported so Footer can update it when doing manual checks
 export const lastUpdateCheckTimeRef = { current: null as number | null };
@@ -1231,10 +1242,11 @@ export function EnvironmentList() {
                                 Published: {new Date(release.published_at).toLocaleDateString()}
                               </div>
                               <a
-                                href={release.isNightly 
-                                  ? `https://github.com/LavaGang/MelonLoader/actions`
-                                  : `https://github.com/LavaGang/MelonLoader/releases/tag/${release.tag_name}`
-                                }
+                                href={safeExternalUrl(
+                                  release.isNightly
+                                    ? 'https://github.com/LavaGang/MelonLoader/actions'
+                                    : `https://github.com/LavaGang/MelonLoader/releases/tag/${encodeURIComponent(release.tag_name)}`
+                                )}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={(e) => e.stopPropagation()}

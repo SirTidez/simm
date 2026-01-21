@@ -163,9 +163,7 @@ export interface ConfigEntry {
   entries: ConfigEntry[];
 }
 
-export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';
-
-export interface ConfigFile {
+export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';export interface ConfigFile {
   name: string;
   path: string;
   fileType: ConfigFileType;

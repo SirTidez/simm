@@ -111,6 +111,7 @@ pub async fn export_logs(
     log_path: String,
     filter_level: Option<String>,
     search_query: Option<String>,
+    filter_mod_tag: Option<String>,
     output_path: String,
 ) -> Result<(), String> {
     let logs_service = get_logs_service().await?;
@@ -118,6 +119,7 @@ pub async fn export_logs(
         &log_path,
         filter_level.as_deref(),
         search_query.as_deref(),
+        filter_mod_tag.as_deref(),
         &output_path,
     )
     .await

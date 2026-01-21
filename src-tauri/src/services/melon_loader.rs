@@ -67,11 +67,13 @@ impl MelonLoaderService {
     #[cfg(target_os = "windows")]
     async fn extract_version_from_dll(&self, dll_path: &Path) -> Result<String> {
         use tokio::process::Command;
-        
+        use std::os::windows::process::CommandExt;
+
         let path_str = dll_path.to_string_lossy().replace('\'', "''");
         let output = Command::new("powershell")
             .arg("-Command")
             .arg(&format!("(Get-Item '{}').VersionInfo.FileVersion", path_str))
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
             .output()
             .await
             .context("Failed to execute PowerShell command")?;

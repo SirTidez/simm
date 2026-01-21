@@ -984,12 +984,14 @@ export class ApiService {
     logPath: string,
     filterLevel: string | null,
     searchQuery: string | null,
+    filterModTag: string | null,
     outputPath: string
   ): Promise<void> {
     return invoke('export_logs', {
       logPath,
       filterLevel,
       searchQuery,
+      filterModTag,
       outputPath,
     });
   }

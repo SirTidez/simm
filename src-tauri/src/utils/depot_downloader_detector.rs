@@ -18,6 +18,16 @@ pub async fn detect_depot_downloader() -> Result<DepotDownloaderInfo> {
         "which"
     };
 
+    #[cfg(target_os = "windows")]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new(which_command)
+            .arg(executable_name)
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+            .output()
+    };
+
+    #[cfg(not(target_os = "windows"))]
     let output = Command::new(which_command)
         .arg(executable_name)
         .output();

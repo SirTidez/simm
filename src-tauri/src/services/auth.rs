@@ -57,6 +57,21 @@ impl AuthService {
         let depots_dir = crate::utils::directory_init::get_depots_dir()
             .context("Failed to get depots directory")?;
 
+        #[cfg(target_os = "windows")]
+        let mut child = {
+            use std::os::windows::process::CommandExt;
+            Command::new(&executable_path)
+                .args(&args)
+                .current_dir(&depots_dir) // Set working directory to SIMM/depots
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .spawn()
+                .context("Failed to spawn DepotDownloader process")?
+        };
+
+        #[cfg(not(target_os = "windows"))]
         let mut child = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots

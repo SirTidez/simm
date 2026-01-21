@@ -12,8 +12,10 @@ impl FileSystemService {
     pub async fn open_folder(&self, path: &str) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
+            use std::os::windows::process::CommandExt;
             std::process::Command::new("explorer")
                 .arg(path)
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
                 .context("Failed to open folder")?;
         }
@@ -147,11 +149,17 @@ impl FileSystemService {
             // Launch with Steam environment variables to ensure proper authentication
             let mut cmd = std::process::Command::new(&executable_path);
             cmd.current_dir(dir);
-            
+
             // Set Steam App ID environment variable so Steam knows which game this is
             cmd.env("SteamAppId", app_id);
             cmd.env("SteamGameId", app_id);
-            
+
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW flag
+            }
+
             cmd.spawn()
                 .context("Failed to launch game executable")?;
             
@@ -173,19 +181,31 @@ impl FileSystemService {
         if !steam_exe.exists() {
             return Err(anyhow::anyhow!("Steam executable not found at {:?}", steam_exe));
         }
-        
-        std::process::Command::new(&steam_exe)
-            .arg("-applaunch")
-            .arg(app_id)
-            .spawn()
-            .context("Failed to launch game via Steam")?;
-        
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new(&steam_exe)
+                .arg("-applaunch")
+                .arg(app_id)
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .spawn()
+                .context("Failed to launch game via Steam")?;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new(&steam_exe)
+                .arg("-applaunch")
+                .arg(app_id)
+                .spawn()
+                .context("Failed to launch game via Steam")?;
+        }
+
         Ok(())
     }
 
     async fn ensure_steam_running(&self) -> Result<()> {
-        use std::process::Command;
-        
         let steam_path = crate::services::steam::SteamService::get_steam_path()
             .ok_or_else(|| anyhow::anyhow!("Steam installation not found"))?;
         
@@ -205,14 +225,16 @@ impl FileSystemService {
         #[cfg(target_os = "windows")]
         {
             use std::process::Command;
+            use std::os::windows::process::CommandExt;
             let steam_exe_name = steam_exe.file_name()
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
-            
+
             let output = Command::new("tasklist")
                 .arg("/FI")
                 .arg(format!("IMAGENAME eq {}", steam_exe_name))
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .output()
                 .ok();
             
@@ -241,15 +263,27 @@ impl FileSystemService {
                 }
             }
         }
-        
+
         // Steam is not running, start it
-        std::process::Command::new(&steam_exe)
-            .spawn()
-            .context("Failed to start Steam")?;
-        
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new(&steam_exe)
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .spawn()
+                .context("Failed to start Steam")?;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new(&steam_exe)
+                .spawn()
+                .context("Failed to start Steam")?;
+        }
+
         // Give Steam a moment to start
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        
+
         Ok(())
     }
 
@@ -271,8 +305,10 @@ impl FileSystemService {
 
         #[cfg(target_os = "windows")]
         {
+            use std::os::windows::process::CommandExt;
             std::process::Command::new(&executable_path)
                 .current_dir(game_dir)
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
                 .context("Failed to launch game")?;
         }
