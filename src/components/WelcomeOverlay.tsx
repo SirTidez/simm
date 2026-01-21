@@ -20,7 +20,9 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
 
   if (!isOpen) return null;
 
-  const simmPath = homePath ? `${homePath}SIMM` : 'your home directory\\SIMM';
+  const simmPath = homePath
+    ? `${homePath.replace(/[\\/]*$/, '\\')}SIMM`
+    : 'your home directory\\SIMM';
 
   return (
     <div className="modal-overlay" onClick={onClose} style={{ zIndex: 10002 }}>
