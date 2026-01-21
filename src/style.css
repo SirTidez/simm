@@ -2263,6 +2263,11 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
+}
+
+.footer-theme-custom .footer-theme-option {
+  flex: 1;
 }
 
 .footer-theme-edit-btn {
