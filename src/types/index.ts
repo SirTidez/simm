@@ -36,7 +36,7 @@ export interface Environment {
   currentGameVersion?: string;
   updateGameVersion?: string;
   melonLoaderVersion?: string;
-  environmentType?: 'Steam' | 'DepotDownloader';
+  environmentType?: 'steam' | 'depotDownloader' | 'local';
 }
 
 export interface UpdateCheckResult {

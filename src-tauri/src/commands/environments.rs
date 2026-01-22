@@ -145,6 +145,7 @@ pub async fn update_environment(
 pub async fn delete_environment(
     watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
     id: String,
+    delete_files: Option<bool>,
 ) -> Result<bool, String> {
     // Stop watching directories before deleting
     let watcher_guard = watcher.lock().await;
@@ -152,7 +153,7 @@ pub async fn delete_environment(
     drop(watcher_guard);
 
     let service = get_env_service().await?;
-    service.delete_environment(&id)
+    service.delete_environment(&id, delete_files.unwrap_or(false))
         .await
         .map_err(|e| e.to_string())
 }
@@ -191,7 +192,32 @@ pub async fn create_steam_environment(
     let mods_dir = std::path::Path::new(&steam_path).join("Mods");
     let plugins_dir = std::path::Path::new(&steam_path).join("Plugins");
     let userlibs_dir = std::path::Path::new(&steam_path).join("UserLibs");
-    
+
+    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
+    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
+    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+
+    Ok(env)
+}
+
+#[tauri::command]
+pub async fn import_local_environment(
+    watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
+    local_path: String,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<Environment, String> {
+    let service = get_env_service().await?;
+    let env = service.create_local_environment(local_path.clone(), name, description)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Start watching mods/plugins/userlibs directories
+    let watcher_guard = watcher.lock().await;
+    let mods_dir = std::path::Path::new(&local_path).join("Mods");
+    let plugins_dir = std::path::Path::new(&local_path).join("Plugins");
+    let userlibs_dir = std::path::Path::new(&local_path).join("UserLibs");
+
     let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
     let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
     let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;

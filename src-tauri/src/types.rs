@@ -98,6 +98,7 @@ pub enum EnvironmentStatus {
 pub enum EnvironmentType {
     Steam,
     DepotDownloader,
+    Local,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

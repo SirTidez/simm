@@ -217,10 +217,119 @@ impl EnvironmentService {
         let mut map = self.environments.write().await;
         map.insert(id.clone(), env.clone());
         drop(map);
-        
+
         self.save_environments().await?;
-        
+
         Ok(env)
+    }
+
+    pub async fn create_local_environment(
+        &self,
+        local_path: String,
+        name: Option<String>,
+        description: Option<String>,
+    ) -> Result<Environment> {
+        self.load_environments().await?;
+
+        let path = Path::new(&local_path);
+
+        // Validate installation - check for game executable
+        let executable = path.join("Schedule I.exe");
+        if !executable.exists() {
+            return Err(anyhow::anyhow!("Invalid installation path: Schedule I.exe not found in {}", local_path));
+        }
+
+        // Detect runtime by checking for IL2CPP vs Mono indicators
+        let runtime = if path.join("GameAssembly.dll").exists() {
+            crate::types::Runtime::Il2cpp
+        } else if path.join("Schedule I_Data").join("Managed").join("Assembly-CSharp.dll").exists() {
+            crate::types::Runtime::Mono
+        } else {
+            // Default to IL2CPP if we can't determine
+            crate::types::Runtime::Il2cpp
+        };
+
+        // Infer branch from runtime
+        let branch = match runtime {
+            crate::types::Runtime::Il2cpp => "main".to_string(),
+            crate::types::Runtime::Mono => "alternate".to_string(),
+        };
+
+        // Extract game version
+        let game_version_service = crate::services::game_version::GameVersionService::new();
+        let current_game_version = game_version_service.extract_game_version(&local_path).await.ok().flatten();
+
+        // Check MelonLoader status
+        let melon_loader_version = self.detect_melon_loader_version(path).await;
+
+        let id = format!("local-{}", chrono::Utc::now().timestamp_millis());
+
+        // Generate default name from folder name
+        let default_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Local Installation".to_string());
+
+        let env = Environment {
+            id: id.clone(),
+            name: name.unwrap_or(default_name),
+            description,
+            app_id: crate::services::steam::SteamService::get_steam_app_id(),
+            branch,
+            output_dir: local_path,
+            runtime,
+            status: crate::types::EnvironmentStatus::Completed,
+            last_updated: Some(chrono::Utc::now()),
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version,
+            update_game_version: None,
+            melon_loader_version,
+            environment_type: Some(crate::types::EnvironmentType::Local),
+        };
+
+        let mut map = self.environments.write().await;
+        map.insert(id.clone(), env.clone());
+        drop(map);
+
+        self.save_environments().await?;
+
+        Ok(env)
+    }
+
+    async fn detect_melon_loader_version(&self, game_path: &Path) -> Option<String> {
+        // Check for MelonLoader by looking for version.dll or MelonLoader folder
+        let melon_loader_dir = game_path.join("MelonLoader");
+        if !melon_loader_dir.exists() {
+            return None;
+        }
+
+        // Try to read version from MelonLoader.dll or net6/MelonLoader.dll
+        let possible_paths = [
+            melon_loader_dir.join("MelonLoader.dll"),
+            melon_loader_dir.join("net6").join("MelonLoader.dll"),
+            melon_loader_dir.join("net35").join("MelonLoader.dll"),
+        ];
+
+        for dll_path in &possible_paths {
+            if dll_path.exists() {
+                // MelonLoader is installed, but we can't easily read version from DLL
+                // Return a placeholder indicating it's installed
+                return Some("installed".to_string());
+            }
+        }
+
+        // Check for version.dll as another indicator
+        if game_path.join("version.dll").exists() {
+            return Some("installed".to_string());
+        }
+
+        None
     }
 
     pub async fn update_environment(
@@ -309,27 +418,32 @@ impl EnvironmentService {
         Ok(updated)
     }
 
-    pub async fn delete_environment(&self, id: &str) -> Result<bool> {
+    pub async fn delete_environment(&self, id: &str, delete_files: bool) -> Result<bool> {
         self.load_environments().await?;
-        
+
         let env = {
             let map = self.environments.read().await;
             map.get(id).cloned()
         };
-        
+
         if let Some(env) = env {
-            // Delete the environment's directory if it exists
-            if Path::new(&env.output_dir).exists() {
+            // Only delete files if explicitly requested AND not a Steam environment
+            // Steam environments are managed by Steam, so we never delete their files
+            let should_delete_files = delete_files
+                && env.environment_type != Some(crate::types::EnvironmentType::Steam)
+                && Path::new(&env.output_dir).exists();
+
+            if should_delete_files {
                 if let Err(e) = fs::remove_dir_all(&env.output_dir).await {
                     eprintln!("Failed to delete directory {}: {}", env.output_dir, e);
                     // Continue with environment deletion even if directory deletion fails
                 }
             }
-            
+
             let mut map = self.environments.write().await;
             map.remove(id);
             drop(map);
-            
+
             self.save_environments().await?;
             Ok(true)
         } else {

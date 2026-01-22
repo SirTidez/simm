@@ -17,6 +17,11 @@ export class ApiService {
     return invoke('detect_depot_downloader');
   }
 
+  // App Init
+  static async getHomeDirectory(): Promise<string> {
+    return invoke('get_home_directory');
+  }
+
   // Settings
   static async getSettings(): Promise<Settings> {
     return invoke('get_settings');
@@ -59,8 +64,8 @@ export class ApiService {
     return invoke('update_environment', { id, updates });
   }
 
-  static async deleteEnvironment(id: string): Promise<{ success: boolean }> {
-    const result = await invoke<boolean>('delete_environment', { id });
+  static async deleteEnvironment(id: string, deleteFiles?: boolean): Promise<{ success: boolean }> {
+    const result = await invoke<boolean>('delete_environment', { id, deleteFiles });
     return { success: result };
   }
 
@@ -112,6 +117,18 @@ export class ApiService {
   ): Promise<Environment> {
     return invoke('create_steam_environment', {
       steamPath,
+      name,
+      description,
+    });
+  }
+
+  static async importLocalEnvironment(
+    localPath: string,
+    name?: string,
+    description?: string
+  ): Promise<Environment> {
+    return invoke('import_local_environment', {
+      localPath,
       name,
       description,
     });

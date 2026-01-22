@@ -9,7 +9,7 @@ interface Props {
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
-  const { createEnvironment } = useEnvironmentStore();
+  const { createEnvironment, refreshEnvironments } = useEnvironmentStore();
   const { settings } = useSettingsStore();
   const [step, setStep] = useState(1);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
@@ -28,6 +28,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [steamInstallations, setSteamInstallations] = useState<Array<{ path: string; executablePath: string; appId: string }>>([]);
   const [detectingSteam, setDetectingSteam] = useState(false);
   const [showSteamDetection, setShowSteamDetection] = useState(false);
+  const [showImportLocal, setShowImportLocal] = useState(false);
+  const [importPath, setImportPath] = useState('');
+  const [importingLocal, setImportingLocal] = useState(false);
 
   useEffect(() => {
     loadSchedule1Config();
@@ -141,11 +144,50 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
     try {
       await ApiService.createSteamEnvironment(steamPath, name || undefined, description.trim() || undefined);
+      await refreshEnvironments();
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create Steam environment');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleBrowseForImport = async () => {
+    try {
+      const homeDir = await ApiService.getHomeDirectory();
+      setDirectoryPath(importPath || homeDir);
+      setShowDirectoryPicker(true);
+      if (importPath || homeDir) {
+        await loadDirectory(importPath || homeDir);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to open directory picker');
+    }
+  };
+
+  const handleImportDirectorySelect = (selectedPath: string) => {
+    setImportPath(selectedPath);
+    setShowDirectoryPicker(false);
+  };
+
+  const handleImportLocalEnvironment = async () => {
+    if (!importPath) {
+      setError('Please select a game folder');
+      return;
+    }
+
+    setImportingLocal(true);
+    setError(null);
+
+    try {
+      await ApiService.importLocalEnvironment(importPath, name || undefined, description.trim() || undefined);
+      await refreshEnvironments();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to import local environment');
+    } finally {
+      setImportingLocal(false);
     }
   };
 
@@ -184,7 +226,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
         {error && <div className="error-message">{error}</div>}
 
-        {!showSteamDetection && step === 1 && (
+        {!showSteamDetection && !showImportLocal && step === 1 && (
           <div className="wizard-step">
             <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
               <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -213,6 +255,25 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 )}
               </button>
             </div>
+
+            <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
+              <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <i className="fas fa-folder-open" style={{ color: '#4caf50' }}></i>
+                Import Existing Installation
+              </h4>
+              <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
+                Add an existing game folder you've already downloaded or copied. Detects runtime, version, and installed mods automatically.
+              </p>
+              <button
+                onClick={() => setShowImportLocal(true)}
+                className="btn btn-secondary"
+                style={{ width: '100%' }}
+              >
+                <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
+                Import Existing Folder
+              </button>
+            </div>
+
             <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
               <span>OR</span>
             </div>
@@ -447,6 +508,106 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             )}
           </div>
         )}
+
+        {showImportLocal && (
+          <div className="wizard-step">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3>Import Existing Installation</h3>
+              <button
+                onClick={() => {
+                  setShowImportLocal(false);
+                  setImportPath('');
+                }}
+                className="btn btn-secondary btn-small"
+              >
+                <i className="fas fa-arrow-left" style={{ marginRight: '0.25rem' }}></i>
+                Back
+              </button>
+            </div>
+
+            <div className="form-group">
+              <label>Game Folder *</label>
+              <p style={{ margin: '0 0 0.5rem 0', color: '#aaa', fontSize: '0.85rem' }}>
+                Select the folder containing Schedule I.exe
+              </p>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input
+                  type="text"
+                  value={importPath}
+                  onChange={(e) => setImportPath(e.target.value)}
+                  placeholder="C:\Games\Schedule I"
+                  style={{ flex: 1 }}
+                />
+                <button
+                  type="button"
+                  onClick={handleBrowseForImport}
+                  className="btn btn-secondary"
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label>Name (Optional)</label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="My Game Install"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Description (Optional)</label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Describe this installation..."
+                rows={3}
+                style={{
+                  width: '100%',
+                  padding: '0.5rem 0.75rem',
+                  backgroundColor: 'var(--input-bg-color, #1a1a1a)',
+                  border: '1px solid var(--input-border-color, #3a3a3a)',
+                  borderRadius: '6px',
+                  color: 'var(--input-text-color, #ffffff)',
+                  fontSize: '0.85rem',
+                  fontFamily: 'inherit',
+                  resize: 'vertical',
+                  minHeight: '60px'
+                }}
+              />
+            </div>
+
+            <div style={{ marginTop: '1rem', padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
+              <p style={{ margin: 0, color: '#aaa', fontSize: '0.85rem' }}>
+                <i className="fas fa-info-circle" style={{ marginRight: '0.5rem', color: '#00bcd4' }}></i>
+                Runtime (IL2CPP/Mono), branch, and game version will be auto-detected from the game files.
+              </p>
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: '1.5rem' }}>
+              <button
+                onClick={handleImportLocalEnvironment}
+                className="btn btn-primary"
+                disabled={importingLocal || !importPath}
+              >
+                {importingLocal ? (
+                  <>
+                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                    Importing...
+                  </>
+                ) : (
+                  <>
+                    <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
+                    Import Installation
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Directory Picker Modal */}
@@ -454,7 +615,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDirectoryPicker(false)}>
           <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
             <div className="modal-header">
-              <h2>Select Base Directory</h2>
+              <h2>{showImportLocal ? 'Select Game Folder' : 'Select Base Directory'}</h2>
               <button className="modal-close" onClick={() => setShowDirectoryPicker(false)}>×</button>
             </div>
 
@@ -592,11 +753,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
             <div className="modal-actions" style={{ marginTop: '1rem' }}>
               <button
-                onClick={() => handleDirectorySelect(directoryPath)}
+                onClick={() => showImportLocal ? handleImportDirectorySelect(directoryPath) : handleDirectorySelect(directoryPath)}
                 className="btn btn-primary"
                 disabled={!directoryPath}
               >
-                Select This Directory
+                {showImportLocal ? 'Select This Folder' : 'Select This Directory'}
               </button>
               <button
                 onClick={() => setShowDirectoryPicker(false)}

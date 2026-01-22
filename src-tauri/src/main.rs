@@ -83,6 +83,7 @@ fn main() {
             commands::environments::get_schedule1_config,
             commands::environments::detect_steam_installations,
             commands::environments::create_steam_environment,
+            commands::environments::import_local_environment,
             // Downloads
             commands::downloads::start_download,
             commands::downloads::cancel_download,
