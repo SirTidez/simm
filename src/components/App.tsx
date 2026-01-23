@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
+import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
 import { Settings } from './Settings';
 import { SteamAccountOverlay } from './SteamAccountOverlay';
@@ -17,6 +18,8 @@ function AppContent() {
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
+  // Discord Rich Presence - automatically initializes and sets presence
+     useDiscordPresence();
 
   // Initialize console logging interception after a short delay to avoid blocking startup
   useEffect(() => {

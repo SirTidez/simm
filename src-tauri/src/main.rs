@@ -8,6 +8,7 @@ mod services;
 mod types;
 mod utils;
 mod events;
+mod discord_rpc;
 
 use tauri::Manager;
 
@@ -190,6 +191,9 @@ fn main() {
             // Game Version
             commands::game_version::extract_game_version,
             commands::game_version::extract_game_version_from_path,
+            // Discord RPC
+            commands::discord_rpc::discord_initialize,
+            commands::discord_rpc::discord_shutdown,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

@@ -167,6 +167,7 @@ simmrust/
 │   │   │   ├── settings.rs       # Settings management
 │   │   │   ├── thunderstore.rs   # Thunderstore API integration
 │   │   │   ├── update_check.rs   # Update checking
+│   │   │   ├── discord_rpc.rs    # Discord RPC commands
 │   │   │   └── userlibs.rs       # User library management
 │   │   ├── services/             # Business logic layer
 │   │   │   ├── app_init.rs       # Service initialization
@@ -200,7 +201,8 @@ simmrust/
 │   │   │   └── validation.rs     # Input validation
 │   │   ├── events.rs             # Tauri event definitions
 │   │   ├── types.rs              # Rust type definitions
-│   │   └── main.rs               # Application entry point
+│   │   ├── main.rs               # Application entry point
+│   │   └── discord_rpc.rs        #  Discord RPC core logic
 │   ├── capabilities/             # Tauri security capabilities
 │   │   └── default.json          # Default permissions
 │   ├── icons/                    # Application icons
@@ -232,6 +234,8 @@ simmrust/
 │   │   ├── api.ts                # Tauri API client (invoke wrapper)
 │   │   ├── events.ts             # Tauri event handlers
 │   │   └── logger.ts             # Frontend logging
+│   ├──  hooks/                    
+│   │    └── useDiscordPresence.ts  # Discord presence hook
 │   ├── stores/                   # State management
 │   │   ├── environmentStore.tsx  # Environment state
 │   │   └── settingsStore.tsx    # Settings state
