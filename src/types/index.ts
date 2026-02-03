@@ -141,7 +141,9 @@ export interface NexusMod {
   endorsement_count: number;
   unique_downloads: number;
   mod_downloads: number;
-}export interface NexusModFile {
+}
+
+export interface NexusModFile {
   file_id: number;
   name: string;
   version: string;
@@ -152,6 +154,23 @@ export interface NexusMod {
   file_name: string;
   uploaded_timestamp: number;
   mod_version: string;
+}
+
+export interface ModLibraryEntry {
+  storageId: string;
+  displayName: string;
+  files: string[];
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
+  sourceId?: string;
+  sourceVersion?: string;
+  sourceUrl?: string;
+  installedVersion?: string;
+  managed: boolean;
+  installedIn: string[];
+}
+
+export interface ModLibraryResult {
+  downloaded: ModLibraryEntry[];
 }
 
 export interface ConfigEntry {

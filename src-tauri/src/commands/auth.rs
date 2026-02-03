@@ -1,8 +1,10 @@
 use crate::services::auth::AuthService;
 use crate::services::settings::SettingsService;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
+use tauri::State;
 
 static AUTH_SERVICE: Lazy<AsyncMutex<Option<Arc<AuthService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
@@ -16,6 +18,7 @@ async fn get_auth_service() -> Result<Arc<AuthService>, String> {
 
 #[tauri::command]
 pub async fn authenticate(
+    db: State<'_, Arc<SqlitePool>>,
     username: String,
     password: Option<String>,
     steam_guard: Option<String>,
@@ -30,7 +33,7 @@ pub async fn authenticate(
         // Save credentials if requested
         if save_credentials.unwrap_or(false) {
             if let Some(pwd) = password {
-                let mut settings_service = SettingsService::new().map_err(|e| e.to_string())?;
+                let mut settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
                 settings_service.save_credentials(username.clone(), pwd)
                     .await
                     .map_err(|e| e.to_string())?;

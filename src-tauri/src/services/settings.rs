@@ -1,64 +1,39 @@
-use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use serde_json;
-use tokio::fs;
-use crate::types::Settings;
+use sqlx::SqlitePool;
+
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
+
+use crate::types::Settings;
 
 pub struct SettingsService {
-    settings: Option<Settings>,
-    data_dir: PathBuf,
+    pool: Arc<SqlitePool>,
 }
 
+const SETTINGS_ID: i64 = 1;
+const STEAM_CREDENTIALS_KEY: &str = "steam_credentials";
+const GITHUB_TOKEN_KEY: &str = "github_token";
+const NEXUS_MODS_API_KEY: &str = "nexus_mods_api_key";
+
 impl SettingsService {
-    pub fn new() -> Result<Self> {
-        let data_dir = Self::get_data_dir()?;
-        Ok(Self {
-            settings: None,
-            data_dir,
-        })
-    }
-
-    fn get_data_dir() -> Result<PathBuf> {
-        let data_dir = dirs::data_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
-            .join("s1devenvmanager");
-        
-        std::fs::create_dir_all(&data_dir)
-            .context("Failed to create data directory")?;
-        
-        Ok(data_dir)
-    }
-
-    fn settings_file(&self) -> PathBuf {
-        self.data_dir.join("settings.json")
-    }
-
-    fn credentials_file(&self) -> PathBuf {
-        self.data_dir.join("credentials.enc")
-    }
-
-    fn github_token_file(&self) -> PathBuf {
-        self.data_dir.join("github_token.enc")
-    }
-
-    fn nexus_mods_api_key_file(&self) -> PathBuf {
-        self.data_dir.join("nexus_mods_api_key.enc")
+    pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
+        Ok(Self { pool })
     }
 
     fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
         let key_str = std::env::var("ENCRYPTION_KEY")
             .unwrap_or_else(|_| "default-key-change-in-production".to_string());
-        
-        // Derive 32-byte key from string using SHA-256
+
         let mut hasher = Sha256::new();
         hasher.update(key_str.as_bytes());
         let key_bytes = hasher.finalize();
-        
+
         Ok(*Key::<Aes256Gcm>::from_slice(&key_bytes))
     }
 
@@ -66,55 +41,47 @@ impl SettingsService {
         let key = Self::get_encryption_key()?;
         let cipher = Aes256Gcm::new(&key);
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-        
-        let ciphertext = cipher.encrypt(&nonce, data.as_bytes())
+
+        let ciphertext = cipher
+            .encrypt(&nonce, data.as_bytes())
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-        
-        // Format: nonce_hex:ciphertext_hex
+
         Ok(format!("{}:{}", hex::encode(nonce), hex::encode(ciphertext)))
     }
 
     async fn decrypt_credentials(encrypted: &str) -> Result<String> {
         let key = Self::get_encryption_key()?;
         let cipher = Aes256Gcm::new(&key);
-        
+
         let parts: Vec<&str> = encrypted.split(':').collect();
         if parts.len() != 2 {
             return Err(anyhow::anyhow!("Invalid encrypted format"));
         }
-        
-        let nonce_bytes = hex::decode(parts[0])
-            .context("Failed to decode nonce")?;
-        let ciphertext = hex::decode(parts[1])
-            .context("Failed to decode ciphertext")?;
-        
+
+        let nonce_bytes = hex::decode(parts[0]).context("Failed to decode nonce")?;
+        let ciphertext = hex::decode(parts[1]).context("Failed to decode ciphertext")?;
+
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let plaintext = cipher.decrypt(nonce, ciphertext.as_ref())
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext.as_ref())
             .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
-        
-        String::from_utf8(plaintext)
-            .context("Invalid UTF-8 in decrypted data")
+
+        String::from_utf8(plaintext).context("Invalid UTF-8 in decrypted data")
     }
 
     pub async fn load_settings(&mut self) -> Result<Settings> {
-        if let Some(ref settings) = self.settings {
-            return Ok(settings.clone());
+        let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to load settings")?;
+
+        if let Some(data) = stored {
+            if let Ok(settings) = serde_json::from_str::<Settings>(&data) {
+                return Ok(settings);
+            }
         }
 
-        let file_path = self.settings_file();
-        
-        if file_path.exists() {
-            let content = fs::read_to_string(&file_path)
-                .await
-                .context("Failed to read settings file")?;
-            
-            self.settings = Some(serde_json::from_str(&content)
-                .context("Failed to parse settings file")?);
-            
-            return Ok(self.settings.as_ref().unwrap().clone());
-        }
-
-        // Return default settings
         let platform = if cfg!(target_os = "windows") {
             crate::types::Platform::Windows
         } else if cfg!(target_os = "macos") {
@@ -149,29 +116,30 @@ impl SettingsService {
             auto_update_mods: None,
             mod_update_check_interval: None,
             custom_theme: None,
-            log_retention_days: Some(7), // Default to keeping 7 days of logs
+            log_retention_days: Some(7),
         };
 
-        self.settings = Some(default_settings.clone());
         Ok(default_settings)
     }
 
     pub async fn save_settings(&mut self, updates: serde_json::Value) -> Result<()> {
         let current = self.load_settings().await?;
-        
-        // Merge updates into current settings
+
         let current_json = serde_json::to_value(&current)?;
         let merged = Self::merge_json(&current_json, &updates);
-        
-        self.settings = Some(serde_json::from_value(merged)?);
-        
-        let content = serde_json::to_string_pretty(&self.settings.as_ref().unwrap())
-            .context("Failed to serialize settings")?;
-        
-        fs::write(self.settings_file(), content)
-            .await
-            .context("Failed to write settings file")?;
-        
+        let updated: Settings = serde_json::from_value(merged)?;
+
+        let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
+        sqlx::query(
+            "INSERT INTO settings (id, data) VALUES (?, ?) \
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        )
+        .bind(SETTINGS_ID)
+        .bind(content)
+        .execute(&*self.pool)
+        .await
+        .context("Failed to save settings")?;
+
         Ok(())
     }
 
@@ -192,17 +160,46 @@ impl SettingsService {
         }
     }
 
-    pub async fn get_credentials(&self) -> Result<Option<(String, String)>> {
-        let file_path = self.credentials_file();
-        
-        if !file_path.exists() {
-            return Ok(None);
-        }
-
-        let encrypted = fs::read_to_string(&file_path)
+    async fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        let value = sqlx::query_scalar::<_, String>("SELECT encrypted FROM secrets WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&*self.pool)
             .await
-            .context("Failed to read credentials file")?;
-        
+            .context("Failed to read secret")?;
+
+        Ok(value)
+    }
+
+    async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO secrets (key, encrypted) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET encrypted = excluded.encrypted",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&*self.pool)
+        .await
+        .context("Failed to save secret")?;
+
+        Ok(())
+    }
+
+    async fn clear_secret(&self, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM secrets WHERE key = ?")
+            .bind(key)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to clear secret")?;
+
+        Ok(())
+    }
+
+    pub async fn get_credentials(&self) -> Result<Option<(String, String)>> {
+        let encrypted = match self.get_secret(STEAM_CREDENTIALS_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
         if encrypted.is_empty() {
             return Ok(None);
         }
@@ -210,14 +207,16 @@ impl SettingsService {
         let decrypted = Self::decrypt_credentials(&encrypted).await?;
         let creds: serde_json::Value = serde_json::from_str(&decrypted)
             .context("Failed to parse credentials")?;
-        
-        let username = creds.get("username")
+
+        let username = creds
+            .get("username")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let password = creds.get("password")
+        let password = creds
+            .get("password")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        
+
         match (username, password) {
             (Some(u), Some(p)) => Ok(Some((u, p))),
             _ => Ok(None),
@@ -229,131 +228,66 @@ impl SettingsService {
             "username": username,
             "password": password
         });
-        
+
         let encrypted = Self::encrypt_credentials(&data.to_string()).await?;
-        
-        fs::write(self.credentials_file(), encrypted)
-            .await
-            .context("Failed to write credentials file")?;
-        
-        Ok(())
+        self.set_secret(STEAM_CREDENTIALS_KEY, &encrypted).await
     }
 
     pub async fn clear_credentials(&self) -> Result<()> {
-        let file_path = self.credentials_file();
-        if file_path.exists() {
-            fs::write(&file_path, "")
-                .await
-                .context("Failed to clear credentials file")?;
-        }
-        Ok(())
+        self.clear_secret(STEAM_CREDENTIALS_KEY).await
     }
 
-    /// Get GitHub token from encrypted storage
-    /// Returns None if token is not set or cannot be decrypted
     pub async fn get_github_token(&self) -> Result<Option<String>> {
-        let file_path = self.github_token_file();
-        
-        if !file_path.exists() {
-            return Ok(None);
-        }
+        let encrypted = match self.get_secret(GITHUB_TOKEN_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
 
-        let encrypted = fs::read_to_string(&file_path)
-            .await
-            .context("Failed to read GitHub token file")?;
-        
         if encrypted.is_empty() {
             return Ok(None);
         }
 
-        // Decrypt the token
         let decrypted = Self::decrypt_credentials(&encrypted).await?;
         Ok(Some(decrypted))
     }
 
-    /// Save GitHub token to encrypted storage
-    /// The token is encrypted and never logged
     pub async fn save_github_token(&self, token: String) -> Result<()> {
-        // Encrypt the token
         let encrypted = Self::encrypt_credentials(&token).await?;
-        
-        fs::write(self.github_token_file(), encrypted)
-            .await
-            .context("Failed to write GitHub token file")?;
-        
-        Ok(())
+        self.set_secret(GITHUB_TOKEN_KEY, &encrypted).await
     }
 
-    /// Clear GitHub token from storage
     pub async fn clear_github_token(&self) -> Result<()> {
-        let file_path = self.github_token_file();
-        if file_path.exists() {
-            fs::write(&file_path, "")
-                .await
-                .context("Failed to clear GitHub token file")?;
-        }
-        Ok(())
+        self.clear_secret(GITHUB_TOKEN_KEY).await
     }
 
-    /// Get NexusMods API key from encrypted storage
-    /// Returns None if API key is not set or cannot be decrypted
     pub async fn get_nexus_mods_api_key(&self) -> Result<Option<String>> {
-        let file_path = self.nexus_mods_api_key_file();
-        
-        if !file_path.exists() {
-            return Ok(None);
-        }
+        let encrypted = match self.get_secret(NEXUS_MODS_API_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
 
-        let encrypted = fs::read_to_string(&file_path)
-            .await
-            .context("Failed to read NexusMods API key file")?;
-        
         if encrypted.is_empty() {
             return Ok(None);
         }
 
-        // Decrypt the API key
         let decrypted = Self::decrypt_credentials(&encrypted).await?;
         Ok(Some(decrypted))
     }
 
-    /// Save NexusMods API key to encrypted storage
-    /// The API key is encrypted and never logged
     pub async fn save_nexus_mods_api_key(&self, api_key: String) -> Result<()> {
-        // Encrypt the API key
         let encrypted = Self::encrypt_credentials(&api_key).await?;
-        
-        fs::write(self.nexus_mods_api_key_file(), encrypted)
-            .await
-            .context("Failed to write NexusMods API key file")?;
-        
-        Ok(())
+        self.set_secret(NEXUS_MODS_API_KEY, &encrypted).await
     }
 
-    /// Clear NexusMods API key from storage
     pub async fn clear_nexus_mods_api_key(&self) -> Result<()> {
-        let file_path = self.nexus_mods_api_key_file();
-        if file_path.exists() {
-            fs::write(&file_path, "")
-                .await
-                .context("Failed to clear NexusMods API key file")?;
-        }
-        Ok(())
+        self.clear_secret(NEXUS_MODS_API_KEY).await
     }
 }
 
 impl Clone for SettingsService {
     fn clone(&self) -> Self {
         Self {
-            settings: self.settings.clone(),
-            data_dir: self.data_dir.clone(),
+            pool: Arc::clone(&self.pool),
         }
     }
 }
-
-impl Default for SettingsService {
-    fn default() -> Self {
-        Self::new().expect("Failed to create SettingsService")
-    }
-}
-

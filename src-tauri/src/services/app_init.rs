@@ -5,6 +5,7 @@ use crate::utils::directory_init;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::services::environment::EnvironmentService;
 use tauri::{AppHandle, Manager};
+use sqlx::SqlitePool;
 
 /// Initialize SIMM directory and return whether it was just created
 pub fn initialize_simm_directory() -> Result<bool> {
@@ -36,7 +37,8 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
     log::info!("FileSystem watcher service initialized");
 
     // Start watching existing environments
-    if let Ok(env_service) = EnvironmentService::new() {
+    let pool = app.state::<Arc<SqlitePool>>();
+    if let Ok(env_service) = EnvironmentService::new(pool.inner().clone()) {
         if let Ok(environments) = env_service.get_environments().await {
             let env_count = environments.len();
             log::info!("Found {} existing environment(s) to watch", env_count);
@@ -61,4 +63,3 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
 
     Ok(())
 }
-

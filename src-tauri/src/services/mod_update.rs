@@ -35,7 +35,6 @@ impl ModUpdateService {
 
         // Load metadata
         let mods_dir = Path::new(&env.output_dir).join("Mods");
-        let metadata_file = mods_dir.join(".mods-metadata.json");
         let mut all_metadata: HashMap<String, ModMetadata> = mods_service.load_mod_metadata(&mods_dir).await
             .unwrap_or_else(|_| HashMap::new());
 

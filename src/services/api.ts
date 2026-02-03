@@ -190,14 +190,14 @@ export class ApiService {
   }
 
   // Update checks
-  static async checkUpdate(environmentId: string): Promise<UpdateCheckResult> {
-    return invoke('check_update', { environmentId });
+  static async checkUpdate(environmentId: string, manual = false): Promise<UpdateCheckResult> {
+    return invoke('check_update', { environmentId, manual });
   }
 
-  static async checkAllUpdates(): Promise<
+  static async checkAllUpdates(manual = false): Promise<
     Array<{ environmentId: string } & UpdateCheckResult>
   > {
-    return invoke('check_all_updates');
+    return invoke('check_all_updates', { manual });
   }
 
   static async getUpdateStatus(environmentId: string): Promise<{
@@ -238,12 +238,39 @@ export class ApiService {
       path: string;
       version?: string;
       source?: string;
+      sourceUrl?: string;
       disabled?: boolean;
+      modStorageId?: string;
+      managed?: boolean;
     }>;
     modsDirectory: string;
     count: number;
   }> {
     return invoke('get_mods', { environmentId });
+  }
+
+  static async getModLibrary(): Promise<import('../types').ModLibraryResult> {
+    return invoke('get_mod_library');
+  }
+
+  static async installDownloadedMod(
+    storageId: string,
+    environmentIds: string[]
+  ): Promise<{ results: Array<{ environmentId: string; installedFiles: string[] }> }> {
+    return invoke('install_downloaded_mod', { storageId, environmentIds });
+  }
+
+  static async uninstallDownloadedMod(
+    storageId: string,
+    environmentIds: string[]
+  ): Promise<{ results: Array<{ environmentId: string; removedFiles: string[] }> }> {
+    return invoke('uninstall_downloaded_mod', { storageId, environmentIds });
+  }
+
+  static async deleteDownloadedMod(
+    storageId: string
+  ): Promise<{ deleted: boolean; removedFrom: string[] }> {
+    return invoke('delete_downloaded_mod', { storageId });
   }
 
   static async getModsCount(environmentId: string): Promise<{ count: number }> {
@@ -489,7 +516,13 @@ export class ApiService {
     installedFiles?: string[];
   }> {
     try {
-      const result = await invoke('install_melon_loader', { environmentId, versionTag: versionTag });
+      const result = await invoke<{
+        success: boolean;
+        error?: string;
+        message?: string;
+        version?: string;
+        installedFiles?: string[];
+      }>('install_melon_loader', { environmentId, versionTag: versionTag });
       console.log('installMelonLoader result:', result);
       return result;
     } catch (err: any) {
@@ -733,7 +766,13 @@ export class ApiService {
     error?: string;
   }> {
     try {
-      const result = await invoke('install_s1api', { environmentId, versionTag });
+      const result = await invoke<{
+        success: boolean;
+        message?: string;
+        version?: string;
+        installedFiles?: string[];
+        error?: string;
+      }>('install_s1api', { environmentId, versionTag });
       console.log('installS1API result:', result);
       return result;
     } catch (err: any) {
@@ -823,7 +862,12 @@ export class ApiService {
     error?: string;
   }> {
     try {
-      const result = await invoke('install_mlvscan', { environmentId, versionTag });
+      const result = await invoke<{
+        success: boolean;
+        message?: string;
+        version?: string;
+        error?: string;
+      }>('install_mlvscan', { environmentId, versionTag });
       console.log('installMLVScan result:', result);
       return result;
     } catch (err: any) {
@@ -907,6 +951,17 @@ export class ApiService {
     // Check if mod is already installed before downloading
     // Thunderstore mods use "owner/name" format for sourceId (matches manifest.json format)
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
+    const storageCheck = await invoke<any>('find_existing_mod_storage', {
+      sourceId,
+      sourceVersion: versionNumber,
+    });
+    if (storageCheck?.found && storageCheck.storageId) {
+      await this.installDownloadedMod(storageCheck.storageId, [environmentId]);
+      return {
+        success: true,
+        message: 'Installed from library',
+      };
+    }
     const checkResult = await invoke<any>('check_mod_installed', {
       environmentId,
       sourceId: sourceId,

@@ -1,15 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::Arc;
 use std::io::Read;
 use anyhow::{Context, Result};
 use tokio::fs;
 use chrono;
 use zip::ZipArchive;
 use crate::types::{ModMetadata, ModSource};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct PluginsService;
+pub struct PluginsService {
+    pool: Arc<SqlitePool>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,8 +36,8 @@ struct PluginsListResult {
 }
 
 impl PluginsService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(pool: Arc<SqlitePool>) -> Self {
+        Self { pool }
     }
 
     fn get_plugins_directory(&self, output_dir: &str) -> PathBuf {
@@ -44,44 +48,120 @@ impl PluginsService {
         Path::new(output_dir).join("Mods")
     }
 
+    async fn environment_id_for_dir(&self, game_dir: &str) -> Result<Option<String>> {
+        if game_dir.is_empty() {
+            return Ok(None);
+        }
+
+        let id = sqlx::query_scalar::<_, String>("SELECT id FROM environments WHERE output_dir = ?")
+            .bind(game_dir)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to resolve environment id")?;
+
+        Ok(id)
+    }
+
     pub async fn load_plugin_metadata(&self, plugins_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = plugins_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = self.environment_id_for_dir(game_dir).await?;
+        let mut metadata = HashMap::new();
+
+        if let Some(env_id) = env_id {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT file_name, data FROM mod_metadata WHERE environment_id = ? AND kind = 'plugins'",
+            )
+            .bind(&env_id)
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load plugin metadata")?;
+
+            for (file_name, data) in rows {
+                if let Ok(entry) = serde_json::from_str::<ModMetadata>(&data) {
+                    metadata.insert(file_name, entry);
+                }
+            }
+        }
+
+        if metadata.is_empty() {
+            if let Ok(file_metadata) = self.load_plugin_metadata_from_file(plugins_directory).await {
+                if !file_metadata.is_empty() {
+                    self.save_plugin_metadata(plugins_directory, &file_metadata).await?;
+                    return Ok(file_metadata);
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    async fn load_mods_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = mods_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = self.environment_id_for_dir(game_dir).await?;
+        let mut metadata = HashMap::new();
+
+        if let Some(env_id) = env_id {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT file_name, data FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'",
+            )
+            .bind(&env_id)
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load mods metadata")?;
+
+            for (file_name, data) in rows {
+                if let Ok(entry) = serde_json::from_str::<ModMetadata>(&data) {
+                    metadata.insert(file_name, entry);
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    async fn load_plugin_metadata_from_file(&self, plugins_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
         let metadata_file = plugins_directory.join(".plugins-metadata.json");
-        
         if !metadata_file.exists() {
             return Ok(HashMap::new());
         }
 
         let content = fs::read_to_string(&metadata_file).await
             .context("Failed to read plugin metadata file")?;
-        
         let metadata: HashMap<String, ModMetadata> = serde_json::from_str(&content)
             .context("Failed to parse plugin metadata file")?;
-        
-        Ok(metadata)
-    }
-
-    async fn load_mods_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
-        let metadata_file = mods_directory.join(".mods-metadata.json");
-        
-        if !metadata_file.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let content = fs::read_to_string(&metadata_file).await
-            .context("Failed to read mods metadata file")?;
-        
-        let metadata: HashMap<String, ModMetadata> = serde_json::from_str(&content)
-            .context("Failed to parse mods metadata file")?;
-        
         Ok(metadata)
     }
 
     pub async fn save_plugin_metadata(&self, plugins_directory: &Path, metadata: &HashMap<String, ModMetadata>) -> Result<()> {
-        let metadata_file = plugins_directory.join(".plugins-metadata.json");
-        let content = serde_json::to_string_pretty(metadata)
-            .context("Failed to serialize plugin metadata")?;
-        fs::write(&metadata_file, content).await
-            .context("Failed to write plugin metadata file")?;
+        let game_dir = plugins_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = match self.environment_id_for_dir(game_dir).await? {
+            Some(id) => id,
+            None => {
+                log::warn!("Skipping plugin metadata save; environment not found for {}", game_dir);
+                return Ok(());
+            }
+        };
+
+        sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ? AND kind = 'plugins'")
+            .bind(&env_id)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to clear plugin metadata")?;
+
+        for (file_name, meta) in metadata {
+            let serialized = serde_json::to_string(meta).context("Failed to serialize plugin metadata")?;
+            sqlx::query(
+                "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'plugins', ?, ?) \
+                 ON CONFLICT(environment_id, kind, file_name) DO UPDATE SET data = excluded.data",
+            )
+            .bind(&env_id)
+            .bind(file_name)
+            .bind(serialized)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to save plugin metadata")?;
+        }
+
         Ok(())
     }
 
@@ -665,7 +745,7 @@ impl PluginsService {
         if version.is_none() && has_plugin {
             // Use mods service to extract version (plugins use same DLL structure)
             use crate::services::mods::ModsService;
-            let mods_service = ModsService::new();
+            let mods_service = ModsService::new(self.pool.clone());
             version = mods_service.extract_mod_version(&plugin_file).await;
         }
 
@@ -681,11 +761,5 @@ impl PluginsService {
                 None
             }
         }))
-    }
-}
-
-impl Default for PluginsService {
-    fn default() -> Self {
-        Self::new()
     }
 }

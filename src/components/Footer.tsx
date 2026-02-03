@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { logger } from '../services/logger';
-import { lastUpdateCheckTimeRef } from './EnvironmentList';
+import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 import { CustomThemeEditor } from './CustomThemeEditor';
 
 // Version injected at build time by Vite
@@ -146,10 +146,11 @@ export function Footer() {
     
     try {
       setCheckingAll(true);
+      batchUpdateCheckRef.current = true;
       logger.info('Footer: Calling checkAllUpdates from store...');
       // Update last check time before calling (manual check bypasses interval)
       lastUpdateCheckTimeRef.current = Date.now();
-      await checkAllUpdates();
+      await checkAllUpdates(true);
       logger.info('Footer: Update check completed successfully');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
@@ -159,6 +160,7 @@ export function Footer() {
       });
       // Errors are now logged to the backend log file, not shown to user
     } finally {
+      batchUpdateCheckRef.current = false;
       setCheckingAll(false);
       logger.debug('Footer: Reset checkingAll state');
     }

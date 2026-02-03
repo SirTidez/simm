@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
+import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 
 export function Settings() {
   const { settings, depotDownloader, loading, updateSettings, refreshDepotDownloader } = useSettingsStore();
@@ -327,11 +328,14 @@ export function Settings() {
                     onClick={async () => {
                       try {
                         setCheckingAllUpdates(true);
-                        await checkAllUpdates();
+                        lastUpdateCheckTimeRef.current = Date.now();
+                        batchUpdateCheckRef.current = true;
+                        await checkAllUpdates(true);
                         alert('Update check complete!');
                       } catch (err) {
                         alert(`Failed to check for updates: ${err instanceof Error ? err.message : 'Unknown error'}`);
                       } finally {
+                        batchUpdateCheckRef.current = false;
                         setCheckingAllUpdates(false);
                       }
                     }}

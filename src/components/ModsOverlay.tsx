@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
-import { onModsChanged } from '../services/events';
-import { useSettingsStore } from '../stores/settingsStore';
-import type { Environment, NexusMod, NexusModFile } from '../types';
+import { onModsChanged as onModsChangedEvent } from '../services/events';
+import type { Environment, ModLibraryEntry, NexusMod, NexusModFile } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 
 interface ModInfo {
@@ -14,6 +13,8 @@ interface ModInfo {
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
   sourceUrl?: string;
   disabled?: boolean;
+  modStorageId?: string;
+  managed?: boolean;
 }
 
 interface Props {
@@ -63,8 +64,8 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
 }
 
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: Props) {
-  const { settings } = useSettingsStore();
   const [mods, setMods] = useState<ModInfo[]>([]);
+  const [downloadedMods, setDownloadedMods] = useState<ModLibraryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modsDirectory, setModsDirectory] = useState<string>('');
@@ -95,48 +96,19 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
   const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
   const [checkingModUpdates, setCheckingModUpdates] = useState(false);
   
-  // S1API state
-  const [s1apiStatus, setS1apiStatus] = useState<{
-    installed: boolean;
-    enabled: boolean;
-    version?: string;
-  } | null>(null);
-  const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
-    tag_name: string;
-    name: string;
-    published_at: string;
-    prerelease: boolean;
-    download_url: string | null;
-  } | null>(null);
-  const [s1apiReleases, setS1apiReleases] = useState<Array<{
-    tag_name: string;
-    name: string;
-    published_at: string;
-    prerelease: boolean;
-    download_url: string | null;
-    body?: string;
-  }>>([]);
-  const [loadingS1APIReleases, setLoadingS1APIReleases] = useState(false);
-  const [showS1APIVersionSelector, setShowS1APIVersionSelector] = useState(false);
-  const [selectedS1APIVersion, setSelectedS1APIVersion] = useState<string>('');
-  const [installingS1API, setInstallingS1API] = useState(false);
-  const [uninstallingS1API, setUninstallingS1API] = useState(false);
-
   useEffect(() => {
     if (isOpen && environmentId) {
       loadEnvironment();
       loadMods();
-      loadS1APIStatus();
       
       // Listen for filesystem changes
       let unlistenModsChanged: (() => void) | null = null;
       
       const setupListener = async () => {
         try {
-          unlistenModsChanged = await onModsChanged((data) => {
+          unlistenModsChanged = await onModsChangedEvent((data) => {
             if (data.environmentId === environmentId) {
               loadMods();
-              loadS1APIStatus();
               if (onModsChanged) {
                 onModsChanged();
               }
@@ -167,11 +139,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setShowNexusModsResults(false);
       setNexusModsFiles(new Map());
       setModUpdates(new Map());
-      setS1apiStatus(null);
-      setS1apiLatestRelease(null);
-      setS1apiReleases([]);
-      setShowS1APIVersionSelector(false);
-      setSelectedS1APIVersion('');
     }
   }, [isOpen, environmentId]);
 
@@ -207,14 +174,22 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                  lowerName === 's1api.il2cpp.melonloader.dll' ||
                  (lowerName.startsWith('s1api') && lowerName.includes('.') && lowerName.endsWith('.dll')));
       });
-      setMods(filteredMods);
+      const normalizedMods = filteredMods.map(mod => ({
+        ...mod,
+        source: mod.source as ModInfo['source'],
+      }));
+      setMods(normalizedMods);
       setModsDirectory(result.modsDirectory);
+
+      const library = await ApiService.getModLibrary();
+      setDownloadedMods(library.downloaded || []);
       
       // Load update information
       await checkModUpdates();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load mods');
       setMods([]);
+      setDownloadedMods([]);
     } finally {
       setLoading(false);
     }
@@ -257,7 +232,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                    lowerName === 's1api.il2cpp.melonloader.dll' ||
                    (lowerName.startsWith('s1api') && lowerName.includes('.') && lowerName.endsWith('.dll')));
         });
-        setMods(filteredMods);
+        const normalizedMods = filteredMods.map(mod => ({
+          ...mod,
+          source: mod.source as ModInfo['source'],
+        }));
+        setMods(normalizedMods);
         setModsDirectory(result.modsDirectory);
       } catch (err) {
         console.error('Failed to reload mods after update check:', err);
@@ -268,129 +247,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setError(err instanceof Error ? err.message : 'Failed to check for mod updates');
     } finally {
       setCheckingModUpdates(false);
-    }
-  };
-
-  const loadS1APIStatus = async () => {
-    try {
-      const status = await ApiService.getS1APIStatus(environmentId);
-      setS1apiStatus(status);
-      
-      // Only check for updates if S1API is installed and we have a version
-      if (status.installed && status.version) {
-        // Get all releases (including prereleases) to find the actual latest
-        try {
-          const allReleases = await ApiService.getS1APIReleases(environmentId);
-          if (allReleases.length > 0) {
-            // Find the release that matches the installed version
-            const installedRelease = allReleases.find(r => r.tag_name === status.version);
-            // Get the latest release (first in the list, sorted newest first)
-            const latestRelease = allReleases[0];
-            
-            // Only show update available if the latest release is different from installed
-            // and the installed version is not the latest
-            if (installedRelease && latestRelease.tag_name !== status.version) {
-              setS1apiLatestRelease(latestRelease);
-            } else {
-              setS1apiLatestRelease(null);
-            }
-          }
-        } catch (releaseErr) {
-          // Fail silently if release fetch fails
-          console.warn('Failed to load S1API releases for update check:', releaseErr);
-        }
-      } else {
-        // If not installed, get the latest release for the install button
-        try {
-          const latestRelease = await ApiService.getS1APILatestRelease(environmentId);
-          setS1apiLatestRelease(latestRelease);
-        } catch (releaseErr) {
-          // Fail silently
-          console.warn('Failed to load latest S1API release:', releaseErr);
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to load S1API status:', err);
-      // Set default status if API call fails
-      setS1apiStatus({ installed: false, enabled: false });
-    }
-  };
-
-  const loadS1APIReleases = async () => {
-    setLoadingS1APIReleases(true);
-    try {
-      const releases = await ApiService.getS1APIReleases(environmentId);
-      setS1apiReleases(releases);
-      // Set default selection to latest (first in the list, which is sorted newest first)
-      if (releases.length > 0) {
-        setSelectedS1APIVersion(releases[0].tag_name);
-      }
-    } catch (err) {
-      console.error('Failed to load S1API releases:', err);
-      setError('Failed to load S1API releases');
-    } finally {
-      setLoadingS1APIReleases(false);
-    }
-  };
-
-  const handleInstallS1APIClick = () => {
-    // Load releases and show version selector
-    loadS1APIReleases();
-    setShowS1APIVersionSelector(true);
-  };
-
-  const handleS1APIVersionSelected = async () => {
-    if (!selectedS1APIVersion) {
-      setError('Please select a version');
-      return;
-    }
-
-    setShowS1APIVersionSelector(false);
-    setInstallingS1API(true);
-    setError(null);
-    
-    try {
-      const result = await ApiService.installS1API(environmentId, selectedS1APIVersion);
-      if (result.success) {
-        await loadS1APIStatus();
-        await loadMods();
-        if (onModsChanged) {
-          onModsChanged();
-        }
-        setSelectedS1APIVersion('');
-        setS1apiReleases([]); // Clear releases list after installation
-      } else {
-        setError(result.error || 'Failed to install S1API');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to install S1API');
-    } finally {
-      setInstallingS1API(false);
-    }
-  };
-
-  const handleUninstallS1API = async () => {
-    if (!confirm('Are you sure you want to uninstall S1API? This will remove all S1API components (Mono, IL2CPP, and plugin).')) {
-      return;
-    }
-
-    setUninstallingS1API(true);
-    setError(null);
-    try {
-      const result = await ApiService.uninstallS1API(environmentId);
-      if (result.success) {
-        await loadS1APIStatus();
-        await loadMods();
-        if (onModsChanged) {
-          onModsChanged();
-        }
-      } else {
-        setError(result.error || 'Failed to uninstall S1API');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to uninstall S1API');
-    } finally {
-      setUninstallingS1API(false);
     }
   };
 
@@ -506,7 +362,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
     return 0;
   };
 
-  const detectModSource = async (filePath: string, fileName: string): Promise<{
+  const detectModSource = async (fileName: string): Promise<{
     source: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
     sourceUrl?: string;
     modName?: string;
@@ -617,7 +473,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
           extensions: ['dll', 'zip', 'rar']
         }],
         title: 'Select Mod File',
-      });
+      }) as string | { path: string; name?: string } | null;
 
       if (!selected) {
         // User cancelled
@@ -628,18 +484,17 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       // Handle both string path and FileEntry object
       let filePath: string;
       let fileName: string;
-      
+
       if (typeof selected === 'string') {
         filePath = selected;
         fileName = selected.split(/[/\\]/).pop() || 'unknown';
       } else {
-        // FileEntry object
         filePath = selected.path;
         fileName = selected.name || filePath.split(/[/\\]/).pop() || 'unknown';
       }
 
       // Detect source
-      const sourceInfo = await detectModSource(filePath, fileName);
+      const sourceInfo = await detectModSource(fileName);
 
       // Call upload with file path and metadata
       const result = await ApiService.uploadMod(
@@ -1043,6 +898,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
 
   if (!isOpen) return null;
 
+  const downloadedNotInstalled = downloadedMods.filter(entry => !entry.installedIn.includes(environmentId));
+  const showSearchInOverlay = false;
+
   return (
     <>
       <ConfirmOverlay
@@ -1069,7 +927,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
           )}
 
           {/* Mod Search Bar */}
-          {environment && (
+          {showSearchInOverlay && environment && (
             <div style={{ padding: '0 1.25rem', marginBottom: '1rem', borderBottom: '1px solid #3a3a3a', paddingBottom: '1rem' }}>
               {/* Source Tabs */}
               <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
@@ -1432,7 +1290,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
           {/* NexusMods Search Results */}
           {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length > 0 && (() => {
             const runtimeLower = environment?.runtime?.toLowerCase() || '';
-            const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
 
             // Filter mods to only show those with installable files for current runtime
             const compatibleMods = nexusModsSearchResults.filter((mod) => {
@@ -1720,153 +1577,47 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
           ) : !showSearchResults && (
             <div style={{ padding: '0 1.25rem 1.25rem', maxHeight: '500px', overflowY: 'auto' }}>
               <div style={{ display: 'grid', gap: '1rem' }}>
-                {/* S1API Special Entry */}
-                {s1apiStatus !== null && (
-                  <div
-                    className="mod-card"
-                    style={{
-                      backgroundColor: '#2a2a2a',
-                      border: '2px solid',
-                      borderColor: s1apiStatus.installed && s1apiStatus.enabled ? '#4a90e2' : '#3a3a3a',
-                      borderRadius: '8px',
-                      padding: '1rem',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}
-                  >
-                    <div style={{ flex: 1 }}>
-                      <h3 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1.1rem', color: '#fff', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        S1API
-                        {s1apiStatus.installed && s1apiStatus.enabled && (
-                          <span style={{ 
-                            fontSize: '0.75rem', 
-                            padding: '0.25rem 0.5rem', 
-                            backgroundColor: '#4a90e220',
-                            color: '#4a90e2',
-                            borderRadius: '4px',
-                            border: '1px solid #4a90e240'
-                          }}>
-                            Installed
-                          </span>
-                        )}
-                        {s1apiStatus.installed && !s1apiStatus.enabled && (
-                          <span style={{ 
-                            fontSize: '0.75rem', 
-                            padding: '0.25rem 0.5rem', 
-                            backgroundColor: '#88820',
-                            color: '#888',
-                            borderRadius: '4px',
-                            border: '1px solid #88840'
-                          }}>
-                            Installed (Wrong Runtime)
-                          </span>
-                        )}
-                        {!s1apiStatus.installed && (
-                          <span style={{ 
-                            fontSize: '0.75rem', 
-                            padding: '0.25rem 0.5rem', 
-                            backgroundColor: '#88820',
-                            color: '#888',
-                            borderRadius: '4px',
-                            border: '1px solid #88840'
-                          }}>
-                            Not Installed
-                          </span>
-                        )}
-                      </h3>
-                      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', fontSize: '0.875rem', color: '#888', flexWrap: 'wrap' }}>
-                        <span>
-                          <i className="fab fa-github" style={{ marginRight: '0.25rem', color: '#6e5494' }}></i>
-                          GitHub Release
-                        </span>
-                        {s1apiStatus.installed && s1apiStatus.version && (
-                          <span>
-                            <i className="fas fa-tag" style={{ marginRight: '0.25rem', color: '#888' }}></i>
-                            <span style={{ color: '#888' }}>
-                              Version: {s1apiStatus.version}
-                            </span>
-                          </span>
-                        )}
-                        {s1apiStatus.installed && s1apiLatestRelease && s1apiStatus.version && s1apiLatestRelease.tag_name !== s1apiStatus.version && (
-                          <span>
-                            <i className="fas fa-exclamation-triangle" style={{ marginRight: '0.25rem', color: '#ffd700' }}></i>
-                            <span style={{ color: '#ffd700' }}>
-                              Update Available: {s1apiLatestRelease.tag_name}
-                            </span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
-                      {!s1apiStatus.installed ? (
-                        <button
-                          onClick={handleInstallS1APIClick}
-                          className="btn btn-primary btn-small"
-                          disabled={installingS1API}
-                          title="Install S1API from GitHub"
-                        >
-                          {installingS1API ? (
-                            <i className="fas fa-spinner fa-spin"></i>
-                          ) : (
-                            <>
-                              <i className="fas fa-download"></i>
-                              <span style={{ marginLeft: '0.5rem' }}>Install</span>
-                            </>
-                          )}
-                        </button>
-                      ) : (
-                        <>
-                          {s1apiLatestRelease && s1apiStatus.version && s1apiLatestRelease.tag_name !== s1apiStatus.version && (
-                            <button
-                              onClick={handleInstallS1APIClick}
-                              className="btn btn-primary btn-small"
-                              disabled={installingS1API}
-                              title="Update S1API"
-                            >
-                              {installingS1API ? (
-                                <i className="fas fa-spinner fa-spin"></i>
-                              ) : (
-                                <>
-                                  <i className="fas fa-sync-alt"></i>
-                                  <span style={{ marginLeft: '0.5rem' }}>Update</span>
-                                </>
-                              )}
-                            </button>
-                          )}
-                          <button
-                            onClick={handleUninstallS1API}
-                            className="btn btn-danger btn-small"
-                            disabled={uninstallingS1API}
-                            title="Uninstall S1API"
-                          >
-                            {uninstallingS1API ? (
-                              <i className="fas fa-spinner fa-spin"></i>
-                            ) : (
-                              <>
-                                <i className="fas fa-trash"></i>
-                                <span style={{ marginLeft: '0.5rem' }}>Uninstall</span>
-                              </>
-                            )}
-                          </button>
-                        </>
-                      )}
-                      <a
-                        href="https://github.com/ifBars/S1API"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn btn-secondary btn-small"
-                        style={{ textDecoration: 'none', textAlign: 'center' }}
-                        title="View on GitHub"
-                      >
-                        <i className="fab fa-github"></i>
-                        <span style={{ marginLeft: '0.5rem' }}>View</span>
-                      </a>
-                    </div>
-                  </div>
-                )}
-                
                 {/* Regular Mods List */}
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Downloaded (Not Installed Here)</h3>
+                  {downloadedNotInstalled.length === 0 ? (
+                    <div style={{ padding: '1rem', textAlign: 'center', color: '#888' }}>
+                      <p>No downloaded mods waiting to be installed in this environment.</p>
+                    </div>
+                  ) : (
+                    downloadedNotInstalled.map(entry => (
+                      <div
+                        key={entry.storageId}
+                        className="mod-card"
+                        style={{
+                          backgroundColor: '#2a2a2a',
+                          border: '1px solid #3a3a3a',
+                          borderRadius: '8px',
+                          padding: '0.75rem',
+                          marginBottom: '0.5rem'
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+                          <div>
+                            <strong>{entry.displayName}</strong>
+                            <div style={{ fontSize: '0.8rem', color: '#888' }}>{entry.files.length} file(s)</div>
+                          </div>
+                          <span style={{
+                            fontSize: '0.7rem',
+                            padding: '0.15rem 0.4rem',
+                            borderRadius: '4px',
+                            backgroundColor: entry.managed ? '#28a745' : '#6c757d',
+                            color: '#fff'
+                          }}>
+                            {entry.managed ? 'Managed' : 'External'}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Installed in This Environment</h3>
                 {mods.length === 0 ? (
                   <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
                     <i className="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
@@ -1903,6 +1654,17 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                             border: '1px solid #ff6b6b40'
                           }}>
                             Disabled
+                          </span>
+                        )}
+                        {mod.managed !== undefined && (
+                          <span style={{
+                            fontSize: '0.75rem',
+                            padding: '0.25rem 0.5rem',
+                            backgroundColor: mod.managed ? '#28a745' : '#6c757d',
+                            color: '#fff',
+                            borderRadius: '4px'
+                          }}>
+                            {mod.managed ? 'Managed' : 'External'}
                           </span>
                         )}
                       </h3>
@@ -2050,167 +1812,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       </div>
     </div>
 
-    {/* S1API Version Selector Modal */}
-    {showS1APIVersionSelector && (
-      <div className="modal-overlay" onClick={(e) => {
-        if (e.target === e.currentTarget) {
-          setShowS1APIVersionSelector(false);
-          setSelectedS1APIVersion('');
-        }
-      }}>
-        <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
-          <div className="modal-header">
-            <h2>Select S1API Version</h2>
-            <button className="modal-close" onClick={() => {
-              setShowS1APIVersionSelector(false);
-              setSelectedS1APIVersion('');
-            }}>×</button>
-          </div>
-
-          <div style={{ padding: '1.25rem' }}>
-            <p style={{ marginBottom: '1rem', color: '#ccc', fontSize: '0.9rem', lineHeight: '1.5' }}>
-              S1API is very game version specific, so it's important to select the version that matches your game version. If you're not sure which version to choose, we recommend checking the changelog for each release to see which game version it supports.
-            </p>
-
-            {loadingS1APIReleases ? (
-              <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
-                <p>Loading releases...</p>
-              </div>
-            ) : s1apiReleases.length === 0 ? (
-              <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                <p>No releases found</p>
-              </div>
-            ) : (
-              <>
-                <div style={{ marginBottom: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
-                  <div style={{ display: 'grid', gap: '0.5rem' }}>
-                    {s1apiReleases.map((release) => (
-                      <label
-                        key={release.tag_name}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: '0.75rem',
-                          backgroundColor: selectedS1APIVersion === release.tag_name ? '#3a3a3a' : '#2a2a2a',
-                          border: '1px solid',
-                          borderColor: selectedS1APIVersion === release.tag_name ? '#4a90e2' : '#3a3a3a',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s'
-                        }}
-                        onMouseEnter={(e) => {
-                          if (selectedS1APIVersion !== release.tag_name) {
-                            e.currentTarget.style.backgroundColor = '#333';
-                          }
-                        }}
-                        onMouseLeave={(e) => {
-                          if (selectedS1APIVersion !== release.tag_name) {
-                            e.currentTarget.style.backgroundColor = '#2a2a2a';
-                          }
-                        }}
-                      >
-                        <input
-                          type="radio"
-                          name="s1apiVersion"
-                          value={release.tag_name}
-                          checked={selectedS1APIVersion === release.tag_name}
-                          onChange={(e) => setSelectedS1APIVersion(e.target.value)}
-                          style={{ marginRight: '0.75rem', cursor: 'pointer' }}
-                        />
-                        <div style={{ flex: 1 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                            <strong style={{ color: '#fff' }}>{release.tag_name}</strong>
-                            {release.prerelease && (
-                              <span style={{
-                                fontSize: '0.7rem',
-                                padding: '0.15rem 0.4rem',
-                                backgroundColor: '#ffd70020',
-                                color: '#ffd700',
-                                borderRadius: '4px',
-                                border: '1px solid #ffd70040'
-                              }}>
-                                Beta
-                              </span>
-                            )}
-                          </div>
-                          {release.name && (
-                            <div style={{ fontSize: '0.85rem', color: '#aaa', marginBottom: '0.25rem' }}>
-                              {release.name}
-                            </div>
-                          )}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                            <div style={{ fontSize: '0.75rem', color: '#888' }}>
-                              Published: {new Date(release.published_at).toLocaleDateString()}
-                            </div>
-                            <a
-                              href={`https://github.com/ifBars/S1API/releases/tag/${release.tag_name}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              style={{
-                                fontSize: '0.75rem',
-                                color: '#4a90e2',
-                                textDecoration: 'none',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '0.25rem',
-                                transition: 'color 0.2s'
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.color = '#6ba3f5';
-                                e.currentTarget.style.textDecoration = 'underline';
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.color = '#4a90e2';
-                                e.currentTarget.style.textDecoration = 'none';
-                              }}
-                              title="View release page and changelog"
-                            >
-                              <i className="fas fa-external-link-alt" style={{ fontSize: '0.7rem' }}></i>
-                              View Release & Changelog
-                            </a>
-                          </div>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => {
-                      setShowS1APIVersionSelector(false);
-                      setSelectedS1APIVersion('');
-                    }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    onClick={handleS1APIVersionSelected}
-                    disabled={!selectedS1APIVersion || installingS1API}
-                  >
-                    {installingS1API ? (
-                      <>
-                        <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                        Installing...
-                      </>
-                    ) : (
-                      <>
-                        <i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>
-                        Install
-                      </>
-                    )}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-    )}
     </>
   );
 }

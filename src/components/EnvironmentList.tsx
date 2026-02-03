@@ -41,6 +41,8 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
 // Shared ref to track last update check time (accessible across components)
 // This is exported so Footer can update it when doing manual checks
 export const lastUpdateCheckTimeRef = { current: null as number | null };
+export const batchUpdateCheckRef = { current: false };
+const LAST_ENV_KEY = 'simm:lastEnvId';
 
 export function EnvironmentList() {
   const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
@@ -98,8 +100,13 @@ export function EnvironmentList() {
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [launchDropdownOpen, setLaunchDropdownOpen] = useState<string | null>(null);
 
+  const rememberEnvironment = useCallback((envId: string) => {
+    localStorage.setItem(LAST_ENV_KEY, envId);
+  }, []);
+
   const handleStartDownload = async (env: Environment) => {
     try {
+      rememberEnvironment(env.id);
       // Check if we have credentials
       const hasCredentials = settings?.steamUsername;
       
@@ -146,6 +153,7 @@ export function EnvironmentList() {
 
   // Perform automatic update check (respects 60-minute interval)
   const performAutoUpdateCheck = useCallback(async (isManual: boolean = false) => {
+    batchUpdateCheckRef.current = false;
     const completedEnvironments = environments.filter(env => env.status === 'completed');
     
     if (completedEnvironments.length === 0) {
@@ -162,6 +170,7 @@ export function EnvironmentList() {
       if (timeSinceLastCheck < checkInterval) {
         const minutesRemaining = Math.ceil((checkInterval - timeSinceLastCheck) / 60000);
         console.log(`[EnvironmentList] Skipping automatic update check - last check was ${Math.floor(timeSinceLastCheck / 60000)} minutes ago. Next check in ${minutesRemaining} minute(s)`);
+        batchUpdateCheckRef.current = false;
         return;
       }
     }
@@ -170,7 +179,8 @@ export function EnvironmentList() {
     lastUpdateCheckTimeRef.current = now;
     
     try {
-      await checkAllUpdates();
+      batchUpdateCheckRef.current = true;
+      await checkAllUpdates(false);
       console.log(`[EnvironmentList] Update check completed successfully`);
     } catch (err) {
       console.error('[EnvironmentList] Failed to check for updates:', err);
@@ -178,6 +188,8 @@ export function EnvironmentList() {
       if (!isManual) {
         lastUpdateCheckTimeRef.current = null;
       }
+    } finally {
+      batchUpdateCheckRef.current = false;
     }
   }, [environments, settings?.updateCheckInterval, checkAllUpdates]);
 
@@ -354,7 +366,7 @@ export function EnvironmentList() {
         };
 
         const handleFirstUpdateEvent = () => {
-          if (!checkInProgressRef.current) {
+          if (!checkInProgressRef.current && batchUpdateCheckRef.current) {
             checkInProgressRef.current = true;
             handleUpdateCheckStart();
           }
@@ -545,6 +557,26 @@ export function EnvironmentList() {
     await handleStartDownload(env);
   };
 
+  const handleManualUpdateCheck = async (env: Environment) => {
+    if (checkingEnvironments.has(env.id)) {
+      return;
+    }
+    rememberEnvironment(env.id);
+    batchUpdateCheckRef.current = false;
+    setCheckingEnvironments(prev => new Set(prev).add(env.id));
+    try {
+      await checkUpdate(env.id, true);
+    } catch (err) {
+      console.error(`Failed to check for updates for ${env.id}:`, err);
+    } finally {
+      setCheckingEnvironments(prev => {
+        const next = new Set(prev);
+        next.delete(env.id);
+        return next;
+      });
+    }
+  };
+
   const handleStartEditDescription = (env: Environment) => {
     setEditingDescription(env.id);
     setDescriptionValue(env.description || '');
@@ -666,6 +698,7 @@ export function EnvironmentList() {
   }, [environments]);
 
   const handleOpenModsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setModsOverlay({ isOpen: true, envId });
   };
 
@@ -694,6 +727,7 @@ export function EnvironmentList() {
   };
 
   const handleOpenPluginsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setPluginsOverlay({ isOpen: true, envId });
   };
 
@@ -726,10 +760,12 @@ export function EnvironmentList() {
   };
 
   const handleOpenUserLibsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setUserLibsOverlay({ isOpen: true, envId });
   };
 
   const handleOpenLogsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setLogsOverlay({ isOpen: true, envId });
   };
 
@@ -738,6 +774,7 @@ export function EnvironmentList() {
   };
 
   const handleOpenConfigOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setConfigOverlay({ isOpen: true, envId });
   };
 
@@ -1330,6 +1367,7 @@ export function EnvironmentList() {
         }).map(env => {
           const prog = progress.get(env.id);
           const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
+          const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
 
           return (
             <div key={env.id} className="environment-card">
@@ -1827,7 +1865,18 @@ export function EnvironmentList() {
                       </div>
                     </div>
                     <div className="environment-actions-secondary">
-                      {env.updateAvailable && env.environmentType !== 'Steam' && env.environmentType !== 'steam' && !env.id.startsWith('steam-') && (
+                      {env.status === 'completed' && (
+                        <button
+                          onClick={() => handleManualUpdateCheck(env)}
+                          className="btn btn-secondary"
+                          disabled={checkingEnvironments.has(env.id)}
+                          title="Check for updates"
+                        >
+                          <i className={`fas ${checkingEnvironments.has(env.id) ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
+                          <span>Check Updates</span>
+                        </button>
+                      )}
+                      {env.updateAvailable && !isSteam && (
                       <button 
                           onClick={() => handleUpdate(env)} 
                           className="btn btn-primary"
@@ -1837,7 +1886,7 @@ export function EnvironmentList() {
                           <span>Update</span>
                       </button>
                       )}
-                      {env.updateAvailable && (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) && (
+                      {env.updateAvailable && isSteam && (
                       <button 
                           className="btn btn-secondary"
                           disabled
@@ -1847,14 +1896,16 @@ export function EnvironmentList() {
                           <span>Steam Updates</span>
                       </button>
                       )}
-                      <button onClick={() => handleDelete(env)} className="btn btn-danger">
-                        <i className="fas fa-trash"></i>
-                        <span>Delete</span>
-                      </button>
+                      {!isSteam && (
+                        <button onClick={() => handleDelete(env)} className="btn btn-danger">
+                          <i className="fas fa-trash"></i>
+                          <span>Delete</span>
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
-                {env.status !== 'completed' && (
+                {env.status !== 'completed' && !isSteam && (
                   <button onClick={() => handleDelete(env)} className="btn btn-danger">
                     <i className="fas fa-trash"></i>
                     <span>Delete</span>

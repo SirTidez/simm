@@ -14,9 +14,9 @@ interface EnvironmentStoreContextValue {
   deleteEnvironment: (id: string) => Promise<void>;
   startDownload: (environmentId: string) => Promise<void>;
   cancelDownload: (downloadId: string) => Promise<void>;
-  checkUpdate: (environmentId: string) => Promise<void>;
+  checkUpdate: (environmentId: string, manual?: boolean) => Promise<void>;
   refreshGameVersion: (environmentId: string) => Promise<string | null>;
-  checkAllUpdates: () => Promise<void>;
+  checkAllUpdates: (manual?: boolean) => Promise<void>;
 }
 
 const EnvironmentStoreContext = createContext<EnvironmentStoreContextValue | null>(null);
@@ -126,9 +126,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, [updateEnvironment]);
 
-  const checkUpdate = useCallback(async (environmentId: string) => {
+  const checkUpdate = useCallback(async (environmentId: string, manual: boolean = false) => {
     try {
-      const result = await ApiService.checkUpdate(environmentId);
+      const result = await ApiService.checkUpdate(environmentId, manual);
       await updateEnvironment(environmentId, {
         lastUpdateCheck: result.checkedAt,
         updateAvailable: result.updateAvailable,
@@ -154,10 +154,10 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, [updateEnvironment]);
 
-  const checkAllUpdates = useCallback(async () => {
+  const checkAllUpdates = useCallback(async (manual: boolean = false) => {
     try {
       console.log('EnvironmentStore: checkAllUpdates called');
-      const results = await ApiService.checkAllUpdates();
+      const results = await ApiService.checkAllUpdates(manual);
       console.log(`EnvironmentStore: API call completed, got ${results?.length || 0} result(s)`, { results });
       
       // Update environments in place without triggering loading state

@@ -1186,11 +1186,18 @@ body::after {
 .auth-badge {
   display: inline-block;
   padding: 0.2rem 0.5rem;
-  background-color: #ffaa00;
   color: #000000;
   border-radius: 4px;
   font-size: 0.75rem;
   margin-top: 0.5rem;
+}
+
+.auth-badge-required {
+  background-color: #ffaa00;
+}
+
+.auth-badge-ready {
+  background-color: #28a745;
 }
 
 /* Forms */

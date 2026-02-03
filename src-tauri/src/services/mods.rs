@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
 use std::fs::File;
 use anyhow::{Context, Result};
 use tokio::fs;
@@ -10,11 +11,14 @@ use zip::ZipArchive;
 use unrar::Archive;
 use chrono::Utc;
 use uuid::Uuid;
-use crate::types::{ModMetadata, ModSource};
+use crate::types::{ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, Environment};
 use crate::services::settings::SettingsService;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct ModsService;
+pub struct ModsService {
+    pool: Arc<SqlitePool>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +30,8 @@ struct ModInfo {
     source: Option<ModSource>,
     source_url: Option<String>,
     disabled: Option<bool>,
+    mod_storage_id: Option<String>,
+    managed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -37,8 +43,8 @@ struct ModsListResult {
 }
 
 impl ModsService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(pool: Arc<SqlitePool>) -> Self {
+        Self { pool }
     }
 
     fn get_mods_directory(&self, output_dir: &str) -> PathBuf {
@@ -47,6 +53,20 @@ impl ModsService {
 
     fn get_plugins_directory(&self, output_dir: &str) -> PathBuf {
         Path::new(output_dir).join("Plugins")
+    }
+
+    async fn environment_id_for_dir(&self, game_dir: &str) -> Result<Option<String>> {
+        if game_dir.is_empty() {
+            return Ok(None);
+        }
+
+        let id = sqlx::query_scalar::<_, String>("SELECT id FROM environments WHERE output_dir = ?")
+            .bind(game_dir)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to resolve environment id")?;
+
+        Ok(id)
     }
 
     fn is_s1api_component_file(&self, file_name: &str) -> bool {
@@ -88,9 +108,59 @@ impl ModsService {
         Ok(None)
     }
 
+    /// Find existing mod storage by source_id and source_version across all environments
+    pub async fn find_existing_mod_storage_by_source_version(
+        &self,
+        source_id: &str,
+        source_version: &str,
+    ) -> Result<Option<String>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for storage lookup")?;
+
+        for (_, data) in rows {
+            if let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) {
+                if meta.source_id.as_deref() == Some(source_id)
+                    && meta.source_version.as_deref() == Some(source_version)
+                {
+                    if let Some(storage_id) = meta.mod_storage_id.clone() {
+                        return Ok(Some(storage_id));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn find_metadata_template_for_storage_id(
+        &self,
+        storage_id: &str,
+    ) -> Result<Option<ModMetadata>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for template lookup")?;
+
+        for (_, data) in rows {
+            if let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) {
+                if meta.mod_storage_id.as_deref() == Some(storage_id) {
+                    return Ok(Some(meta));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Get the mods storage directory from settings
     async fn get_mods_storage_dir(&self) -> Result<PathBuf> {
-        let mut settings_service = SettingsService::new()
+        let mut settings_service = SettingsService::new(self.pool.clone())
             .context("Failed to create settings service")?;
         let settings = settings_service.load_settings().await
             .context("Failed to load settings")?;
@@ -174,6 +244,10 @@ impl ModsService {
         }).await?
     }
 
+    async fn path_exists_or_symlink(&self, path: &Path) -> bool {
+        tokio::fs::symlink_metadata(path).await.is_ok()
+    }
+
     /// Resolves a symbolic link to its target path.
     pub async fn resolve_symlink(&self, path: &Path) -> Result<PathBuf> {
         let path_owned = path.to_owned();
@@ -184,27 +258,81 @@ impl ModsService {
     }
 
     pub async fn load_mod_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = mods_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = self.environment_id_for_dir(game_dir).await?;
+        let mut metadata = HashMap::new();
+
+        if let Some(env_id) = env_id {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT file_name, data FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'",
+            )
+            .bind(&env_id)
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load mod metadata")?;
+
+            for (file_name, data) in rows {
+                if let Ok(entry) = serde_json::from_str::<ModMetadata>(&data) {
+                    metadata.insert(file_name, entry);
+                }
+            }
+        }
+
+        if metadata.is_empty() {
+            if let Ok(file_metadata) = self.load_mod_metadata_from_file(mods_directory).await {
+                if !file_metadata.is_empty() {
+                    self.save_mod_metadata(mods_directory, &file_metadata).await?;
+                    return Ok(file_metadata);
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    async fn load_mod_metadata_from_file(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
         let metadata_file = mods_directory.join(".mods-metadata.json");
-        
         if !metadata_file.exists() {
             return Ok(HashMap::new());
         }
 
         let content = fs::read_to_string(&metadata_file).await
             .context("Failed to read mod metadata file")?;
-        
         let metadata: HashMap<String, ModMetadata> = serde_json::from_str(&content)
             .context("Failed to parse mod metadata file")?;
-        
         Ok(metadata)
     }
 
     pub async fn save_mod_metadata(&self, mods_directory: &Path, metadata: &HashMap<String, ModMetadata>) -> Result<()> {
-        let metadata_file = mods_directory.join(".mods-metadata.json");
-        let content = serde_json::to_string_pretty(metadata)
-            .context("Failed to serialize mod metadata")?;
-        fs::write(&metadata_file, content).await
-            .context("Failed to write mod metadata file")?;
+        let game_dir = mods_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = match self.environment_id_for_dir(game_dir).await? {
+            Some(id) => id,
+            None => {
+                log::warn!("Skipping mod metadata save; environment not found for {}", game_dir);
+                return Ok(());
+            }
+        };
+
+        sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'")
+            .bind(&env_id)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to clear mod metadata")?;
+
+        for (file_name, meta) in metadata {
+            let serialized = serde_json::to_string(meta).context("Failed to serialize mod metadata")?;
+            sqlx::query(
+                "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?) \
+                 ON CONFLICT(environment_id, kind, file_name) DO UPDATE SET data = excluded.data",
+            )
+            .bind(&env_id)
+            .bind(file_name)
+            .bind(serialized)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to save mod metadata")?;
+        }
+
         Ok(())
     }
 
@@ -371,6 +499,8 @@ impl ModsService {
                 .and_then(|m| m.source.clone());
             let source_url = file_metadata.as_ref()
                 .and_then(|m| m.source_url.clone());
+            let mod_storage_id = file_metadata.as_ref().and_then(|m| m.mod_storage_id.clone());
+            let managed = mod_storage_id.is_some();
 
             mods.push(ModInfo {
                 name: mod_name.clone(),
@@ -380,6 +510,8 @@ impl ModsService {
                 source,
                 source_url,
                 disabled: Some(is_disabled),
+                mod_storage_id,
+                managed,
             });
         }
 
@@ -390,6 +522,346 @@ impl ModsService {
         };
 
         Ok(serde_json::to_value(result)?)
+    }
+
+    async fn load_environment(&self, env_id: &str) -> Result<Environment> {
+        let row = sqlx::query_scalar::<_, String>("SELECT data FROM environments WHERE id = ?")
+            .bind(env_id)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to query environment")?;
+
+        let data = row.ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
+        serde_json::from_str::<Environment>(&data).context("Failed to parse environment")
+    }
+
+    pub async fn get_mod_library(&self) -> Result<ModLibraryResult> {
+        let storage_dir = self.get_mods_storage_dir().await?;
+        if !storage_dir.exists() {
+            return Ok(ModLibraryResult { downloaded: Vec::new() });
+        }
+
+        let mut metadata_rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for library")?;
+
+        let mut storage_meta: HashMap<String, (ModMetadata, Vec<String>)> = HashMap::new();
+        for (env_id, data) in metadata_rows.drain(..) {
+            if let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) {
+                if let Some(storage_id) = meta.mod_storage_id.clone() {
+                    let entry = storage_meta.entry(storage_id).or_insert_with(|| (meta.clone(), Vec::new()));
+                    if !entry.1.contains(&env_id) {
+                        entry.1.push(env_id);
+                    }
+                }
+            }
+        }
+
+        let mut entries = fs::read_dir(&storage_dir)
+            .await
+            .context("Failed to read mod storage directory")?;
+        let mut downloaded = Vec::new();
+
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let metadata = entry.metadata().await?;
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let storage_id = entry_path.file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_string();
+            if storage_id.is_empty() {
+                continue;
+            }
+
+            let mods_dir = entry_path.join("Mods");
+            if !mods_dir.exists() {
+                continue;
+            }
+
+            let mut files = Vec::new();
+            let mut mod_entries = fs::read_dir(&mods_dir)
+                .await
+                .context("Failed to read storage mods directory")?;
+            while let Some(mod_entry) = mod_entries.next_entry().await? {
+                let path = mod_entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+                let lower_name = file_name.to_lowercase();
+                if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
+                    files.push(file_name.to_string());
+                }
+            }
+
+            if files.is_empty() {
+                continue;
+            }
+
+            let (template, installed_in) = storage_meta.get(&storage_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    (
+                        ModMetadata {
+                            source: None,
+                            source_id: None,
+                            source_version: None,
+                            author: None,
+                            mod_name: None,
+                            source_url: None,
+                            installed_version: None,
+                            installed_at: None,
+                            last_update_check: None,
+                            update_available: None,
+                            remote_version: None,
+                            detected_runtime: None,
+                            runtime_match: None,
+                            mod_storage_id: None,
+                            symlink_paths: None,
+                        },
+                        Vec::new(),
+                    )
+                });
+
+            let display_name = template.mod_name.clone().unwrap_or_else(|| {
+                files
+                    .get(0)
+                    .cloned()
+                    .unwrap_or_else(|| storage_id.clone())
+                    .replace(".dll", "")
+                    .replace(".DLL", "")
+                    .replace(".disabled", "")
+            });
+
+            let installed_version = template.source_version.clone().or(template.installed_version.clone());
+            let managed = template.mod_storage_id.is_some();
+
+            downloaded.push(ModLibraryEntry {
+                storage_id: storage_id.clone(),
+                display_name,
+                files: files.clone(),
+                source: template.source.clone(),
+                source_id: template.source_id.clone(),
+                source_version: template.source_version.clone(),
+                source_url: template.source_url.clone(),
+                installed_version,
+                managed,
+                installed_in,
+            });
+        }
+
+        downloaded.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+
+        Ok(ModLibraryResult { downloaded })
+    }
+
+    pub async fn install_storage_mod_to_envs(
+        &self,
+        storage_id: &str,
+        environment_ids: Vec<String>,
+    ) -> Result<serde_json::Value> {
+        let storage_dir = self.get_mods_storage_dir().await?;
+        let storage_base = storage_dir.join(storage_id).join("Mods");
+        if !storage_base.exists() {
+            return Err(anyhow::anyhow!("Mod storage not found"));
+        }
+
+        let mut files = Vec::new();
+        let mut storage_entries = fs::read_dir(&storage_base)
+            .await
+            .context("Failed to read storage mod files")?;
+        while let Some(entry) = storage_entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+            let lower = file_name.to_lowercase();
+            if lower.ends_with(".dll") || lower.ends_with(".dll.disabled") {
+                files.push(file_name.to_string());
+            }
+        }
+
+        if files.is_empty() {
+            return Err(anyhow::anyhow!("No mod files found in storage"));
+        }
+
+        let template_meta = self.find_metadata_template_for_storage_id(storage_id).await?;
+        let mut results = Vec::new();
+        for env_id in environment_ids {
+            let env = self.load_environment(&env_id).await?;
+            let mods_dir = self.get_mods_directory(&env.output_dir);
+            fs::create_dir_all(&mods_dir)
+                .await
+                .context("Failed to create mods directory")?;
+
+            let mut metadata_map = self.load_mod_metadata(&mods_dir).await
+                .unwrap_or_else(|_| HashMap::new());
+            let mut symlink_paths = Vec::new();
+
+            for file_name in &files {
+                let storage_file = storage_base.join(file_name);
+                let symlink_path = mods_dir.join(file_name);
+                if self.path_exists_or_symlink(&symlink_path).await {
+                    let meta = fs::metadata(&symlink_path).await?;
+                    if meta.is_file() {
+                        fs::remove_file(&symlink_path).await?;
+                    }
+                }
+                self.create_symlink_file(&storage_file, &symlink_path).await?;
+                symlink_paths.push(symlink_path.to_string_lossy().to_string());
+
+                let mut meta = metadata_map
+                    .get(file_name)
+                    .cloned()
+                    .unwrap_or(ModMetadata {
+                        source: template_meta.as_ref().and_then(|t| t.source.clone()),
+                        source_id: template_meta.as_ref().and_then(|t| t.source_id.clone()),
+                        source_version: template_meta.as_ref().and_then(|t| t.source_version.clone()),
+                        author: template_meta.as_ref().and_then(|t| t.author.clone()),
+                        mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
+                        source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                        installed_version: template_meta.as_ref().and_then(|t| t.installed_version.clone()),
+                        installed_at: None,
+                        last_update_check: None,
+                        update_available: None,
+                        remote_version: None,
+                        detected_runtime: template_meta.as_ref().and_then(|t| t.detected_runtime.clone()),
+                        runtime_match: template_meta.as_ref().and_then(|t| t.runtime_match),
+                        mod_storage_id: None,
+                        symlink_paths: None,
+                    });
+
+                if let Some(template) = template_meta.as_ref() {
+                    meta.source = template.source.clone();
+                    meta.source_id = template.source_id.clone();
+                    meta.source_version = template.source_version.clone();
+                    meta.author = template.author.clone();
+                    meta.mod_name = template.mod_name.clone();
+                    meta.source_url = template.source_url.clone();
+                    meta.detected_runtime = template.detected_runtime.clone();
+                    meta.runtime_match = template.runtime_match;
+                }
+                meta.installed_version = template_meta
+                    .as_ref()
+                    .and_then(|t| t.installed_version.clone())
+                    .or(self.extract_mod_version(&storage_file).await);
+                meta.mod_storage_id = Some(storage_id.to_string());
+                meta.symlink_paths = Some(vec![symlink_path.to_string_lossy().to_string()]);
+                meta.installed_at = Some(Utc::now());
+                metadata_map.insert(file_name.clone(), meta);
+            }
+
+            self.save_mod_metadata(&mods_dir, &metadata_map).await?;
+            results.push(serde_json::json!({
+                "environmentId": env_id,
+                "installedFiles": files,
+            }));
+        }
+
+        Ok(serde_json::json!({ "results": results }))
+    }
+
+    pub async fn uninstall_storage_mod_from_envs(
+        &self,
+        storage_id: &str,
+        environment_ids: Vec<String>,
+    ) -> Result<serde_json::Value> {
+        let mut results = Vec::new();
+
+        for env_id in environment_ids {
+            let env = self.load_environment(&env_id).await?;
+            let mods_dir = self.get_mods_directory(&env.output_dir);
+            let mut metadata_map = self.load_mod_metadata(&mods_dir).await
+                .unwrap_or_else(|_| HashMap::new());
+
+            let mut removed_files = Vec::new();
+            let file_names: Vec<String> = metadata_map
+                .iter()
+                .filter_map(|(file_name, meta)| {
+                    if meta.mod_storage_id.as_deref() == Some(storage_id) {
+                        Some(file_name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for file_name in file_names {
+                let mod_path = mods_dir.join(&file_name);
+                let disabled_path = mods_dir.join(format!("{}.disabled", file_name));
+
+                if mod_path.exists() {
+                    if let Err(err) = fs::remove_file(&mod_path).await {
+                        log::warn!("Failed to remove mod file {:?}: {}", mod_path, err);
+                    } else {
+                        removed_files.push(file_name.clone());
+                    }
+                } else if disabled_path.exists() {
+                    if let Err(err) = fs::remove_file(&disabled_path).await {
+                        log::warn!("Failed to remove disabled mod file {:?}: {}", disabled_path, err);
+                    } else {
+                        removed_files.push(file_name.clone());
+                    }
+                }
+
+                metadata_map.remove(&file_name);
+            }
+
+            self.save_mod_metadata(&mods_dir, &metadata_map).await?;
+
+            results.push(serde_json::json!({
+                "environmentId": env_id,
+                "removedFiles": removed_files,
+            }));
+        }
+
+        Ok(serde_json::json!({ "results": results }))
+    }
+
+    pub async fn delete_downloaded_mod(&self, storage_id: &str) -> Result<serde_json::Value> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for deletion")?;
+
+        let mut env_ids = Vec::new();
+        for (env_id, data) in rows {
+            if let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) {
+                if meta.mod_storage_id.as_deref() == Some(storage_id) {
+                    env_ids.push(env_id);
+                }
+            }
+        }
+
+        env_ids.sort();
+        env_ids.dedup();
+
+        if !env_ids.is_empty() {
+            let _ = self.uninstall_storage_mod_from_envs(storage_id, env_ids.clone()).await?;
+        }
+
+        let storage_dir = self.get_mods_storage_dir().await?;
+        let storage_path = storage_dir.join(storage_id);
+        if storage_path.exists() {
+            tokio::fs::remove_dir_all(&storage_path)
+                .await
+                .context("Failed to remove downloaded mod files")?;
+        }
+
+        Ok(serde_json::json!({
+            "deleted": true,
+            "removedFrom": env_ids
+        }))
     }
 
     pub async fn count_mods(&self, game_dir: &str) -> Result<u32> {
@@ -612,7 +1084,7 @@ impl ModsService {
                         let symlink_path = mods_directory.join(file_name);
                         
                         // Only create symlink if it doesn't exist
-                        if !symlink_path.exists() {
+                        if !self.path_exists_or_symlink(&symlink_path).await {
                             eprintln!("[DEBUG] install_zip_mod: Creating symlink for already-installed file: {:?} -> {:?}", entry_path, symlink_path);
                             if let Ok(_) = self.create_symlink_file(&entry_path, &symlink_path).await {
                                 symlink_paths.push(symlink_path.to_string_lossy().to_string());
@@ -634,7 +1106,7 @@ impl ModsService {
                     if metadata.is_file() {
                         let file_name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let symlink_path = plugins_directory.join(file_name);
-                        if !symlink_path.exists() {
+                        if !self.path_exists_or_symlink(&symlink_path).await {
                             if let Ok(_) = self.create_symlink_file(&entry_path, &symlink_path).await {
                                 symlink_paths.push(symlink_path.to_string_lossy().to_string());
                             }
@@ -653,7 +1125,7 @@ impl ModsService {
                     let file_name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let symlink_path = userlibs_directory.join(file_name);
                     if metadata.is_dir() {
-                        if !symlink_path.exists() {
+                        if !self.path_exists_or_symlink(&symlink_path).await {
                             if let Ok(_) = self.create_symlink_dir(&entry_path, &symlink_path).await {
                                 symlink_paths.push(symlink_path.to_string_lossy().to_string());
                             }
@@ -661,7 +1133,7 @@ impl ModsService {
                             symlink_paths.push(symlink_path.to_string_lossy().to_string());
                         }
                     } else if metadata.is_file() {
-                        if !symlink_path.exists() {
+                        if !self.path_exists_or_symlink(&symlink_path).await {
                             if let Ok(_) = self.create_symlink_file(&entry_path, &symlink_path).await {
                                 symlink_paths.push(symlink_path.to_string_lossy().to_string());
                             }
@@ -670,6 +1142,63 @@ impl ModsService {
                         }
                     }
                 }
+            }
+
+            if mod_storage_mods.exists() {
+                let template_meta = self.find_metadata_template_for_storage_id(&existing_id).await?;
+                let mut metadata_map = self.load_mod_metadata(&mods_directory).await
+                    .unwrap_or_else(|_| HashMap::new());
+
+                let mut entries = fs::read_dir(&mod_storage_mods).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let entry_path = entry.path();
+                    let metadata = fs::metadata(&entry_path).await?;
+                    if metadata.is_file() {
+                        let file_name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let mut meta = metadata_map
+                            .get(file_name)
+                            .cloned()
+                            .unwrap_or(ModMetadata {
+                                source: template_meta.as_ref().and_then(|t| t.source.clone()),
+                                source_id: template_meta.as_ref().and_then(|t| t.source_id.clone()),
+                                source_version: template_meta.as_ref().and_then(|t| t.source_version.clone()),
+                                author: template_meta.as_ref().and_then(|t| t.author.clone()),
+                                mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
+                                source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                                installed_version: template_meta.as_ref().and_then(|t| t.installed_version.clone()),
+                                installed_at: None,
+                                last_update_check: None,
+                                update_available: None,
+                                remote_version: None,
+                                detected_runtime: template_meta.as_ref().and_then(|t| t.detected_runtime.clone()),
+                                runtime_match: template_meta.as_ref().and_then(|t| t.runtime_match),
+                                mod_storage_id: None,
+                                symlink_paths: None,
+                            });
+
+                        if let Some(template) = template_meta.as_ref() {
+                            meta.source = template.source.clone();
+                            meta.source_id = template.source_id.clone();
+                            meta.source_version = template.source_version.clone();
+                            meta.author = template.author.clone();
+                            meta.mod_name = template.mod_name.clone();
+                            meta.source_url = template.source_url.clone();
+                            meta.detected_runtime = template.detected_runtime.clone();
+                            meta.runtime_match = template.runtime_match;
+                        }
+
+                        meta.installed_version = template_meta
+                            .as_ref()
+                            .and_then(|t| t.installed_version.clone())
+                            .or(self.extract_mod_version(&entry_path).await);
+                        meta.mod_storage_id = Some(existing_id.clone());
+                        meta.installed_at = Some(Utc::now());
+
+                        metadata_map.insert(file_name.to_string(), meta);
+                    }
+                }
+
+                self.save_mod_metadata(&mods_directory, &metadata_map).await?;
             }
             
             // Return success - mod is already installed, symlinks verified
@@ -768,7 +1297,7 @@ impl ModsService {
                     eprintln!("[DEBUG] install_zip_mod: Preparing symlink for {}: {:?} -> {:?}", file_name, entry_path, symlink_path);
                     
                     // Remove existing symlink/file if it exists
-                    if symlink_path.exists() {
+                    if self.path_exists_or_symlink(&symlink_path).await {
                         eprintln!("[DEBUG] install_zip_mod: Removing existing file/symlink at {:?}", symlink_path);
                         if self.is_symlink(&symlink_path).await.unwrap_or(false) {
                             self.remove_symlink(&symlink_path).await?;
@@ -816,7 +1345,7 @@ impl ModsService {
                     let symlink_path = plugins_directory.join(file_name);
                     
                     // Remove existing symlink/file if it exists
-                    if symlink_path.exists() {
+                    if self.path_exists_or_symlink(&symlink_path).await {
                         if self.is_symlink(&symlink_path).await.unwrap_or(false) {
                             self.remove_symlink(&symlink_path).await?;
                         } else {
@@ -853,7 +1382,7 @@ impl ModsService {
                 
                 if metadata.is_dir() {
                     // For directories, create directory symlink
-                    if symlink_path.exists() {
+                    if self.path_exists_or_symlink(&symlink_path).await {
                         if self.is_symlink(&symlink_path).await.unwrap_or(false) {
                             self.remove_symlink(&symlink_path).await?;
                         } else {
@@ -870,7 +1399,7 @@ impl ModsService {
                     }
                 } else {
                     // For files, create file symlink
-                    if symlink_path.exists() {
+                    if self.path_exists_or_symlink(&symlink_path).await {
                         if self.is_symlink(&symlink_path).await.unwrap_or(false) {
                             self.remove_symlink(&symlink_path).await?;
                         } else {
@@ -1436,7 +1965,7 @@ impl ModsService {
         let symlink_path = mods_directory.join(file_name);
         
         // Remove existing symlink/file if it exists
-        if symlink_path.exists() {
+        if self.path_exists_or_symlink(&symlink_path).await {
             if self.is_symlink(&symlink_path).await.unwrap_or(false) {
                 self.remove_symlink(&symlink_path).await?;
             } else {
@@ -1545,7 +2074,7 @@ impl ModsService {
         }
         
         // Get all environments
-        let env_service = EnvironmentService::new()
+        let env_service = EnvironmentService::new(self.pool.clone())
             .context("Failed to create environment service")?;
         let environments = env_service.get_environments().await
             .context("Failed to get environments")?;
@@ -1678,8 +2207,14 @@ impl ModsService {
         // Remove from metadata
         let mut metadata = self.load_mod_metadata(&mods_directory).await
             .unwrap_or_else(|_| HashMap::new());
-        metadata.remove("S1API.Mono.MelonLoader.dll");
-        metadata.remove("S1API.IL2CPP.MelonLoader.dll");
+        let keys_to_remove: Vec<String> = metadata
+            .keys()
+            .filter(|key| self.is_s1api_component_file(key))
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            metadata.remove(&key);
+        }
         self.save_mod_metadata(&mods_directory, &metadata).await?;
 
         Ok(serde_json::json!({
@@ -1741,11 +2276,29 @@ impl ModsService {
         let metadata = self.load_mod_metadata(&mods_directory).await
             .unwrap_or_else(|_| HashMap::new());
 
-        if let Some(meta) = metadata.get("S1API.Mono.MelonLoader.dll")
-            .or_else(|| metadata.get("S1API.IL2CPP.MelonLoader.dll")) {
+        let runtime_lower = runtime.to_lowercase();
+        let mut runtime_match: Option<&ModMetadata> = None;
+        for (file_name, meta) in metadata.iter() {
+            let lower_name = file_name.to_lowercase();
+            if !self.is_s1api_component_file(&lower_name) {
+                continue;
+            }
+            if runtime_lower == "mono" && lower_name.contains("mono") {
+                runtime_match = Some(meta);
+                break;
+            }
+            if runtime_lower == "il2cpp" && lower_name.contains("il2cpp") {
+                runtime_match = Some(meta);
+                break;
+            }
+            if runtime_match.is_none() {
+                runtime_match = Some(meta);
+            }
+        }
+
+        if let Some(meta) = runtime_match {
             // Check installed_version first, then fall back to source_version
-            version = meta.installed_version.clone()
-                .or_else(|| meta.source_version.clone());
+            version = meta.installed_version.clone().or_else(|| meta.source_version.clone());
         }
 
         if version.is_none() && enabled {
@@ -1775,8 +2328,3 @@ impl ModsService {
     }
 }
 
-impl Default for ModsService {
-    fn default() -> Self {
-        Self::new()
-    }
-}

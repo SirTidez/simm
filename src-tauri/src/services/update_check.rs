@@ -7,15 +7,19 @@ use chrono::Utc;
 use std::process::Command;
 use regex::Regex;
 use std::collections::HashMap;
+use sqlx::SqlitePool;
+use std::sync::Arc;
 
 pub struct UpdateCheckService {
     game_version_service: GameVersionService,
+    pool: Arc<SqlitePool>,
 }
 
 impl UpdateCheckService {
-    pub fn new() -> Self {
+    pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self {
             game_version_service: GameVersionService::new(),
+            pool,
         }
     }
 
@@ -151,7 +155,7 @@ impl UpdateCheckService {
             .ok_or_else(|| anyhow::anyhow!("DepotDownloader path not found"))?;
 
         // Get credentials from settings for authentication
-        let mut settings_service = SettingsService::new()
+        let mut settings_service = SettingsService::new(self.pool.clone())
             .context("Failed to create settings service")?;
         let settings = settings_service.load_settings().await
             .context("Failed to load settings")?;
@@ -254,10 +258,3 @@ impl UpdateCheckService {
         Err(anyhow::anyhow!("Could not parse manifest ID from DepotDownloader output. Output: {}", all_output))
     }
 }
-
-impl Default for UpdateCheckService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
+import { ModLibraryOverlay } from './ModLibraryOverlay';
 import { Settings } from './Settings';
 import { SteamAccountOverlay } from './SteamAccountOverlay';
 import { HelpOverlay } from './HelpOverlay';
@@ -14,6 +15,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 
 function AppContent() {
   const [showWizard, setShowWizard] = useState(false);
+  const [showModLibrary, setShowModLibrary] = useState(false);
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
@@ -47,6 +49,14 @@ function AppContent() {
       <header className="app-header">
         <h1>Schedule I Mod Manager</h1>
         <div className="header-actions">
+          <button
+            onClick={() => setShowModLibrary(true)}
+            className="btn btn-icon"
+            title="Mod Library"
+            aria-label="Mod Library"
+          >
+            <i className="fas fa-search"></i>
+          </button>
           <button
             onClick={() => setShowHelp(true)}
             className="btn btn-icon"
@@ -83,6 +93,10 @@ function AppContent() {
 
       {showWizard && (
         <EnvironmentCreationWizard onClose={() => setShowWizard(false)} />
+      )}
+
+      {showModLibrary && (
+        <ModLibraryOverlay isOpen={showModLibrary} onClose={() => setShowModLibrary(false)} />
       )}
 
       <SteamAccountOverlay

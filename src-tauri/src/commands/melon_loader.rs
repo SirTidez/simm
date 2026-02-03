@@ -3,14 +3,13 @@ use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
 use crate::events;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
 static MELON_LOADER_SERVICE: Lazy<AsyncMutex<Option<Arc<MelonLoaderService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static GITHUB_RELEASES_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_melon_loader_service() -> Result<Arc<MelonLoaderService>, String> {
     let mut service = MELON_LOADER_SERVICE.lock().await;
@@ -20,29 +19,14 @@ async fn get_melon_loader_service() -> Result<Arc<MelonLoaderService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
-
-async fn get_github_service() -> Result<Arc<GitHubReleasesService>, String> {
-    let mut service = GITHUB_RELEASES_SERVICE.lock().await;
-    if service.is_none() {
-        // Load GitHub token from encrypted storage
-        let settings_service = SettingsService::new().map_err(|e| e.to_string())?;
-        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
-        *service = Some(Arc::new(GitHubReleasesService::with_token(token)));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
 
 
 #[tauri::command]
-pub async fn get_melon_loader_status(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_melon_loader_status(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -70,6 +54,7 @@ pub async fn get_melon_loader_status(environment_id: String) -> Result<serde_jso
 
 #[tauri::command]
 pub async fn install_melon_loader(
+    db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
     environment_id: String, 
     version_tag: String
@@ -91,7 +76,7 @@ pub async fn install_melon_loader(
         }))
     };
     
-    let env_service = match get_env_service().await {
+    let env_service = match EnvironmentService::new(db.inner().clone()) {
         Ok(service) => service,
         Err(e) => return error_json(format!("Failed to get environment service: {}", e))
     };
@@ -108,12 +93,17 @@ pub async fn install_melon_loader(
 
     // Get all MelonLoader releases to find the one matching the version tag
     eprintln!("[install_melon_loader] Getting GitHub service...");
-    let github_service = match get_github_service().await {
-        Ok(service) => {
-            eprintln!("[install_melon_loader] GitHub service obtained");
-            service
-        },
-        Err(e) => return error_json(format!("Failed to get GitHub service: {}", e))
+    let github_service = {
+        let settings_service = match SettingsService::new(db.inner().clone()) {
+            Ok(service) => service,
+            Err(e) => return error_json(format!("Failed to get settings service: {}", e)),
+        };
+        let token = match settings_service.get_github_token().await {
+            Ok(token) => token,
+            Err(e) => return error_json(format!("Failed to load GitHub token: {}", e)),
+        };
+        eprintln!("[install_melon_loader] GitHub service obtained");
+        GitHubReleasesService::with_token(token)
     };
     
     eprintln!("[install_melon_loader] Fetching MelonLoader releases from GitHub...");
@@ -236,8 +226,12 @@ pub async fn install_melon_loader(
 }
 
 #[tauri::command]
-pub async fn get_available_melonloader_versions() -> Result<Vec<serde_json::Value>, String> {
-    let github_service = get_github_service().await?;
+pub async fn get_available_melonloader_versions(
+    db: State<'_, Arc<SqlitePool>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
+    let github_service = GitHubReleasesService::with_token(token);
 
     let releases = github_service.get_all_releases("LavaGang", "MelonLoader", false)
         .await
@@ -259,8 +253,11 @@ pub async fn get_available_melonloader_versions() -> Result<Vec<serde_json::Valu
 }
 
 #[tauri::command]
-pub async fn uninstall_melon_loader(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn uninstall_melon_loader(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -275,4 +272,3 @@ pub async fn uninstall_melon_loader(environment_id: String) -> Result<serde_json
         .await
         .map_err(|e| e.to_string())
 }
-
