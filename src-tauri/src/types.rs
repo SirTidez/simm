@@ -280,6 +280,10 @@ pub struct ModLibraryEntry {
     pub installed_version: Option<String>,
     pub managed: bool,
     pub installed_in: Vec<String>,
+    pub available_runtimes: Vec<String>,
+    pub storage_ids_by_runtime: std::collections::HashMap<String, String>,
+    pub installed_in_by_runtime: std::collections::HashMap<String, Vec<String>>,
+    pub files_by_runtime: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

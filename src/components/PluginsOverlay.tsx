@@ -28,7 +28,7 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
   const [uploading, setUploading] = useState(false);
   const [pendingUpload, setPendingUpload] = useState<{ file: null; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
   const [environment, setEnvironment] = useState<import('../types').Environment | null>(null);
-  
+
   useEffect(() => {
     if (isOpen && environmentId) {
       loadEnvironment();
@@ -57,7 +57,7 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
     try {
       const result = await ApiService.getPlugins(environmentId);
       // Filter out MLVScan.dll from the regular plugins list
-      const filteredPlugins = result.plugins.filter(plugin => 
+      const filteredPlugins = result.plugins.filter(plugin =>
         plugin.fileName.toLowerCase() !== 'mlvscan.dll'
       );
       const normalizedPlugins = filteredPlugins.map(plugin => ({
@@ -148,7 +148,7 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
         fileName,
         environment.runtime
       );
-      
+
       if (result.success) {
         // Check for runtime mismatch - plugin is already installed, just show warning
         if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
@@ -337,4 +337,3 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
     </>
   );
 }
-

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tokio::fs;
@@ -28,10 +29,23 @@ pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
         .await
         .context("Failed to open SQLite database")?;
 
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .context("Failed to run database migrations")?;
+    let migrator = sqlx::migrate!();
+    if let Err(err) = migrator.run(&pool).await {
+        match err {
+            MigrateError::VersionMismatch(version) => {
+                if has_expected_schema(&pool).await? {
+                    log::warn!(
+                        "Database migration version mismatch detected for version {}; proceeding with existing schema",
+                        version
+                    );
+                } else {
+                    return Err(MigrateError::VersionMismatch(version))
+                        .context("Failed to run database migrations");
+                }
+            }
+            other => return Err(other).context("Failed to run database migrations"),
+        }
+    }
 
     migrate_from_files(&pool).await?;
 
@@ -44,6 +58,13 @@ pub fn get_database_path() -> Result<PathBuf> {
 }
 
 pub fn get_data_dir() -> Result<PathBuf> {
+    if let Ok(override_dir) = std::env::var("SIMMRUST_DATA_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
     let data_dir = dirs::data_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
         .join("simmrust");
@@ -53,6 +74,20 @@ pub fn get_data_dir() -> Result<PathBuf> {
 
 fn legacy_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    if let Ok(override_dir) = std::env::var("SIMMRUST_DATA_DIR") {
+        let trimmed = override_dir.trim();
+        if trimmed.is_empty() {
+            // fall through to dirs::data_dir() below
+        } else {
+            let override_path = PathBuf::from(trimmed);
+            if let Some(base) = override_path.parent() {
+                dirs.push(base.join("s1devenvmanager"));
+                dirs.push(base.join("simmrust"));
+                return dirs;
+            }
+        }
+    }
+
     if let Some(base) = dirs::data_dir() {
         dirs.push(base.join("s1devenvmanager"));
         dirs.push(base.join("simmrust"));
@@ -141,12 +176,13 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
         secrets_written |= migrate_secret_file(pool, dir, "nexus_mods_api_key.enc", "nexus_mods_api_key").await?;
     }
 
+    let mut mod_metadata_migrated = false;
     for env in &environments {
-        migrate_mod_metadata_for_env(pool, env, "mods").await?;
-        migrate_mod_metadata_for_env(pool, env, "plugins").await?;
+        mod_metadata_migrated |= migrate_mod_metadata_for_env(pool, env, "mods").await?;
+        mod_metadata_migrated |= migrate_mod_metadata_for_env(pool, env, "plugins").await?;
     }
 
-    if settings_migrated || !environments.is_empty() || secrets_written {
+    if settings_migrated || !environments.is_empty() || secrets_written || mod_metadata_migrated {
         sqlx::query("INSERT INTO app_meta (key, value) VALUES (?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value")
             .bind(MIGRATION_FLAG_KEY)
@@ -157,6 +193,26 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn has_expected_schema(pool: &SqlitePool) -> Result<bool> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to read database schema")?;
+
+    let required = [
+        "_sqlx_migrations",
+        "app_meta",
+        "settings",
+        "environments",
+        "secrets",
+        "mod_metadata",
+    ];
+
+    Ok(required.iter().all(|table| tables.contains(&table.to_string())))
 }
 
 async fn migrate_secret_file(
@@ -170,7 +226,9 @@ async fn migrate_secret_file(
         return Ok(false);
     }
 
-    let content = fs::read_to_string(&path).await.unwrap_or_default();
+    let content = fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("Failed to read secret file {}", path.display()))?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return Ok(false);
@@ -189,7 +247,7 @@ async fn migrate_secret_file(
     Ok(true)
 }
 
-async fn migrate_mod_metadata_for_env(pool: &SqlitePool, env: &Environment, kind: &str) -> Result<()> {
+async fn migrate_mod_metadata_for_env(pool: &SqlitePool, env: &Environment, kind: &str) -> Result<bool> {
     let metadata_path = if kind == "mods" {
         Path::new(&env.output_dir).join("Mods").join(".mods-metadata.json")
     } else {
@@ -197,19 +255,21 @@ async fn migrate_mod_metadata_for_env(pool: &SqlitePool, env: &Environment, kind
     };
 
     if !metadata_path.exists() {
-        return Ok(());
+        return Ok(false);
     }
 
-    let content = fs::read_to_string(&metadata_path).await.unwrap_or_default();
+    let content = fs::read_to_string(&metadata_path)
+        .await
+        .with_context(|| format!("Failed to read {} metadata file {}", kind, metadata_path.display()))?;
     if content.trim().is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let metadata: std::collections::HashMap<String, ModMetadata> = match serde_json::from_str(&content) {
         Ok(value) => value,
         Err(err) => {
             log::warn!("Failed to parse {} metadata for {}: {}", kind, env.id, err);
-            return Ok(());
+            return Ok(false);
         }
     };
 
@@ -228,5 +288,332 @@ async fn migrate_mod_metadata_for_env(pool: &SqlitePool, env: &Environment, kind
         .context("Failed to migrate mod metadata")?;
     }
 
-    Ok(())
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        EnvironmentStatus, LogLevel, ModSource, Platform, Runtime, Theme,
+    };
+    use serial_test::serial;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn sample_settings(download_dir: &Path) -> Settings {
+        Settings {
+            default_download_dir: download_dir.to_string_lossy().to_string(),
+            depot_downloader_path: Some("C:\\tools\\depotdownloader.exe".to_string()),
+            steam_username: Some("tester".to_string()),
+            max_concurrent_downloads: 3,
+            platform: Platform::Windows,
+            language: "en".to_string(),
+            theme: Theme::Light,
+            melon_loader_version: Some("0.6.0".to_string()),
+            auto_install_melon_loader: Some(true),
+            update_check_interval: Some(30),
+            auto_check_updates: Some(true),
+            log_level: Some(LogLevel::Info),
+            nexus_mods_api_key: None,
+            nexus_mods_game_id: Some("123".to_string()),
+            nexus_mods_app_slug: Some("schedule-i".to_string()),
+            thunderstore_game_id: Some("schedule-i".to_string()),
+            auto_update_mods: Some(false),
+            mod_update_check_interval: Some(60),
+            custom_theme: None,
+            log_retention_days: Some(7),
+        }
+    }
+
+    fn sample_environment(output_dir: &Path) -> Environment {
+        Environment {
+            id: "env-1".to_string(),
+            name: "Test Environment".to_string(),
+            description: None,
+            app_id: "3164500".to_string(),
+            branch: "main".to_string(),
+            output_dir: output_dir.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: None,
+        }
+    }
+
+    fn sample_metadata() -> ModMetadata {
+        ModMetadata {
+            source: Some(ModSource::Local),
+            source_id: Some("local-mod".to_string()),
+            source_version: Some("1.0.0".to_string()),
+            author: Some("Tester".to_string()),
+            mod_name: Some("Sample Mod".to_string()),
+            source_url: Some("https://example.com/mod".to_string()),
+            installed_version: Some("1.0.0".to_string()),
+            installed_at: None,
+            last_update_check: None,
+            update_available: Some(false),
+            remote_version: None,
+            detected_runtime: Some(Runtime::Il2cpp),
+            runtime_match: Some(true),
+            mod_storage_id: Some("storage-1".to_string()),
+            symlink_paths: Some(vec!["C:\\mods\\sample".to_string()]),
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_data_dir_uses_override() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let data_dir = get_data_dir()?;
+        assert_eq!(data_dir, override_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_creates_tables() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table'",
+        )
+        .fetch_all(&*pool)
+        .await?;
+
+        for table in ["app_meta", "settings", "environments", "secrets", "mod_metadata"] {
+            assert!(tables.contains(&table.to_string()));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_migrates_legacy_files() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let legacy_dir = temp.path().join("s1devenvmanager");
+        fs::create_dir_all(&legacy_dir).await?;
+
+        let settings = sample_settings(temp.path());
+        let settings_json = serde_json::to_string(&settings)?;
+        fs::write(legacy_dir.join("settings.json"), settings_json).await?;
+
+        let env_output_dir = temp.path().join("envs").join("env-1");
+        let environment = sample_environment(&env_output_dir);
+        let environments_json = serde_json::to_string(&vec![environment.clone()])?;
+        fs::write(legacy_dir.join("environments.json"), environments_json).await?;
+
+        let mods_dir = env_output_dir.join("Mods");
+        let plugins_dir = env_output_dir.join("Plugins");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+
+        let mut mod_metadata = HashMap::new();
+        mod_metadata.insert("sample-mod.dll".to_string(), sample_metadata());
+        let mods_json = serde_json::to_string(&mod_metadata)?;
+        let plugins_json = serde_json::to_string(&mod_metadata)?;
+
+        fs::write(mods_dir.join(".mods-metadata.json"), &mods_json).await?;
+        fs::write(plugins_dir.join(".plugins-metadata.json"), &plugins_json).await?;
+
+        fs::write(legacy_dir.join("credentials.enc"), " secret ").await?;
+        fs::write(legacy_dir.join("github_token.enc"), " token ").await?;
+        fs::write(legacy_dir.join("nexus_mods_api_key.enc"), " key ").await?;
+
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+
+        let stored_settings: Option<String> = sqlx::query_scalar(
+            "SELECT data FROM settings WHERE id = 1",
+        )
+        .fetch_optional(&*pool)
+        .await?;
+        let stored_settings = stored_settings.expect("expected settings row");
+        let stored_value: serde_json::Value = serde_json::from_str(&stored_settings)?;
+        let expected_value = serde_json::to_value(&settings)?;
+        assert_eq!(stored_value, expected_value);
+
+        let stored_env: Option<String> = sqlx::query_scalar(
+            "SELECT data FROM environments WHERE id = ?",
+        )
+        .bind("env-1")
+        .fetch_optional(&*pool)
+        .await?;
+        let stored_env = stored_env.expect("expected environment row");
+        let deserialized_env: Environment = serde_json::from_str(&stored_env)?;
+        assert_eq!(deserialized_env.output_dir, environment.output_dir);
+        assert_eq!(
+            deserialized_env.environment_type,
+            Some(EnvironmentType::DepotDownloader)
+        );
+
+        let stored_secret: Option<String> = sqlx::query_scalar(
+            "SELECT encrypted FROM secrets WHERE key = ?",
+        )
+        .bind("steam_credentials")
+        .fetch_optional(&*pool)
+        .await?;
+        assert_eq!(stored_secret.as_deref(), Some("secret"));
+
+        let stored_mod: Option<String> = sqlx::query_scalar(
+            "SELECT data FROM mod_metadata WHERE environment_id = ? AND kind = ? AND file_name = ?",
+        )
+        .bind("env-1")
+        .bind("mods")
+        .bind("sample-mod.dll")
+        .fetch_optional(&*pool)
+        .await?;
+        let stored_mod = stored_mod.expect("expected mod metadata");
+        let stored_mod_value: serde_json::Value = serde_json::from_str(&stored_mod)?;
+        let expected_mod_value = serde_json::to_value(sample_metadata())?;
+        assert_eq!(stored_mod_value, expected_mod_value);
+
+        let migration_flag: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM app_meta WHERE key = ?",
+        )
+        .bind(MIGRATION_FLAG_KEY)
+        .fetch_optional(&*pool)
+        .await?;
+        assert_eq!(migration_flag.as_deref(), Some("true"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn database_crud_round_trip() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+
+        let env_dir = temp.path().join("envs").join("env-2");
+        let env = sample_environment(&env_dir);
+        let serialized_env = serde_json::to_string(&env)?;
+
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)",
+        )
+        .bind(&env.id)
+        .bind(&env.output_dir)
+        .bind(&serialized_env)
+        .execute(&*pool)
+        .await?;
+
+        let stored_env: String = sqlx::query_scalar(
+            "SELECT data FROM environments WHERE id = ?",
+        )
+        .bind(&env.id)
+        .fetch_one(&*pool)
+        .await?;
+        let stored_value: serde_json::Value = serde_json::from_str(&stored_env)?;
+        assert_eq!(stored_value, serde_json::to_value(&env)?);
+
+        let updated_env = Environment {
+            output_dir: temp.path().join("envs").join("env-2b").to_string_lossy().to_string(),
+            ..env.clone()
+        };
+        let updated_serialized = serde_json::to_string(&updated_env)?;
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
+        )
+        .bind(&updated_env.id)
+        .bind(&updated_env.output_dir)
+        .bind(&updated_serialized)
+        .execute(&*pool)
+        .await?;
+
+        let stored_output: String = sqlx::query_scalar(
+            "SELECT output_dir FROM environments WHERE id = ?",
+        )
+        .bind(&updated_env.id)
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(stored_output, updated_env.output_dir);
+
+        let metadata = sample_metadata();
+        let metadata_json = serde_json::to_string(&metadata)?;
+        sqlx::query(
+            "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&updated_env.id)
+        .bind("mods")
+        .bind("example.dll")
+        .bind(&metadata_json)
+        .execute(&*pool)
+        .await?;
+
+        let stored_metadata: String = sqlx::query_scalar(
+            "SELECT data FROM mod_metadata WHERE environment_id = ? AND kind = ? AND file_name = ?",
+        )
+        .bind(&updated_env.id)
+        .bind("mods")
+        .bind("example.dll")
+        .fetch_one(&*pool)
+        .await?;
+        let stored_metadata_value: serde_json::Value = serde_json::from_str(&stored_metadata)?;
+        assert_eq!(stored_metadata_value, serde_json::to_value(&metadata)?);
+
+        sqlx::query(
+            "INSERT INTO secrets (key, encrypted) VALUES (?, ?)",
+        )
+        .bind("test-secret")
+        .bind("secret-data")
+        .execute(&*pool)
+        .await?;
+
+        let stored_secret: String = sqlx::query_scalar(
+            "SELECT encrypted FROM secrets WHERE key = ?",
+        )
+        .bind("test-secret")
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(stored_secret, "secret-data");
+
+        Ok(())
+    }
 }

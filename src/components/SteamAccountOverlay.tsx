@@ -35,12 +35,12 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   // Check NexusMods API key status on mount
   useEffect(() => {
     if (!isOpen) return;
-    
+
     const checkNexusModsStatus = async () => {
       try {
         const hasKey = await ApiService.hasNexusModsApiKey();
         setNexusModsApiKeySet(hasKey);
-        
+
         if (hasKey) {
           // Try to get rate limits to verify key is still valid
           try {
@@ -68,7 +68,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
     try {
       const result = await ApiService.validateNexusModsApiKey(nexusModsApiKey.trim());
-      
+
       if (result.success) {
         setNexusModsApiKeySet(true);
         setNexusModsUser(result.user || null);
@@ -336,14 +336,14 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             </div>
 
             {/* NexusMods Authentication Status */}
-            <div style={{ 
-              marginTop: '1.5rem', 
-              paddingTop: '1.5rem', 
-              borderTop: '1px solid #3a3a3a' 
+            <div style={{
+              marginTop: '1.5rem',
+              paddingTop: '1.5rem',
+              borderTop: '1px solid #3a3a3a'
             }}>
-              <h3 style={{ 
-                margin: '0 0 1rem 0', 
-                fontSize: '1rem', 
+              <h3 style={{
+                margin: '0 0 1rem 0',
+                fontSize: '1rem',
                 fontWeight: '600',
                 display: 'flex',
                 alignItems: 'center',
@@ -353,7 +353,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 NexusMods Authentication
               </h3>
               {nexusModsApiKeySet ? (
-                <div style={{ 
+                <div style={{
                   padding: '0.75rem',
                   backgroundColor: '#1a3a1a',
                   borderRadius: '4px',
@@ -399,7 +399,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 </div>
               ) : (
                 <div>
-                  <div style={{ 
+                  <div style={{
                     padding: '0.75rem',
                     backgroundColor: '#3a2a1a',
                     borderRadius: '4px',
@@ -434,9 +434,9 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                       disabled={validatingNexusMods}
                     />
                     {nexusModsError && (
-                      <div style={{ 
-                        color: '#ff6b6b', 
-                        fontSize: '0.75rem', 
+                      <div style={{
+                        color: '#ff6b6b',
+                        fontSize: '0.75rem',
                         marginBottom: '0.5rem',
                         padding: '0.25rem 0.5rem',
                         backgroundColor: '#3a1a1a',
@@ -466,16 +466,16 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                   </div>
                 </div>
               )}
-              <p style={{ 
-                color: '#888', 
-                fontSize: '0.85rem', 
+              <p style={{
+                color: '#888',
+                fontSize: '0.85rem',
                 marginTop: '0.5rem',
                 lineHeight: '1.4'
               }}>
                 Used for searching and downloading mods from NexusMods. Get your API key from{' '}
-                <a 
-                  href="https://www.nexusmods.com/users/myaccount?tab=api" 
-                  target="_blank" 
+                <a
+                  href="https://www.nexusmods.com/users/myaccount?tab=api"
+                  target="_blank"
                   rel="noopener noreferrer"
                   style={{ color: '#4a90e2', textDecoration: 'underline' }}
                 >
@@ -499,4 +499,3 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     </>
   );
 }
-

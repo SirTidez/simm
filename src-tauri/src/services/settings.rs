@@ -291,3 +291,158 @@ impl Clone for SettingsService {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::initialize_pool;
+    use crate::types::Theme;
+    use serial_test::serial;
+    use sqlx::Row;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn save_and_load_settings_merges_updates() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            data_dir.to_string_lossy().as_ref(),
+        );
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool)?;
+
+        let updates = serde_json::json!({
+            "maxConcurrentDownloads": 5,
+            "theme": "dark",
+            "logRetentionDays": 10,
+            "autoCheckUpdates": false
+        });
+
+        service.save_settings(updates).await?;
+        let loaded = service.load_settings().await?;
+
+        assert_eq!(loaded.max_concurrent_downloads, 5);
+        assert!(matches!(loaded.theme, Theme::Dark));
+        assert_eq!(loaded.log_retention_days, Some(10));
+        assert_eq!(loaded.auto_check_updates, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn credentials_and_tokens_round_trip() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            data_dir.to_string_lossy().as_ref(),
+        );
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool)?;
+
+        service
+            .save_credentials("user".to_string(), "pass".to_string())
+            .await?;
+        let creds = service.get_credentials().await?;
+        assert_eq!(creds, Some(("user".to_string(), "pass".to_string())));
+
+        service.save_github_token("token".to_string()).await?;
+        let token = service.get_github_token().await?;
+        assert_eq!(token.as_deref(), Some("token"));
+
+        service.save_nexus_mods_api_key("nexus".to_string()).await?;
+        let nexus = service.get_nexus_mods_api_key().await?;
+        assert_eq!(nexus.as_deref(), Some("nexus"));
+
+        service.clear_credentials().await?;
+        service.clear_github_token().await?;
+        service.clear_nexus_mods_api_key().await?;
+
+        assert!(service.get_credentials().await?.is_none());
+        assert!(service.get_github_token().await?.is_none());
+        assert!(service.get_nexus_mods_api_key().await?.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn secrets_are_encrypted_in_database() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            data_dir.to_string_lossy().as_ref(),
+        );
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        service.save_credentials("user".to_string(), "pass".to_string()).await?;
+        service.save_github_token("token".to_string()).await?;
+        service.save_nexus_mods_api_key("nexus".to_string()).await?;
+
+        let rows = sqlx::query("SELECT key, encrypted FROM secrets")
+            .fetch_all(&*pool)
+            .await?;
+
+        let mut secrets = std::collections::HashMap::new();
+        for row in rows {
+            let key: String = row.try_get("key")?;
+            let encrypted: String = row.try_get("encrypted")?;
+            secrets.insert(key, encrypted);
+        }
+
+        let credentials = secrets
+            .get(STEAM_CREDENTIALS_KEY)
+            .expect("steam_credentials stored");
+        assert!(credentials.contains(':'));
+        assert_ne!(credentials, "user");
+        assert_ne!(credentials, "pass");
+
+        let github = secrets
+            .get(GITHUB_TOKEN_KEY)
+            .expect("github_token stored");
+        assert!(github.contains(':'));
+        assert_ne!(github, "token");
+
+        let nexus = secrets
+            .get(NEXUS_MODS_API_KEY)
+            .expect("nexus_mods_api_key stored");
+        assert!(nexus.contains(':'));
+        assert_ne!(nexus, "nexus");
+
+        Ok(())
+    }
+}

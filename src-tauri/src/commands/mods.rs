@@ -226,10 +226,16 @@ pub async fn find_existing_mod_storage(
     db: State<'_, Arc<SqlitePool>>,
     source_id: String,
     source_version: String,
+    runtime: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mods_service = ModsService::new(db.inner().clone());
+    let runtime_parsed = runtime.as_deref().and_then(|value| match value.trim().to_lowercase().as_str() {
+        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+        "mono" => Some(crate::types::Runtime::Mono),
+        _ => None,
+    });
     match mods_service
-        .find_existing_mod_storage_by_source_version(&source_id, &source_version)
+        .find_existing_mod_storage_by_source_version(&source_id, &source_version, runtime_parsed)
         .await
     {
         Ok(Some(storage_id)) => Ok(serde_json::json!({
@@ -314,6 +320,35 @@ pub async fn upload_mod(
 }
 
 #[tauri::command]
+pub async fn store_mod_archive(
+    db: State<'_, Arc<SqlitePool>>,
+    file_path: String,
+    original_file_name: String,
+    runtime: Option<String>,
+    metadata: Option<serde_json::Value>,
+    target: Option<String>,
+    cleanup: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let runtime_parsed = runtime.as_deref().and_then(|value| match value.trim().to_lowercase().as_str() {
+        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+        "mono" => Some(crate::types::Runtime::Mono),
+        _ => None,
+    });
+
+    let mods_service = ModsService::new(db.inner().clone());
+    let result = mods_service
+        .store_mod_archive(&file_path, &original_file_name, runtime_parsed, metadata, target)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if cleanup.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(&file_path).await;
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn install_s1api(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
@@ -354,7 +389,7 @@ pub async fn install_s1api(
     let mods_service = ModsService::new(db.inner().clone());
     let source_id = "ifBars/S1API".to_string();
     if let Ok(Some(existing_mod_id)) = mods_service
-        .find_existing_mod_storage_by_source_version(&source_id, &version_tag)
+        .find_existing_mod_storage_by_source_version(&source_id, &version_tag, Some(env.runtime.clone()))
         .await
     {
         eprintln!("[install_s1api] S1API version {} already stored with storage_id: {}, installing from storage", version_tag, existing_mod_id);
@@ -468,6 +503,174 @@ pub async fn install_s1api(
         Ok(json_result) => Ok(json_result),
         Err(e) => error_json(format!("Installation failed: {}", e))
     }
+}
+
+#[tauri::command]
+pub async fn download_s1api_to_library(
+    db: State<'_, Arc<SqlitePool>>,
+    version_tag: String,
+) -> Result<serde_json::Value, String> {
+    let error_json = |msg: String| -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({
+            "success": false,
+            "error": msg
+        }))
+    };
+
+    let github_service = {
+        let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
+        GitHubReleasesService::with_token(token)
+    };
+
+    let releases = github_service.get_all_releases("ifBars", "S1API", false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let release = match releases.iter()
+        .find(|r| r.get("tag_name")
+            .and_then(|t| t.as_str())
+            .map(|t| t == version_tag)
+            .unwrap_or(false)) {
+        Some(release) => release,
+        None => return error_json(format!("S1API version {} not found", version_tag)),
+    };
+
+    let zip_url = match github_service.get_zip_asset_url(release) {
+        Some(url) => url,
+        None => return error_json(format!("No ZIP asset found for S1API version {}", version_tag)),
+    };
+
+    let zip_bytes = github_service.download_release_asset(&zip_url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let temp_dir = std::env::temp_dir();
+    let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
+    let temp_zip_path = temp_dir.join(format!("s1api-{}.zip", sanitized_tag));
+    tokio::fs::write(&temp_zip_path, zip_bytes).await
+        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+
+    let metadata = serde_json::json!({
+        "source": "local",
+        "sourceId": "ifBars/S1API",
+        "sourceVersion": version_tag,
+        "sourceUrl": "https://github.com/ifBars/S1API",
+        "modName": "S1API",
+        "author": "ScheduleI-Dev",
+    });
+
+    let mods_service = ModsService::new(db.inner().clone());
+    let result = mods_service
+        .store_mod_archive(
+            &temp_zip_path.to_string_lossy(),
+            "S1API.zip",
+            None,
+            Some(metadata),
+            None,
+        )
+        .await;
+
+    let _ = tokio::fs::remove_file(&temp_zip_path).await;
+
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn download_mlvscan_to_library(
+    db: State<'_, Arc<SqlitePool>>,
+    version_tag: String,
+) -> Result<serde_json::Value, String> {
+    let error_json = |msg: String| -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({
+            "success": false,
+            "error": msg
+        }))
+    };
+
+    let github_service = {
+        let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
+        GitHubReleasesService::with_token(token)
+    };
+
+    let releases = github_service.get_all_releases("ifBars", "MLVScan", false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let release = match releases.iter()
+        .find(|r| r.get("tag_name")
+            .and_then(|t| t.as_str())
+            .map(|t| t == version_tag)
+            .unwrap_or(false)) {
+        Some(release) => release,
+        None => return error_json(format!("MLVScan version {} not found", version_tag)),
+    };
+
+    let assets = release.get("assets").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    let zip_asset = assets.iter().find(|asset| {
+        asset.get("name")
+            .and_then(|n| n.as_str())
+            .map(|name| name.to_lowercase().ends_with(".zip"))
+            .unwrap_or(false)
+    });
+    let dll_asset = assets.iter().find(|asset| {
+        asset.get("name")
+            .and_then(|n| n.as_str())
+            .map(|name| name.to_lowercase().ends_with(".dll") && name.to_lowercase().contains("mlvscan"))
+            .unwrap_or(false)
+    });
+
+    let (asset_url, asset_name, target) = if let Some(asset) = zip_asset {
+        let url = asset.get("browser_download_url").and_then(|v| v.as_str());
+        let name = asset.get("name").and_then(|v| v.as_str());
+        match (url, name) {
+            (Some(url), Some(name)) => (url.to_string(), name.to_string(), None),
+            _ => return error_json(format!("Invalid ZIP asset for MLVScan version {}", version_tag)),
+        }
+    } else if let Some(asset) = dll_asset {
+        let url = asset.get("browser_download_url").and_then(|v| v.as_str());
+        match url {
+            Some(url) => (url.to_string(), "MLVScan.dll".to_string(), Some("plugins".to_string())),
+            None => return error_json(format!("Invalid DLL asset for MLVScan version {}", version_tag)),
+        }
+    } else {
+        return error_json(format!("No ZIP or DLL asset found for MLVScan version {}", version_tag));
+    };
+
+    let bytes = github_service.download_release_asset(&asset_url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let temp_dir = std::env::temp_dir();
+    let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
+    let temp_path = temp_dir.join(format!("mlvscan-{}-{}", sanitized_tag, asset_name));
+    tokio::fs::write(&temp_path, bytes).await
+        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+
+    let metadata = serde_json::json!({
+        "source": "local",
+        "sourceId": "ifBars/MLVScan",
+        "sourceVersion": version_tag,
+        "sourceUrl": "https://github.com/ifBars/MLVScan",
+        "modName": "MLVScan",
+        "author": "ifBars",
+    });
+
+    let mods_service = ModsService::new(db.inner().clone());
+    let result = mods_service
+        .store_mod_archive(
+            &temp_path.to_string_lossy(),
+            &asset_name,
+            None,
+            Some(metadata),
+            target,
+        )
+        .await;
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

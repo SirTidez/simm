@@ -17,7 +17,7 @@ impl ModUpdateService {
     pub async fn check_mod_updates(&self, environment_id: &str, env_service: &EnvironmentService, mods_service: &ModsService, thunderstore_service: &ThunderStoreService, nexus_mods_service: &NexusModsService) -> Result<Vec<serde_json::Value>> {
         use crate::types::ModMetadata;
         use chrono::Utc;
-        
+
         let env = env_service.get_environment(environment_id)
             .await
             .context("Failed to get environment")?
@@ -63,12 +63,12 @@ impl ModUpdateService {
                                     .map(|s| s.to_string())
                                 {
                                     let update_available = current_version.as_ref().map(|cv| cv != &latest_version).unwrap_or(true);
-                                    
+
                                     // Update metadata with check results
                                     metadata.last_update_check = Some(now);
                                     metadata.update_available = Some(update_available);
                                     metadata.remote_version = Some(latest_version.clone());
-                                    
+
                                     results.push(serde_json::json!({
                                         "modFileName": file_name,
                                         "updateAvailable": update_available,
@@ -101,12 +101,12 @@ impl ModUpdateService {
                                         .map(|s| s.to_string())
                                     {
                                         let update_available = current_version.as_ref().map(|cv| cv != &latest_version).unwrap_or(true);
-                                        
+
                                         // Update metadata with check results
                                         metadata.last_update_check = Some(now);
                                         metadata.update_available = Some(update_available);
                                         metadata.remote_version = Some(latest_version.clone());
-                                        
+
                                         results.push(serde_json::json!({
                                             "modFileName": file_name,
                                             "updateAvailable": update_available,
@@ -149,5 +149,213 @@ impl ModUpdateService {
 impl Default for ModUpdateService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::initialize_pool;
+    use crate::services::environment::EnvironmentService;
+    use crate::services::mods::ModsService;
+    use crate::services::nexus_mods::NexusModsService;
+    use crate::services::thunderstore::ThunderStoreService;
+    use crate::types::{schedule_i_config, ModMetadata, ModSource};
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn check_mod_updates_requires_output_dir() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let mods_service = ModsService::new(pool.clone());
+        let thunderstore_service = ThunderStoreService::new();
+        let nexus_mods_service = NexusModsService::new();
+
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                "".to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let service = ModUpdateService::new();
+        let err = service
+            .check_mod_updates(
+                &env.id,
+                &env_service,
+                &mods_service,
+                &thunderstore_service,
+                &nexus_mods_service,
+            )
+            .await
+            .expect_err("expected output dir error");
+
+        assert!(err.to_string().contains("Output directory not set"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_mod_returns_not_implemented() -> Result<()> {
+        let service = ModUpdateService::new();
+        let result = service.update_mod("env", "mod").await?;
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(result.get("error").and_then(|v| v.as_str()), Some("Not implemented"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn check_mod_updates_returns_empty_for_no_mods() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let mods_service = ModsService::new(pool.clone());
+        let thunderstore_service = ThunderStoreService::new();
+        let nexus_mods_service = NexusModsService::new();
+
+        let output_dir = temp.path().join("envs").join("env-1");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let service = ModUpdateService::new();
+        let results = service
+            .check_mod_updates(
+                &env.id,
+                &env_service,
+                &mods_service,
+                &thunderstore_service,
+                &nexus_mods_service,
+            )
+            .await?;
+        assert!(results.is_empty());
+
+        Ok(())
+    }
+
+    fn extract_package_id(package: &serde_json::Value) -> Option<String> {
+        for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
+            if let Some(value) = package.get(key).and_then(|v| v.as_str()) {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn check_mod_updates_detects_thunderstore_updates() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let mods_service = ModsService::new(pool.clone());
+        let thunderstore_service = ThunderStoreService::new();
+        let nexus_mods_service = NexusModsService::new();
+
+        let output_dir = temp.path().join("envs").join("env-live");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let packages = thunderstore_service
+            .search_packages_filtered_by_runtime("schedule-i", "unknown", None)
+            .await?;
+        let package_id = packages
+            .iter()
+            .find_map(extract_package_id)
+            .ok_or_else(|| anyhow::anyhow!("No Thunderstore package ID found"))?;
+
+        let mods_dir = output_dir.join("Mods");
+        tokio::fs::create_dir_all(&mods_dir).await?;
+        tokio::fs::write(mods_dir.join("Example.dll"), b"data").await?;
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "Example.dll".to_string(),
+            ModMetadata {
+                source: Some(ModSource::Thunderstore),
+                source_id: Some(package_id),
+                source_version: Some("0.0.0".to_string()),
+                author: None,
+                mod_name: Some("Example".to_string()),
+                source_url: None,
+                installed_version: None,
+                installed_at: None,
+                last_update_check: None,
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: None,
+                symlink_paths: None,
+            },
+        );
+        mods_service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let service = ModUpdateService::new();
+        let results = service
+            .check_mod_updates(
+                &env.id,
+                &env_service,
+                &mods_service,
+                &thunderstore_service,
+                &nexus_mods_service,
+            )
+            .await?;
+
+        assert!(!results.is_empty());
+        let entry = results.first().expect("update result");
+        assert_eq!(entry.get("modFileName").and_then(|v| v.as_str()), Some("Example.dll"));
+        assert_eq!(entry.get("source").and_then(|v| v.as_str()), Some("thunderstore"));
+
+        Ok(())
     }
 }

@@ -11,17 +11,14 @@ static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Laz
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
     let mut service = NEXUS_MODS_SERVICE.lock().await;
     if service.is_none() {
-        let nexus_service = Arc::new(NexusModsService::new());
-        
-        // Try to load API key from encrypted storage
-        let settings_service = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
-        if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
-            nexus_service.set_api_key(api_key).await;
-        }
-        
-        *service = Some(nexus_service);
+        *service = Some(Arc::new(NexusModsService::new()));
     }
-    Ok(service.as_ref().unwrap().clone())
+    let nexus_service = service.as_ref().unwrap().clone();
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
+        nexus_service.set_api_key(api_key).await;
+    }
+    Ok(nexus_service)
 }
 
 #[tauri::command]
@@ -31,22 +28,27 @@ pub async fn validate_nexus_mods_api_key(
 ) -> Result<serde_json::Value, String> {
     let db_pool = db.inner().clone();
     let service = get_nexus_mods_service(db_pool.clone()).await?;
+    let previous_key = service.get_api_key_optional().await;
     service.set_api_key(api_key.clone()).await;
-    
+
     match service.validate_api_key().await {
         Ok(validation) => {
-            // If valid, save to encrypted storage
             let settings_service = SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
             if let Err(e) = settings_service.save_nexus_mods_api_key(api_key).await {
+                if let Some(prev) = previous_key {
+                    service.set_api_key(prev).await;
+                } else {
+                    service.clear_api_key().await;
+                }
                 return Ok(serde_json::json!({
                     "success": false,
                     "error": format!("Failed to save API key: {}", e)
                 }));
             }
-            
+
             let rate_limits = service.get_rate_limits().await
                 .unwrap_or_else(|_| serde_json::json!({ "daily": 0, "hourly": 0 }));
-            
+
             Ok(serde_json::json!({
                 "success": true,
                 "rateLimits": rate_limits,
@@ -58,6 +60,11 @@ pub async fn validate_nexus_mods_api_key(
             }))
         }
         Err(e) => {
+            if let Some(prev) = previous_key {
+                service.set_api_key(prev).await;
+            } else {
+                service.clear_api_key().await;
+            }
             Ok(serde_json::json!({
                 "success": false,
                 "error": e.to_string()
@@ -196,10 +203,20 @@ pub async fn check_nexus_mods_for_updates(
         .map_err(|e| e.to_string())
 }
 
+fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
+    let s = game_id.map(|s| s.trim()).unwrap_or("").to_string();
+    if s.is_empty() {
+        "schedule1".to_string()
+    } else {
+        s
+    }
+}
+
 #[tauri::command]
 pub async fn install_nexus_mods_mod(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
+    game_id_param: Option<String>,
     mod_id: u32,
     file_id: u32,
 ) -> Result<serde_json::Value, String> {
@@ -207,6 +224,14 @@ pub async fn install_nexus_mods_mod(
     use crate::services::mods::ModsService;
 
     let db_pool = db.inner().clone();
+    let game_id = if let Some(ref id) = game_id_param {
+        normalize_nexus_game_id(Some(id))
+    } else {
+        let mut settings_service = SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
+        let settings = settings_service.load_settings().await.map_err(|e| e.to_string())?;
+        normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
+    };
+
     let env_service = EnvironmentService::new(db_pool.clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
@@ -222,10 +247,8 @@ pub async fn install_nexus_mods_mod(
         crate::types::Runtime::Mono => "Mono",
     };
 
-    // Get mod info for metadata
     let nexus_service = get_nexus_mods_service(db_pool.clone()).await
         .map_err(|e| format!("Failed to get NexusMods service: {}", e))?;
-    let game_id = "schedule1".to_string();
     let mod_info = nexus_service.get_mod(&game_id, mod_id)
         .await
         .map_err(|e| format!("Failed to fetch mod info for mod {}: {}", mod_id, e))?;
@@ -239,18 +262,15 @@ pub async fn install_nexus_mods_mod(
         .find(|f| f.get("file_id").and_then(|id| id.as_u64()) == Some(file_id as u64))
         .ok_or_else(|| format!("File {} not found in mod {}", file_id, mod_id))?;
 
-    // Extract metadata for duplicate check
     let version = file_info.get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("1.0.0")
         .to_string();
-    let source_id = Some(mod_id.to_string());
-    let source_version = Some(version.clone());
 
     // Check if we already have this mod/version stored anywhere before downloading
     let mods_service = ModsService::new(db_pool.clone());
     if let Ok(Some(existing_mod_id)) = mods_service
-        .find_existing_mod_storage_by_source_version(&mod_id.to_string(), &version)
+        .find_existing_mod_storage_by_source_version(&mod_id.to_string(), &version, Some(env.runtime.clone()))
         .await
     {
         eprintln!("[DEBUG] install_nexus_mods_mod: Found existing storage for mod {} version {}: {}, installing from storage", mod_id, version, existing_mod_id);
@@ -297,7 +317,7 @@ pub async fn install_nexus_mods_mod(
         .and_then(|v| v.as_str())
         .unwrap_or("1.0.0")
         .to_string();
-    let source_url = format!("https://www.nexusmods.com/schedule1/mods/{}", mod_id);
+    let source_url = format!("https://www.nexusmods.com/{}/mods/{}", game_id, mod_id);
 
     // Install using mods service
     let mods_service = ModsService::new(db_pool.clone());

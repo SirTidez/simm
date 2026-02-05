@@ -145,3 +145,74 @@ impl Default for AuthService {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct CurrentDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new(path: &std::path::Path) -> Result<Self> {
+            let original = std::env::current_dir().context("Failed to read current dir")?;
+            std::env::set_current_dir(path).context("Failed to set current dir")?;
+            Ok(Self { original })
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    async fn authenticate_returns_error_when_depotdownloader_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let _cwd_guard = CurrentDirGuard::new(temp.path())?;
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let system32 = format!("{}\\System32", system_root);
+        let _path_guard = EnvVarGuard::set("PATH", &system32);
+        let _local_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
+        let _program_guard = EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
+
+        let service = AuthService::new();
+        let result = service
+            .authenticate("user".to_string(), None, None)
+            .await?;
+
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap_or("").contains("DepotDownloader"));
+        assert_eq!(result.requires_steam_guard, None);
+
+        Ok(())
+    }
+}

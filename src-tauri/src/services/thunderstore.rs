@@ -135,7 +135,7 @@ impl ThunderStoreService {
         } else {
             format!("{}/package/{}/", THUNDERSTORE_API_BASE, package_uuid)
         };
-        
+
         let response = self.client
             .get(&url)
             .send()
@@ -190,5 +190,41 @@ impl ThunderStoreService {
 impl Default for ThunderStoreService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract_package_id(package: &serde_json::Value) -> Option<String> {
+        for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
+            if let Some(value) = package.get(key).and_then(|v| v.as_str()) {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn live_search_and_fetch_package() -> Result<()> {
+        let service = ThunderStoreService::new();
+        let packages = service
+            .search_packages_filtered_by_runtime("schedule-i", "unknown", None)
+            .await?;
+        assert!(!packages.is_empty(), "Expected Thunderstore packages");
+
+        let package_id = packages
+            .iter()
+            .find_map(extract_package_id)
+            .ok_or_else(|| anyhow::anyhow!("No package ID found in Thunderstore response"))?;
+
+        let package = service
+            .get_package(&package_id, Some("schedule-i"))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Package not found for id {}", package_id))?;
+
+        assert!(package.get("name").is_some());
+        Ok(())
     }
 }

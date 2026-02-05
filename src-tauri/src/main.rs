@@ -40,7 +40,7 @@ fn main() {
 
             // Store flag in app state so frontend can check it
             app.manage(tauri::async_runtime::Mutex::new(simm_was_created));
-            
+
             // Initialize services (async)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -119,6 +119,9 @@ fn main() {
             commands::mods::find_existing_mod_storage,
             commands::mods::cleanup_duplicate_mod_storage,
             commands::mods::get_s1api_installation_status,
+            commands::mods::store_mod_archive,
+            commands::mods::download_s1api_to_library,
+            commands::mods::download_mlvscan_to_library,
             // Plugins
             commands::plugins::get_plugins,
             commands::plugins::get_plugins_count,
@@ -211,4 +214,3 @@ fn main() {
             std::process::exit(1);
         });
 }
-

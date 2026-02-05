@@ -31,18 +31,24 @@ async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> 
 }
 
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
-    let mut service = NEXUS_MODS_SERVICE.lock().await;
-    if service.is_none() {
-        let nexus_service = Arc::new(NexusModsService::new());
-
-        let settings_service = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
-        if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
+    let nexus_service = {
+        let mut service = NEXUS_MODS_SERVICE.lock().await;
+        if service.is_none() {
+            *service = Some(Arc::new(NexusModsService::new()));
+        }
+        service.as_ref().unwrap().clone()
+    };
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    match settings_service.get_nexus_mods_api_key().await {
+        Ok(Some(api_key)) => {
             nexus_service.set_api_key(api_key).await;
         }
-
-        *service = Some(nexus_service);
+        Ok(None) => {}
+        Err(e) => {
+            log::warn!("Failed to get Nexus Mods API key: {:?}", e);
+        }
     }
-    Ok(service.as_ref().unwrap().clone())
+    Ok(nexus_service)
 }
 
 #[tauri::command]
@@ -55,7 +61,7 @@ pub async fn check_mod_updates(
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let thunderstore_service = get_thunderstore_service().await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
-    
+
     mod_update_service.check_mod_updates(&environment_id, &env_service, &mods_service, &thunderstore_service, &nexus_mods_service)
         .await
         .map_err(|e| e.to_string())
@@ -68,4 +74,3 @@ pub async fn update_mod(environment_id: String, mod_file_name: String) -> Result
         .await
         .map_err(|e| e.to_string())
 }
-

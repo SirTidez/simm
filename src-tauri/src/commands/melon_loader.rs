@@ -56,17 +56,17 @@ pub async fn get_melon_loader_status(
 pub async fn install_melon_loader(
     db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
-    environment_id: String, 
+    environment_id: String,
     version_tag: String
 ) -> Result<serde_json::Value, String> {
     eprintln!("[install_melon_loader] Starting installation for environment: {}, version: {}", environment_id, version_tag);
-    
+
     // Generate a download_id for tracking this installation
     let download_id = format!("melonloader-{}-{}", environment_id, chrono::Utc::now().timestamp_millis());
-    
+
     // Emit installing event
     let _ = events::emit_melonloader_installing(&app, download_id.clone(), format!("Starting MelonLoader {} installation...", version_tag));
-    
+
     // Helper to return error as JSON
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
         eprintln!("[install_melon_loader] Error: {}", msg);
@@ -75,12 +75,12 @@ pub async fn install_melon_loader(
             "error": msg
         }))
     };
-    
+
     let env_service = match EnvironmentService::new(db.inner().clone()) {
         Ok(service) => service,
         Err(e) => return error_json(format!("Failed to get environment service: {}", e))
     };
-    
+
     let env = match env_service.get_environment(&environment_id).await {
         Ok(Some(env)) => env,
         Ok(None) => return error_json("Environment not found".to_string()),
@@ -105,7 +105,7 @@ pub async fn install_melon_loader(
         eprintln!("[install_melon_loader] GitHub service obtained");
         GitHubReleasesService::with_token(token)
     };
-    
+
     eprintln!("[install_melon_loader] Fetching MelonLoader releases from GitHub...");
     let releases = match github_service.get_all_releases("LavaGang", "MelonLoader", false).await {
         Ok(releases) => {
@@ -114,7 +114,7 @@ pub async fn install_melon_loader(
         },
         Err(e) => return error_json(format!("Failed to fetch MelonLoader releases: {}", e))
     };
-    
+
     // Find the release matching the version tag
     eprintln!("[install_melon_loader] Looking for version tag: {}", version_tag);
     let release = match releases.iter()
@@ -128,7 +128,7 @@ pub async fn install_melon_loader(
         },
         None => return error_json(format!("MelonLoader version {} not found", version_tag))
     };
-    
+
     // Get the Windows x64 ZIP asset URL
     eprintln!("[install_melon_loader] Getting Windows x64 ZIP asset URL...");
     let zip_url = match github_service.get_melonloader_x64_asset_url(release) {
@@ -149,7 +149,7 @@ pub async fn install_melon_loader(
             return error_json(format!("No Windows x64 ZIP asset found for MelonLoader version {}. Please ensure the release contains a MelonLoader.x64.zip file.", version_tag))
         }
     };
-    
+
     // Download the ZIP file
     eprintln!("[install_melon_loader] Downloading ZIP file from GitHub...");
     let zip_bytes = match github_service.download_release_asset(&zip_url).await {
@@ -159,17 +159,17 @@ pub async fn install_melon_loader(
         },
         Err(e) => return error_json(format!("Failed to download MelonLoader: {}", e))
     };
-    
+
     // Save to temp file
     let temp_dir = std::env::temp_dir();
     // Sanitize version tag for filename (remove invalid characters)
     let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
     let temp_zip_path = temp_dir.join(format!("melonloader-{}.zip", sanitized_tag));
-    
+
     if let Err(e) = tokio::fs::write(&temp_zip_path, zip_bytes).await {
         return error_json(format!("Failed to save downloaded file: {}", e));
     }
-    
+
     // Install from the temp file
     let melon_loader_service = match get_melon_loader_service().await {
         Ok(service) => service,
@@ -178,15 +178,15 @@ pub async fn install_melon_loader(
             return error_json(format!("Failed to get MelonLoader service: {}", e));
         }
     };
-    
+
     let result = melon_loader_service.install_melon_loader(
         &env.output_dir,
         &temp_zip_path.to_string_lossy()
     ).await;
-    
+
     // Clean up temp file (ignore errors)
     let _ = tokio::fs::remove_file(&temp_zip_path).await;
-    
+
     // The service returns Ok(serde_json::Value) with success/error fields
     // So we just return it directly
     match result {
@@ -198,7 +198,7 @@ pub async fn install_melon_loader(
                     let version = json_result.get("version")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    
+
                     let _ = events::emit_melonloader_installed(
                         &app,
                         download_id.clone(),
@@ -211,7 +211,7 @@ pub async fn install_melon_loader(
                         .and_then(|e| e.as_str())
                         .unwrap_or("Installation failed")
                         .to_string();
-                    
+
                     let _ = events::emit_melonloader_error(&app, download_id.clone(), error_msg.clone());
                 }
             }

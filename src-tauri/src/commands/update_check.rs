@@ -96,7 +96,7 @@ pub async fn check_update(
 
     // Emit update check complete event
     let _ = events::emit_update_check_complete(&app, environment_id.clone(), result.clone());
-    
+
     // Emit update available event if an update is available
     if result.update_available {
         let _ = events::emit_update_available(&app, environment_id, result.clone());
@@ -144,12 +144,12 @@ pub async fn check_all_updates(
     let mods_service = Arc::new(ModsService::new(db.inner().clone()));
     let thunderstore_service = get_thunderstore_service().await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
-    
+
     // Filter to only completed environments and check mod updates in parallel
     let completed_envs: Vec<_> = envs.iter()
         .filter(|env| matches!(env.status, crate::types::EnvironmentStatus::Completed))
         .collect();
-    
+
     // Check mod updates for all completed environments in parallel
     let mod_update_tasks: Vec<_> = completed_envs.iter().map(|env| {
         let env_id = env.id.clone();
@@ -158,7 +158,7 @@ pub async fn check_all_updates(
         let env_service = env_service.clone();
         let thunderstore_service = thunderstore_service.clone();
         let nexus_mods_service = nexus_mods_service.clone();
-        
+
         tokio::spawn(async move {
             match mod_update_service.check_mod_updates(
                 &env_id,
@@ -178,7 +178,7 @@ pub async fn check_all_updates(
             }
         })
     }).collect();
-    
+
     // Wait for all mod update checks to complete (but don't fail if they error)
     for task in mod_update_tasks {
         let _ = task.await;
@@ -189,19 +189,19 @@ pub async fn check_all_updates(
         let mut updates = Vec::new();
         updates.push(("lastUpdateCheck".to_string(), serde_json::json!(result.checked_at.timestamp())));
         updates.push(("updateAvailable".to_string(), serde_json::json!(result.update_available)));
-        
+
         if let Some(ref remote_manifest_id) = result.remote_manifest_id {
             updates.push(("remoteManifestId".to_string(), serde_json::json!(remote_manifest_id)));
         }
-        
+
         if let Some(ref remote_build_id) = result.remote_build_id {
             updates.push(("remoteBuildId".to_string(), serde_json::json!(remote_build_id)));
         }
-        
+
         if let Some(ref current_game_version) = result.current_game_version {
             updates.push(("currentGameVersion".to_string(), serde_json::json!(current_game_version)));
         }
-        
+
         if let Some(ref update_game_version) = result.update_game_version {
             updates.push(("updateGameVersion".to_string(), serde_json::json!(update_game_version)));
         }
@@ -210,10 +210,10 @@ pub async fn check_all_updates(
         if let Err(e) = env_service.update_environment(env_id, updates).await {
             eprintln!("[UpdateCheck] Failed to update environment {}: {}", env_id, e);
         }
-        
+
         // Emit update check complete event
         let _ = events::emit_update_check_complete(&app, env_id.clone(), result.clone());
-        
+
         // Emit update available event if an update is available
         if result.update_available {
             let _ = events::emit_update_available(&app, env_id.clone(), result.clone());

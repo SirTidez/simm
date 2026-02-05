@@ -7,8 +7,25 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::State;
 
+/// Start filesystem watchers for an environment's Mods/Plugins/UserLibs (reused by get_environments and create_*).
+async fn start_watchers_for_env(
+    watcher_guard: &FileSystemWatcherService,
+    env_id: &str,
+    output_dir: &str,
+) {
+    let mods_dir = std::path::Path::new(output_dir).join("Mods");
+    let plugins_dir = std::path::Path::new(output_dir).join("Plugins");
+    let userlibs_dir = std::path::Path::new(output_dir).join("UserLibs");
+    let _ = watcher_guard.start_watching(env_id, mods_dir.to_str().unwrap_or(""), "mods").await;
+    let _ = watcher_guard.start_watching(env_id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
+    let _ = watcher_guard.start_watching(env_id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+}
+
 #[tauri::command]
-pub async fn get_environments(db: State<'_, Arc<SqlitePool>>) -> Result<Vec<Environment>, String> {
+pub async fn get_environments(
+    db: State<'_, Arc<SqlitePool>>,
+    watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
+) -> Result<Vec<Environment>, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let mut envs = service.get_environments()
         .await
@@ -34,6 +51,8 @@ pub async fn get_environments(db: State<'_, Arc<SqlitePool>>) -> Result<Vec<Envi
                     .create_steam_environment(installation.path.clone(), None, None)
                     .await;
                 if let Ok(env) = steam_env {
+                    let watcher_guard = watcher.lock().await;
+                    start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
                     envs.push(env);
                 }
             }
@@ -54,7 +73,7 @@ pub async fn get_environments(db: State<'_, Arc<SqlitePool>>) -> Result<Vec<Envi
         }
         true
     });
-    
+
     // Sort environments: Steam environments first, then DepotDownloader
     envs.sort_by(|a, b| {
         let a_is_steam = a.environment_type == Some(crate::types::EnvironmentType::Steam);
@@ -65,7 +84,7 @@ pub async fn get_environments(db: State<'_, Arc<SqlitePool>>) -> Result<Vec<Envi
             _ => std::cmp::Ordering::Equal, // Maintain original order for same type
         }
     });
-    
+
     Ok(envs)
 }
 
@@ -116,15 +135,8 @@ pub async fn create_environment(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Start watching mods/plugins/userlibs directories
     let watcher_guard = watcher.lock().await;
-    let mods_dir = std::path::Path::new(&validated_dir).join("Mods");
-    let plugins_dir = std::path::Path::new(&validated_dir).join("Plugins");
-    let userlibs_dir = std::path::Path::new(&validated_dir).join("UserLibs");
-    
-    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
-    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
-    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+    start_watchers_for_env(&watcher_guard, &env.id, &validated_dir).await;
 
     Ok(env)
 }
@@ -136,8 +148,8 @@ pub async fn update_environment(
     updates: serde_json::Value,
 ) -> Result<Environment, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    
-    let updates_map: std::collections::HashMap<String, serde_json::Value> = 
+
+    let updates_map: std::collections::HashMap<String, serde_json::Value> =
         if let Some(map) = updates.as_object() {
             map.iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -176,12 +188,12 @@ pub async fn get_schedule1_config() -> Result<AppConfig, String> {
 #[tauri::command]
 pub async fn detect_steam_installations() -> Result<serde_json::Value, String> {
     use crate::services::steam::SteamService;
-    
+
     let service = SteamService::new();
     let installations = service.detect_steam_installations()
         .await
         .map_err(|e| e.to_string())?;
-    
+
     Ok(serde_json::json!(installations))
 }
 
@@ -198,15 +210,8 @@ pub async fn create_steam_environment(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Start watching mods/plugins/userlibs directories
     let watcher_guard = watcher.lock().await;
-    let mods_dir = std::path::Path::new(&steam_path).join("Mods");
-    let plugins_dir = std::path::Path::new(&steam_path).join("Plugins");
-    let userlibs_dir = std::path::Path::new(&steam_path).join("UserLibs");
-    
-    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
-    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
-    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+    start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
 
     Ok(env)
 }

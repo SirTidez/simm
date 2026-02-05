@@ -50,7 +50,7 @@ impl UpdateCheckService {
         // For Steam environments, skip DepotDownloader and only check version
         if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
             log::info!("Steam environment detected, skipping DepotDownloader update check");
-            
+
             // Still check for remote manifest ID to compare versions, but don't trigger downloads
             match self.get_manifest_id_from_depot_downloader(&env.app_id, &env.branch).await {
                 Ok(manifest_id) => {
@@ -159,10 +159,10 @@ impl UpdateCheckService {
             .context("Failed to create settings service")?;
         let settings = settings_service.load_settings().await
             .context("Failed to load settings")?;
-        
+
         let credentials = settings_service.get_credentials().await
             .context("Failed to get credentials")?;
-        
+
         // Get username from credentials or settings
         let username = credentials
             .as_ref()
@@ -213,7 +213,7 @@ impl UpdateCheckService {
 
         // Check if command failed
         if !output.status.success() {
-            return Err(anyhow::anyhow!("DepotDownloader exited with code {}: {}", 
+            return Err(anyhow::anyhow!("DepotDownloader exited with code {}: {}",
                 output.status.code().unwrap_or(-1), error_str));
         }
 
@@ -256,5 +256,157 @@ impl UpdateCheckService {
         log::error!("Could not parse manifest ID from DepotDownloader output");
 
         Err(anyhow::anyhow!("Could not parse manifest ID from DepotDownloader output. Output: {}", all_output))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::initialize_pool;
+    use crate::types::{EnvironmentStatus, EnvironmentType, Runtime, schedule_i_config};
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    struct CurrentDirGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new(path: &std::path::Path) -> Result<Self> {
+            let original = std::env::current_dir().context("Failed to read current dir")?;
+            std::env::set_current_dir(path).context("Failed to set current dir")?;
+            Ok(Self { original })
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn check_update_for_steam_env_records_error_when_depotdownloader_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &format!("{}\\System32", std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())),
+        );
+        let _local_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
+        let _program_guard = EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
+        let _cwd_guard = CurrentDirGuard::new(temp.path())?;
+
+        let pool = initialize_pool().await?;
+        let service = UpdateCheckService::new(pool);
+
+        let env = Environment {
+            id: "steam-1".to_string(),
+            name: "Steam Installation".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: temp.path().join("steam").to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::Steam),
+        };
+
+        let result = service.check_update_for_environment(&env).await?;
+        assert!(!result.update_available);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Steam will handle updates"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn check_update_for_depot_env_sets_error_when_depotdownloader_missing() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &format!("{}\\System32", std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())),
+        );
+        let _local_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
+        let _program_guard = EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
+        let _cwd_guard = CurrentDirGuard::new(temp.path())?;
+
+        let pool = initialize_pool().await?;
+        let service = UpdateCheckService::new(pool);
+
+        let env = Environment {
+            id: "env-1".to_string(),
+            name: "Env".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: temp.path().join("env").to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::NotDownloaded,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("123".to_string()),
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        let result = service.check_update_for_environment(&env).await?;
+        assert!(!result.update_available);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("DepotDownloader"));
+
+        Ok(())
     }
 }

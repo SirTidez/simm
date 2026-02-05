@@ -142,26 +142,28 @@ impl PluginsService {
             }
         };
 
+        let mut tx = self.pool.begin().await.context("Failed to begin transaction for plugin metadata")?;
+
         sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ? AND kind = 'plugins'")
             .bind(&env_id)
-            .execute(&*self.pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to clear plugin metadata")?;
 
         for (file_name, meta) in metadata {
             let serialized = serde_json::to_string(meta).context("Failed to serialize plugin metadata")?;
             sqlx::query(
-                "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'plugins', ?, ?) \
-                 ON CONFLICT(environment_id, kind, file_name) DO UPDATE SET data = excluded.data",
+                "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'plugins', ?, ?)",
             )
             .bind(&env_id)
             .bind(file_name)
             .bind(serialized)
-            .execute(&*self.pool)
+            .execute(&mut *tx)
             .await
             .context("Failed to save plugin metadata")?;
         }
 
+        tx.commit().await.context("Failed to commit plugin metadata transaction")?;
         Ok(())
     }
 
@@ -302,14 +304,14 @@ impl PluginsService {
             // Copy from Plugins/ folder
             let mut entries = fs::read_dir(&source_plugins_dir).await
                 .context("Failed to read Plugins directory from archive")?;
-            
+
             while let Some(entry) = entries.next_entry().await? {
                 let entry_path = entry.path();
                 if entry_path.is_file() {
                     let file_name = entry_path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    
+
                     if file_name.to_lowercase().ends_with(".dll") {
                         let dest_path = plugins_directory.join(file_name);
                         fs::copy(&entry_path, &dest_path).await
@@ -322,14 +324,14 @@ impl PluginsService {
             // Legacy structure: DLLs at root level
             let mut entries = fs::read_dir(&source_plugins_dir).await
                 .context("Failed to read temp directory")?;
-            
+
             while let Some(entry) = entries.next_entry().await? {
                 let entry_path = entry.path();
                 if entry_path.is_file() {
                     let file_name = entry_path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    
+
                     // Only root-level DLLs (not in subdirectories)
                     if file_name.to_lowercase().ends_with(".dll") {
                         let dest_path = plugins_directory.join(file_name);
@@ -423,7 +425,7 @@ impl PluginsService {
 
     pub async fn list_plugins(&self, game_dir: &str) -> Result<serde_json::Value> {
         let plugins_directory = self.get_plugins_directory(game_dir);
-        
+
         if !plugins_directory.exists() {
             return Ok(serde_json::json!({
                 "plugins": [],
@@ -632,7 +634,7 @@ impl PluginsService {
         // The source file might be named MLVScan.MelonLoader.dll or similar
         // but we always install it as MLVScan.dll in the Plugins folder
         let dest_path = plugins_directory.join("MLVScan.dll");
-        
+
         // Copy the DLL file
         fs::copy(source_path, &dest_path).await
             .context("Failed to copy MLVScan.dll")?;

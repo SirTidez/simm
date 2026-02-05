@@ -33,12 +33,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       setError(null);
       const envs = await ApiService.getEnvironments();
       setEnvironments(envs);
-      
+
       // Automatically extract versions for completed environments that don't have one
-      const envsNeedingVersion = envs.filter(env => 
+      const envsNeedingVersion = envs.filter(env =>
         env.status === 'completed' && !env.currentGameVersion
       );
-      
+
       if (envsNeedingVersion.length > 0) {
         // Extract versions in the background (don't block UI)
         // Use setTimeout to avoid blocking the initial render
@@ -49,8 +49,8 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
                 const version = await ApiService.extractGameVersion(env.id);
                 if (version) {
                   // Update the environment state directly
-                  setEnvironments(prev => prev.map(e => 
-                    e.id === env.id 
+                  setEnvironments(prev => prev.map(e =>
+                    e.id === env.id
                       ? { ...e, currentGameVersion: version }
                       : e
                   ));
@@ -159,7 +159,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       console.log('EnvironmentStore: checkAllUpdates called');
       const results = await ApiService.checkAllUpdates(manual);
       console.log(`EnvironmentStore: API call completed, got ${results?.length || 0} result(s)`, { results });
-      
+
       // Update environments in place without triggering loading state
       // This prevents the page from appearing to refresh
       setEnvironments(prev => {
@@ -180,11 +180,11 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         });
         return updated;
       });
-      
+
       console.log('EnvironmentStore: Environments updated in place');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      console.error(`EnvironmentStore: checkAllUpdates failed - ${errorMessage}`, { 
+      console.error(`EnvironmentStore: checkAllUpdates failed - ${errorMessage}`, {
         error: err instanceof Error ? err.stack : String(err),
         errorType: err instanceof Error ? err.constructor.name : typeof err
       });
@@ -233,7 +233,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             next.delete(downloadId);
             return next;
           });
-          
+
           // Automatically extract game version when download completes
           try {
             const version = await ApiService.extractGameVersion(downloadId);
@@ -317,4 +317,3 @@ export function useEnvironmentStore() {
   }
   return context;
 }
-

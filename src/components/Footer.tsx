@@ -17,13 +17,13 @@ export function Footer() {
   const [themeDropdownOpen, setThemeDropdownOpen] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const themeDropdownRef = useRef<HTMLDivElement>(null);
-  
+
   // Update current time every 30 seconds to refresh the "Last check" display
   useEffect(() => {
     const interval = setInterval(() => {
       setCurrentTime(Date.now());
     }, 30000); // Update every 30 seconds
-    
+
     return () => clearInterval(interval);
   }, []);
 
@@ -43,29 +43,29 @@ export function Footer() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [themeDropdownOpen]);
-  
+
   // Recalculate most recent check whenever environments change
 
   // Calculate update check statistics
   const completedEnvs = environments.filter(env => env.status === 'completed');
   const envsWithUpdates = completedEnvs.filter(env => env.updateAvailable);
   const envsChecked = completedEnvs.filter(env => env.lastUpdateCheck);
-  
+
   // Get the most recent update check time (handle both string and number timestamps)
   const mostRecentCheck = envsChecked.length > 0
     ? envsChecked.reduce((latest, env) => {
         if (!env.lastUpdateCheck) return latest;
-        
+
         // Convert to timestamp (milliseconds) for comparison
         let envCheckTime: number;
         if (typeof env.lastUpdateCheck === 'number') {
-          envCheckTime = env.lastUpdateCheck < 946684800000 
+          envCheckTime = env.lastUpdateCheck < 946684800000
             ? env.lastUpdateCheck * 1000 // Convert seconds to milliseconds
             : env.lastUpdateCheck; // Already in milliseconds
         } else {
           envCheckTime = new Date(env.lastUpdateCheck).getTime();
         }
-        
+
         let latestTime: number;
         if (latest) {
           if (typeof latest === 'number') {
@@ -76,7 +76,7 @@ export function Footer() {
         } else {
           latestTime = 0;
         }
-        
+
         return envCheckTime > latestTime ? env.lastUpdateCheck : latest;
       }, envsChecked[0].lastUpdateCheck || null)
     : null;
@@ -90,18 +90,18 @@ export function Footer() {
         // If it's a number, check if it's seconds (less than year 2000 in ms) or milliseconds
         // Timestamps after 2000-01-01 in seconds would be > 946684800
         // Timestamps after 2000-01-01 in milliseconds would be > 946684800000
-        date = dateValue < 946684800000 
+        date = dateValue < 946684800000
           ? new Date(dateValue * 1000) // Convert seconds to milliseconds
           : new Date(dateValue); // Already in milliseconds
       } else {
         date = new Date(dateValue);
       }
-      
+
       // Check if date is valid
       if (isNaN(date.getTime())) {
         return 'Invalid date';
       }
-      
+
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -121,29 +121,29 @@ export function Footer() {
   const handleCheckAllUpdates = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     logger.info('Footer: Check updates button clicked');
     console.log('Footer: Check updates button clicked (console)');
-    
+
     // Check all registered environments, not just completed ones
     const allEnvs = environments.filter(env => env.status !== 'error');
-    logger.debug(`Footer: Found ${allEnvs.length} environments to check (excluding errors)`, { 
+    logger.debug(`Footer: Found ${allEnvs.length} environments to check (excluding errors)`, {
       totalEnvs: environments.length,
-      validEnvs: allEnvs.length 
+      validEnvs: allEnvs.length
     });
-    
+
     if (checkingAll) {
       logger.warn('Footer: Already checking updates, ignoring click');
       return;
     }
-    
+
     if (allEnvs.length === 0) {
       logger.warn('Footer: No environments to check');
       return;
     }
-    
+
     logger.info(`Footer: Starting update check for ${allEnvs.length} environment(s)`);
-    
+
     try {
       setCheckingAll(true);
       batchUpdateCheckRef.current = true;
@@ -154,7 +154,7 @@ export function Footer() {
       logger.info('Footer: Update check completed successfully');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      logger.error(`Footer: Update check failed - ${errorMessage}`, { 
+      logger.error(`Footer: Update check failed - ${errorMessage}`, {
         error: err instanceof Error ? err.stack : String(err),
         environmentCount: allEnvs.length
       });
@@ -315,4 +315,3 @@ export function Footer() {
     </footer>
   );
 }
-
