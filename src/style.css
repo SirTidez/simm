@@ -202,8 +202,9 @@ body::after {
   justify-content: flex-start;
   align-items: center;
   text-align: left;
-  gap: var(--sidebar-label-gap);
+  gap: 10px;
   padding: clamp(0.45rem, 1vw, 0.6rem) clamp(0.5rem, 1vw, 0.65rem);
+  padding-left: clamp(0.6rem, 1vw, 0.75rem);
   min-width: 0;
   height: clamp(2.25rem, 4vw, 2.5rem);
 }
@@ -1088,6 +1089,16 @@ body::after {
 
 .btn-icon:active {
   transform: scale(0.95);
+}
+
+.btn-icon.sidebar-button {
+  justify-content: flex-start;
+  align-items: center;
+  text-align: left;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding-left: clamp(0.6rem, 1vw, 0.75rem);
 }
 
 /* Steam Account Overlay */
