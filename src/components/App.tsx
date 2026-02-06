@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
+import { ModLibraryOverlay } from './ModLibraryOverlay';
 import { Settings } from './Settings';
 import { SteamAccountOverlay } from './SteamAccountOverlay';
 import { HelpOverlay } from './HelpOverlay';
@@ -14,6 +15,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 
 function AppContent() {
   const [showWizard, setShowWizard] = useState(false);
+  const [showModLibrary, setShowModLibrary] = useState(false);
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
@@ -55,34 +57,58 @@ function AppContent() {
           >
             <i className="fas fa-question-circle"></i>
           </button>
-          <button
-            onClick={() => setShowWizard(true)}
-            className="btn btn-icon"
-            title="Create Game Install"
-            aria-label="Create Game Install"
-          >
-            <i className="fas fa-plus-circle"></i>
-          </button>
-          <button
-            onClick={() => setShowSteamAccount(true)}
-            className="btn btn-icon"
-            title="Steam Account"
-            aria-label="Steam Account"
-          >
-            <i className="fas fa-user-circle"></i>
-          </button>
-          <Settings />
         </div>
       </header>
 
-      <main className="app-main">
-        <EnvironmentList />
-      </main>
+      <div className="app-body">
+        <nav className="app-sidebar" aria-label="Primary">
+          <div className="sidebar-panel">
+            <button
+              onClick={() => setShowModLibrary(true)}
+              className="btn btn-icon sidebar-button"
+              title="Mod Library"
+              aria-label="Mod Library"
+            >
+              <i className="fas fa-search sidebar-icon"></i>
+              <span className="sidebar-label">Mod Library</span>
+            </button>
+            <button
+              onClick={() => setShowWizard(true)}
+              className="btn btn-icon sidebar-button"
+              title="Add New Environment"
+              aria-label="Add New Environment"
+            >
+              <i className="fas fa-plus-circle sidebar-icon"></i>
+              <span className="sidebar-label">Add New Environment</span>
+            </button>
+            <button
+              onClick={() => setShowSteamAccount(true)}
+              className="btn btn-icon sidebar-button"
+              title="Accounts"
+              aria-label="Accounts"
+            >
+              <i className="fas fa-user-circle sidebar-icon"></i>
+              <span className="sidebar-label">Accounts</span>
+            </button>
+            <Settings className="btn btn-icon sidebar-button" showLabel label="Settings" />
+          </div>
+        </nav>
+
+        <div className="app-content">
+          <main className="app-main">
+            <EnvironmentList />
+          </main>
+        </div>
+      </div>
 
       <Footer />
 
       {showWizard && (
         <EnvironmentCreationWizard onClose={() => setShowWizard(false)} />
+      )}
+
+      {showModLibrary && (
+        <ModLibraryOverlay isOpen={showModLibrary} onClose={() => setShowModLibrary(false)} />
       )}
 
       <SteamAccountOverlay

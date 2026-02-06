@@ -19,6 +19,7 @@ pub async fn get_home_directory() -> Result<String, String> {
 }
 
 /// Mark that the user has seen the welcome message (so we don't show it again)
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn mark_welcome_message_seen() -> Result<(), String> {
     // This could be stored in settings if we want to persist it

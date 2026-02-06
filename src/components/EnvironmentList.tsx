@@ -11,10 +11,10 @@ import { ConfigurationOverlay } from './ConfigurationOverlay';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
-import { 
-  onAuthWaiting, 
-  onAuthSuccess, 
-  onAuthError, 
+import {
+  onAuthWaiting,
+  onAuthSuccess,
+  onAuthError,
   onProgress as onProgressEvent,
   onMelonLoaderInstalling,
   onMelonLoaderInstalled,
@@ -41,6 +41,8 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
 // Shared ref to track last update check time (accessible across components)
 // This is exported so Footer can update it when doing manual checks
 export const lastUpdateCheckTimeRef = { current: null as number | null };
+export const batchUpdateCheckRef = { current: false };
+const LAST_ENV_KEY = 'simm:lastEnvId';
 
 export function EnvironmentList() {
   const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
@@ -63,17 +65,19 @@ export function EnvironmentList() {
   const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
   const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
   const [melonLoaderStatus, setMelonLoaderStatus] = useState<Map<string, { installed: boolean; version?: string }>>(new Map());
-  
+  const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
+
   // Debounce timers for filesystem change events
   const modsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const pluginsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const userLibsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  
+
   // Use refs to access latest environments without causing effect re-runs
   const environmentsRef = useRef(environments);
   useEffect(() => {
     environmentsRef.current = environments;
   }, [environments]);
+  const initialUpdateCheckDoneRef = useRef(false);
   const [melonLoaderLatestRelease, setMelonLoaderLatestRelease] = useState<Map<string, {
     tag_name: string;
     name: string;
@@ -98,11 +102,16 @@ export function EnvironmentList() {
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [launchDropdownOpen, setLaunchDropdownOpen] = useState<string | null>(null);
 
+  const rememberEnvironment = useCallback((envId: string) => {
+    localStorage.setItem(LAST_ENV_KEY, envId);
+  }, []);
+
   const handleStartDownload = async (env: Environment) => {
     try {
+      rememberEnvironment(env.id);
       // Check if we have credentials
       const hasCredentials = settings?.steamUsername;
-      
+
       if (!hasCredentials) {
         // Show authentication modal
         setAuthModal({ isOpen: true, envId: env.id });
@@ -146,8 +155,9 @@ export function EnvironmentList() {
 
   // Perform automatic update check (respects 60-minute interval)
   const performAutoUpdateCheck = useCallback(async (isManual: boolean = false) => {
-    const completedEnvironments = environments.filter(env => env.status === 'completed');
-    
+    batchUpdateCheckRef.current = false;
+    const completedEnvironments = environmentsRef.current.filter(env => env.status === 'completed');
+
     if (completedEnvironments.length === 0) {
       console.log('[EnvironmentList] No completed environments to check for updates');
       return;
@@ -155,22 +165,24 @@ export function EnvironmentList() {
 
     const now = Date.now();
     const checkInterval = (settings?.updateCheckInterval || 60) * 60 * 1000; // Convert minutes to milliseconds
-    
+
     // If this is not a manual check, enforce the 60-minute minimum interval
     if (!isManual && lastUpdateCheckTimeRef.current !== null) {
       const timeSinceLastCheck = now - lastUpdateCheckTimeRef.current;
       if (timeSinceLastCheck < checkInterval) {
         const minutesRemaining = Math.ceil((checkInterval - timeSinceLastCheck) / 60000);
         console.log(`[EnvironmentList] Skipping automatic update check - last check was ${Math.floor(timeSinceLastCheck / 60000)} minutes ago. Next check in ${minutesRemaining} minute(s)`);
+        batchUpdateCheckRef.current = false;
         return;
       }
     }
 
     console.log(`[EnvironmentList] ${isManual ? 'Manual' : 'Automatic'} update check starting for ${completedEnvironments.length} environment(s)`);
     lastUpdateCheckTimeRef.current = now;
-    
+
     try {
-      await checkAllUpdates();
+      batchUpdateCheckRef.current = true;
+      await checkAllUpdates(false);
       console.log(`[EnvironmentList] Update check completed successfully`);
     } catch (err) {
       console.error('[EnvironmentList] Failed to check for updates:', err);
@@ -178,28 +190,33 @@ export function EnvironmentList() {
       if (!isManual) {
         lastUpdateCheckTimeRef.current = null;
       }
+    } finally {
+      batchUpdateCheckRef.current = false;
     }
-  }, [environments, settings?.updateCheckInterval, checkAllUpdates]);
+  }, [settings?.updateCheckInterval, checkAllUpdates]);
 
   // Check for updates automatically on app launch (after environments are loaded)
   useEffect(() => {
+    if (initialUpdateCheckDoneRef.current) {
+      return;
+    }
     if (environments.length === 0) {
       console.log('[EnvironmentList] Waiting for environments to load...');
       return;
     }
 
-    const completedEnvironments = environments.filter(env => env.status === 'completed');
-    if (completedEnvironments.length === 0) {
+    if (completedEnvironmentCount === 0) {
       console.log('[EnvironmentList] No completed environments to check for updates');
       return;
     }
 
     // Always run update check on app launch (first time)
-    console.log(`[EnvironmentList] Running initial update check on app launch for ${completedEnvironments.length} environment(s)`);
+    console.log(`[EnvironmentList] Running initial update check on app launch for ${completedEnvironmentCount} environment(s)`);
+    initialUpdateCheckDoneRef.current = true;
     performAutoUpdateCheck(false).catch(err => {
       console.error('[EnvironmentList] Failed to check for updates on app launch:', err);
     });
-  }, [environments.length, performAutoUpdateCheck]); // Run when environments are first loaded
+  }, [environments.length, completedEnvironmentCount, performAutoUpdateCheck]); // Run when environments are first loaded
 
   // Set up automatic update check interval (every 60 minutes or based on settings)
   useEffect(() => {
@@ -213,7 +230,7 @@ export function EnvironmentList() {
 
     if (autoCheckEnabled) {
       console.log(`[EnvironmentList] Setting up automatic update checks every ${settings?.updateCheckInterval || 60} minutes`);
-      
+
       // Set up interval for automatic checks
       autoCheckIntervalRef.current = setInterval(() => {
         performAutoUpdateCheck(false);
@@ -279,7 +296,7 @@ export function EnvironmentList() {
         });
 
         unlistenProgress = await onProgressEvent((progress) => {
-          if (progress.error && (progress.error.toLowerCase().includes('password') || 
+          if (progress.error && (progress.error.toLowerCase().includes('password') ||
               progress.message?.toLowerCase().includes('enter account password'))) {
             const env = environments.find(e => e.id === progress.downloadId);
             if (env && !authModal.isOpen) {
@@ -354,7 +371,7 @@ export function EnvironmentList() {
         };
 
         const handleFirstUpdateEvent = () => {
-          if (!checkInProgressRef.current) {
+          if (!checkInProgressRef.current && batchUpdateCheckRef.current) {
             checkInProgressRef.current = true;
             handleUpdateCheckStart();
           }
@@ -393,7 +410,7 @@ export function EnvironmentList() {
             if (existingTimer) {
               clearTimeout(existingTimer);
             }
-            
+
             // Set new timer to refresh count after 500ms of no events
             const timer = setTimeout(async () => {
               try {
@@ -410,7 +427,7 @@ export function EnvironmentList() {
                 modsRefreshTimers.current.delete(data.environmentId);
               }
             }, 500);
-            
+
             modsRefreshTimers.current.set(data.environmentId, timer);
           }
         });
@@ -424,7 +441,7 @@ export function EnvironmentList() {
             if (existingTimer) {
               clearTimeout(existingTimer);
             }
-            
+
             // Set new timer to refresh count after 500ms of no events
             const timer = setTimeout(async () => {
               try {
@@ -441,7 +458,7 @@ export function EnvironmentList() {
                 pluginsRefreshTimers.current.delete(data.environmentId);
               }
             }, 500);
-            
+
             pluginsRefreshTimers.current.set(data.environmentId, timer);
           }
         });
@@ -455,7 +472,7 @@ export function EnvironmentList() {
             if (existingTimer) {
               clearTimeout(existingTimer);
             }
-            
+
             // Set new timer to refresh count after 500ms of no events
             const timer = setTimeout(async () => {
               try {
@@ -472,7 +489,7 @@ export function EnvironmentList() {
                 userLibsRefreshTimers.current.delete(data.environmentId);
               }
             }, 500);
-            
+
             userLibsRefreshTimers.current.set(data.environmentId, timer);
           }
         });
@@ -506,7 +523,7 @@ export function EnvironmentList() {
       if (unlistenModsChanged) unlistenModsChanged();
       if (unlistenPluginsChanged) unlistenPluginsChanged();
       if (unlistenUserLibsChanged) unlistenUserLibsChanged();
-      
+
       // Clear all debounce timers
       modsRefreshTimers.current.forEach(timer => clearTimeout(timer));
       pluginsRefreshTimers.current.forEach(timer => clearTimeout(timer));
@@ -543,6 +560,26 @@ export function EnvironmentList() {
     }
     // Start the download to update to the latest version
     await handleStartDownload(env);
+  };
+
+  const handleManualUpdateCheck = async (env: Environment) => {
+    if (checkingEnvironments.has(env.id)) {
+      return;
+    }
+    rememberEnvironment(env.id);
+    batchUpdateCheckRef.current = false;
+    setCheckingEnvironments(prev => new Set(prev).add(env.id));
+    try {
+      await checkUpdate(env.id, true);
+    } catch (err) {
+      console.error(`Failed to check for updates for ${env.id}:`, err);
+    } finally {
+      setCheckingEnvironments(prev => {
+        const next = new Set(prev);
+        next.delete(env.id);
+        return next;
+      });
+    }
   };
 
   const handleStartEditDescription = (env: Environment) => {
@@ -648,7 +685,7 @@ export function EnvironmentList() {
       setPluginsCounts(pluginCounts);
       setUserLibsCounts(userLibsCounts);
       setMelonLoaderStatus(melonLoaderStatuses);
-      
+
       // Load releases for environments with MelonLoader installed (so we can show/hide the Change Version button)
       for (const env of environments) {
         if (env.status === 'completed' && melonLoaderStatuses.get(env.id)?.installed) {
@@ -666,6 +703,7 @@ export function EnvironmentList() {
   }, [environments]);
 
   const handleOpenModsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setModsOverlay({ isOpen: true, envId });
   };
 
@@ -694,6 +732,7 @@ export function EnvironmentList() {
   };
 
   const handleOpenPluginsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setPluginsOverlay({ isOpen: true, envId });
   };
 
@@ -726,10 +765,12 @@ export function EnvironmentList() {
   };
 
   const handleOpenUserLibsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setUserLibsOverlay({ isOpen: true, envId });
   };
 
   const handleOpenLogsOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setLogsOverlay({ isOpen: true, envId });
   };
 
@@ -738,6 +779,7 @@ export function EnvironmentList() {
   };
 
   const handleOpenConfigOverlay = (envId: string) => {
+    rememberEnvironment(envId);
     setConfigOverlay({ isOpen: true, envId });
   };
 
@@ -789,9 +831,9 @@ export function EnvironmentList() {
           const tag = r.tag_name || '';
           return (tag === '0.7.0' || tag === 'v0.7.0' || tag.startsWith('0.7.0')) && !r.isNightly;
         });
-        
+
         const defaultVersion = stableVersion ? stableVersion.tag_name : releases[0].tag_name;
-        
+
         setSelectedMelonLoaderVersion(prev => {
           const next = new Map(prev);
           next.set(envId, defaultVersion);
@@ -836,7 +878,7 @@ export function EnvironmentList() {
     setShowMelonLoaderVersionSelector(null);
     setInstallingMelonLoader(prev => new Set(prev).add(envId));
     setMessageOverlay({ isOpen: false, title: '', message: '', type: 'info' });
-    
+
     try {
       const result = await ApiService.installMelonLoader(envId, selectedVersion);
       if (result.success) {
@@ -882,7 +924,7 @@ export function EnvironmentList() {
       } else if (err && typeof err === 'object' && 'message' in err) {
         errorMessage = String(err.message);
       }
-      
+
       setMessageOverlay({
         isOpen: true,
         title: 'Installation Failed',
@@ -918,7 +960,7 @@ export function EnvironmentList() {
           const faLoaded = (width > 0 || fontFamily.includes('Font Awesome') || fontFamily.includes('FontAwesome'));
           setShowFallback(!faLoaded);
         };
-        
+
         // Check after a short delay to allow FontAwesome to load
         const timeout = setTimeout(checkIcon, 150);
         return () => clearTimeout(timeout);
@@ -926,7 +968,7 @@ export function EnvironmentList() {
     }, []);
 
     return (
-      <span 
+      <span
         className="badge badge-blue"
         style={{
           marginRight: '0.5rem'
@@ -948,18 +990,18 @@ export function EnvironmentList() {
         // If it's a number, check if it's seconds (less than year 2000 in ms) or milliseconds
         // Timestamps after 2000-01-01 in seconds would be > 946684800
         // Timestamps after 2000-01-01 in milliseconds would be > 946684800000
-        date = dateValue < 946684800000 
+        date = dateValue < 946684800000
           ? new Date(dateValue * 1000) // Convert seconds to milliseconds
           : new Date(dateValue); // Already in milliseconds
       } else {
         date = new Date(dateValue);
       }
-      
+
       // Check if date is valid
       if (isNaN(date.getTime())) {
         return 'Invalid date';
       }
-      
+
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -989,17 +1031,17 @@ export function EnvironmentList() {
     };
 
     let badge = badges[status] || badges['not_downloaded'];
-    
+
     // If status is completed and update is available, replace with update badge
     if (status === 'completed' && env.updateAvailable) {
       badge = { text: 'Update Available', className: 'badge-orange' };
     }
 
     const statusBadge = <span className={`badge ${badge.className}`}>{badge.text}</span>;
-    
+
     // Check if this is a Steam environment (handle both 'Steam' and 'steam' cases)
     const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
-    
+
     // Add Steam badge before status badge for Steam environments when completed
     // Show it regardless of update status (but only when showing Ready or Update Available badges)
     if (status === 'completed' && isSteam) {
@@ -1033,7 +1075,7 @@ export function EnvironmentList() {
   return (
     <div className="environment-list">
       <h2>Game Installs</h2>
-      
+
       <AuthenticationModal
         isOpen={authModal.isOpen}
         onClose={() => {
@@ -1330,6 +1372,7 @@ export function EnvironmentList() {
         }).map(env => {
           const prog = progress.get(env.id);
           const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
+          const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
 
           return (
             <div key={env.id} className="environment-card">
@@ -1431,13 +1474,13 @@ export function EnvironmentList() {
               <div className="environment-details">
                 <p style={{ marginBottom: '0.75rem', width: '100%' }}><strong>Directory:</strong> <span className="detail-value detail-directory" title={env.outputDir}>{env.outputDir}</span></p>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', width: '100%', alignItems: 'center', marginBottom: '0.75rem', gap: '0.5rem' }}>
-                  <span 
+                  <span
                     className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}
                     style={{ display: 'inline-block', justifySelf: 'start' }}
                   >
                     {env.branch}
                   </span>
-                  <span 
+                  <span
                     className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}
                     style={{ display: 'inline-block', justifySelf: 'center' }}
                   >
@@ -1445,9 +1488,9 @@ export function EnvironmentList() {
                   </span>
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', justifySelf: 'end' }}>
                     {env.status === 'completed' && env.currentGameVersion && (
-                      <span 
+                      <span
                         className={`badge ${env.updateAvailable === false ? 'badge-green' : env.updateAvailable === true ? 'badge-yellow' : 'badge-gray'}`}
-                        style={{ 
+                        style={{
                           display: 'inline-block',
                           fontWeight: env.updateAvailable === false ? 'bold' : 'normal'
                         }}
@@ -1481,7 +1524,7 @@ export function EnvironmentList() {
                           }
                         }}
                         className="btn btn-secondary"
-                        style={{ 
+                        style={{
                           padding: '0.25rem 0.5rem',
                           fontSize: '0.75rem',
                           minWidth: 'auto',
@@ -1638,8 +1681,8 @@ export function EnvironmentList() {
                 {prog && (
                   <div className="progress-info">
                     <div className="progress-bar">
-                      <div 
-                        className="progress-fill" 
+                      <div
+                        className="progress-fill"
                         style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }}
                       />
                     </div>
@@ -1665,8 +1708,8 @@ export function EnvironmentList() {
                 {env.status === 'completed' && (
                   <>
                     <div className="environment-actions-primary">
-                      <button 
-                        onClick={() => handleOpenFolder(env)} 
+                      <button
+                        onClick={() => handleOpenFolder(env)}
                         className="btn btn-secondary"
                         title="Open folder in file explorer"
                       >
@@ -1674,7 +1717,7 @@ export function EnvironmentList() {
                         <span>Open Folder</span>
                       </button>
                       <div style={{ position: 'relative', display: 'inline-block' }} data-launch-dropdown>
-                        <button 
+                        <button
                           onClick={(e) => {
                             e.stopPropagation();
                             setLaunchDropdownOpen(launchDropdownOpen === env.id ? null : env.id);
@@ -1827,9 +1870,20 @@ export function EnvironmentList() {
                       </div>
                     </div>
                     <div className="environment-actions-secondary">
-                      {env.updateAvailable && env.environmentType !== 'Steam' && env.environmentType !== 'steam' && !env.id.startsWith('steam-') && (
-                      <button 
-                          onClick={() => handleUpdate(env)} 
+                      {env.status === 'completed' && (
+                        <button
+                          onClick={() => handleManualUpdateCheck(env)}
+                          className="btn btn-secondary"
+                          disabled={checkingEnvironments.has(env.id)}
+                          title="Check for updates"
+                        >
+                          <i className={`fas ${checkingEnvironments.has(env.id) ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
+                          <span>Check Updates</span>
+                        </button>
+                      )}
+                      {env.updateAvailable && !isSteam && (
+                      <button
+                          onClick={() => handleUpdate(env)}
                           className="btn btn-primary"
                           title="Update to the latest branch version"
                       >
@@ -1837,8 +1891,8 @@ export function EnvironmentList() {
                           <span>Update</span>
                       </button>
                       )}
-                      {env.updateAvailable && (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) && (
-                      <button 
+                      {env.updateAvailable && isSteam && (
+                      <button
                           className="btn btn-secondary"
                           disabled
                           title="Steam manages updates for this installation"
@@ -1847,14 +1901,16 @@ export function EnvironmentList() {
                           <span>Steam Updates</span>
                       </button>
                       )}
-                      <button onClick={() => handleDelete(env)} className="btn btn-danger">
-                        <i className="fas fa-trash"></i>
-                        <span>Delete</span>
-                      </button>
+                      {!isSteam && (
+                        <button onClick={() => handleDelete(env)} className="btn btn-danger">
+                          <i className="fas fa-trash"></i>
+                          <span>Delete</span>
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
-                {env.status !== 'completed' && (
+                {env.status !== 'completed' && !isSteam && (
                   <button onClick={() => handleDelete(env)} className="btn btn-danger">
                     <i className="fas fa-trash"></i>
                     <span>Delete</span>
@@ -1868,4 +1924,3 @@ export function EnvironmentList() {
     </div>
   );
 }
-

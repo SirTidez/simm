@@ -2,13 +2,13 @@ use crate::services::logs::LogsService;
 use crate::services::logger::LoggerService;
 use crate::services::environment::EnvironmentService;
 use crate::types::LogLevel;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 static LOGS_SERVICE: Lazy<AsyncMutex<Option<Arc<LogsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_logs_service() -> std::result::Result<Arc<LogsService>, String> {
     let mut service = LOGS_SERVICE.lock().await;
@@ -27,17 +27,13 @@ async fn get_logger_service() -> Result<Arc<LoggerService>, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn get_env_service() -> std::result::Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
 
 #[tauri::command]
-pub async fn get_log_files(environment_id: String) -> Result<Vec<serde_json::Value>, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_log_files(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?

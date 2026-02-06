@@ -8,6 +8,7 @@ mod services;
 mod types;
 mod utils;
 mod events;
+mod db;
 
 use tauri::Manager;
 
@@ -29,9 +30,17 @@ fn main() {
 
             log::info!("SIMM directory initialized (was_created: {})", simm_was_created);
 
+            let db_pool = tauri::async_runtime::block_on(crate::db::initialize_pool())
+                .map_err(|e| {
+                    log::error!("Failed to initialize database: {}", e);
+                    e
+                })?;
+
+            app.manage(db_pool.clone());
+
             // Store flag in app state so frontend can check it
             app.manage(tauri::async_runtime::Mutex::new(simm_was_created));
-            
+
             // Initialize services (async)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -98,13 +107,21 @@ fn main() {
             // Mods
             commands::mods::get_mods,
             commands::mods::get_mods_count,
+            commands::mods::get_mod_library,
+            commands::mods::install_downloaded_mod,
+            commands::mods::uninstall_downloaded_mod,
+            commands::mods::delete_downloaded_mod,
             commands::mods::delete_mod,
             commands::mods::enable_mod,
             commands::mods::disable_mod,
             commands::mods::open_mods_folder,
             commands::mods::check_mod_installed,
+            commands::mods::find_existing_mod_storage,
             commands::mods::cleanup_duplicate_mod_storage,
             commands::mods::get_s1api_installation_status,
+            commands::mods::store_mod_archive,
+            commands::mods::download_s1api_to_library,
+            commands::mods::download_mlvscan_to_library,
             // Plugins
             commands::plugins::get_plugins,
             commands::plugins::get_plugins_count,
@@ -184,9 +201,6 @@ fn main() {
             commands::plugins::get_mlvscan_installation_status,
             commands::plugins::install_mlvscan,
             commands::plugins::uninstall_mlvscan,
-            commands::plugins::get_mlvscan_installation_status,
-            commands::plugins::install_mlvscan,
-            commands::plugins::uninstall_mlvscan,
             // Game Version
             commands::game_version::extract_game_version,
             commands::game_version::extract_game_version_from_path,
@@ -197,4 +211,3 @@ fn main() {
             std::process::exit(1);
         });
 }
-

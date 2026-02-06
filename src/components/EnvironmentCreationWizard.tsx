@@ -9,7 +9,7 @@ interface Props {
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
-  const { createEnvironment } = useEnvironmentStore();
+  const { createEnvironment, environments } = useEnvironmentStore();
   const { settings } = useSettingsStore();
   const [step, setStep] = useState(1);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
@@ -103,13 +103,13 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim() || !directoryPath) return;
-    
+
     setCreatingFolder(true);
     try {
       const separator = directoryPath.includes('/') ? '/' : '\\';
       const cleanPath = directoryPath.replace(/[/\\]+$/, '');
       const newFolderPath = `${cleanPath}${separator}${newFolderName.trim()}`;
-      
+
       await ApiService.createDirectory(newFolderPath);
       setNewFolderName('');
       // Reload directory to show the new folder
@@ -174,6 +174,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     }
   };
 
+  const hasSteamEnvironment = environments.some(
+    env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
+  );
+  const isSteamAuthenticated = Boolean(settings?.steamUsername);
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -186,50 +191,78 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
         {!showSteamDetection && step === 1 && (
           <div className="wizard-step">
-            <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-              <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <i className="fab fa-steam" style={{ color: '#00bcd4' }}></i>
-                Steam Installation
-              </h4>
-              <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
-                Add your existing Steam installation to manage mods, plugins, and view logs. Steam will handle game updates.
-              </p>
-              <button
-                onClick={handleDetectSteam}
-                className="btn btn-secondary"
-                disabled={detectingSteam}
-                style={{ width: '100%' }}
-              >
-                {detectingSteam ? (
-                  <>
-                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                    Detecting...
-                  </>
-                ) : (
-                  <>
-                    <i className="fab fa-steam" style={{ marginRight: '0.5rem' }}></i>
-                    Detect Steam Installation
-                  </>
-                )}
-              </button>
-            </div>
-            <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
-              <span>OR</span>
-            </div>
+            {!hasSteamEnvironment && (
+              <>
+                <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
+                  <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <i className="fab fa-steam" style={{ color: '#00bcd4' }}></i>
+                    Steam Installation
+                  </h4>
+                  <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
+                    Add your existing Steam installation to manage mods, plugins, and view logs. Steam will handle game updates.
+                  </p>
+                  <button
+                    onClick={handleDetectSteam}
+                    className="btn btn-secondary"
+                    disabled={detectingSteam}
+                    style={{ width: '100%' }}
+                  >
+                    {detectingSteam ? (
+                      <>
+                        <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                        Detecting...
+                      </>
+                    ) : (
+                      <>
+                        <i className="fab fa-steam" style={{ marginRight: '0.5rem' }}></i>
+                        Detect Steam Installation
+                      </>
+                    )}
+                  </button>
+                </div>
+                <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
+                  <span>OR</span>
+                </div>
+              </>
+            )}
             <h3>Select Branch (DepotDownloader)</h3>
             {appConfig ? (
               <div className="branch-list">
-                {appConfig.branches.map(branch => (
-                  <div 
-                    key={branch.name} 
-                    className="branch-card"
-                    onClick={() => handleBranchSelect(branch)}
-                  >
-                    <h4>{branch.displayName}</h4>
-                    <p>Runtime: {branch.runtime}</p>
-                    {branch.requiresAuth && <span className="auth-badge">Requires Auth</span>}
-                  </div>
-                ))}
+                {appConfig.branches.map(branch => {
+                  const authRequired = branch.requiresAuth && !isSteamAuthenticated;
+                  return (
+                    <div
+                      key={branch.name}
+                      className={`branch-card ${authRequired ? 'branch-card--disabled' : ''}`}
+                      onClick={() => {
+                        if (authRequired) return;
+                        handleBranchSelect(branch);
+                      }}
+                      role="button"
+                      tabIndex={authRequired ? -1 : 0}
+                      onKeyDown={(e) => {
+                        if (authRequired) return;
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleBranchSelect(branch);
+                        }
+                      }}
+                      aria-disabled={authRequired}
+                      title={authRequired ? 'Steam authentication required to select this branch' : undefined}
+                    >
+                      <h4>{branch.displayName}</h4>
+                      <p>Runtime: {branch.runtime}</p>
+                      {branch.requiresAuth && (
+                        <span
+                          className={`auth-badge ${isSteamAuthenticated ? 'auth-badge-ready' : 'auth-badge-required'}`}
+                          title={isSteamAuthenticated ? 'Authenticated with Steam' : 'Steam authentication required'}
+                        >
+                          Requires Auth
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="loading">Loading branches...</div>
@@ -323,8 +356,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Describe what this version means..."
                 rows={3}
-                style={{ 
-                  width: '100%', 
+                style={{
+                  width: '100%',
                   padding: '0.5rem 0.75rem',
                   backgroundColor: 'var(--input-bg-color, #1a1a1a)',
                   border: '1px solid var(--input-border-color, #3a3a3a)',
@@ -344,8 +377,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <button onClick={() => setStep(1)} className="btn btn-secondary">
                 Back
               </button>
-              <button 
-                onClick={handleCreate} 
+              <button
+                onClick={handleCreate}
                 className="btn btn-primary"
                 disabled={loading || !outputDir}
               >
@@ -429,8 +462,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     onChange={(e) => setDescription(e.target.value)}
                     placeholder="Describe what this version means..."
                     rows={3}
-                    style={{ 
-                      width: '100%', 
+                    style={{
+                      width: '100%',
                       padding: '0.5rem 0.75rem',
                       backgroundColor: 'var(--input-bg-color, #1a1a1a)',
                       border: '1px solid var(--input-border-color, #3a3a3a)',
@@ -525,28 +558,28 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       // Handle Windows paths (C:\, D:\, etc.)
                       const isWindowsRoot = /^[A-Z]:\\?$/i.test(currentPath);
                       if (isWindowsRoot) return null;
-                      
+
                       // Handle Unix paths (/)
                       if (currentPath === '/' || currentPath === '\\') return null;
-                      
+
                       // Get parent by removing last segment
                       const separator = currentPath.includes('/') ? '/' : '\\';
                       const parts = currentPath.split(separator).filter(p => p);
-                      
+
                       // If we're at a drive root (C:\), return null
                       if (parts.length <= 1 && currentPath.includes(':')) return null;
-                      
+
                       // Remove last part
                       parts.pop();
-                      
+
                       if (parts.length === 0) {
                         // Return root
                         return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
                       }
-                      
+
                       return parts.join(separator) + (separator === '/' ? '/' : '');
                     };
-                    
+
                     const parentPath = getParentPath(directoryPath);
                     return parentPath ? (
                       <div
@@ -611,4 +644,3 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     </div>
   );
 }
-

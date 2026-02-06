@@ -1,5 +1,3 @@
-import React from 'react';
-
 interface ConfirmOverlayProps {
   isOpen: boolean;
   onClose: () => void;
@@ -8,6 +6,7 @@ interface ConfirmOverlayProps {
   message: string;
   confirmText?: string;
   cancelText?: string;
+  isNested?: boolean;
 }
 
 export function ConfirmOverlay({
@@ -17,7 +16,8 @@ export function ConfirmOverlay({
   title,
   message,
   confirmText = 'Confirm',
-  cancelText = 'Cancel'
+  cancelText = 'Cancel',
+  isNested = false
 }: ConfirmOverlayProps) {
   if (!isOpen) return null;
 
@@ -27,8 +27,8 @@ export function ConfirmOverlay({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+    <div className={`modal-overlay${isNested ? ' modal-overlay-nested' : ''}`} onClick={onClose}>
+      <div className={`modal-content${isNested ? ' modal-content-nested' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{title}</h2>
           <button className="modal-close" onClick={onClose}>×</button>

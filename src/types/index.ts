@@ -141,7 +141,9 @@ export interface NexusMod {
   endorsement_count: number;
   unique_downloads: number;
   mod_downloads: number;
-}export interface NexusModFile {
+}
+
+export interface NexusModFile {
   file_id: number;
   name: string;
   version: string;
@@ -154,7 +156,26 @@ export interface NexusMod {
   mod_version: string;
 }
 
-export interface ConfigEntry {
+export interface ModLibraryEntry {
+  storageId: string;
+  displayName: string;
+  files: string[];
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
+  sourceId?: string;
+  sourceVersion?: string;
+  sourceUrl?: string;
+  installedVersion?: string;
+  managed: boolean;
+  installedIn: string[];
+  availableRuntimes: Array<'IL2CPP' | 'Mono'>;
+  storageIdsByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>>;
+  installedInByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
+  filesByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
+}
+
+export interface ModLibraryResult {
+  downloaded: ModLibraryEntry[];
+}export interface ConfigEntry {
   key: string;
   value: string;
   comment?: string;
@@ -168,9 +189,7 @@ export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';expor
   path: string;
   fileType: ConfigFileType;
   sections: ConfigSection[];
-}
-
-export interface ConfigUpdate {
+}export interface ConfigUpdate {
   section: string;
   key: string;
   value: string;

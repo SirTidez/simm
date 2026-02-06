@@ -162,6 +162,7 @@ impl LoggerService {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn log_backend(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
         self.log(level, &format!("[Backend] {}", message), data).await;
     }
@@ -208,18 +209,22 @@ impl LoggerService {
         });
     }
 
+    #[allow(dead_code)]
     pub async fn log_game_version(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
         self.log(level, &format!("[GameVersion] {}", message), data).await;
     }
 
+    #[allow(dead_code)]
     pub async fn log_update_check(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
         self.log(level, &format!("[UpdateCheck] {}", message), data).await;
     }
 
+    #[allow(dead_code)]
     pub async fn log_melon_loader(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
         self.log(level, &format!("[MelonLoader] {}", message), data).await;
     }
 
+    #[allow(dead_code)]
     pub async fn log_websocket(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
         self.log(level, &format!("[WebSocket] {}", message), data).await;
     }

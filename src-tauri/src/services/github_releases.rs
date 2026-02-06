@@ -18,7 +18,7 @@ impl GitHubReleasesService {
         // NEVER log the token value - only log that authentication is being used
         let token = token
             .or_else(|| env::var("GITHUB_TOKEN").ok());
-        
+
         let client = if let Some(ref token_val) = token {
             // Token is present - use it but never log it
             Octocrab::builder()
@@ -46,7 +46,7 @@ impl GitHubReleasesService {
             .context("Failed to fetch releases")?;
 
         let mut filtered: Vec<_> = releases.items.into_iter().collect();
-        
+
         if !include_prereleases {
             filtered.retain(|r| !r.prerelease);
         }
@@ -85,7 +85,7 @@ impl GitHubReleasesService {
             .context("Failed to fetch releases")?;
 
         let mut filtered: Vec<_> = releases.items.into_iter().collect();
-        
+
         if !include_prereleases {
             filtered.retain(|r| !r.prerelease);
         }
@@ -165,7 +165,7 @@ impl GitHubReleasesService {
                     // - MelonLoader-x64.zip
                     // - MelonLoader_x64.zip
                     // - MelonLoader.x64-<version>.zip
-                    if name_lower.ends_with(".zip") 
+                    if name_lower.ends_with(".zip")
                         && (name_lower.contains(".x64") || name_lower.contains("-x64") || name_lower.contains("_x64"))
                         && !name_lower.contains(".so") // Exclude Linux files
                         && !name_lower.contains("linux")
@@ -185,5 +185,75 @@ impl GitHubReleasesService {
 impl Default for GitHubReleasesService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_zip_asset_url_picks_first_zip() {
+        let service = GitHubReleasesService { client: None, token: None };
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "file.tar.gz", "browser_download_url": "https://example.com/file.tar.gz"},
+                {"name": "alpha.zip", "browser_download_url": "https://example.com/alpha.zip"},
+                {"name": "beta.zip", "browser_download_url": "https://example.com/beta.zip"}
+            ]
+        });
+
+        let url = service.get_zip_asset_url(&release);
+        assert_eq!(url.as_deref(), Some("https://example.com/alpha.zip"));
+    }
+
+    #[test]
+    fn get_melonloader_x64_asset_url_filters_non_windows_assets() {
+        let service = GitHubReleasesService { client: None, token: None };
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "MelonLoader.linux.x64.zip", "browser_download_url": "https://example.com/linux.zip"},
+                {"name": "MelonLoader.x64.zip", "browser_download_url": "https://example.com/windows.zip"},
+                {"name": "MelonLoader.macos.x64.zip", "browser_download_url": "https://example.com/macos.zip"}
+            ]
+        });
+
+        let url = service.get_melonloader_x64_asset_url(&release);
+        assert_eq!(url.as_deref(), Some("https://example.com/windows.zip"));
+    }
+
+    #[test]
+    fn get_zip_asset_url_returns_none_when_missing() {
+        let service = GitHubReleasesService { client: None, token: None };
+        let release = serde_json::json!({ "assets": [] });
+        assert!(service.get_zip_asset_url(&release).is_none());
+    }
+
+    /// Performs a real GitHub API request. Run with: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn live_get_latest_release_returns_data() -> Result<()> {
+        let service = GitHubReleasesService::new();
+        let release = service
+            .get_latest_release("tauri-apps", "tauri", false)
+            .await?;
+
+        let release = release.expect("expected release data");
+        assert!(release.get("tag_name").is_some());
+
+        Ok(())
+    }
+
+    /// Performs a real GitHub API request. Run with: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn live_get_latest_release_invalid_repo_errors() -> Result<()> {
+        let service = GitHubReleasesService::new();
+        let result = service
+            .get_latest_release("tauri-apps", "this-repo-should-not-exist-123", false)
+            .await;
+
+        assert!(result.is_err());
+        Ok(())
     }
 }

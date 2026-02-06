@@ -5,6 +5,7 @@ use crate::utils::directory_init;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::services::environment::EnvironmentService;
 use tauri::{AppHandle, Manager};
+use sqlx::SqlitePool;
 
 /// Initialize SIMM directory and return whether it was just created
 pub fn initialize_simm_directory() -> Result<bool> {
@@ -35,9 +36,26 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
     app.manage(watcher_arc.clone());
     log::info!("FileSystem watcher service initialized");
 
-    // Start watching existing environments
-    if let Ok(env_service) = EnvironmentService::new() {
-        if let Ok(environments) = env_service.get_environments().await {
+    let pool = match app.try_state::<Arc<SqlitePool>>() {
+        Some(p) => p.inner().clone(),
+        None => {
+            log::error!("SQLite pool not registered; skipping environment watcher setup");
+            log::info!("Application initialization complete");
+            return Ok(());
+        }
+    };
+
+    let env_service = match EnvironmentService::new(pool.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Failed to create EnvironmentService: {}", e);
+            log::info!("Application initialization complete");
+            return Ok(());
+        }
+    };
+
+    match env_service.get_environments().await {
+        Ok(environments) => {
             let env_count = environments.len();
             log::info!("Found {} existing environment(s) to watch", env_count);
 
@@ -55,10 +73,12 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
             }
             log::info!("Started watching {} environment(s)", env_count);
         }
+        Err(e) => {
+            log::error!("Failed to get environments: {:?}", e);
+        }
     }
 
     log::info!("Application initialization complete");
 
     Ok(())
 }
-

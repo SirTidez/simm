@@ -50,6 +50,45 @@ impl ThunderStoreService {
         let mut packages: Vec<Value> = response.json().await
             .context("Failed to parse Thunderstore response")?;
 
+        // Apply local query filtering (community endpoints may ignore `q`)
+        if let Some(q) = query {
+            let query_lower = q.trim().to_lowercase();
+            if !query_lower.is_empty() {
+                packages.retain(|pkg| {
+                    let name = pkg.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let full_name = pkg.get("latest")
+                        .and_then(|l| l.get("full_name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let owner = pkg.get("owner")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let description = pkg.get("latest")
+                        .and_then(|l| l.get("description"))
+                        .and_then(|d| d.as_str())
+                        .or_else(|| {
+                            pkg.get("versions")
+                                .and_then(|v| v.as_array())
+                                .and_then(|v| v.first())
+                                .and_then(|v| v.get("description"))
+                                .and_then(|d| d.as_str())
+                        })
+                        .unwrap_or("")
+                        .to_lowercase();
+
+                    name.contains(&query_lower)
+                        || full_name.contains(&query_lower)
+                        || owner.contains(&query_lower)
+                        || description.contains(&query_lower)
+                });
+            }
+        }
+
         // Filter by runtime if specified
         if runtime != "unknown" {
             let runtime_lower = runtime.to_lowercase();
@@ -135,7 +174,7 @@ impl ThunderStoreService {
         } else {
             format!("{}/package/{}/", THUNDERSTORE_API_BASE, package_uuid)
         };
-        
+
         let response = self.client
             .get(&url)
             .send()
@@ -190,5 +229,41 @@ impl ThunderStoreService {
 impl Default for ThunderStoreService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract_package_id(package: &serde_json::Value) -> Option<String> {
+        for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
+            if let Some(value) = package.get(key).and_then(|v| v.as_str()) {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn live_search_and_fetch_package() -> Result<()> {
+        let service = ThunderStoreService::new();
+        let packages = service
+            .search_packages_filtered_by_runtime("schedule-i", "unknown", None)
+            .await?;
+        assert!(!packages.is_empty(), "Expected Thunderstore packages");
+
+        let package_id = packages
+            .iter()
+            .find_map(extract_package_id)
+            .ok_or_else(|| anyhow::anyhow!("No package ID found in Thunderstore response"))?;
+
+        let package = service
+            .get_package(&package_id, Some("schedule-i"))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Package not found for id {}", package_id))?;
+
+        assert!(package.get("name").is_some());
+        Ok(())
     }
 }

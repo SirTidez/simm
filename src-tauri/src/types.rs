@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,7 +140,7 @@ pub struct Settings {
     pub mod_update_check_interval: Option<u32>, // minutes
     pub custom_theme: Option<CustomTheme>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
-    // Note: github_token is NOT stored here - it's stored encrypted separately
+                                         // Note: github_token is NOT stored here - it's stored encrypted separately
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,24 +204,6 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthState {
-    pub authenticated: bool,
-    pub username: Option<String>,
-    pub method: Option<AuthMethod>,
-    #[serde(with = "chrono::serde::ts_seconds_option")]
-    pub session_expiry: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthMethod {
-    Qr,
-    Password,
-    Session,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct UpdateCheckResult {
     pub update_available: bool,
     pub current_manifest_id: Option<String>,
@@ -265,6 +247,31 @@ pub struct ModMetadata {
     pub runtime_match: Option<bool>,
     pub mod_storage_id: Option<String>,
     pub symlink_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModLibraryEntry {
+    pub storage_id: String,
+    pub display_name: String,
+    pub files: Vec<String>,
+    pub source: Option<ModSource>,
+    pub source_id: Option<String>,
+    pub source_version: Option<String>,
+    pub source_url: Option<String>,
+    pub installed_version: Option<String>,
+    pub managed: bool,
+    pub installed_in: Vec<String>,
+    pub available_runtimes: Vec<String>,
+    pub storage_ids_by_runtime: std::collections::HashMap<String, String>,
+    pub installed_in_by_runtime: std::collections::HashMap<String, Vec<String>>,
+    pub files_by_runtime: std::collections::HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModLibraryResult {
+    pub downloaded: Vec<ModLibraryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,4 +325,3 @@ pub fn schedule_i_config() -> AppConfig {
         ],
     }
 }
-
