@@ -776,6 +776,10 @@ impl ModsService {
                 file_name.clone()
             };
 
+            if self.is_s1api_component_file(&original_file_name) {
+                continue;
+            }
+
             let mod_name = original_file_name
                 .replace(".dll", "")
                 .replace(".DLL", "");
@@ -2464,7 +2468,7 @@ impl ModsService {
         let lower = name.to_lowercase();
         if lower.contains("mono") {
             "Mono"
-        } else if lower.contains("il2cpp") || lower.contains("il2") || lower.contains("cpp") {
+        } else if lower.contains("il2cpp") {
             "IL2CPP"
         } else {
             "unknown"
@@ -2977,6 +2981,7 @@ mod tests {
     use super::*;
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
+    use crate::services::settings::SettingsService;
     use crate::types::{schedule_i_config, ModMetadata, ModSource};
     use serial_test::serial;
     use std::fs::File;
@@ -3233,6 +3238,14 @@ mod tests {
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
 
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
         let output_dir = temp.path().join("envs").join("env-4");
         let env = env_service
             .create_environment(
@@ -3254,6 +3267,10 @@ mod tests {
         .bind(serialized)
         .execute(&*pool)
         .await?;
+
+        let storage_mods_dir = download_dir.join("Mods").join("storage-1").join("Mods");
+        fs::create_dir_all(&storage_mods_dir).await?;
+        fs::write(storage_mods_dir.join("Example.dll"), b"data").await?;
 
         let found = service
             .find_existing_mod_storage_by_source_version("source-id", "1.0.0", None)
