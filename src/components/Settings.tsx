@@ -4,7 +4,17 @@ import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 
-export function Settings() {
+type SettingsButtonProps = {
+  className?: string;
+  showLabel?: boolean;
+  label?: string;
+};
+
+export function Settings({
+  className = 'btn btn-icon',
+  showLabel = false,
+  label = 'Settings'
+}: SettingsButtonProps) {
   const { settings, depotDownloader, loading, updateSettings, refreshDepotDownloader } = useSettingsStore();
   const { checkAllUpdates } = useEnvironmentStore();
   const [isOpen, setIsOpen] = useState(false);
@@ -164,12 +174,13 @@ export function Settings() {
     <>
       <button
         onClick={() => setIsOpen(true)}
-        className="btn btn-icon"
+        className={className}
         disabled={loading}
-        title="Settings"
-        aria-label="Settings"
+        title={label}
+        aria-label={label}
       >
-        <i className="fas fa-cog"></i>
+        <i className="fas fa-cog sidebar-icon"></i>
+        {showLabel && <span className="sidebar-label">{label}</span>}
       </button>
 
       {isOpen && (
