@@ -461,7 +461,7 @@ impl ModsService {
                 std::os::windows::fs::symlink_file(&src_owned, &dst_owned)
                     .context(format!("Failed to create file symlink from {:?} to {:?}", src_owned, dst_owned))?;
             }
-            #[cfg(target_os = "unix")]
+            #[cfg(target_os = "linux")]
             {
                 std::os::unix::fs::symlink(&src_owned, &dst_owned)
                     .context(format!("Failed to create file symlink from {:?} to {:?}", src_owned, dst_owned))?;

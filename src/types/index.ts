@@ -189,9 +189,7 @@ export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';expor
   path: string;
   fileType: ConfigFileType;
   sections: ConfigSection[];
-}
-
-export interface ConfigUpdate {
+}export interface ConfigUpdate {
   section: string;
   key: string;
   value: string;

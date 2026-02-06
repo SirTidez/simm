@@ -50,6 +50,45 @@ impl ThunderStoreService {
         let mut packages: Vec<Value> = response.json().await
             .context("Failed to parse Thunderstore response")?;
 
+        // Apply local query filtering (community endpoints may ignore `q`)
+        if let Some(q) = query {
+            let query_lower = q.trim().to_lowercase();
+            if !query_lower.is_empty() {
+                packages.retain(|pkg| {
+                    let name = pkg.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let full_name = pkg.get("latest")
+                        .and_then(|l| l.get("full_name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let owner = pkg.get("owner")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let description = pkg.get("latest")
+                        .and_then(|l| l.get("description"))
+                        .and_then(|d| d.as_str())
+                        .or_else(|| {
+                            pkg.get("versions")
+                                .and_then(|v| v.as_array())
+                                .and_then(|v| v.first())
+                                .and_then(|v| v.get("description"))
+                                .and_then(|d| d.as_str())
+                        })
+                        .unwrap_or("")
+                        .to_lowercase();
+
+                    name.contains(&query_lower)
+                        || full_name.contains(&query_lower)
+                        || owner.contains(&query_lower)
+                        || description.contains(&query_lower)
+                });
+            }
+        }
+
         // Filter by runtime if specified
         if runtime != "unknown" {
             let runtime_lower = runtime.to_lowercase();

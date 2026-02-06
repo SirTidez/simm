@@ -30,6 +30,38 @@ interface ThunderstorePackage {
   }>;
 }
 
+type ThunderstoreRuntime = 'IL2CPP' | 'Mono';
+
+interface ThunderstorePackageGroup {
+  key: string;
+  name: string;
+  owner: string;
+  packageUrl: string;
+  packagesByRuntime: Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>;
+}
+
+const runtimeSuffixPatterns = [
+  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
+  /\s*[_-]\s*(mono|il2cpp)\s*$/i,
+  /\s+(mono|il2cpp)\s*$/i,
+];
+
+const normalizeThunderstoreName = (name: string): string => {
+  let normalized = name;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of runtimeSuffixPatterns) {
+      const next = normalized.replace(pattern, '').trim();
+      if (next !== normalized) {
+        normalized = next;
+        changed = true;
+      }
+    }
+  }
+  return normalized;
+};
+
 interface Props {
   isOpen: boolean;
   onClose: () => void;
@@ -54,10 +86,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
   const [searchSource, setSearchSource] = useState<'thunderstore' | 'nexusmods'>('thunderstore');
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<ThunderstorePackage[]>([]);
+  const [searchResults, setSearchResults] = useState<ThunderstorePackageGroup[]>([]);
   const [searching, setSearching] = useState(false);
   const [showSearchResults, setShowSearchResults] = useState(false);
-  const [thunderstoreRuntimeByUuid, setThunderstoreRuntimeByUuid] = useState<Map<string, Array<'IL2CPP' | 'Mono'>>>(new Map());
 
   const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState('');
   const [nexusModsSearchResults, setNexusModsSearchResults] = useState<NexusMod[]>([]);
@@ -193,21 +224,35 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         ApiService.searchThunderstore('schedule-i', searchQuery.trim(), 'Mono'),
       ]);
 
-      const runtimeMap = new Map<string, Array<'IL2CPP' | 'Mono'>>();
-      const merged = new Map<string, ThunderstorePackage>();
-      const addRuntime = (pkg: ThunderstorePackage, runtime: 'IL2CPP' | 'Mono') => {
-        merged.set(pkg.uuid4, pkg);
-        const existing = runtimeMap.get(pkg.uuid4) || [];
-        if (!existing.includes(runtime)) {
-          runtimeMap.set(pkg.uuid4, [...existing, runtime]);
+      const merged = new Map<string, ThunderstorePackageGroup>();
+      const addRuntime = (pkg: ThunderstorePackage, runtime: ThunderstoreRuntime) => {
+        const baseName = normalizeThunderstoreName(pkg.name || pkg.full_name || '');
+        const owner = pkg.owner || '';
+        const key = `${owner.toLowerCase()}::${baseName.toLowerCase()}`;
+        const existing = merged.get(key);
+        if (existing) {
+          existing.packagesByRuntime[runtime] = pkg;
+          if (!existing.packageUrl && pkg.package_url) {
+            existing.packageUrl = pkg.package_url;
+          }
+          return;
         }
+
+        merged.set(key, {
+          key,
+          name: baseName || pkg.name || pkg.full_name || 'Unknown Mod',
+          owner,
+          packageUrl: pkg.package_url || '',
+          packagesByRuntime: {
+            [runtime]: pkg,
+          },
+        });
       };
 
       (il2cppResult.packages || []).forEach((pkg: ThunderstorePackage) => addRuntime(pkg, 'IL2CPP'));
       (monoResult.packages || []).forEach((pkg: ThunderstorePackage) => addRuntime(pkg, 'Mono'));
 
       setSearchResults(Array.from(merged.values()));
-      setThunderstoreRuntimeByUuid(runtimeMap);
       setShowSearchResults(true);
     } catch (err) {
       console.error('Error searching Thunderstore:', err);
@@ -378,16 +423,21 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     });
   };
 
-  const handleDownloadThunderstore = async (pkg: ThunderstorePackage) => {
-    const runtimeAvailability = thunderstoreRuntimeByUuid.get(pkg.uuid4) || [];
+  const handleDownloadThunderstore = async (pkg: ThunderstorePackageGroup) => {
+    const hasIl2cpp = Boolean(pkg.packagesByRuntime.IL2CPP);
+    const hasMono = Boolean(pkg.packagesByRuntime.Mono);
     const runDownload = async (runtime: 'IL2CPP' | 'Mono' | 'Both') => {
-      setDownloading(pkg.uuid4);
+      setDownloading(pkg.key);
       try {
         if (runtime === 'Both') {
-          await ApiService.downloadThunderstoreToLibrary(pkg.uuid4, 'IL2CPP');
-          await ApiService.downloadThunderstoreToLibrary(pkg.uuid4, 'Mono');
-        } else {
-          await ApiService.downloadThunderstoreToLibrary(pkg.uuid4, runtime);
+          if (pkg.packagesByRuntime.IL2CPP) {
+            await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.IL2CPP.uuid4, 'IL2CPP');
+          }
+          if (pkg.packagesByRuntime.Mono) {
+            await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.Mono.uuid4, 'Mono');
+          }
+        } else if (pkg.packagesByRuntime[runtime]) {
+          await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime);
         }
         const updated = await ApiService.getModLibrary();
         setLibrary(updated);
@@ -398,7 +448,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       }
     };
 
-    if (runtimeAvailability.length === 0) {
+    if (!hasIl2cpp && !hasMono) {
       setRuntimePrompt({
         title: 'Select Runtime',
         message: `Select the runtime for ${pkg.name}.`,
@@ -407,12 +457,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       return;
     }
 
-    if (runtimeAvailability.length === 1) {
-      runDownload(runtimeAvailability[0]);
+    if (hasIl2cpp && hasMono) {
+      runDownload('Both');
       return;
     }
 
-    runDownload('Both');
+    runDownload(hasIl2cpp ? 'IL2CPP' : 'Mono');
   };
 
   const selectNexusFileForRuntime = (files: NexusModFile[], runtime: 'IL2CPP' | 'Mono') => {
@@ -830,16 +880,18 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 {showSearchResults && searchResults.length > 0 && (
                   <div style={{ display: 'grid', gap: '0.75rem' }}>
                     {searchResults.map(pkg => {
-                      const runtimes = thunderstoreRuntimeByUuid.get(pkg.uuid4) || [];
+                      const runtimes: ThunderstoreRuntime[] = [];
+                      if (pkg.packagesByRuntime.IL2CPP) runtimes.push('IL2CPP');
+                      if (pkg.packagesByRuntime.Mono) runtimes.push('Mono');
                       return (
-                        <div key={pkg.uuid4} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
+                        <div key={pkg.key} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
                             <div>
                               <strong>{pkg.name}</strong>
                               <div style={{ fontSize: '0.8rem', color: '#888' }}>{pkg.owner}</div>
                               <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
                                 {runtimes.length > 0 ? runtimes.map(runtime => (
-                                  <span key={`${pkg.uuid4}-${runtime}`} style={{
+                                  <span key={`${pkg.key}-${runtime}`} style={{
                                     fontSize: '0.7rem',
                                     padding: '0.15rem 0.4rem',
                                     borderRadius: '4px',
@@ -864,10 +916,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                             </div>
                             <button
                               className="btn btn-primary btn-small"
-                              disabled={downloading === pkg.uuid4}
+                              disabled={downloading === pkg.key}
                               onClick={() => handleDownloadThunderstore(pkg)}
                             >
-                              {downloading === pkg.uuid4 ? 'Downloading...' : 'Download'}
+                              {downloading === pkg.key ? 'Downloading...' : 'Download'}
                             </button>
                           </div>
                         </div>
