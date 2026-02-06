@@ -1,122 +1,94 @@
 # Schedule I Mod Manager (SIMM)
 
-A native Windows desktop app for managing Schedule I game installations, mod libraries, and dev environments. Built with Rust (Tauri 2) and React (TypeScript).
+A native Windows desktop application for managing Schedule I installations, mod libraries, and development environments. Built with Rust (Tauri 2) and React (TypeScript).
 
-## Feature Index
+## Overview
 
-1) Environment management
-2) Library‑first mod workflow
-3) Mod sources (Thunderstore, NexusMods, local)
-4) Mod updates and runtime compatibility
-5) Framework integrations (MelonLoader, S1API, MLVScan)
-6) Game version detection
-7) Configuration and log tooling
-8) Security and permissions
-9) UI overlays and workflows
+SIMM (Schedule I Mod Manager) is a unified tool for creating and maintaining game environments, installing and updating mods from multiple sources, and handling common modding workflows with runtime-aware integrations.
 
----
+## Features
 
-## 1) Environment management
+### Core Functionality
 
-- Create, update, and delete multiple environments per game branch.
-- Import existing Steam installs or download via DepotDownloader.
-- Per‑environment runtime awareness (IL2CPP/Mono).
+- 🎮 **Environment Management**: Create, update, and delete multiple environments per game branch
+- 🚚 **Install Sources**: Import existing Steam installs or download environments via DepotDownloader
+- 🧠 **Runtime Awareness**: Per-environment runtime support and compatibility handling (IL2CPP/Mono)
+- 🔐 **Secure Authentication**: Encrypted credential storage using AES-GCM
+- ⚙️ **Scoped Access**: Tauri capability-based permissions for filesystem operations
 
-## 2) Library‑first mod workflow
+### Library-First Mod Workflow
 
-- Download mods into a shared library, then install into environments from the environment’s mod list.
-- Centralized mod storage with symlinks into each environment.
-- Deleting a library entry removes it from all environments.
+- 📦 **Shared Library Model**: Download mods into a centralized library, then install into environments
+- 🔗 **Symlink-Based Installs**: Keep environment installs lightweight via library symlinks
+- 🧹 **Consistent Cleanup**: Deleting a library item removes it from all linked environments
 
-## 3) Mod sources
+### Mod Sources & Updates
 
-- Thunderstore search and downloads.
-- NexusMods search, file browsing, and downloads.
-- Local uploads for unmanaged dev mods (listed but not stored in the library).
-- FOMOD installer detection and parsing.
+- 🌐 **Thunderstore Integration**: Search and download packages
+- 🌐 **NexusMods Integration**: Search mods, browse files, download packages, and support FOMOD parsing
+- 📤 **Local Mod Uploads**: Add unmanaged dev mods (listed in environments, not stored in library)
+- 🔄 **Update Checks**: Check for updates across Thunderstore and NexusMods
+- ✅ **Compatibility Signals**: Runtime matching with prompts when runtime is unknown
 
-## 4) Mod updates and runtime compatibility
+### Framework Integration
 
-- Check for updates across Thunderstore and NexusMods.
-- Runtime matching and compatibility signals (IL2CPP/Mono).
-- Runtime selection prompt when a package’s runtime is unknown.
+- 🍈 **MelonLoader**: Select and install versions from GitHub releases
+- 🔌 **S1API**: Download to library and install runtime-aware packages per environment
+- 🛡️ **MLVScan**: Download to library and install runtime-agnostic plugin assets
 
-## 5) Framework integrations
+### Game Version Detection
 
-- MelonLoader: version selection and install from GitHub releases.
-- S1API: downloads to library and runtime‑aware install from the package.
-- MLVScan: downloads to library and runtime‑agnostic plugin install.
+- 🔍 **Multi-Source Version Extraction** in priority order:
+  1. `app.info` (text and binary)
+  2. `version.txt`
+  3. Unity assets (`globalgamemanagers`)
+  4. Unity assemblies (`Assembly-CSharp.dll`)
+  5. Executable metadata
 
-## 6) Game version detection
+### Configuration, Logging, and UI
 
-Detects versions from multiple sources in priority order:
-
-- `app.info` (text and binary)
-- `version.txt`
-- Unity assets (`globalgamemanagers`)
-- Unity assemblies (`Assembly-CSharp.dll`)
-- Executable metadata
-
-## 7) Configuration and log tooling
-
-- Edit MelonLoader configs with grouped UI (MelonPreferences, LoaderConfig).
-- View/export game logs and watch logs in real time.
-- App log retention and level settings.
-
-## 8) Security and permissions
-
-- AES‑GCM encrypted credential storage.
-- Tauri capabilities for scoped filesystem access.
-
-## 9) UI overlays and workflows
-
-- Environment creation wizard
-- Mods, Plugins, UserLibs overlays
-- Logs, Help, Settings, Steam account overlays
-- Error boundary for graceful failure
-
----
+- ⚙️ **Config Tooling**: Edit MelonLoader settings with grouped UI (MelonPreferences, LoaderConfig)
+- 📋 **Log Tooling**: View/export logs and watch log output in real time
+- 📝 **App Logging**: Configurable log level and retention behavior
+- 🎭 **Workflow Overlays**: Environment wizard, Mods, Plugins, UserLibs, Logs, Help, Settings, Steam account
+- 🛡️ **Error Boundary**: Graceful failure handling in the UI
 
 ## Architecture
 
-### Data flow
+### Data Flow
 
-React component → `ApiService` → `invoke()` → Rust command → service → result → UI
+React component -> `ApiService` -> `invoke()` -> Rust command -> service -> result -> UI
 
-### Tech stack
+### Technology Stack
 
-- Rust + Tauri 2 (backend)
-- React 18 + TypeScript (frontend)
-- Vite (build/dev)
-- SQLite (app data) + filesystem storage for mods
+- **Backend**: Rust + Tauri 2
+- **Frontend**: React 18 + TypeScript
+- **Build/Dev**: Vite
+- **Storage**: SQLite (app data) + filesystem-based mod library
 
-### Storage
+### Data Storage
 
-- Windows data dir: `%APPDATA%\simmrust\`
-- Environments and settings stored in SQLite
-- Encrypted credentials stored separately
-- Mod storage: shared library folder with symlinks to environments
-
----
+- **Windows data directory**: `%APPDATA%\simmrust\`
+- **Persistence**: Environments and settings in SQLite
+- **Credentials**: Encrypted and stored separately
+- **Mod files**: Shared library with symlinked environment installs
 
 ## Prerequisites (Windows)
 
-- Rust (stable) https://rustup.rs/
-- Node.js v18+ https://nodejs.org/
-- DepotDownloader (winget):
+- **Rust (stable)**: https://rustup.rs/
+- **Node.js v18+**: https://nodejs.org/
+- **DepotDownloader**:
   - `winget install --exact --id SteamRE.DepotDownloader`
-
----
 
 ## Development
 
-### Run dev
+### Run Full App (Tauri + Vite)
 
 ```bash
 npm run tauri dev
 ```
 
-### Frontend only
+### Run Frontend Only
 
 ```bash
 npm run dev
@@ -129,38 +101,37 @@ npm run build
 npm run tauri build
 ```
 
-### Type check
+### Type Check
 
 ```bash
 npx tsc --noEmit
 ```
 
-### Rust checks
+### Rust Checks
 
 ```bash
 cd src-tauri && cargo check
+cd src-tauri && cargo clippy
+cd src-tauri && cargo test
 ```
 
----
+## Project Structure
 
-## Project structure (high‑level)
-
-```
-src-tauri/       # Rust backend (commands + services)
+```text
+src-tauri/       # Rust backend (commands, services, events, shared types)
 src/             # React frontend
-src/services/    # Tauri invoke client + events
-src/components/  # UI overlays and panels
+src/services/    # Frontend API invoke client + event wiring
+src/components/  # UI components and overlays
+src/stores/      # React context stores
+src/types/       # TypeScript shared types
 ```
-
----
 
 ## Contributing
 
-- Follow existing patterns in `src-tauri/src/services` and `src/services/api.ts`.
-- Keep types in sync between Rust (`src-tauri/src/types.rs`) and TS (`src/types/index.ts`).
-- Run `cargo fmt` for Rust changes and keep TS lint clean.
-
----
+- Keep command handlers thin and place business logic in `src-tauri/src/services/`
+- Route all frontend backend calls through `src/services/api.ts`
+- Keep shared types synchronized between `src-tauri/src/types.rs` and `src/types/index.ts`
+- Run `cargo fmt` for Rust changes and keep TypeScript checks clean
 
 ## License
 
