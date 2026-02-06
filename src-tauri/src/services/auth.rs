@@ -59,6 +59,7 @@ impl AuthService {
 
         #[cfg(target_os = "windows")]
         let mut child = {
+            #[allow(unused_imports)]  // Required for CommandExt trait methods
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
                 .args(&args)
@@ -133,6 +134,7 @@ impl AuthService {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn check_authentication_status(&self, username: String) -> Result<bool> {
         let result = self.authenticate(username, None, None).await?;
         Ok(result.success)

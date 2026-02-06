@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]  // Required for CommandExt trait methods
 use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -500,6 +501,7 @@ impl DepotDownloaderService {
         map.get(download_id).cloned()
     }
 
+    #[allow(dead_code)]
     pub async fn get_active_downloads(&self) -> Vec<String> {
         let map = self.active_downloads.read().await;
         map.keys().cloned().collect()

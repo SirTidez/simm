@@ -32,17 +32,6 @@ pub fn initialize_simm_directory() -> Result<(PathBuf, bool)> {
     Ok((simm_dir, was_just_created))
 }
 
-/// Get the Mods storage directory path
-pub fn get_mods_storage_dir() -> Result<PathBuf> {
-    let home_dir = resolve_home_dir()?;
-
-    let mods_storage_dir = home_dir.join("SIMM").join("Mods");
-    std::fs::create_dir_all(&mods_storage_dir)
-        .context("Failed to create Mods storage directory")?;
-
-    Ok(mods_storage_dir)
-}
-
 /// Get the depots directory path
 pub fn get_depots_dir() -> Result<PathBuf> {
     let home_dir = resolve_home_dir()?;
@@ -110,21 +99,6 @@ mod tests {
 
         let (_, was_created_again) = initialize_simm_directory()?;
         assert!(!was_created_again);
-
-        Ok(())
-    }
-
-    #[test]
-    #[serial]
-    fn storage_and_depots_dirs_use_override() -> Result<()> {
-        let temp = tempdir()?;
-        let _guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
-
-        let mods_dir = get_mods_storage_dir()?;
-        let depots_dir = get_depots_dir()?;
-
-        assert_eq!(mods_dir, temp.path().join("SIMM").join("Mods"));
-        assert_eq!(depots_dir, temp.path().join("SIMM").join("depots"));
 
         Ok(())
     }

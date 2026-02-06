@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -302,43 +302,6 @@ impl EnvironmentService {
             Ok(false)
         }
     }
-
-    pub async fn get_environment_size(&self, output_dir: &str) -> Result<u64> {
-        if !Path::new(output_dir).exists() {
-            return Ok(0);
-        }
-
-        Self::calculate_size(Path::new(output_dir)).await
-    }
-
-    async fn calculate_size(path: &Path) -> Result<u64> {
-        Self::calculate_size_impl(path.to_path_buf()).await
-    }
-
-    fn calculate_size_impl(
-        path: PathBuf,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send>> {
-        Box::pin(async move {
-            let mut size = 0u64;
-
-            let mut entries = tokio::fs::read_dir(&path).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let entry_path = entry.path();
-                let meta = tokio::fs::symlink_metadata(&entry_path).await?;
-
-                if meta.file_type().is_symlink() {
-                    continue;
-                }
-                if meta.is_dir() {
-                    size += Self::calculate_size_impl(entry_path).await?;
-                } else {
-                    size += meta.len();
-                }
-            }
-
-            Ok(size)
-        })
-    }
 }
 
 impl Clone for EnvironmentService {
@@ -578,30 +541,6 @@ mod tests {
             .await
             .expect_err("expected steam delete error");
         assert!(err.to_string().contains("Steam installations"));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_environment_size_sums_files() -> Result<()> {
-        let temp = tempdir()?;
-        let data_dir = temp.path().join("simmrust");
-        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let pool = initialize_pool().await?;
-        let service = EnvironmentService::new(pool)?;
-
-        let output_dir = temp.path().join("envs").join("env-5");
-        let nested = output_dir.join("nested");
-        fs::create_dir_all(&nested).await?;
-
-        fs::write(output_dir.join("a.bin"), vec![0u8; 10]).await?;
-        fs::write(nested.join("b.bin"), vec![0u8; 15]).await?;
-
-        let size = service
-            .get_environment_size(output_dir.to_string_lossy().as_ref())
-            .await?;
-        assert_eq!(size, 25);
 
         Ok(())
     }

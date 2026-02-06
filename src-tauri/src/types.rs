@@ -204,24 +204,6 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthState {
-    pub authenticated: bool,
-    pub username: Option<String>,
-    pub method: Option<AuthMethod>,
-    #[serde(with = "chrono::serde::ts_seconds_option")]
-    pub session_expiry: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthMethod {
-    Qr,
-    Password,
-    Session,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct UpdateCheckResult {
     pub update_available: bool,
     pub current_manifest_id: Option<String>,

@@ -11,17 +11,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct FomodService;
 
-/// FOMOD archive type
-#[derive(Debug, Clone, PartialEq)]
-pub enum FomodType {
-    /// XML-based FOMOD installer
-    Xml,
-    /// C# script-based FOMOD installer (not yet supported)
-    CSharp,
-    /// Not a FOMOD archive
-    None,
-}
-
 /// FOMOD module configuration (parsed from ModuleConfig.xml)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -341,6 +330,7 @@ impl FomodService {
     }
 
     /// Extract files from FOMOD archive based on selected options
+    #[allow(dead_code)]
     pub fn extract_fomod_files(
         &self,
         _zip_path: &Path,

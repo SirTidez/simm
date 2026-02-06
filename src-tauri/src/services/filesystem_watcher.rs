@@ -93,6 +93,7 @@ impl FileSystemWatcherService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn stop_all(&self) -> Result<()> {
         let mut watchers = self.watchers.write().await;
         watchers.clear(); // Dropping watchers will stop them

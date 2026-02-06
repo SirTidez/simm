@@ -480,7 +480,7 @@ impl ModsService {
                 std::os::windows::fs::symlink_dir(&src_owned, &dst_owned)
                     .context(format!("Failed to create directory symlink from {:?} to {:?}", src_owned, dst_owned))?;
             }
-            #[cfg(target_os = "unix")]
+            #[cfg(target_family = "unix")]
             {
                 std::os::unix::fs::symlink(&src_owned, &dst_owned)
                     .context(format!("Failed to create directory symlink from {:?} to {:?}", src_owned, dst_owned))?;
@@ -505,7 +505,7 @@ impl ModsService {
                         .context(format!("Failed to remove file symlink: {:?}", path_owned))?;
                 }
             }
-            #[cfg(target_os = "unix")]
+            #[cfg(target_family = "unix")]
             {
                 std::fs::remove_file(&path_owned)
                     .context(format!("Failed to remove symlink: {:?}", path_owned))?;
@@ -529,6 +529,7 @@ impl ModsService {
     }
 
     /// Resolves a symbolic link to its target path.
+    #[allow(dead_code)]
     pub async fn resolve_symlink(&self, path: &Path) -> Result<PathBuf> {
         let path_owned = path.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -662,6 +663,7 @@ impl ModsService {
 
     #[cfg(target_os = "windows")]
     async fn extract_version_powershell(&self, dll_path: &Path) -> Result<String> {
+        #[allow(unused_imports)]  // Required for CommandExt trait methods
         use std::os::windows::process::CommandExt;
 
         let path_str = dll_path.to_string_lossy().replace('\'', "''");

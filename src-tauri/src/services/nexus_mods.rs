@@ -101,6 +101,7 @@ impl NexusModsService {
         }))
     }
 
+    #[allow(dead_code)]
     pub async fn get_validation_result(&self) -> Option<Value> {
         self.validation_result.read().await.clone()
     }

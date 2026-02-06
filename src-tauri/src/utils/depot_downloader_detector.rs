@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::Command;
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(all(test, target_os = "windows"))]
+use anyhow::Context;
 use crate::types::{DepotDownloaderInfo, DetectionMethod};
 
 /// Detects if DepotDownloader is installed and returns its path
@@ -135,16 +137,6 @@ fn get_common_paths(executable_name: &str) -> Vec<(String, DetectionMethod)> {
     }
 
     paths
-}
-
-/// Verifies DepotDownloader is functional by running --help
-pub async fn verify_depot_downloader(path: &str) -> Result<bool> {
-    let output = Command::new(path)
-        .arg("--help")
-        .output()
-        .context("Failed to execute DepotDownloader")?;
-
-    Ok(output.status.success())
 }
 
 #[cfg(all(test, target_os = "windows"))]

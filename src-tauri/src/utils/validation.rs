@@ -87,24 +87,6 @@ pub fn validate_environment_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 200
 }
 
-/// Sanitizes string to prevent command injection
-pub fn sanitize_string(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| {
-            !matches!(
-                c,
-                ';' | '&' | '|' | '`' | '$' | '(' | ')' | '{' | '}' | '[' | ']' | '<' | '>'
-            )
-        })
-        .collect()
-}
-
-/// Validates platform value
-pub fn validate_platform(platform: &str) -> bool {
-    matches!(platform, "windows" | "macos" | "linux")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,20 +145,5 @@ mod tests {
         assert!(validate_environment_name("Env"));
         assert!(!validate_environment_name(""));
         assert!(!validate_environment_name(&"a".repeat(201)));
-    }
-
-    #[test]
-    fn sanitize_string_removes_dangerous_chars() {
-        let sanitized = sanitize_string("rm -rf /; echo hi | exit");
-        assert!(!sanitized.contains(';'));
-        assert!(!sanitized.contains('|'));
-        assert!(sanitized.contains("rm -rf /"));
-    }
-
-    #[test]
-    fn validate_platform_rules() {
-        assert!(validate_platform("windows"));
-        assert!(validate_platform("linux"));
-        assert!(!validate_platform("win"));
     }
 }

@@ -620,6 +620,7 @@ impl PluginsService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn install_dll_plugin(&self, _game_dir: &str, _dll_path: &str, _source: &str, _runtime: &str) -> Result<serde_json::Value> {
         // TODO: Implement DLL plugin installation
         Ok(serde_json::json!({ "success": false, "error": "Not implemented" }))
