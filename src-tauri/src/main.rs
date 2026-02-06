@@ -201,9 +201,6 @@ fn main() {
             commands::plugins::get_mlvscan_installation_status,
             commands::plugins::install_mlvscan,
             commands::plugins::uninstall_mlvscan,
-            commands::plugins::get_mlvscan_installation_status,
-            commands::plugins::install_mlvscan,
-            commands::plugins::uninstall_mlvscan,
             // Game Version
             commands::game_version::extract_game_version,
             commands::game_version::extract_game_version_from_path,
