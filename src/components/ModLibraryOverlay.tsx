@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
@@ -40,6 +40,16 @@ interface ThunderstorePackageGroup {
   packagesByRuntime: Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>;
 }
 
+interface DownloadedModGroup {
+  key: string;
+  displayName: string;
+  managed: boolean;
+  entries: ModLibraryEntry[];
+  storageIds: string[];
+  installedIn: string[];
+  availableRuntimes: Array<'IL2CPP' | 'Mono'>;
+}
+
 const runtimeSuffixPatterns = [
   /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
@@ -60,6 +70,69 @@ const normalizeThunderstoreName = (name: string): string => {
     }
   }
   return normalized;
+};
+
+const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: string } => {
+  if (!sourceId) {
+    return { owner: '', name: '' };
+  }
+  const [owner, ...rest] = sourceId.split('/');
+  return { owner: owner || '', name: rest.join('/') };
+};
+
+const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGroup[] => {
+  const groups = new Map<string, {
+    key: string;
+    displayName: string;
+    entries: ModLibraryEntry[];
+    storageIds: string[];
+    installedIn: Set<string>;
+    availableRuntimes: Set<'IL2CPP' | 'Mono'>;
+    managedStates: Set<boolean>;
+  }>();
+
+  downloaded.forEach(entry => {
+    let key = entry.storageId;
+    let displayName = entry.displayName;
+
+    if (entry.source === 'thunderstore') {
+      const { owner, name } = parseThunderstoreSourceId(entry.sourceId);
+      const baseName = normalizeThunderstoreName(name || entry.displayName);
+      const ownerKey = owner.toLowerCase();
+      key = `thunderstore::${ownerKey}::${baseName.toLowerCase()}`;
+      displayName = baseName || entry.displayName;
+    }
+
+    const group = groups.get(key) || {
+      key,
+      displayName,
+      entries: [],
+      storageIds: [],
+      installedIn: new Set<string>(),
+      availableRuntimes: new Set<'IL2CPP' | 'Mono'>(),
+      managedStates: new Set<boolean>(),
+    };
+
+    group.entries.push(entry);
+    group.storageIds.push(entry.storageId);
+    entry.installedIn.forEach(envId => group.installedIn.add(envId));
+    entry.availableRuntimes.forEach(runtime => group.availableRuntimes.add(runtime));
+    group.managedStates.add(entry.managed);
+
+    groups.set(key, group);
+  });
+
+  return Array.from(groups.values())
+    .map(group => ({
+      key: group.key,
+      displayName: group.displayName,
+      managed: group.managedStates.size === 1 && group.managedStates.has(true),
+      entries: group.entries,
+      storageIds: group.storageIds,
+      installedIn: Array.from(group.installedIn),
+      availableRuntimes: Array.from(group.availableRuntimes),
+    }))
+    .sort((a, b) => a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase()));
 };
 
 interface Props {
@@ -140,6 +213,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [downloadingS1API, setDownloadingS1API] = useState(false);
   const [downloadingMlvscan, setDownloadingMlvscan] = useState(false);
 
+  const downloadedGroups = useMemo(
+    () => buildDownloadedGroups(library?.downloaded ?? []),
+    [library]
+  );
+
   const handleLoadNexusModFiles = useCallback(async (modId: number) => {
     setNexusModsLoading(prev => new Set(prev).add(modId));
     try {
@@ -202,13 +280,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     toLoad.forEach(modItem => handleLoadNexusModFiles(modItem.mod_id));
   }, [showNexusModsResults, nexusModsSearchResults, nexusModsFiles, nexusModsLoading, handleLoadNexusModFiles]);
 
-  const toggleModSelection = (storageId: string) => {
+  const toggleGroupSelection = (storageIds: string[]) => {
     setSelectedModIds(prev => {
       const next = new Set(prev);
-      if (next.has(storageId)) {
-        next.delete(storageId);
+      const allSelected = storageIds.every(id => next.has(id));
+      if (allSelected) {
+        storageIds.forEach(id => next.delete(id));
       } else {
-        next.add(storageId);
+        storageIds.forEach(id => next.add(id));
       }
       return next;
     });
@@ -361,26 +440,28 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     return entry.storageId ? [entry.storageId] : [];
   };
 
-  const handleDeleteDownloaded = async (entry: ModLibraryEntry) => {
+  const handleDeleteDownloadedGroup = async (group: DownloadedModGroup) => {
     setConfirmOverlay({
       isOpen: true,
       title: 'Delete Downloaded Files',
-      message: entry.installedIn.length
+      message: group.entries.some(entry => entry.installedIn.length > 0)
         ? 'This will remove the mod from all environments and delete the downloaded files. Continue?'
         : 'Delete the downloaded files from the library? This cannot be undone.',
       onConfirm: async () => {
         setConfirmOverlay({ isOpen: false, title: '', message: '', onConfirm: () => {} });
-        setDeleting(entry.storageId);
+        setDeleting(group.key);
         try {
-          const storageIds = getEntryStorageIds(entry);
-          for (const storageId of storageIds) {
-            await ApiService.deleteDownloadedMod(storageId);
+          for (const entry of group.entries) {
+            const storageIds = getEntryStorageIds(entry);
+            for (const storageId of storageIds) {
+              await ApiService.deleteDownloadedMod(storageId);
+            }
           }
           const updated = await ApiService.getModLibrary();
           setLibrary(updated);
           setSelectedModIds(prev => {
             const next = new Set(prev);
-            next.delete(entry.storageId);
+            group.storageIds.forEach(id => next.delete(id));
             return next;
           });
         } catch (err) {
@@ -1010,45 +1091,45 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 </div>
               </div>
               {loadingLibrary && <div style={{ color: '#888' }}>Loading mod library...</div>}
-              {!loadingLibrary && library?.downloaded.length === 0 && (
+              {!loadingLibrary && downloadedGroups.length === 0 && (
                 <div style={{ color: '#888' }}>No downloaded mods yet.</div>
               )}
-              {!loadingLibrary && library?.downloaded.length ? (
+              {!loadingLibrary && downloadedGroups.length ? (
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  {library.downloaded.map(entry => (
-                    <div key={entry.storageId} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
+                  {downloadedGroups.map(group => (
+                    <div key={group.key} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           <input
                             type="checkbox"
-                            checked={selectedModIds.has(entry.storageId)}
-                            onChange={() => toggleModSelection(entry.storageId)}
+                            checked={group.storageIds.every(id => selectedModIds.has(id))}
+                            onChange={() => toggleGroupSelection(group.storageIds)}
                           />
-                          <strong>{entry.displayName}</strong>
+                          <strong>{group.displayName}</strong>
                           <span style={{
                             fontSize: '0.7rem',
                             padding: '0.15rem 0.4rem',
                             borderRadius: '4px',
-                            backgroundColor: entry.managed ? '#28a745' : '#6c757d',
+                            backgroundColor: group.managed ? '#28a745' : '#6c757d',
                             color: '#fff'
                           }}>
-                            {entry.managed ? 'Managed' : 'External'}
+                            {group.managed ? 'Managed' : 'External'}
                           </span>
                         </label>
                         <button
                           className="btn btn-danger btn-small"
-                          disabled={deleting === entry.storageId}
-                          onClick={() => handleDeleteDownloaded(entry)}
+                          disabled={deleting === group.key}
+                          onClick={() => handleDeleteDownloadedGroup(group)}
                           title="Delete downloaded files from library"
                         >
-                          {deleting === entry.storageId ? 'Deleting...' : 'Delete Files'}
+                          {deleting === group.key ? 'Deleting...' : 'Delete Files'}
                         </button>
                       </div>
                       <div style={{ fontSize: '0.8rem', color: '#888', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <span>Installed in: {entry.installedIn.length ? entry.installedIn.length : '0'} env(s)</span>
-                        {entry.availableRuntimes?.map(runtime => (
+                        <span>Installed in: {group.installedIn.length ? group.installedIn.length : '0'} env(s)</span>
+                        {group.availableRuntimes?.map(runtime => (
                           <span
-                            key={`${entry.storageId}-${runtime}`}
+                            key={`${group.key}-${runtime}`}
                             style={{
                               fontSize: '0.7rem',
                               padding: '0.15rem 0.4rem',
