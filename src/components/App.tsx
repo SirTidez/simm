@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
@@ -19,6 +19,11 @@ function AppContent() {
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
+  const [showStartupSplash, setShowStartupSplash] = useState(true);
+
+  const handleInitialDetectionComplete = useCallback(() => {
+    setShowStartupSplash(false);
+  }, []);
 
   // Initialize console logging interception after a short delay to avoid blocking startup
   useEffect(() => {
@@ -96,7 +101,7 @@ function AppContent() {
 
         <div className="app-content">
           <main className="app-main">
-            <EnvironmentList />
+            <EnvironmentList onInitialDetectionComplete={handleInitialDetectionComplete} />
           </main>
         </div>
       </div>
@@ -125,6 +130,23 @@ function AppContent() {
         isOpen={showWelcome}
         onClose={() => setShowWelcome(false)}
       />
+
+      {showStartupSplash && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 4000 }}>
+          <div className="boot-screen" role="status" aria-live="polite">
+            <div className="boot-card">
+              <div className="boot-title">Schedule I</div>
+              <div className="boot-subtitle">Detecting game and MelonLoader versions</div>
+              <div className="boot-loader" aria-hidden="true">
+                <span className="boot-dot"></span>
+                <span className="boot-dot"></span>
+                <span className="boot-dot"></span>
+              </div>
+              <div className="boot-bar"></div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
