@@ -56,11 +56,7 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
     setError(null);
     try {
       const result = await ApiService.getPlugins(environmentId);
-      // Filter out MLVScan.dll from the regular plugins list
-      const filteredPlugins = result.plugins.filter(plugin =>
-        plugin.fileName.toLowerCase() !== 'mlvscan.dll'
-      );
-      const normalizedPlugins = filteredPlugins.map(plugin => ({
+      const normalizedPlugins = result.plugins.map(plugin => ({
         ...plugin,
         source: plugin.source as PluginInfo['source']
       }));

@@ -230,13 +230,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setLoading(true);
       try {
         const result = await ApiService.getMods(environmentId);
-        const filteredMods = result.mods.filter(mod => {
-          const lowerName = mod.fileName.toLowerCase();
-          return !(lowerName === 's1api.mono.melonloader.dll' ||
-                   lowerName === 's1api.il2cpp.melonloader.dll' ||
-                   (lowerName.startsWith('s1api') && lowerName.includes('.') && lowerName.endsWith('.dll')));
-        });
-        const normalizedMods = filteredMods.map(mod => ({
+        const normalizedMods = result.mods.map(mod => ({
           ...mod,
           source: mod.source as ModInfo['source'],
         }));
@@ -324,7 +318,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
   const handleInstallDownloaded = async (entry: ModLibraryEntry) => {
     const runtime = environment?.runtime;
     const storageId = runtime
-      ? entry.storageIdsByRuntime?.[runtime]
+      ? entry.storageIdsByRuntime?.[runtime] || entry.storageId
       : entry.storageId;
 
     if (!storageId) {
@@ -1674,7 +1668,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
                     </div>
                   ) : (
                     downloadedNotInstalled.map(entry => {
-                      const storageId = envRuntime ? entry.storageIdsByRuntime?.[envRuntime] : entry.storageId;
+                      const storageId = envRuntime ? entry.storageIdsByRuntime?.[envRuntime] || entry.storageId : entry.storageId;
                       return (
                         <div
                           key={entry.storageId}
