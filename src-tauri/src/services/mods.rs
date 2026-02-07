@@ -3330,7 +3330,7 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert(
             "Ghost.dll".to_string(),
-            sample_metadata(Some("storage-ghost"), Some("ghost"), Some("1.0.0")),
+            sample_metadata(None, Some("ghost"), Some("1.0.0")),
         );
         service.save_mod_metadata(&mods_dir, &metadata).await?;
 
@@ -3502,6 +3502,38 @@ mod tests {
             sample_metadata(None, None, Some("1.0.0")),
         );
         service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let count = service.count_mods(output_dir.to_string_lossy().as_ref()).await?;
+        assert_eq!(count, 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn count_mods_includes_multiple_s1api_component_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-2b");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("S1API.Mono.MelonLoader.dll"), b"data").await?;
+        fs::write(mods_dir.join("S1API.IL2CPP.MelonLoader.dll"), b"data").await?;
 
         let count = service.count_mods(output_dir.to_string_lossy().as_ref()).await?;
         assert_eq!(count, 2);
