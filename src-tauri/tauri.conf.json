@@ -15,8 +15,8 @@
         "fullscreen": false,
         "resizable": true,
         "title": "Schedule I Mod Manager",
-        "width": 1200,
-        "height": 800
+        "width": 1270,
+        "height": 884
       }
     ],
     "security": {
@@ -35,4 +35,3 @@
     ]
   }
 }
-

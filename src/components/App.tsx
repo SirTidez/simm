@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
+import appIcon256 from '../assets/app-icon-256.png';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
 import { ModLibraryOverlay } from './ModLibraryOverlay';
 import { Settings } from './Settings';
@@ -52,7 +53,10 @@ function AppContent() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Schedule I Mod Manager</h1>
+        <div className="app-header-brand">
+          <img src={appIcon256} alt="" className="app-header-icon" aria-hidden />
+          <h1>Schedule I Mod Manager</h1>
+        </div>
         <div className="header-actions">
           <button
             onClick={() => setShowHelp(true)}
@@ -162,4 +166,3 @@ export function App() {
     </ErrorBoundary>
   );
 }
-
