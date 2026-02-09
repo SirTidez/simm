@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
+import appIcon256 from '../assets/app-icon-256.png';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
 import { ModLibraryOverlay } from './ModLibraryOverlay';
 import { Settings } from './Settings';
@@ -19,6 +20,11 @@ function AppContent() {
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
+  const [showStartupSplash, setShowStartupSplash] = useState(true);
+
+  const handleInitialDetectionComplete = useCallback(() => {
+    setShowStartupSplash(false);
+  }, []);
 
   // Initialize console logging interception after a short delay to avoid blocking startup
   useEffect(() => {
@@ -47,7 +53,10 @@ function AppContent() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Schedule I Mod Manager</h1>
+        <div className="app-header-brand">
+          <img src={appIcon256} alt="" className="app-header-icon" aria-hidden />
+          <h1>Schedule I Mod Manager</h1>
+        </div>
         <div className="header-actions">
           <button
             onClick={() => setShowHelp(true)}
@@ -96,7 +105,7 @@ function AppContent() {
 
         <div className="app-content">
           <main className="app-main">
-            <EnvironmentList />
+            <EnvironmentList onInitialDetectionComplete={handleInitialDetectionComplete} />
           </main>
         </div>
       </div>
@@ -125,6 +134,23 @@ function AppContent() {
         isOpen={showWelcome}
         onClose={() => setShowWelcome(false)}
       />
+
+      {showStartupSplash && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 4000 }}>
+          <div className="boot-screen" role="status" aria-live="polite">
+            <div className="boot-card">
+              <div className="boot-title">Schedule I</div>
+              <div className="boot-subtitle">Detecting game and MelonLoader versions</div>
+              <div className="boot-loader" aria-hidden="true">
+                <span className="boot-dot"></span>
+                <span className="boot-dot"></span>
+                <span className="boot-dot"></span>
+              </div>
+              <div className="boot-bar"></div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -140,4 +166,3 @@ export function App() {
     </ErrorBoundary>
   );
 }
-

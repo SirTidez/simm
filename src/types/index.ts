@@ -171,9 +171,7 @@ export interface ModLibraryEntry {
   storageIdsByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>>;
   installedInByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
   filesByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
-}
-
-export interface ModLibraryResult {
+}export interface ModLibraryResult {
   downloaded: ModLibraryEntry[];
 }export interface ConfigEntry {
   key: string;
@@ -182,9 +180,7 @@ export interface ModLibraryResult {
 }export interface ConfigSection {
   name: string;
   entries: ConfigEntry[];
-}
-
-export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';export interface ConfigFile {
+}export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';export interface ConfigFile {
   name: string;
   path: string;
   fileType: ConfigFileType;

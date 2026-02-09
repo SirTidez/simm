@@ -1,5 +1,7 @@
 # Schedule I Mod Manager (SIMM)
 
+![SIMM logo](app-icon.png)
+
 A native Windows desktop application for managing Schedule I installations, mod libraries, and development environments. Built with Rust (Tauri 2) and React (TypeScript).
 
 ## Overview
@@ -118,6 +120,7 @@ cd src-tauri && cargo test
 ## Project Structure
 
 ```text
+app-icon.png     # Source app icon (project root). Used to generate all app icons.
 src-tauri/       # Rust backend (commands, services, events, shared types)
 src/             # React frontend
 src/services/    # Frontend API invoke client + event wiring
@@ -125,6 +128,13 @@ src/components/  # UI components and overlays
 src/stores/      # React context stores
 src/types/       # TypeScript shared types
 ```
+
+### App icon
+
+The file **`app-icon.png`** in the project root is the source image for the application icon. It is used to generate:
+
+- **Taskbar and window icon**: All platform icons in `src-tauri/icons/` (including `icon.ico` on Windows), via the Tauri icon generator.
+- **In-app header**: A 256px variant is copied to `src/assets/` for the logo in the top bar.
 
 ## Contributing
 

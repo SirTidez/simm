@@ -292,6 +292,8 @@ impl ModsService {
             return Ok(None);
         }
 
+        self.reconcile_tracked_mod_state().await?;
+
         let mods_directory = self.get_mods_directory(game_dir);
         let mod_metadata = self.load_mod_metadata(&mods_directory).await?;
 
@@ -560,6 +562,204 @@ impl ModsService {
         Ok(false)
     }
 
+    fn tracked_name_variants(name: &str) -> Vec<String> {
+        if name.ends_with(".disabled") {
+            vec![name.to_string(), name.trim_end_matches(".disabled").to_string()]
+        } else {
+            vec![name.to_string(), format!("{name}.disabled")]
+        }
+    }
+
+    fn storage_contains_expected_file(files: &HashSet<String>, file_name: &str) -> bool {
+        Self::tracked_name_variants(file_name)
+            .into_iter()
+            .map(|name| name.to_lowercase())
+            .any(|name| files.contains(&name))
+    }
+
+    async fn tracked_entry_exists_in_environment(
+        &self,
+        output_dir: &str,
+        file_name: &str,
+        symlink_paths: Option<&Vec<String>>,
+    ) -> bool {
+        let mods_dir = self.get_mods_directory(output_dir);
+        let plugins_dir = self.get_plugins_directory(output_dir);
+        let userlibs_dir = Path::new(output_dir).join("UserLibs");
+
+        let mut candidate_paths: Vec<PathBuf> = Vec::new();
+        for variant in Self::tracked_name_variants(file_name) {
+            candidate_paths.push(mods_dir.join(&variant));
+            candidate_paths.push(plugins_dir.join(&variant));
+            candidate_paths.push(userlibs_dir.join(&variant));
+        }
+
+        if let Some(paths) = symlink_paths {
+            for path in paths {
+                for variant in Self::tracked_name_variants(path) {
+                    candidate_paths.push(PathBuf::from(variant));
+                }
+            }
+        }
+
+        for path in candidate_paths {
+            if self.path_exists_or_symlink(&path).await {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub async fn reconcile_tracked_mod_state(&self) -> Result<Vec<String>> {
+        #[derive(Clone)]
+        struct ReconcileEntry {
+            environment_id: String,
+            file_name: String,
+            mod_storage_id: Option<String>,
+            symlink_paths: Option<Vec<String>>,
+        }
+
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT environment_id, file_name, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for reconciliation")?;
+
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries: Vec<ReconcileEntry> = Vec::new();
+        for (environment_id, file_name, data) in rows {
+            if let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) {
+                entries.push(ReconcileEntry {
+                    environment_id,
+                    file_name,
+                    mod_storage_id: meta.mod_storage_id,
+                    symlink_paths: meta.symlink_paths,
+                });
+            }
+        }
+
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let env_rows = sqlx::query_as::<_, (String, String)>("SELECT id, data FROM environments")
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load environments for reconciliation")?;
+
+        let mut env_output_dirs: HashMap<String, String> = HashMap::new();
+        for (env_id, data) in env_rows {
+            if let Ok(env) = serde_json::from_str::<Environment>(&data) {
+                env_output_dirs.insert(env_id, env.output_dir);
+            }
+        }
+
+        let mut entries_by_storage: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for entry in &entries {
+            if let Some(storage_id) = entry.mod_storage_id.as_ref() {
+                entries_by_storage
+                    .entry(storage_id.clone())
+                    .or_default()
+                    .push((entry.environment_id.clone(), entry.file_name.clone()));
+            }
+        }
+
+        let storage_root = self.get_mods_storage_dir().await?;
+        let mut broken_storage_ids: HashSet<String> = HashSet::new();
+        for (storage_id, storage_entries) in &entries_by_storage {
+            let storage_path = storage_root.join(storage_id);
+            if !storage_path.exists() {
+                broken_storage_ids.insert(storage_id.clone());
+                continue;
+            }
+
+            let storage_meta = fs::metadata(&storage_path)
+                .await
+                .context("Failed to read storage metadata during reconciliation")?;
+            if !storage_meta.is_dir() {
+                broken_storage_ids.insert(storage_id.clone());
+                continue;
+            }
+
+            let files = self.collect_storage_files(&storage_path).await?;
+            if files.is_empty() {
+                broken_storage_ids.insert(storage_id.clone());
+                continue;
+            }
+
+            let storage_file_set: HashSet<String> = files.into_iter().map(|f| f.to_lowercase()).collect();
+            let missing_base_file = storage_entries
+                .iter()
+                .any(|(_, file_name)| !Self::storage_contains_expected_file(&storage_file_set, file_name));
+            if missing_base_file {
+                broken_storage_ids.insert(storage_id.clone());
+            }
+        }
+
+        let mut rows_to_delete: HashSet<(String, String)> = HashSet::new();
+        let mut affected_env_ids: HashSet<String> = HashSet::new();
+        for entry in &entries {
+            if let Some(storage_id) = entry.mod_storage_id.as_ref() {
+                if broken_storage_ids.contains(storage_id) {
+                    rows_to_delete.insert((entry.environment_id.clone(), entry.file_name.clone()));
+                    affected_env_ids.insert(entry.environment_id.clone());
+                    continue;
+                }
+            }
+
+            let output_dir = match env_output_dirs.get(&entry.environment_id) {
+                Some(output_dir) => output_dir,
+                None => {
+                    rows_to_delete.insert((entry.environment_id.clone(), entry.file_name.clone()));
+                    affected_env_ids.insert(entry.environment_id.clone());
+                    continue;
+                }
+            };
+
+            let entry_exists = self
+                .tracked_entry_exists_in_environment(output_dir, &entry.file_name, entry.symlink_paths.as_ref())
+                .await;
+            if !entry_exists {
+                rows_to_delete.insert((entry.environment_id.clone(), entry.file_name.clone()));
+                affected_env_ids.insert(entry.environment_id.clone());
+            }
+        }
+
+        if rows_to_delete.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin reconciliation transaction")?;
+
+        for (environment_id, file_name) in rows_to_delete {
+            sqlx::query(
+                "DELETE FROM mod_metadata WHERE environment_id = ? AND kind = 'mods' AND file_name = ?",
+            )
+            .bind(&environment_id)
+            .bind(&file_name)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to delete stale mod metadata entry")?;
+        }
+
+        tx.commit()
+            .await
+            .context("Failed to commit reconciliation transaction")?;
+
+        let mut affected: Vec<String> = affected_env_ids.into_iter().collect();
+        affected.sort();
+        Ok(affected)
+    }
+
     pub async fn load_mod_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
         let game_dir = mods_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
         let env_id = self.environment_id_for_dir(game_dir).await?;
@@ -736,6 +936,8 @@ impl ModsService {
     }
 
     pub async fn list_mods(&self, game_dir: &str) -> Result<serde_json::Value> {
+        self.reconcile_tracked_mod_state().await?;
+
         let mods_directory = self.get_mods_directory(game_dir);
 
         if !mods_directory.exists() {
@@ -777,10 +979,6 @@ impl ModsService {
             } else {
                 file_name.clone()
             };
-
-            if self.is_s1api_component_file(&original_file_name) {
-                continue;
-            }
 
             let mod_name = original_file_name
                 .replace(".dll", "")
@@ -842,6 +1040,8 @@ impl ModsService {
     }
 
     pub async fn get_mod_library(&self) -> Result<ModLibraryResult> {
+        self.reconcile_tracked_mod_state().await?;
+
         let storage_dir = self.get_mods_storage_dir().await?;
         if !storage_dir.exists() {
             return Ok(ModLibraryResult { downloaded: Vec::new() });
@@ -1498,23 +1698,9 @@ impl ModsService {
 
     pub async fn count_mods(&self, game_dir: &str) -> Result<u32> {
         let result = self.list_mods(game_dir).await?;
-        let mut count = result.get("count")
+        let count = result.get("count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
-
-        // Check if S1API is installed and add it to the count
-        // S1API is shown separately in the UI but should be counted as a mod
-        let mods_directory = self.get_mods_directory(game_dir);
-        if mods_directory.exists() {
-            let mono_file = mods_directory.join("S1API.Mono.MelonLoader.dll");
-            let il2cpp_file = mods_directory.join("S1API.IL2CPP.MelonLoader.dll");
-            let mono_disabled = mods_directory.join("S1API.Mono.MelonLoader.dll.disabled");
-            let il2cpp_disabled = mods_directory.join("S1API.IL2CPP.MelonLoader.dll.disabled");
-
-            if mono_file.exists() || il2cpp_file.exists() || mono_disabled.exists() || il2cpp_disabled.exists() {
-                count += 1; // Count S1API as 1 mod
-            }
-        }
 
         Ok(count)
     }
@@ -3094,7 +3280,7 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert(
             "Example.dll".to_string(),
-            sample_metadata(Some("storage-1"), Some("local"), Some("1.2.3")),
+            sample_metadata(None, Some("local"), Some("1.2.3")),
         );
         service.save_mod_metadata(&mods_dir, &metadata).await?;
 
@@ -3112,7 +3298,174 @@ mod tests {
         let entry = mods.first().expect("mod entry");
         assert_eq!(entry.get("fileName").and_then(|v| v.as_str()), Some("Example.dll"));
         assert_eq!(entry.get("version").and_then(|v| v.as_str()), Some("1.2.3"));
-        assert_eq!(entry.get("managed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(entry.get("managed").and_then(|v| v.as_bool()), Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_tracked_mod_state_removes_missing_env_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-stale");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "Ghost.dll".to_string(),
+            sample_metadata(None, Some("ghost"), Some("1.0.0")),
+        );
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let affected = service.reconcile_tracked_mod_state().await?;
+        assert_eq!(affected, vec![env.id.clone()]);
+
+        let loaded = service.load_mod_metadata(&mods_dir).await?;
+        assert!(loaded.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reconcile_tracked_mod_state_removes_broken_storage_references_across_envs() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_a = temp.path().join("envs").join("env-a");
+        let output_b = temp.path().join("envs").join("env-b");
+        let env_a = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_a.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let env_b = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "beta".to_string(),
+                output_b.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_a = output_a.join("Mods");
+        let mods_b = output_b.join("Mods");
+        fs::create_dir_all(&mods_a).await?;
+        fs::create_dir_all(&mods_b).await?;
+        fs::write(mods_a.join("Shared.dll"), b"data").await?;
+        fs::write(mods_b.join("Shared.dll"), b"data").await?;
+
+        let mut meta_a = HashMap::new();
+        meta_a.insert(
+            "Shared.dll".to_string(),
+            sample_metadata(Some("storage-broken"), Some("shared"), Some("1.0.0")),
+        );
+        let mut meta_b = HashMap::new();
+        meta_b.insert(
+            "Shared.dll".to_string(),
+            sample_metadata(Some("storage-broken"), Some("shared"), Some("1.0.0")),
+        );
+        service.save_mod_metadata(&mods_a, &meta_a).await?;
+        service.save_mod_metadata(&mods_b, &meta_b).await?;
+
+        let broken_storage_mods = service
+            .get_mods_storage_dir()
+            .await?
+            .join("storage-broken")
+            .join("Mods");
+        fs::create_dir_all(&broken_storage_mods).await?;
+        fs::write(broken_storage_mods.join("Different.dll"), b"data").await?;
+
+        let mut affected = service.reconcile_tracked_mod_state().await?;
+        affected.sort();
+
+        let mut expected = vec![env_a.id.clone(), env_b.id.clone()];
+        expected.sort();
+        assert_eq!(affected, expected);
+
+        let loaded_a = service.load_mod_metadata(&mods_a).await?;
+        let loaded_b = service.load_mod_metadata(&mods_b).await?;
+        assert!(loaded_a.is_empty());
+        assert!(loaded_b.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_mods_includes_s1api_in_normal_listing() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-s1api");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("S1API.Mono.MelonLoader.dll"), b"data").await?;
+
+        let result = service.list_mods(output_dir.to_string_lossy().as_ref()).await?;
+        let count = result
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(count, 1);
+
+        let mods = result
+            .get("mods")
+            .and_then(|v| v.as_array())
+            .expect("mods array");
+        assert_eq!(mods.len(), 1);
+        assert_eq!(
+            mods[0].get("fileName").and_then(|v| v.as_str()),
+            Some("S1API.Mono.MelonLoader.dll")
+        );
 
         Ok(())
     }
@@ -3149,6 +3502,38 @@ mod tests {
             sample_metadata(None, None, Some("1.0.0")),
         );
         service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let count = service.count_mods(output_dir.to_string_lossy().as_ref()).await?;
+        assert_eq!(count, 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn count_mods_includes_multiple_s1api_component_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-2b");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("S1API.Mono.MelonLoader.dll"), b"data").await?;
+        fs::write(mods_dir.join("S1API.IL2CPP.MelonLoader.dll"), b"data").await?;
 
         let count = service.count_mods(output_dir.to_string_lossy().as_ref()).await?;
         assert_eq!(count, 2);

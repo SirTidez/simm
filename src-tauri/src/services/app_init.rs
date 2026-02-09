@@ -1,9 +1,11 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use crate::utils::directory_init;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::services::environment::EnvironmentService;
+use crate::services::mods::ModsService;
 use tauri::{AppHandle, Manager};
 use sqlx::SqlitePool;
 
@@ -77,6 +79,31 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
             log::error!("Failed to get environments: {:?}", e);
         }
     }
+
+    let maintenance_mods_service = ModsService::new(pool.clone());
+    let maintenance_app = app.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match maintenance_mods_service.reconcile_tracked_mod_state().await {
+                Ok(affected_envs) => {
+                    for env_id in affected_envs {
+                        if let Err(err) = crate::events::emit_mods_changed(&maintenance_app, env_id.clone()) {
+                            log::warn!("Failed to emit mods_changed for {}: {}", env_id, err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::warn!("Failed to run mod metadata reconciliation: {}", err);
+                }
+            }
+        }
+    });
+    log::info!("Started mod metadata reconciliation maintenance task");
 
     log::info!("Application initialization complete");
 

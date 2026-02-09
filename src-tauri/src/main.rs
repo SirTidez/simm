@@ -51,8 +51,16 @@ fn main() {
             });
 
             // Ensure window stays open even if frontend has errors
+            // Explicitly set window icon (taskbar + title bar) from bundle icon
             if let Some(window) = app.get_webview_window("main") {
                 log::info!("Main window found");
+                if let Some(icon) = app.default_window_icon() {
+                    if let Err(e) = window.set_icon(icon.clone()) {
+                        log::warn!("Failed to set window icon: {}", e);
+                    }
+                } else {
+                    log::warn!("No default window icon available");
+                }
                 #[cfg(debug_assertions)]
                 {
                     window.open_devtools();

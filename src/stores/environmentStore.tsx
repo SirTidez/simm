@@ -40,28 +40,33 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       );
 
       if (envsNeedingVersion.length > 0) {
-        // Extract versions in the background (don't block UI)
-        // Use setTimeout to avoid blocking the initial render
-        setTimeout(() => {
-          Promise.all(
-            envsNeedingVersion.map(async (env) => {
-              try {
-                const version = await ApiService.extractGameVersion(env.id);
-                if (version) {
-                  // Update the environment state directly
-                  setEnvironments(prev => prev.map(e =>
-                    e.id === env.id
-                      ? { ...e, currentGameVersion: version }
-                      : e
-                  ));
-                }
-              } catch (err) {
-                // Silently fail - version extraction can be done manually later
-                console.warn(`Failed to auto-extract version for environment ${env.id}:`, err);
-              }
-            })
-          );
-        }, 100); // Small delay to let UI render first
+        const detectedVersions = await Promise.all(
+          envsNeedingVersion.map(async (env) => {
+            try {
+              const version = await ApiService.extractGameVersion(env.id);
+              return version ? { id: env.id, version } : null;
+            } catch (err) {
+              // Silently fail - version extraction can be done manually later
+              console.warn(`Failed to auto-extract version for environment ${env.id}:`, err);
+              return null;
+            }
+          })
+        );
+
+        const versionMap = new Map(
+          detectedVersions
+            .filter((entry): entry is { id: string; version: string } => entry !== null)
+            .map(entry => [entry.id, entry.version])
+        );
+
+        if (versionMap.size > 0) {
+          setEnvironments(prev => prev.map(env => {
+            const detectedVersion = versionMap.get(env.id);
+            return detectedVersion
+              ? { ...env, currentGameVersion: detectedVersion }
+              : env;
+          }));
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load environments');

@@ -44,7 +44,11 @@ export const lastUpdateCheckTimeRef = { current: null as number | null };
 export const batchUpdateCheckRef = { current: false };
 const LAST_ENV_KEY = 'simm:lastEnvId';
 
-export function EnvironmentList() {
+interface EnvironmentListProps {
+  onInitialDetectionComplete?: () => void;
+}
+
+export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListProps) {
   const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
   const { settings } = useSettingsStore();
   const autoCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -101,6 +105,15 @@ export function EnvironmentList() {
   const [messageOverlay, setMessageOverlay] = useState<{ isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info' }>({ isOpen: false, title: '', message: '', type: 'info' });
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [launchDropdownOpen, setLaunchDropdownOpen] = useState<string | null>(null);
+  const initialDetectionNotifiedRef = useRef(false);
+
+  const notifyInitialDetectionComplete = useCallback(() => {
+    if (initialDetectionNotifiedRef.current) {
+      return;
+    }
+    initialDetectionNotifiedRef.current = true;
+    onInitialDetectionComplete?.();
+  }, [onInitialDetectionComplete]);
 
   const rememberEnvironment = useCallback((envId: string) => {
     localStorage.setItem(LAST_ENV_KEY, envId);
@@ -695,12 +708,32 @@ export function EnvironmentList() {
           });
         }
       }
+
+      notifyInitialDetectionComplete();
     };
 
-    if (environments.length > 0) {
-      loadCounts();
+    if (loading) {
+      return;
     }
-  }, [environments]);
+
+    if (error) {
+      notifyInitialDetectionComplete();
+      return;
+    }
+
+    const hasCompletedEnvironment = environments.some(env => env.status === 'completed');
+    if (!hasCompletedEnvironment) {
+      notifyInitialDetectionComplete();
+      return;
+    }
+
+    if (environments.length > 0) {
+      loadCounts().catch((err) => {
+        console.error('Failed to load environment counts during startup detection:', err);
+        notifyInitialDetectionComplete();
+      });
+    }
+  }, [loading, error, environments, notifyInitialDetectionComplete]);
 
   const handleOpenModsOverlay = (envId: string) => {
     rememberEnvironment(envId);

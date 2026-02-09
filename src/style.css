@@ -186,6 +186,20 @@ body::after {
 }
 
 
+.app-header-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.app-header-icon {
+  width: 3.5rem;
+  height: 3.5rem;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
 .app-header h1 {
   margin: 0;
   font-size: clamp(1.25rem, 3vw, 1.5rem);

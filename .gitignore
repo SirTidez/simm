@@ -2,6 +2,7 @@
 /node_modules
 package-lock.json
 /dist
+/new-app-icon-square.png
 /assets/plan
 /depots
 # Encrypted credential files (never commit these)
