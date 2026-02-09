@@ -1,6 +1,6 @@
 # Schedule I Mod Manager (SIMM)
 
-![SIMM logo](app-icon.png)
+![SIMM logo](src-tauri/icons/128x128@2x.png)
 
 A native Windows desktop application for managing Schedule I installations, mod libraries, and development environments. Built with Rust (Tauri 2) and React (TypeScript).
 
