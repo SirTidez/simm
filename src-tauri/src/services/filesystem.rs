@@ -250,7 +250,7 @@ impl FileSystemService {
         #[cfg(not(target_os = "windows"))]
         {
             // On Unix systems, check if Steam process is running
-            let output = Command::new("pgrep")
+            let output = std::process::Command::new("pgrep")
                 .arg("-f")
                 .arg("steam")
                 .output()

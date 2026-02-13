@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::fs::File;
 use anyhow::{Context, Result};
 use tokio::fs;
+#[cfg(target_os = "windows")]
 use tokio::process::Command;
 use regex::Regex;
 use zip::ZipArchive;
