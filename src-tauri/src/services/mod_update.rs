@@ -3,6 +3,7 @@ use crate::services::mods::ModsService;
 use crate::services::environment::EnvironmentService;
 use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
+use crate::services::github_releases::GitHubReleasesService;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -14,7 +15,15 @@ impl ModUpdateService {
         Self
     }
 
-    pub async fn check_mod_updates(&self, environment_id: &str, env_service: &EnvironmentService, mods_service: &ModsService, thunderstore_service: &ThunderStoreService, nexus_mods_service: &NexusModsService) -> Result<Vec<serde_json::Value>> {
+    pub async fn check_mod_updates(
+        &self,
+        environment_id: &str,
+        env_service: &EnvironmentService,
+        mods_service: &ModsService,
+        thunderstore_service: &ThunderStoreService,
+        nexus_mods_service: &NexusModsService,
+        github_service: &GitHubReleasesService,
+    ) -> Result<Vec<serde_json::Value>> {
         use crate::types::ModMetadata;
         use chrono::Utc;
 
@@ -126,6 +135,53 @@ impl ModUpdateService {
                                 }
                             }
                         }
+                    } else if let Some(crate::types::ModSource::Github) = source {
+                        if let Some(repo) = source_id {
+                            // Parse owner/repo from source_id (e.g., "ifBars/S1API")
+                            let parts: Vec<&str> = repo.split('/').collect();
+                            if parts.len() == 2 {
+                                let owner = parts[0];
+                                let repo_name = parts[1];
+
+                                // Check GitHub for latest release
+                                if let Ok(Some(latest_release)) = github_service.get_latest_release(owner, repo_name, false).await {
+                                    if let Some(latest_version) = latest_release
+                                        .get("tag_name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                    {
+                                        // Normalize versions for comparison (strip 'v' prefix)
+                                        let current_normalized = current_version.as_ref().map(|cv| cv.trim_start_matches('v').to_string());
+                                        let latest_normalized = latest_version.trim_start_matches('v').to_string();
+                                        let update_available = current_normalized
+                                            .map(|cv| cv != latest_normalized)
+                                            .unwrap_or(true);
+
+                                        // Update metadata with check results
+                                        metadata.last_update_check = Some(now);
+                                        metadata.update_available = Some(update_available);
+                                        metadata.remote_version = Some(latest_version.clone());
+
+                                        results.push(serde_json::json!({
+                                            "modFileName": file_name,
+                                            "modName": metadata.mod_name.clone().unwrap_or_else(|| file_name.to_string()),
+                                            "updateAvailable": update_available,
+                                            "currentVersion": current_version,
+                                            "latestVersion": latest_version,
+                                            "source": "github",
+                                            "packageInfo": latest_release
+                                        }));
+                                    } else {
+                                        // No version found, still update check time
+                                        metadata.last_update_check = Some(now);
+                                        metadata.update_available = Some(false);
+                                    }
+                                } else {
+                                    // Failed to fetch release, still update check time
+                                    metadata.last_update_check = Some(now);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -161,6 +217,7 @@ mod tests {
     use crate::services::nexus_mods::NexusModsService;
     use crate::services::thunderstore::ThunderStoreService;
     use crate::types::{schedule_i_config, ModMetadata, ModSource};
+    use crate::services::github_releases::GitHubReleasesService;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -198,6 +255,7 @@ mod tests {
         let mods_service = ModsService::new(pool.clone());
         let thunderstore_service = ThunderStoreService::new();
         let nexus_mods_service = NexusModsService::new();
+        let github_service = GitHubReleasesService::new();
 
         let env = env_service
             .create_environment(
@@ -217,6 +275,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                &github_service,
             )
             .await
             .expect_err("expected output dir error");
@@ -246,6 +305,7 @@ mod tests {
         let mods_service = ModsService::new(pool.clone());
         let thunderstore_service = ThunderStoreService::new();
         let nexus_mods_service = NexusModsService::new();
+        let github_service = GitHubReleasesService::new();
 
         let output_dir = temp.path().join("envs").join("env-1");
         let env = env_service
@@ -266,6 +326,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                &github_service,
             )
             .await?;
         assert!(results.is_empty());
@@ -293,6 +354,7 @@ mod tests {
         let mods_service = ModsService::new(pool.clone());
         let thunderstore_service = ThunderStoreService::new();
         let nexus_mods_service = NexusModsService::new();
+        let github_service = GitHubReleasesService::new();
 
         let output_dir = temp.path().join("envs").join("env-live");
         let env = env_service
@@ -348,6 +410,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                &github_service,
             )
             .await?;
 

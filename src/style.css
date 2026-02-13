@@ -394,6 +394,11 @@ body::after {
   font-weight: 500;
 }
 
+.footer-stat-success {
+  color: #4ade80;
+  font-weight: 500;
+}
+
 .footer-copyright {
   flex-direction: row;
   align-items: center;
@@ -531,6 +536,15 @@ body::after {
 
 .btn-danger:hover {
   background-color: #c82333;
+}
+
+.btn-warning {
+  background-color: #ff9800;
+  color: white;
+}
+
+.btn-warning:hover {
+  background-color: #e68900;
 }
 
 .btn-small {

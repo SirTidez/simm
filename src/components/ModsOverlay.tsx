@@ -10,7 +10,7 @@ interface ModInfo {
   fileName: string;
   path: string;
   version?: string;
-  source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceUrl?: string;
   disabled?: boolean;
   modStorageId?: string;
@@ -22,6 +22,7 @@ interface Props {
   onClose: () => void;
   environmentId: string;
   onModsChanged?: () => void;
+  onModUpdatesChecked?: (count: number) => void;
 }
 
 interface ConfirmDialog {
@@ -71,7 +72,7 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
   }
 }
 
-export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: Props) {
+export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked }: Props) {
   const [mods, setMods] = useState<ModInfo[]>([]);
   const [downloadedMods, setDownloadedMods] = useState<ModLibraryEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -82,6 +83,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
   const [disablingMod, setDisablingMod] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [pendingUpload, setPendingUpload] = useState<{ file: null; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
+  const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<{ filePath: string; fileName: string; sourceInfo: any } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [installingDownloaded, setInstallingDownloaded] = useState<string | null>(null);
 
@@ -150,6 +152,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setNexusModsFiles(new Map());
       setModUpdates(new Map());
       setConfirmDialog(null);
+      setPendingRuntimeSelection(null);
+      setPendingUpload(null);
     }
   }, [isOpen, environmentId]);
 
@@ -211,6 +215,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
         });
       });
       setModUpdates(updatesMap);
+      const count = Array.from(updatesMap.values()).filter(u => u.updateAvailable).length;
+      onModUpdatesChecked?.(count);
     } catch (updateErr) {
       if (showErrors) {
         throw updateErr; // Re-throw if called manually so we can show error
@@ -402,7 +408,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
   };
 
   const detectModSource = async (fileName: string): Promise<{
-    source: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
+    source: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
     sourceUrl?: string;
     modName?: string;
     author?: string;
@@ -535,13 +541,49 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       // Detect source
       const sourceInfo = await detectModSource(fileName);
 
+      // Detect runtime from filename
+      const detectedRuntime = detectRuntimeFromFileName(fileName);
+
+      if (!detectedRuntime) {
+        // Couldn't detect runtime - ask user to select
+        setPendingRuntimeSelection({ filePath, fileName, sourceInfo });
+        setUploading(false);
+        return;
+      }
+
+      // Proceed with upload using detected runtime
+      await performUpload(filePath, fileName, detectedRuntime, sourceInfo);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload mod');
+      setUploading(false);
+    }
+  };
+
+  const detectRuntimeFromFileName = (fileName: string): 'IL2CPP' | 'Mono' | null => {
+    const lower = fileName.toLowerCase();
+    if (lower.includes('mono')) return 'Mono';
+    if (lower.includes('il2cpp')) return 'IL2CPP';
+    return null;
+  };
+
+  const performUpload = async (filePath: string, fileName: string, runtime: 'IL2CPP' | 'Mono', sourceInfo: any) => {
+    setUploading(true);
+    setError(null);
+
+    try {
+      // Include detected runtime in metadata so backend knows
+      const metadataWithRuntime = {
+        ...sourceInfo,
+        detectedRuntime: runtime,
+      };
+
       // Call upload with file path and metadata
       const result = await ApiService.uploadMod(
         environmentId,
         filePath,
         fileName,
-        environment.runtime,
-        sourceInfo
+        environment!.runtime,
+        metadataWithRuntime
       );
 
       if (result.success) {
@@ -564,6 +606,18 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
       setError(err instanceof Error ? err.message : 'Failed to upload mod');
       setUploading(false);
     }
+  };
+
+  const handleRuntimeSelectionConfirm = async (selectedRuntime: 'IL2CPP' | 'Mono') => {
+    if (!pendingRuntimeSelection) return;
+    const { filePath, fileName, sourceInfo } = pendingRuntimeSelection;
+    setPendingRuntimeSelection(null);
+    await performUpload(filePath, fileName, selectedRuntime, sourceInfo);
+  };
+
+  const handleRuntimeSelectionCancel = () => {
+    setPendingRuntimeSelection(null);
+    setUploading(false);
   };
 
   const handleUploadSuccess = async () => {
@@ -984,6 +1038,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
         message={pendingUpload?.runtimeMismatch.warning || ''}
         confirmText="Continue Anyway"
         cancelText="Cancel"
+        isNested
       />
       <ConfirmOverlay
         isOpen={!!confirmDialog}
@@ -993,7 +1048,43 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged }: P
         message={confirmDialog?.message || ''}
         confirmText={confirmDialog?.confirmText}
         cancelText={confirmDialog?.cancelText}
+        isNested
       />
+      {pendingRuntimeSelection && (
+        <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
+          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
+            <div className="modal-header">
+              <h2>Select Mod Runtime</h2>
+              <button className="modal-close" onClick={handleRuntimeSelectionCancel}>×</button>
+            </div>
+            <div style={{ padding: '1.5rem' }}>
+              <p style={{ marginBottom: '1rem', color: '#ccc' }}>
+                Could not determine the runtime for <strong>{pendingRuntimeSelection.fileName}</strong>.
+                Please select which runtime this mod is designed for:
+              </p>
+              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', marginBottom: '1.5rem' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => handleRuntimeSelectionConfirm('Mono')}
+                  style={{ minWidth: '100px' }}
+                >
+                  Mono
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}
+                  style={{ minWidth: '100px' }}
+                >
+                  IL2CPP
+                </button>
+              </div>
+              <p style={{ fontSize: '0.85rem', color: '#888', textAlign: 'center' }}>
+                This helps ensure the mod is tagged correctly in your library.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content mods-overlay" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">

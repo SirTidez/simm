@@ -2,8 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { logger } from '../services/logger';
+import { ApiService } from '../services/api';
+import { onModUpdatesChecked } from '../services/events';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 import { CustomThemeEditor } from './CustomThemeEditor';
+
+interface ModUpdatesEntry {
+  count: number;
+  updates: Array<{ modFileName: string; modName: string; currentVersion: string; latestVersion: string; source: string }>;
+}
 
 // Version injected at build time by Vite
 declare const __APP_VERSION__: string;
@@ -14,9 +21,12 @@ export function Footer() {
   const { settings, updateSettings } = useSettingsStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
+  const [modUpdatesByEnv, setModUpdatesByEnv] = useState<Map<string, ModUpdatesEntry>>(new Map());
   const [themeDropdownOpen, setThemeDropdownOpen] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const themeDropdownRef = useRef<HTMLDivElement>(null);
+
+  const totalModsNeedingUpdate = Array.from(modUpdatesByEnv.values()).reduce((sum, e) => sum + e.count, 0);
 
   // Update current time every 30 seconds to refresh the "Last check" display
   useEffect(() => {
@@ -26,6 +36,47 @@ export function Footer() {
 
     return () => clearInterval(interval);
   }, []);
+
+  // Load mod updates summary for completed environments
+  const loadModUpdatesSummary = React.useCallback(async () => {
+    try {
+      const summary = await ApiService.getAllModUpdatesSummary();
+      const map = new Map<string, ModUpdatesEntry>();
+      for (const entry of summary) {
+        map.set(entry.environmentId, { count: entry.count, updates: entry.updates });
+      }
+      setModUpdatesByEnv(map);
+    } catch (err) {
+      console.warn('Failed to load mod updates summary:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    const completedCount = environments.filter(env => env.status === 'completed').length;
+    if (completedCount > 0) {
+      loadModUpdatesSummary();
+    }
+  }, [environments, loadModUpdatesSummary]);
+
+  // Subscribe to mod_updates_checked (from backend) to refresh when mod checks complete
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    onModUpdatesChecked((data) => {
+      setModUpdatesByEnv(prev => {
+        const next = new Map(prev);
+        next.set(data.environmentId, { count: data.count, updates: data.updates });
+        return next;
+      });
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  // Also refresh when ModsOverlay runs check (custom event from EnvironmentList)
+  useEffect(() => {
+    const handler = () => loadModUpdatesSummary();
+    window.addEventListener('mod-updates-checked', handler);
+    return () => window.removeEventListener('mod-updates-checked', handler);
+  }, [loadModUpdatesSummary]);
 
   // Close theme dropdown when clicking outside
   useEffect(() => {
@@ -163,6 +214,8 @@ export function Footer() {
       batchUpdateCheckRef.current = false;
       setCheckingAll(false);
       logger.debug('Footer: Reset checkingAll state');
+      // Refresh mod updates summary after check (mod checks run as part of checkAllUpdates)
+      loadModUpdatesSummary();
     }
   };
 
@@ -205,6 +258,19 @@ export function Footer() {
                 <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem' }}></i>
                 {envsWithUpdates.length} update{envsWithUpdates.length !== 1 ? 's' : ''} available
               </span>
+            )}
+            {completedEnvs.length > 0 && (
+              totalModsNeedingUpdate > 0 ? (
+                <span className="footer-stat footer-stat-update">
+                  <i className="fas fa-puzzle-piece" style={{ marginRight: '0.5rem' }}></i>
+                  {totalModsNeedingUpdate} mod{totalModsNeedingUpdate !== 1 ? 's' : ''} need updating
+                </span>
+              ) : (
+                <span className="footer-stat footer-stat-success">
+                  <i className="fas fa-puzzle-piece" style={{ marginRight: '0.5rem' }}></i>
+                  All mods up to date
+                </span>
+              )
             )}
             <span className="footer-stat">
               {checkingAll ? (

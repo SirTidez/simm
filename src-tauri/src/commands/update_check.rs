@@ -4,6 +4,7 @@ use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
 use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
+use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
 use crate::types::UpdateCheckResult;
 use crate::events;
@@ -16,6 +17,7 @@ use once_cell::sync::Lazy;
 static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> = Lazy::new(|| AsyncMutex::new(None));
 static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> = Lazy::new(|| AsyncMutex::new(None));
 static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 
 
@@ -49,6 +51,19 @@ async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsServ
         *service = Some(nexus_service);
     }
     Ok(service.as_ref().unwrap().clone())
+}
+
+async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
+    let github_service = {
+        let mut service = GITHUB_SERVICE.lock().await;
+        if service.is_none() {
+            let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+            let token = settings_service.get_github_token().await.ok().flatten();
+            *service = Some(Arc::new(GitHubReleasesService::with_token(token)));
+        }
+        service.as_ref().unwrap().clone()
+    };
+    Ok(github_service)
 }
 
 #[tauri::command]
@@ -144,6 +159,7 @@ pub async fn check_all_updates(
     let mods_service = Arc::new(ModsService::new(db.inner().clone()));
     let thunderstore_service = get_thunderstore_service().await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
+    let github_service = get_github_service(db.inner().clone()).await?;
 
     // Filter to only completed environments and check mod updates in parallel
     let completed_envs: Vec<_> = envs.iter()
@@ -151,13 +167,16 @@ pub async fn check_all_updates(
         .collect();
 
     // Check mod updates for all completed environments in parallel
+    let app_handle = app.clone();
     let mod_update_tasks: Vec<_> = completed_envs.iter().map(|env| {
         let env_id = env.id.clone();
+        let app = app_handle.clone();
         let mod_update_service = mod_update_service.clone();
         let mods_service = mods_service.clone();
         let env_service = env_service.clone();
         let thunderstore_service = thunderstore_service.clone();
         let nexus_mods_service = nexus_mods_service.clone();
+        let github_service = github_service.clone();
 
         tokio::spawn(async move {
             match mod_update_service.check_mod_updates(
@@ -166,10 +185,35 @@ pub async fn check_all_updates(
                 mods_service.as_ref(),
                 &thunderstore_service,
                 &nexus_mods_service,
+                &github_service,
             )
             .await {
-                Ok(_) => {
+                Ok(results) => {
                     eprintln!("[UpdateCheck] Successfully checked mod updates for environment {}", env_id);
+                    // Build minimal payload for mods that need updating
+                    let updates: Vec<serde_json::Value> = results
+                        .iter()
+                        .filter(|r| r.get("updateAvailable").and_then(|v| v.as_bool()).unwrap_or(false))
+                        .map(|r| {
+                            let mod_name = r
+                                .get("packageInfo")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|v| v.as_str())
+                                .or_else(|| r.get("modName").and_then(|v| v.as_str()))
+                                .or_else(|| r.get("modFileName").and_then(|v| v.as_str()))
+                                .unwrap_or("")
+                                .to_string();
+                            serde_json::json!({
+                                "modFileName": r.get("modFileName").and_then(|v| v.as_str()).unwrap_or(""),
+                                "modName": mod_name,
+                                "currentVersion": r.get("currentVersion").and_then(|v| v.as_str()).unwrap_or(""),
+                                "latestVersion": r.get("latestVersion").and_then(|v| v.as_str()).unwrap_or(""),
+                                "source": r.get("source").and_then(|v| v.as_str()).unwrap_or("unknown")
+                            })
+                        })
+                        .collect();
+                    let count = updates.len();
+                    let _ = events::emit_mod_updates_checked(&app, env_id, count, updates);
                 }
                 Err(e) => {
                     // Log but don't fail - mod updates are nice to have but not critical

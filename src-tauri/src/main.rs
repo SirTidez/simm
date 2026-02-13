@@ -180,6 +180,8 @@ fn main() {
             // Mod Updates
             commands::mod_update::check_mod_updates,
             commands::mod_update::update_mod,
+            commands::mod_update::get_mod_updates_summary,
+            commands::mod_update::get_all_mod_updates_summary,
             // Logs (game logs)
             commands::logs::get_log_files,
             commands::logs::read_log_file,

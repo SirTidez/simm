@@ -365,6 +365,7 @@ impl PluginsService {
         let mod_source = match source_str {
             Some("thunderstore") => Some(ModSource::Thunderstore),
             Some("nexusmods") => Some(ModSource::Nexusmods),
+            Some("github") => Some(ModSource::Github),
             Some("unknown") => Some(ModSource::Unknown),
             _ => Some(ModSource::Local),
         };
@@ -411,6 +412,7 @@ impl PluginsService {
         let response_source = match mod_source {
             Some(ModSource::Thunderstore) => "thunderstore",
             Some(ModSource::Nexusmods) => "nexusmods",
+            Some(ModSource::Github) => "github",
             Some(ModSource::Unknown) => "unknown",
             Some(ModSource::Local) => "local",
             _ => "unknown",

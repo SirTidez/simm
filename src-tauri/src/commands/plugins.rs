@@ -193,6 +193,7 @@ pub async fn upload_plugin(
         let mod_source = match source_str {
             Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
             Some("nexusmods") => Some(crate::types::ModSource::Nexusmods),
+            Some("github") => Some(crate::types::ModSource::Github),
             Some("unknown") => Some(crate::types::ModSource::Unknown),
             _ => Some(crate::types::ModSource::Local),
         };
@@ -243,6 +244,7 @@ pub async fn upload_plugin(
         let response_source = match mod_source {
             Some(crate::types::ModSource::Thunderstore) => "thunderstore",
             Some(crate::types::ModSource::Nexusmods) => "nexusmods",
+            Some(crate::types::ModSource::Github) => "github",
             Some(crate::types::ModSource::Unknown) => "unknown",
             Some(crate::types::ModSource::Local) => "local",
             _ => "unknown",

@@ -48,6 +48,10 @@ interface DownloadedModGroup {
   storageIds: string[];
   installedIn: string[];
   availableRuntimes: Array<'IL2CPP' | 'Mono'>;
+  author?: string;
+  sourceVersion?: string;
+  updateAvailable?: boolean;
+  remoteVersion?: string;
 }
 
 const runtimeSuffixPatterns = [
@@ -89,6 +93,10 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
     installedIn: Set<string>;
     availableRuntimes: Set<'IL2CPP' | 'Mono'>;
     managedStates: Set<boolean>;
+    authors: Set<string>;
+    sourceVersions: Set<string>;
+    updateAvailable: boolean;
+    remoteVersions: Set<string>;
   }>();
 
   downloaded.forEach(entry => {
@@ -111,6 +119,10 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
       installedIn: new Set<string>(),
       availableRuntimes: new Set<'IL2CPP' | 'Mono'>(),
       managedStates: new Set<boolean>(),
+      authors: new Set<string>(),
+      sourceVersions: new Set<string>(),
+      updateAvailable: false,
+      remoteVersions: new Set<string>(),
     };
 
     group.entries.push(entry);
@@ -118,6 +130,10 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
     entry.installedIn.forEach(envId => group.installedIn.add(envId));
     entry.availableRuntimes.forEach(runtime => group.availableRuntimes.add(runtime));
     group.managedStates.add(entry.managed);
+    if (entry.author) group.authors.add(entry.author);
+    if (entry.sourceVersion) group.sourceVersions.add(entry.sourceVersion);
+    if (entry.updateAvailable) group.updateAvailable = true;
+    if (entry.remoteVersion) group.remoteVersions.add(entry.remoteVersion);
 
     groups.set(key, group);
   });
@@ -131,6 +147,10 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
       storageIds: group.storageIds,
       installedIn: Array.from(group.installedIn),
       availableRuntimes: Array.from(group.availableRuntimes),
+      author: group.authors.size === 1 ? Array.from(group.authors)[0] : undefined,
+      sourceVersion: group.sourceVersions.size === 1 ? Array.from(group.sourceVersions)[0] : undefined,
+      updateAvailable: group.updateAvailable,
+      remoteVersion: group.remoteVersions.size === 1 ? Array.from(group.remoteVersions)[0] : undefined,
     }))
     .sort((a, b) => a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase()));
 };
@@ -620,16 +640,42 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     runDownload(hasIl2cpp ? 'IL2CPP' : 'Mono');
   };
 
-  const s1apiInLibrary = library?.downloaded.some(entry =>
+  const s1apiEntry = library?.downloaded.find(entry =>
     (entry.sourceId && entry.sourceId.toLowerCase() === 'ifbars/s1api') ||
     entry.displayName.toLowerCase() === 's1api'
-  ) ?? false;
-  const mlvscanInLibrary = library?.downloaded.some(entry =>
+  );
+  const mlvscanEntry = library?.downloaded.find(entry =>
     (entry.sourceId && entry.sourceId.toLowerCase() === 'ifbars/mlvscan') ||
     entry.displayName.toLowerCase() === 'mlvscan'
-  ) ?? false;
-  const s1apiActionLabel = s1apiInLibrary ? 'Downloaded' : 'Download';
-  const mlvscanActionLabel = mlvscanInLibrary ? 'Downloaded' : 'Download';
+  );
+
+  const s1apiInLibrary = !!s1apiEntry;
+  const mlvscanInLibrary = !!mlvscanEntry;
+
+  const compareVersions = (a: string, b: string): number => {
+    const normalize = (v: string) => v.replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    const aParts = normalize(a);
+    const bParts = normalize(b);
+    const maxLen = Math.max(aParts.length, bParts.length);
+    for (let i = 0; i < maxLen; i++) {
+      const aVal = aParts[i] ?? 0;
+      const bVal = bParts[i] ?? 0;
+      if (aVal < bVal) return -1;
+      if (aVal > bVal) return 1;
+    }
+    return 0;
+  };
+
+  const s1apiInstalledVersion = s1apiEntry?.sourceVersion;
+  const s1apiLatestVersion = s1apiLatestRelease?.tag_name;
+  const s1apiNeedsUpdate = s1apiInLibrary && s1apiInstalledVersion && s1apiLatestVersion && compareVersions(s1apiInstalledVersion, s1apiLatestVersion) < 0;
+
+  const mlvscanInstalledVersion = mlvscanEntry?.sourceVersion;
+  const mlvscanLatestVersion = mlvscanLatestRelease?.tag_name;
+  const mlvscanNeedsUpdate = mlvscanInLibrary && mlvscanInstalledVersion && mlvscanLatestVersion && compareVersions(mlvscanInstalledVersion, mlvscanLatestVersion) < 0;
+
+  const s1apiActionLabel = s1apiInLibrary ? (s1apiNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
+  const mlvscanActionLabel = mlvscanInLibrary ? (mlvscanNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
 
   if (!isOpen) return null;
 
@@ -827,24 +873,56 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
                       <strong style={{ fontSize: '1rem' }}>S1API</strong>
-                      <span style={{
-                        fontSize: '0.7rem',
-                        padding: '0.2rem 0.45rem',
-                        borderRadius: '4px',
-                        backgroundColor: s1apiInLibrary ? 'rgba(74,144,226,0.125)' : 'rgba(136,136,136,0.125)',
-                        color: s1apiInLibrary ? '#4a90e2' : '#888',
-                        border: `1px solid ${s1apiInLibrary ? 'rgba(74,144,226,0.25)' : 'rgba(136,136,136,0.25)'}`
-                      }}>
-                        {s1apiInLibrary ? 'In Library' : 'Not Downloaded'}
-                      </span>
+                      {s1apiNeedsUpdate ? (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(255, 170, 0, 0.15)',
+                          color: '#ffaa00',
+                          border: '1px solid rgba(255, 170, 0, 0.3)'
+                        }}>
+                          <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem' }}></i>
+                          Update Available
+                        </span>
+                      ) : s1apiInLibrary ? (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(74, 222, 128, 0.15)',
+                          color: '#4ade80',
+                          border: '1px solid rgba(74, 222, 128, 0.3)'
+                        }}>
+                          <i className="fas fa-check" style={{ marginRight: '0.25rem' }}></i>
+                          Up to Date
+                        </span>
+                      ) : (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(136,136,136,0.125)',
+                          color: '#888',
+                          border: '1px solid rgba(136,136,136,0.25)'
+                        }}>
+                          Not Downloaded
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', fontSize: '0.8rem', color: '#888' }}>
                       <span>
                         <i className="fab fa-github" style={{ marginRight: '0.35rem', color: '#6e5494' }}></i>
                         GitHub Release
                       </span>
-                      {s1apiLatestRelease && (
+                      {s1apiInstalledVersion && (
                         <span>
+                          <i className="fas fa-tag" style={{ marginRight: '0.35rem' }}></i>
+                          Installed: {s1apiInstalledVersion}
+                        </span>
+                      )}
+                      {s1apiLatestRelease && (
+                        <span style={s1apiNeedsUpdate ? { color: '#ffaa00' } : {}}>
                           <i className="fas fa-cloud" style={{ marginRight: '0.35rem' }}></i>
                           Latest: {s1apiLatestRelease.tag_name}
                         </span>
@@ -853,16 +931,16 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
                     <button
-                      className="btn btn-primary btn-small"
+                      className={`btn btn-small ${s1apiNeedsUpdate ? 'btn-warning' : 'btn-primary'}`}
                       onClick={handleDownloadS1APIClick}
                       disabled={downloadingS1API}
-                      title="Download S1API to the library"
+                      title={s1apiNeedsUpdate ? 'Update S1API to the latest version' : 'Download S1API to the library'}
                     >
                       {downloadingS1API ? (
                         <i className="fas fa-spinner fa-spin"></i>
                       ) : (
                         <>
-                          <i className="fas fa-download"></i>
+                          <i className={`fas ${s1apiNeedsUpdate ? 'fa-arrow-up' : 'fa-download'}`}></i>
                           <span style={{ marginLeft: '0.5rem' }}>{s1apiActionLabel}</span>
                         </>
                       )}
@@ -900,24 +978,56 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                         <i className="fas fa-shield-alt" style={{ color: '#4a90e2', marginRight: '0.35rem' }}></i>
                         MLVScan
                       </strong>
-                      <span style={{
-                        fontSize: '0.7rem',
-                        padding: '0.2rem 0.45rem',
-                        borderRadius: '4px',
-                        backgroundColor: mlvscanInLibrary ? 'rgba(74,144,226,0.125)' : 'rgba(136,136,136,0.125)',
-                        color: mlvscanInLibrary ? '#4a90e2' : '#888',
-                        border: `1px solid ${mlvscanInLibrary ? 'rgba(74,144,226,0.25)' : 'rgba(136,136,136,0.25)'}`
-                      }}>
-                        {mlvscanInLibrary ? 'In Library' : 'Not Downloaded'}
-                      </span>
+                      {mlvscanNeedsUpdate ? (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(255, 170, 0, 0.15)',
+                          color: '#ffaa00',
+                          border: '1px solid rgba(255, 170, 0, 0.3)'
+                        }}>
+                          <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem' }}></i>
+                          Update Available
+                        </span>
+                      ) : mlvscanInLibrary ? (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(74, 222, 128, 0.15)',
+                          color: '#4ade80',
+                          border: '1px solid rgba(74, 222, 128, 0.3)'
+                        }}>
+                          <i className="fas fa-check" style={{ marginRight: '0.25rem' }}></i>
+                          Up to Date
+                        </span>
+                      ) : (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(136,136,136,0.125)',
+                          color: '#888',
+                          border: '1px solid rgba(136,136,136,0.25)'
+                        }}>
+                          Not Downloaded
+                        </span>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', fontSize: '0.8rem', color: '#888' }}>
                       <span>
                         <i className="fab fa-github" style={{ marginRight: '0.35rem', color: '#6e5494' }}></i>
                         GitHub Release
                       </span>
-                      {mlvscanLatestRelease && (
+                      {mlvscanInstalledVersion && (
                         <span>
+                          <i className="fas fa-tag" style={{ marginRight: '0.35rem' }}></i>
+                          Installed: {mlvscanInstalledVersion}
+                        </span>
+                      )}
+                      {mlvscanLatestRelease && (
+                        <span style={mlvscanNeedsUpdate ? { color: '#ffaa00' } : {}}>
                           <i className="fas fa-cloud" style={{ marginRight: '0.35rem' }}></i>
                           Latest: {mlvscanLatestRelease.tag_name}
                         </span>
@@ -926,16 +1036,16 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem' }}>
                     <button
-                      className="btn btn-primary btn-small"
+                      className={`btn btn-small ${mlvscanNeedsUpdate ? 'btn-warning' : 'btn-primary'}`}
                       onClick={handleDownloadMlvscanClick}
                       disabled={downloadingMlvscan}
-                      title="Download MLVScan to the library"
+                      title={mlvscanNeedsUpdate ? 'Update MLVScan to the latest version' : 'Download MLVScan to the library'}
                     >
                       {downloadingMlvscan ? (
                         <i className="fas fa-spinner fa-spin"></i>
                       ) : (
                         <>
-                          <i className="fas fa-download"></i>
+                          <i className={`fas ${mlvscanNeedsUpdate ? 'fa-arrow-up' : 'fa-download'}`}></i>
                           <span style={{ marginLeft: '0.5rem' }}>{mlvscanActionLabel}</span>
                         </>
                       )}
@@ -1099,7 +1209,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   {downloadedGroups.map(group => (
                     <div key={group.key} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1 }}>
                           <input
                             type="checkbox"
                             checked={group.storageIds.every(id => selectedModIds.has(id))}
@@ -1115,6 +1225,19 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           }}>
                             {group.managed ? 'Managed' : 'External'}
                           </span>
+                          {group.updateAvailable && (
+                            <span style={{
+                              fontSize: '0.7rem',
+                              padding: '0.15rem 0.4rem',
+                              borderRadius: '4px',
+                              backgroundColor: 'rgba(255, 170, 0, 0.15)',
+                              color: '#ffaa00',
+                              border: '1px solid rgba(255, 170, 0, 0.3)'
+                            }}>
+                              <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem' }}></i>
+                              Update Available
+                            </span>
+                          )}
                         </label>
                         <button
                           className="btn btn-danger btn-small"
@@ -1126,7 +1249,28 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                         </button>
                       </div>
                       <div style={{ fontSize: '0.8rem', color: '#888', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <span>Installed in: {group.installedIn.length ? group.installedIn.length : '0'} env(s)</span>
+                        {group.author && (
+                          <span>
+                            <i className="fas fa-user" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
+                            {group.author}
+                          </span>
+                        )}
+                        {group.sourceVersion && (
+                          <span>
+                            <i className="fas fa-tag" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
+                            v{group.sourceVersion}
+                          </span>
+                        )}
+                        {group.updateAvailable && group.remoteVersion && (
+                          <span style={{ color: '#ffaa00' }}>
+                            <i className="fas fa-cloud-download-alt" style={{ marginRight: '0.25rem' }}></i>
+                            Latest: v{group.remoteVersion}
+                          </span>
+                        )}
+                        <span>
+                          <i className="fas fa-folder" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
+                          {group.installedIn.length ? group.installedIn.length : '0'} env(s)
+                        </span>
                         {group.availableRuntimes?.map(runtime => (
                           <span
                             key={`${group.key}-${runtime}`}

@@ -23,6 +23,7 @@ import {
   onUpdateAvailable,
   onUpdateCheckComplete,
   onModsChanged,
+  onModUpdatesChecked,
   onPluginsChanged,
   onUserLibsChanged
 } from '../services/events';
@@ -66,6 +67,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [modsCounts, setModsCounts] = useState<Map<string, number>>(new Map());
+  const [modUpdatesCounts, setModUpdatesCounts] = useState<Map<string, number>>(new Map());
   const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
   const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
   const [melonLoaderStatus, setMelonLoaderStatus] = useState<Map<string, { installed: boolean; version?: string }>>(new Map());
@@ -274,6 +276,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
     let unlistenUpdateAvailable: (() => void) | null = null;
     let unlistenUpdateCheckComplete: (() => void) | null = null;
     let unlistenModsChanged: (() => void) | null = null;
+    let unlistenModUpdatesChecked: (() => void) | null = null;
     let unlistenPluginsChanged: (() => void) | null = null;
     let unlistenUserLibsChanged: (() => void) | null = null;
 
@@ -411,6 +414,14 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
           handleUpdateEventComplete({ environmentId: data.environmentId });
         });
 
+        unlistenModUpdatesChecked = await onModUpdatesChecked((data) => {
+          setModUpdatesCounts(prev => {
+            const next = new Map(prev);
+            next.set(data.environmentId, data.count);
+            return next;
+          });
+        });
+
         // Listen for filesystem change events (mods/plugins/userlibs)
         // Debounce to avoid too many API calls when multiple file events fire rapidly
         // Use refs to avoid closure issues and prevent unnecessary effect re-runs
@@ -427,11 +438,18 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
             // Set new timer to refresh count after 500ms of no events
             const timer = setTimeout(async () => {
               try {
-                const result = await ApiService.getModsCount(data.environmentId);
-                // Only update the count state - no other side effects
+                const [result, modUpdatesResult] = await Promise.all([
+                  ApiService.getModsCount(data.environmentId),
+                  ApiService.getModUpdatesSummary(data.environmentId)
+                ]);
                 setModsCounts(prev => {
                   const next = new Map(prev);
                   next.set(data.environmentId, result.count);
+                  return next;
+                });
+                setModUpdatesCounts(prev => {
+                  const next = new Map(prev);
+                  next.set(data.environmentId, modUpdatesResult.count);
                   return next;
                 });
               } catch (err) {
@@ -534,6 +552,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
       if (unlistenUpdateAvailable) unlistenUpdateAvailable();
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
       if (unlistenModsChanged) unlistenModsChanged();
+      if (unlistenModUpdatesChecked) unlistenModUpdatesChecked();
       if (unlistenPluginsChanged) unlistenPluginsChanged();
       if (unlistenUserLibsChanged) unlistenUserLibsChanged();
 
@@ -663,6 +682,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
   useEffect(() => {
     const loadCounts = async () => {
       const modCounts = new Map<string, number>();
+      const modUpdatesCountsMap = new Map<string, number>();
       const pluginCounts = new Map<string, number>();
       const userLibsCounts = new Map<string, number>();
       const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
@@ -673,6 +693,12 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
             modCounts.set(env.id, result.count);
           } catch {
             modCounts.set(env.id, 0);
+          }
+          try {
+            const modUpdatesResult = await ApiService.getModUpdatesSummary(env.id);
+            modUpdatesCountsMap.set(env.id, modUpdatesResult.count);
+          } catch {
+            modUpdatesCountsMap.set(env.id, 0);
           }
           try {
             const pluginResult = await ApiService.getPluginsCount(env.id);
@@ -695,6 +721,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
         }
       }
       setModsCounts(modCounts);
+      setModUpdatesCounts(modUpdatesCountsMap);
       setPluginsCounts(pluginCounts);
       setUserLibsCounts(userLibsCounts);
       setMelonLoaderStatus(melonLoaderStatuses);
@@ -741,20 +768,33 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
   };
 
   const handleModsChanged = () => {
-    // Refresh mods count when mods are deleted
+    // Refresh mods count and mod updates when mods are changed
     if (modsOverlay.envId) {
       const env = environments.find(e => e.id === modsOverlay.envId);
       if (env && env.status === 'completed') {
-        ApiService.getModsCount(env.id)
-          .then(result => {
+        Promise.all([
+          ApiService.getModsCount(env.id),
+          ApiService.getModUpdatesSummary(env.id)
+        ])
+          .then(([result, modUpdatesResult]) => {
             setModsCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, result.count);
               return next;
             });
+            setModUpdatesCounts(prev => {
+              const next = new Map(prev);
+              next.set(env.id, modUpdatesResult.count);
+              return next;
+            });
           })
           .catch(() => {
             setModsCounts(prev => {
+              const next = new Map(prev);
+              next.set(env.id, 0);
+              return next;
+            });
+            setModUpdatesCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, 0);
               return next;
@@ -1129,6 +1169,15 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
           onClose={handleCloseModsOverlay}
           environmentId={modsOverlay.envId}
           onModsChanged={handleModsChanged}
+          onModUpdatesChecked={(count) => {
+            const envId = modsOverlay.envId!;
+            setModUpdatesCounts(prev => {
+              const next = new Map(prev);
+              next.set(envId, count);
+              return next;
+            });
+            window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: envId, count } }));
+          }}
         />
       )}
 
@@ -1626,6 +1675,17 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                         <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
                           {modsCounts.get(env.id) ?? 0} Mods found
                         </span>
+                        {(modsCounts.get(env.id) ?? 0) > 0 && (
+                          (modUpdatesCounts.get(env.id) ?? 0) > 0 ? (
+                            <span className="badge badge-orange" style={{ width: 'auto', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }} title="Mods with updates available">
+                              {modUpdatesCounts.get(env.id)} update{(modUpdatesCounts.get(env.id) ?? 0) !== 1 ? 's' : ''} available
+                            </span>
+                          ) : (
+                            <span className="badge badge-green" style={{ width: 'auto', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }} title="All mods up to date">
+                              Up to date
+                            </span>
+                          )
+                        )}
                         <button
                           onClick={() => handleOpenModsOverlay(env.id)}
                           className="btn btn-secondary btn-small"

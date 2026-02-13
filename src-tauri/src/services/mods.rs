@@ -1179,6 +1179,9 @@ impl ModsService {
                 source_version: template_meta.source_version.clone(),
                 source_url: template_meta.source_url.clone(),
                 installed_version: installed_version.clone(),
+                author: template_meta.author.clone(),
+                update_available: template_meta.update_available,
+                remote_version: template_meta.remote_version.clone(),
                 managed,
                 installed_in: installed_in.clone(),
                 available_runtimes: available_runtimes.clone(),
@@ -1328,6 +1331,7 @@ impl ModsService {
         let mod_source = match source_str {
             Some("thunderstore") => Some(ModSource::Thunderstore),
             Some("nexusmods") => Some(ModSource::Nexusmods),
+            Some("github") => Some(ModSource::Github),
             Some("unknown") => Some(ModSource::Unknown),
             Some("local") => Some(ModSource::Local),
             _ => None,
@@ -2252,7 +2256,9 @@ impl ModsService {
         let mod_source = match source_str {
             Some("thunderstore") => Some(ModSource::Thunderstore),
             Some("nexusmods") => Some(ModSource::Nexusmods),
+            Some("github") => Some(ModSource::Github),
             Some("unknown") => Some(ModSource::Unknown),
+            Some("local") => Some(ModSource::Local),
             _ => Some(ModSource::Local),
         };
 
@@ -2275,12 +2281,19 @@ impl ModsService {
             _ => crate::types::Runtime::Mono, // Default to Mono
         };
 
+        // Try to get runtime from metadata first (user may have selected it)
+        let metadata_detected_runtime = effective_metadata
+            .as_ref()
+            .and_then(|m| m.get("detectedRuntime").and_then(|s| s.as_str()));
+
+        eprintln!("[DEBUG] install_zip_mod: metadata_detected_runtime = {:?}", metadata_detected_runtime);
+
         for file_name in &installed_files {
-            // Detect runtime from file name
-            let detected_runtime_str = self.detect_mod_runtime_from_name(file_name);
-            let detected_runtime = match detected_runtime_str {
-                "IL2CPP" => Some(crate::types::Runtime::Il2cpp),
-                "Mono" => Some(crate::types::Runtime::Mono),
+            // Detect runtime from metadata or file name
+            let detected_runtime_str = metadata_detected_runtime.unwrap_or_else(|| self.detect_mod_runtime_from_name(file_name));
+            let detected_runtime = match detected_runtime_str.to_lowercase().as_str() {
+                "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+                "mono" => Some(crate::types::Runtime::Mono),
                 _ => None,
             };
 
@@ -2352,10 +2365,18 @@ impl ModsService {
 
         self.save_mod_metadata(&mods_directory, &mod_metadata).await?;
 
+        // Also save storage metadata so the library can access runtime info
+        // Use the first mod's detected runtime for the storage entry
+        let first_meta = mod_metadata.values().next();
+        if let Some(meta) = first_meta {
+            self.save_storage_metadata(&mod_storage_base, meta).await?;
+        }
+
         // Return the actual source that was installed, not hardcoded "local"
         let response_source = match mod_source {
             Some(ModSource::Thunderstore) => "thunderstore",
             Some(ModSource::Nexusmods) => "nexusmods",
+            Some(ModSource::Github) => "github",
             Some(ModSource::Unknown) => "unknown",
             Some(ModSource::Local) => "local",
             _ => "unknown",
@@ -2817,13 +2838,22 @@ impl ModsService {
         // Extract version from the storage file
         let version = self.extract_mod_version(&storage_path).await;
 
-        // Detect runtime from file name
-        let detected_runtime_str = self.detect_mod_runtime_from_name(file_name);
-        let detected_runtime = match detected_runtime_str {
-            "IL2CPP" => Some(crate::types::Runtime::Il2cpp),
-            "Mono" => Some(crate::types::Runtime::Mono),
+        // Try to get runtime from metadata first (user may have selected it)
+        let metadata_runtime = metadata
+            .as_ref()
+            .and_then(|m| m.get("detectedRuntime").and_then(|s| s.as_str()));
+
+        eprintln!("[DEBUG] install_dll_mod: metadata_runtime = {:?}", metadata_runtime);
+
+        // Detect runtime from metadata or file name
+        let detected_runtime_str = metadata_runtime.unwrap_or_else(|| self.detect_mod_runtime_from_name(file_name));
+        let detected_runtime = match detected_runtime_str.to_lowercase().as_str() {
+            "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+            "mono" => Some(crate::types::Runtime::Mono),
             _ => None,
         };
+
+        eprintln!("[DEBUG] install_dll_mod: detected_runtime = {:?}", detected_runtime);
 
         // Detect runtime from environment
         let env_runtime = match runtime {
@@ -2849,6 +2879,7 @@ impl ModsService {
         let mod_source = match source_str {
             Some("thunderstore") => ModSource::Thunderstore,
             Some("nexusmods") => ModSource::Nexusmods,
+            Some("github") => ModSource::Github,
             Some("unknown") => ModSource::Unknown,
             _ => ModSource::Local,
         };
@@ -2882,11 +2913,17 @@ impl ModsService {
             remote_version: None,
             detected_runtime,
             runtime_match,
-            mod_storage_id: Some(mod_id),
+            mod_storage_id: Some(mod_id.clone()),
             symlink_paths: Some(vec![symlink_path.to_string_lossy().to_string()]),
         });
 
         self.save_mod_metadata(&mods_directory, &mod_metadata).await?;
+
+        // Also save storage metadata so the library can access runtime info
+        let storage_metadata = mod_metadata.get(file_name).cloned();
+        if let Some(meta) = storage_metadata {
+            self.save_storage_metadata(&mod_storage_base, &meta).await?;
+        }
 
         Ok(serde_json::json!({
             "success": true,
@@ -2989,12 +3026,10 @@ impl ModsService {
 
     pub async fn install_s1api(&self, game_dir: &str, zip_path: &str, runtime: &str, branch: &str, version: &str) -> Result<serde_json::Value> {
         // Prepare metadata for GitHub installation (for duplicate detection)
-        // Note: GitHub is not a ModSource variant, so it will default to Local, but sourceId and sourceVersion
-        // are what matter for duplicate detection
         let metadata = serde_json::json!({
-            "source": "local", // GitHub mods use Local source type
-            "sourceId": "ifBars/S1API", // GitHub owner/repo for duplicate detection
-            "sourceVersion": version, // GitHub release tag/version
+            "source": "github",
+            "sourceId": "ifBars/S1API",
+            "sourceVersion": version,
             "sourceUrl": "https://github.com/ifBars/S1API",
             "modName": "S1API",
             "author": "ScheduleI-Dev",

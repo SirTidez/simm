@@ -160,33 +160,22 @@ export interface ModLibraryEntry {
   storageId: string;
   displayName: string;
   files: string[];
-  source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceId?: string;
   sourceVersion?: string;
   sourceUrl?: string;
   installedVersion?: string;
+  author?: string;
+  updateAvailable?: boolean;
+  remoteVersion?: string;
   managed: boolean;
   installedIn: string[];
   availableRuntimes: Array<'IL2CPP' | 'Mono'>;
   storageIdsByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>>;
   installedInByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
   filesByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
-}export interface ModLibraryResult {
+}
+
+export interface ModLibraryResult {
   downloaded: ModLibraryEntry[];
-}export interface ConfigEntry {
-  key: string;
-  value: string;
-  comment?: string;
-}export interface ConfigSection {
-  name: string;
-  entries: ConfigEntry[];
-}export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';export interface ConfigFile {
-  name: string;
-  path: string;
-  fileType: ConfigFileType;
-  sections: ConfigSection[];
-}export interface ConfigUpdate {
-  section: string;
-  key: string;
-  value: string;
 }

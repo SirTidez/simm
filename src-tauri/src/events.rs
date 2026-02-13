@@ -167,3 +167,19 @@ pub fn emit_userlibs_changed<R: Runtime>(
         serde_json::json!({ "environmentId": environment_id }),
     )
 }
+
+pub fn emit_mod_updates_checked<R: Runtime>(
+    app: &AppHandle<R>,
+    environment_id: String,
+    count: usize,
+    updates: Vec<serde_json::Value>,
+) -> Result<(), tauri::Error> {
+    app.emit(
+        "mod_updates_checked",
+        serde_json::json!({
+            "environmentId": environment_id,
+            "count": count,
+            "updates": updates
+        }),
+    )
+}

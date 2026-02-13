@@ -224,6 +224,7 @@ pub enum ModSource {
     Local,
     Thunderstore,
     Nexusmods,
+    Github,
     Unknown,
 }
 
@@ -260,6 +261,9 @@ pub struct ModLibraryEntry {
     pub source_version: Option<String>,
     pub source_url: Option<String>,
     pub installed_version: Option<String>,
+    pub author: Option<String>,
+    pub update_available: Option<bool>,
+    pub remote_version: Option<String>,
     pub managed: bool,
     pub installed_in: Vec<String>,
     pub available_runtimes: Vec<String>,

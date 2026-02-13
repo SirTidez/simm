@@ -552,7 +552,7 @@ pub async fn download_s1api_to_library(
         .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
 
     let metadata = serde_json::json!({
-        "source": "local",
+        "source": "github",
         "sourceId": "ifBars/S1API",
         "sourceVersion": version_tag,
         "sourceUrl": "https://github.com/ifBars/S1API",
@@ -649,7 +649,7 @@ pub async fn download_mlvscan_to_library(
         .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
 
     let metadata = serde_json::json!({
-        "source": "local",
+        "source": "github",
         "sourceId": "ifBars/MLVScan",
         "sourceVersion": version_tag,
         "sourceUrl": "https://github.com/ifBars/MLVScan",

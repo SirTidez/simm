@@ -278,7 +278,7 @@ export class ApiService {
     originalFileName: string,
     runtime?: 'IL2CPP' | 'Mono',
     metadata?: {
-      source?: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
+      source?: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
       sourceUrl?: string;
       modName?: string;
       author?: string;
@@ -344,12 +344,13 @@ export class ApiService {
     originalFileName: string,
     runtime: string,
     metadata?: {
-      source?: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
+      source?: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
       sourceUrl?: string;
       modName?: string;
       author?: string;
       sourceId?: string;
       sourceVersion?: string;
+      detectedRuntime?: 'IL2CPP' | 'Mono';
     }
   ): Promise<{
     success: boolean;
@@ -377,6 +378,7 @@ export class ApiService {
         author: metadata.author,
         sourceId: metadata.sourceId,
         sourceVersion: metadata.sourceVersion,
+        detectedRuntime: metadata.detectedRuntime,
       } : null,
     });
   }
@@ -735,6 +737,34 @@ export class ApiService {
         source: u.source,
       })),
     };
+  }
+
+  static async getModUpdatesSummary(environmentId: string): Promise<{
+    count: number;
+    updates: Array<{
+      modFileName: string;
+      modName: string;
+      currentVersion: string;
+      latestVersion: string;
+      source: string;
+    }>;
+  }> {
+    return invoke('get_mod_updates_summary', { environmentId });
+  }
+
+  static async getAllModUpdatesSummary(): Promise<Array<{
+    environmentId: string;
+    environmentName: string;
+    count: number;
+    updates: Array<{
+      modFileName: string;
+      modName: string;
+      currentVersion: string;
+      latestVersion: string;
+      source: string;
+    }>;
+  }>> {
+    return invoke('get_all_mod_updates_summary', {});
   }
 
   static async getS1APIStatus(environmentId: string): Promise<{

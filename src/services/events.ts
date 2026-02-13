@@ -68,6 +68,18 @@ export interface UserLibsChangedEvent {
   environmentId: string;
 }
 
+export interface ModUpdatesCheckedEvent {
+  environmentId: string;
+  count: number;
+  updates: Array<{
+    modFileName: string;
+    modName: string;
+    currentVersion: string;
+    latestVersion: string;
+    source: string;
+  }>;
+}
+
 export async function onProgress(handler: (data: DownloadProgress) => void): Promise<() => void> {
   return await listen<ProgressEvent>('download_progress', (event) => {
     handler(event.payload.progress);
@@ -148,6 +160,12 @@ export async function onPluginsChanged(handler: (data: PluginsChangedEvent) => v
 
 export async function onUserLibsChanged(handler: (data: UserLibsChangedEvent) => void): Promise<() => void> {
   return await listen<UserLibsChangedEvent>('userlibs_changed', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onModUpdatesChecked(handler: (data: ModUpdatesCheckedEvent) => void): Promise<() => void> {
+  return await listen<ModUpdatesCheckedEvent>('mod_updates_checked', (event) => {
     handler(event.payload);
   });
 }

@@ -8,7 +8,7 @@ interface PluginInfo {
   fileName: string;
   path: string;
   version?: string;
-  source?: 'local' | 'thunderstore' | 'nexusmods' | 'unknown';
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   relatedMod?: string;
 }
 
