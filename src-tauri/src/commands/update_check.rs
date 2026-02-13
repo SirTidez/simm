@@ -19,6 +19,33 @@ static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> 
 static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
 static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
+fn extract_mod_name_for_event(result: &serde_json::Value) -> String {
+    result
+        .get("packageInfo")
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .or_else(|| result.get("modName").and_then(|v| v.as_str()))
+        .or_else(|| result.get("modFileName").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn build_mod_updates_payload(results: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    results
+        .iter()
+        .filter(|r| r.get("updateAvailable").and_then(|v| v.as_bool()).unwrap_or(false))
+        .map(|r| {
+            serde_json::json!({
+                "modFileName": r.get("modFileName").and_then(|v| v.as_str()).unwrap_or(""),
+                "modName": extract_mod_name_for_event(r),
+                "currentVersion": r.get("currentVersion").and_then(|v| v.as_str()).unwrap_or(""),
+                "latestVersion": r.get("latestVersion").and_then(|v| v.as_str()).unwrap_or(""),
+                "source": r.get("source").and_then(|v| v.as_str()).unwrap_or("unknown")
+            })
+        })
+        .collect()
+}
+
 
 
 async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
@@ -198,27 +225,7 @@ pub async fn check_all_updates(
                 Ok(results) => {
                     eprintln!("[UpdateCheck] Successfully checked mod updates for environment {}", env_id);
                     // Build minimal payload for mods that need updating
-                    let updates: Vec<serde_json::Value> = results
-                        .iter()
-                        .filter(|r| r.get("updateAvailable").and_then(|v| v.as_bool()).unwrap_or(false))
-                        .map(|r| {
-                            let mod_name = r
-                                .get("packageInfo")
-                                .and_then(|p| p.get("name"))
-                                .and_then(|v| v.as_str())
-                                .or_else(|| r.get("modName").and_then(|v| v.as_str()))
-                                .or_else(|| r.get("modFileName").and_then(|v| v.as_str()))
-                                .unwrap_or("")
-                                .to_string();
-                            serde_json::json!({
-                                "modFileName": r.get("modFileName").and_then(|v| v.as_str()).unwrap_or(""),
-                                "modName": mod_name,
-                                "currentVersion": r.get("currentVersion").and_then(|v| v.as_str()).unwrap_or(""),
-                                "latestVersion": r.get("latestVersion").and_then(|v| v.as_str()).unwrap_or(""),
-                                "source": r.get("source").and_then(|v| v.as_str()).unwrap_or("unknown")
-                            })
-                        })
-                        .collect();
+                    let updates = build_mod_updates_payload(&results);
                     let count = updates.len();
                     let _ = events::emit_mod_updates_checked(&app, env_id, count, updates);
                 }
@@ -310,4 +317,135 @@ pub async fn get_update_status(
         "remoteBuildId": env.remote_build_id,
         "currentManifestId": env.last_manifest_id
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_mod_updates_payload, extract_mod_name_for_event, get_github_service};
+    use crate::db::initialize_pool;
+    use crate::services::settings::SettingsService;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_github_service_refreshes_token_changes_without_restart() {
+        let temp = tempdir().expect("temp dir");
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _token_guard = EnvVarGuard::unset("GITHUB_TOKEN");
+
+        let pool = initialize_pool().await.expect("pool");
+        let settings = SettingsService::new(pool.clone()).expect("settings service");
+
+        let service = get_github_service(pool.clone()).await.expect("github service");
+        assert_eq!(service.current_token_for_testing().await, None);
+
+        settings
+            .save_github_token("token-two".to_string())
+            .await
+            .expect("save token");
+        let service = get_github_service(pool.clone()).await.expect("github service after save");
+        assert_eq!(
+            service.current_token_for_testing().await.as_deref(),
+            Some("token-two")
+        );
+
+        settings.clear_github_token().await.expect("clear token");
+        let service = get_github_service(pool.clone()).await.expect("github service after clear");
+        assert_eq!(service.current_token_for_testing().await, None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_github_service_none_setting_disables_env_token_fallback() {
+        let temp = tempdir().expect("temp dir");
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
+
+        let pool = initialize_pool().await.expect("pool");
+        let settings = SettingsService::new(pool.clone()).expect("settings service");
+        settings.clear_github_token().await.expect("clear token");
+
+        let service = get_github_service(pool.clone()).await.expect("github service");
+        assert_eq!(service.current_token_for_testing().await, None);
+    }
+
+    #[test]
+    fn extract_mod_name_for_event_prefers_package_then_mod_name_then_file_name() {
+        let from_package = serde_json::json!({
+            "packageInfo": {"name": "Pkg Name"},
+            "modName": "Meta Name",
+            "modFileName": "File.dll"
+        });
+        assert_eq!(extract_mod_name_for_event(&from_package), "Pkg Name");
+
+        let from_meta = serde_json::json!({
+            "modName": "Meta Name",
+            "modFileName": "File.dll"
+        });
+        assert_eq!(extract_mod_name_for_event(&from_meta), "Meta Name");
+
+        let from_file = serde_json::json!({
+            "modFileName": "File.dll"
+        });
+        assert_eq!(extract_mod_name_for_event(&from_file), "File.dll");
+    }
+
+    #[test]
+    fn build_mod_updates_payload_only_includes_available_updates() {
+        let results = vec![
+            serde_json::json!({
+                "modFileName": "A.dll",
+                "modName": "A",
+                "updateAvailable": true,
+                "currentVersion": "1.0.0",
+                "latestVersion": "1.1.0",
+                "source": "github"
+            }),
+            serde_json::json!({
+                "modFileName": "B.dll",
+                "modName": "B",
+                "updateAvailable": false,
+                "currentVersion": "1.0.0",
+                "latestVersion": "1.0.0",
+                "source": "thunderstore"
+            }),
+        ];
+
+        let updates = build_mod_updates_payload(&results);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].get("modFileName").and_then(|v| v.as_str()), Some("A.dll"));
+        assert_eq!(updates[0].get("source").and_then(|v| v.as_str()), Some("github"));
+    }
 }

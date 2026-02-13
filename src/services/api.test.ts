@@ -70,4 +70,108 @@ describe('ApiService', () => {
       })
     );
   });
+
+  it('uploadMod forwards detectedRuntime metadata', async () => {
+    invokeMock.mockResolvedValueOnce({ success: true });
+
+    await ApiService.uploadMod(
+      'env-1',
+      'C:/mods/Example.dll',
+      'Example.dll',
+      'IL2CPP',
+      {
+        source: 'unknown',
+        modName: 'Example',
+        detectedRuntime: 'Mono',
+      }
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith('upload_mod', {
+      environmentId: 'env-1',
+      filePath: 'C:/mods/Example.dll',
+      originalFileName: 'Example.dll',
+      runtime: 'IL2CPP',
+      branch: '',
+      metadata: expect.objectContaining({
+        source: 'unknown',
+        modName: 'Example',
+        detectedRuntime: 'Mono',
+      }),
+    });
+  });
+
+  it('getAllModUpdatesSummary invokes backend summary command', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        environmentId: 'env-1',
+        environmentName: 'Env One',
+        count: 1,
+        updates: [],
+      },
+    ]);
+
+    const result = await ApiService.getAllModUpdatesSummary();
+
+    expect(invokeMock).toHaveBeenCalledWith('get_all_mod_updates_summary', {});
+    expect(result).toEqual([
+      {
+        environmentId: 'env-1',
+        environmentName: 'Env One',
+        count: 1,
+        updates: [],
+      },
+    ]);
+  });
+
+  it('getAvailableModUpdates filters only updateAvailable entries', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        modFileName: 'A.dll',
+        updateAvailable: true,
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        source: 'thunderstore',
+      },
+      {
+        modFileName: 'B.dll',
+        updateAvailable: false,
+        currentVersion: '2.0.0',
+        latestVersion: '2.0.0',
+        source: 'nexusmods',
+      },
+    ]);
+
+    const result = await ApiService.getAvailableModUpdates('env-1');
+
+    expect(result.count).toBe(1);
+    expect(result.updates).toEqual([
+      {
+        modFileName: 'A.dll',
+        updateAvailable: true,
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        source: 'thunderstore',
+      },
+    ]);
+  });
+
+  it.each([
+    ['setGitHubToken', () => ApiService.setGitHubToken('abc123'), 'set_github_token', { token: 'abc123' }],
+    ['hasGitHubToken', () => ApiService.hasGitHubToken(), 'has_github_token', undefined],
+    ['removeGitHubToken', () => ApiService.removeGitHubToken(), 'clear_github_token', undefined],
+    ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
+    ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
+    ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
+  ])('%s invokes correct command contract', async (_label, call, command, payload) => {
+    invokeMock.mockResolvedValueOnce({ success: true });
+
+    await call();
+
+    if (payload === undefined) {
+      expect(invokeMock).toHaveBeenCalledWith(command);
+      return;
+    }
+
+    expect(invokeMock).toHaveBeenCalledWith(command, payload);
+  });
 });

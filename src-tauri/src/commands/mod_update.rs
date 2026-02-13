@@ -18,6 +18,16 @@ static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> 
 static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
 static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
+fn map_mod_source(source: Option<ModSource>) -> &'static str {
+    match source {
+        Some(ModSource::Thunderstore) => "thunderstore",
+        Some(ModSource::Nexusmods) => "nexusmods",
+        Some(ModSource::Github) => "github",
+        Some(ModSource::Local) => "local",
+        Some(ModSource::Unknown) | None => "unknown",
+    }
+}
+
 async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     let mut service = MOD_UPDATE_SERVICE.lock().await;
     if service.is_none() {
@@ -59,12 +69,19 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
     let github_service = {
         let mut service = GITHUB_SERVICE.lock().await;
         if service.is_none() {
-            let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-            let token = settings_service.get_github_token().await.ok().flatten();
-            *service = Some(Arc::new(GitHubReleasesService::with_token(token)));
+            *service = Some(Arc::new(GitHubReleasesService::new()));
         }
         service.as_ref().unwrap().clone()
     };
+    // Fetch token on every call so settings changes take effect without app restart
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    match settings_service.get_github_token().await {
+        Ok(Some(token)) => github_service.set_token(Some(token)).await,
+        Ok(None) => github_service.set_token(None).await,
+        Err(e) => {
+            log::warn!("Failed to get GitHub token: {:?}", e);
+        }
+    }
     Ok(github_service)
 }
 
@@ -127,17 +144,12 @@ pub async fn get_mod_updates_summary(
         .into_iter()
         .filter(|(_, meta)| meta.update_available == Some(true))
         .map(|(file_name, meta)| {
-            let source_str = match meta.source {
-                Some(ModSource::Thunderstore) => "thunderstore",
-                Some(ModSource::Nexusmods) => "nexusmods",
-                _ => "unknown",
-            };
             serde_json::json!({
                 "modFileName": file_name,
                 "modName": meta.mod_name.unwrap_or_else(|| file_name.clone()),
                 "currentVersion": meta.source_version.or(meta.installed_version).unwrap_or_default(),
                 "latestVersion": meta.remote_version.unwrap_or_default(),
-                "source": source_str
+                "source": map_mod_source(meta.source)
             })
         })
         .collect();
@@ -185,17 +197,12 @@ pub async fn get_all_mod_updates_summary(
             .into_iter()
             .filter(|(_, meta)| meta.update_available == Some(true))
             .map(|(file_name, meta)| {
-                let source_str = match meta.source {
-                    Some(ModSource::Thunderstore) => "thunderstore",
-                    Some(ModSource::Nexusmods) => "nexusmods",
-                    _ => "unknown",
-                };
                 serde_json::json!({
                     "modFileName": file_name,
                     "modName": meta.mod_name.unwrap_or_else(|| file_name.clone()),
                     "currentVersion": meta.source_version.or(meta.installed_version).unwrap_or_default(),
                     "latestVersion": meta.remote_version.unwrap_or_default(),
-                    "source": source_str
+                    "source": map_mod_source(meta.source)
                 })
             })
             .collect();
@@ -210,4 +217,99 @@ pub async fn get_all_mod_updates_summary(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_mod_source;
+    use super::get_github_service;
+    use crate::db::initialize_pool;
+    use crate::services::settings::SettingsService;
+    use crate::types::ModSource;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn map_mod_source_includes_all_supported_sources() {
+        assert_eq!(map_mod_source(Some(ModSource::Thunderstore)), "thunderstore");
+        assert_eq!(map_mod_source(Some(ModSource::Nexusmods)), "nexusmods");
+        assert_eq!(map_mod_source(Some(ModSource::Github)), "github");
+        assert_eq!(map_mod_source(Some(ModSource::Local)), "local");
+        assert_eq!(map_mod_source(Some(ModSource::Unknown)), "unknown");
+        assert_eq!(map_mod_source(None), "unknown");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_github_service_refreshes_token_changes_without_restart() {
+        let temp = tempdir().expect("temp dir");
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _token_guard = EnvVarGuard::unset("GITHUB_TOKEN");
+
+        let pool = initialize_pool().await.expect("pool");
+        let settings = SettingsService::new(pool.clone()).expect("settings service");
+
+        let service = get_github_service(pool.clone()).await.expect("github service");
+        assert_eq!(service.current_token_for_testing().await, None);
+
+        settings
+            .save_github_token("token-one".to_string())
+            .await
+            .expect("save token");
+        let service = get_github_service(pool.clone()).await.expect("github service after save");
+        assert_eq!(
+            service.current_token_for_testing().await.as_deref(),
+            Some("token-one")
+        );
+
+        settings.clear_github_token().await.expect("clear token");
+        let service = get_github_service(pool.clone()).await.expect("github service after clear");
+        assert_eq!(service.current_token_for_testing().await, None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_github_service_none_setting_disables_env_token_fallback() {
+        let temp = tempdir().expect("temp dir");
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
+
+        let pool = initialize_pool().await.expect("pool");
+        let settings = SettingsService::new(pool.clone()).expect("settings service");
+        settings.clear_github_token().await.expect("clear token");
+
+        let service = get_github_service(pool.clone()).await.expect("github service");
+        assert_eq!(service.current_token_for_testing().await, None);
+    }
 }

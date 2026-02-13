@@ -11,11 +11,6 @@ pub struct GitHubReleasesService {
 }
 
 fn build_client_from_token(token: &Option<String>) -> Option<Octocrab> {
-    let token = token
-        .as_ref()
-        .map(|s| s.clone())
-        .or_else(|| env::var("GITHUB_TOKEN").ok());
-
     if let Some(ref token_val) = token {
         Octocrab::builder()
             .personal_token(token_val.clone())
@@ -43,9 +38,9 @@ impl GitHubReleasesService {
         }
     }
 
-    /// Update the GitHub token. Token changes in settings will be picked up on the next API call.
+    /// Update the GitHub token. Pass None to explicitly disable authentication
+    /// (ignoring any GITHUB_TOKEN environment variable). Pass Some(token) to use a specific token.
     pub async fn set_token(&self, token: Option<String>) {
-        let token = token.or_else(|| env::var("GITHUB_TOKEN").ok());
         *self.token.write().await = token.clone();
         *self.client.write().await = build_client_from_token(&token);
     }
@@ -133,12 +128,10 @@ impl GitHubReleasesService {
 
         let mut request = client.get(url);
 
-        // Add authentication if available (try stored token, then env var)
-        // NEVER log the token value
+        // Add authentication if available.
+        // NEVER log the token value.
         if let Some(token) = self.token.read().await.as_ref() {
             request = request.bearer_auth(token);
-        } else if let Ok(env_token) = env::var("GITHUB_TOKEN") {
-            request = request.bearer_auth(&env_token);
         }
 
         let response = request
@@ -216,11 +209,39 @@ impl GitHubReleasesService {
             token: Arc::new(RwLock::new(None)),
         }
     }
+
+    pub async fn current_token_for_testing(&self) -> Option<String> {
+        self.token.read().await.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn get_zip_asset_url_picks_first_zip() {
@@ -257,6 +278,28 @@ mod tests {
         let service = GitHubReleasesService::for_testing();
         let release = serde_json::json!({ "assets": [] });
         assert!(service.get_zip_asset_url(&release).is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn with_token_none_uses_env_token_by_default() {
+        let _guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
+        let service = GitHubReleasesService::with_token(None);
+
+        let token = service.token.read().await.clone();
+        assert_eq!(token.as_deref(), Some("env-token"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn set_token_none_explicitly_disables_auth_even_with_env_token() {
+        let _guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
+        let service = GitHubReleasesService::new();
+
+        service.set_token(None).await;
+
+        let token = service.token.read().await.clone();
+        assert!(token.is_none());
     }
 
     /// Performs a real GitHub API request. Run with: cargo test -- --ignored

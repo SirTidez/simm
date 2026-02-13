@@ -246,6 +246,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn live_search_and_fetch_package() -> Result<()> {
         let service = ThunderStoreService::new();
         let packages = service

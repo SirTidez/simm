@@ -768,3 +768,137 @@ impl PluginsService {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PluginsService;
+    use crate::db::initialize_pool;
+    use crate::services::environment::EnvironmentService;
+    use crate::types::schedule_i_config;
+    use anyhow::Result;
+    use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_and_uninstall_mlvscan_updates_status_and_listing() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = PluginsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("plugins-env");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let source_dll = temp.path().join("MLVScan.Input.dll");
+        fs::write(&source_dll, b"not-a-real-dotnet-assembly").await?;
+
+        service
+            .install_mlvscan(
+                output_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "v1.2.3",
+            )
+            .await?;
+
+        let status = service
+            .get_mlvscan_installation_status(output_dir.to_string_lossy().as_ref())
+            .await?;
+        assert_eq!(status.get("installed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(status.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(status.get("version").and_then(|v| v.as_str()), Some("v1.2.3"));
+
+        let list = service
+            .list_plugins(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let count = list.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        assert_eq!(count, 1);
+
+        service
+            .uninstall_mlvscan(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let status_after = service
+            .get_mlvscan_installation_status(output_dir.to_string_lossy().as_ref())
+            .await?;
+        assert_eq!(
+            status_after.get("installed").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disable_and_enable_plugin_renames_file() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = PluginsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("plugins-toggle");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::write(plugins_dir.join("ExamplePlugin.dll"), b"data").await?;
+
+        service
+            .disable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
+            .await?;
+        assert!(plugins_dir.join("ExamplePlugin.dll.disabled").exists());
+
+        service
+            .enable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
+            .await?;
+        assert!(plugins_dir.join("ExamplePlugin.dll").exists());
+
+        Ok(())
+    }
+}

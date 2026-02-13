@@ -9,6 +9,8 @@ mod types;
 mod utils;
 mod events;
 mod db;
+#[cfg(test)]
+mod test_helpers;
 
 use tauri::Manager;
 

@@ -12,6 +12,54 @@ use once_cell::sync::Lazy;
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
+fn map_source_to_mod_source(source_str: Option<&str>) -> Option<crate::types::ModSource> {
+    match source_str {
+        Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
+        Some("nexusmods") => Some(crate::types::ModSource::Nexusmods),
+        Some("github") => Some(crate::types::ModSource::Github),
+        Some("unknown") => Some(crate::types::ModSource::Unknown),
+        _ => Some(crate::types::ModSource::Local),
+    }
+}
+
+fn response_source_label(mod_source: Option<crate::types::ModSource>) -> &'static str {
+    match mod_source {
+        Some(crate::types::ModSource::Thunderstore) => "thunderstore",
+        Some(crate::types::ModSource::Nexusmods) => "nexusmods",
+        Some(crate::types::ModSource::Github) => "github",
+        Some(crate::types::ModSource::Unknown) => "unknown",
+        Some(crate::types::ModSource::Local) => "local",
+        _ => "unknown",
+    }
+}
+
+async fn get_environment_output_dir(db: Arc<SqlitePool>, environment_id: &str) -> Result<String, String> {
+    let env_service = EnvironmentService::new(db).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    Ok(env.output_dir)
+}
+
+async fn get_mlvscan_installation_status_impl(
+    db: Arc<SqlitePool>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let output_dir = get_environment_output_dir(db.clone(), &environment_id).await?;
+    let plugins_service = PluginsService::new(db);
+    plugins_service
+        .get_mlvscan_installation_status(&output_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
     let mut service = FS_SERVICE.lock().await;
     if service.is_none() {
@@ -190,13 +238,7 @@ pub async fn upload_plugin(
             .as_ref()
             .and_then(|m| m.get("source").and_then(|s| s.as_str()));
 
-        let mod_source = match source_str {
-            Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
-            Some("nexusmods") => Some(crate::types::ModSource::Nexusmods),
-            Some("github") => Some(crate::types::ModSource::Github),
-            Some("unknown") => Some(crate::types::ModSource::Unknown),
-            _ => Some(crate::types::ModSource::Local),
-        };
+        let mod_source = map_source_to_mod_source(source_str);
 
         let source_id = metadata
             .as_ref()
@@ -241,14 +283,7 @@ pub async fn upload_plugin(
         plugins_service.save_plugin_metadata(&plugins_directory, &plugin_metadata).await
             .map_err(|e| e.to_string())?;
 
-        let response_source = match mod_source {
-            Some(crate::types::ModSource::Thunderstore) => "thunderstore",
-            Some(crate::types::ModSource::Nexusmods) => "nexusmods",
-            Some(crate::types::ModSource::Github) => "github",
-            Some(crate::types::ModSource::Unknown) => "unknown",
-            Some(crate::types::ModSource::Local) => "local",
-            _ => "unknown",
-        };
+        let response_source = response_source_label(mod_source.clone());
 
         Ok(serde_json::json!({
             "success": true,
@@ -265,20 +300,7 @@ pub async fn get_mlvscan_installation_status(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service.get_environment(&environment_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
-
-    if env.output_dir.is_empty() {
-        return Err("Output directory not set".to_string());
-    }
-
-    let plugins_service = PluginsService::new(db.inner().clone());
-    plugins_service.get_mlvscan_installation_status(&env.output_dir)
-        .await
-        .map_err(|e| e.to_string())
+    get_mlvscan_installation_status_impl(db.inner().clone(), environment_id).await
 }
 
 #[tauri::command]
@@ -595,4 +617,88 @@ pub async fn uninstall_mlvscan(
     plugins_service.uninstall_mlvscan(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        get_mlvscan_installation_status_impl, map_source_to_mod_source, response_source_label,
+    };
+    use crate::services::environment::EnvironmentService;
+    use crate::services::plugins::PluginsService;
+    use crate::test_helpers::init_test_pool_with_temp_data_dir;
+    use crate::types::{schedule_i_config, ModSource};
+    use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    #[test]
+    fn upload_source_mapping_supports_github_and_round_trips_response_label() {
+        assert!(matches!(
+            map_source_to_mod_source(Some("github")),
+            Some(ModSource::Github)
+        ));
+        assert_eq!(
+            response_source_label(map_source_to_mod_source(Some("github"))),
+            "github"
+        );
+        assert_eq!(
+            response_source_label(map_source_to_mod_source(Some("unknown"))),
+            "unknown"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mlvscan_installation_status_reports_installed_and_not_installed() {
+        let (_temp, _guard, pool) = init_test_pool_with_temp_data_dir().await.expect("test pool");
+        let env_root = tempdir().expect("env temp");
+        let env_service = EnvironmentService::new(pool.clone()).expect("env service");
+
+        let output_dir = env_root.path().join("env-plugins");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await
+            .expect("create env");
+
+        let status = get_mlvscan_installation_status_impl(pool.clone(), env.id.clone())
+            .await
+            .expect("status");
+        assert_eq!(status.get("installed").and_then(|v| v.as_bool()), Some(false));
+
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&plugins_dir).await.expect("plugins dir");
+        let source_dll = env_root.path().join("MLVScanSource.dll");
+        fs::write(&source_dll, b"not-a-real-dotnet-assembly")
+            .await
+            .expect("dll source");
+
+        let plugins_service = PluginsService::new(pool.clone());
+        plugins_service
+            .install_mlvscan(
+                output_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "v1.0.0",
+            )
+            .await
+            .expect("install mlvscan");
+
+        let installed_status = get_mlvscan_installation_status_impl(pool.clone(), env.id.clone())
+            .await
+            .expect("installed status");
+        assert_eq!(
+            installed_status.get("installed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            installed_status.get("enabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
 }

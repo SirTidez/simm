@@ -224,4 +224,38 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('update-available').textContent).toBe('true');
     });
   });
+
+  it('cleans up all event listeners on unmount', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+
+    const unlistenProgress = vi.fn();
+    const unlistenComplete = vi.fn();
+    const unlistenError = vi.fn();
+    const unlistenUpdateAvailable = vi.fn();
+    const unlistenUpdateCheckComplete = vi.fn();
+
+    eventMocks.onProgress.mockResolvedValueOnce(unlistenProgress);
+    eventMocks.onComplete.mockResolvedValueOnce(unlistenComplete);
+    eventMocks.onError.mockResolvedValueOnce(unlistenError);
+    eventMocks.onUpdateAvailable.mockResolvedValueOnce(unlistenUpdateAvailable);
+    eventMocks.onUpdateCheckComplete.mockResolvedValueOnce(unlistenUpdateCheckComplete);
+
+    const { unmount } = render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    unmount();
+
+    expect(unlistenProgress).toHaveBeenCalled();
+    expect(unlistenComplete).toHaveBeenCalled();
+    expect(unlistenError).toHaveBeenCalled();
+    expect(unlistenUpdateAvailable).toHaveBeenCalled();
+    expect(unlistenUpdateCheckComplete).toHaveBeenCalled();
+  });
 });

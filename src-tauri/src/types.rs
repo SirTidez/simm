@@ -329,3 +329,66 @@ pub fn schedule_i_config() -> AppConfig {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mod_source_serializes_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ModSource::Thunderstore).expect("serialize"),
+            "\"thunderstore\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModSource::Nexusmods).expect("serialize"),
+            "\"nexusmods\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModSource::Github).expect("serialize"),
+            "\"github\""
+        );
+    }
+
+    #[test]
+    fn runtime_serializes_as_uppercase() {
+        assert_eq!(
+            serde_json::to_string(&Runtime::Il2cpp).expect("serialize"),
+            "\"IL2CPP\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Runtime::Mono).expect("serialize"),
+            "\"MONO\""
+        );
+    }
+
+    #[test]
+    fn mod_library_entry_serializes_camel_case_fields() {
+        let entry = ModLibraryEntry {
+            storage_id: "s-1".to_string(),
+            display_name: "Example".to_string(),
+            files: vec!["Example.dll".to_string()],
+            source: Some(ModSource::Github),
+            source_id: Some("owner/repo".to_string()),
+            source_version: Some("v1.0.0".to_string()),
+            source_url: Some("https://example.com".to_string()),
+            installed_version: Some("v1.0.0".to_string()),
+            author: Some("Author".to_string()),
+            update_available: Some(true),
+            remote_version: Some("v1.1.0".to_string()),
+            managed: true,
+            installed_in: vec!["env-1".to_string()],
+            available_runtimes: vec!["Mono".to_string()],
+            storage_ids_by_runtime: std::collections::HashMap::new(),
+            installed_in_by_runtime: std::collections::HashMap::new(),
+            files_by_runtime: std::collections::HashMap::new(),
+        };
+
+        let json = serde_json::to_value(entry).expect("serialize");
+        assert!(json.get("storageId").is_some());
+        assert!(json.get("displayName").is_some());
+        assert!(json.get("sourceId").is_some());
+        assert!(json.get("availableRuntimes").is_some());
+        assert!(json.get("storage_ids_by_runtime").is_none());
+    }
+}

@@ -12,6 +12,54 @@ use once_cell::sync::Lazy;
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadKind {
+    Zip,
+    Dll,
+    Unsupported,
+}
+
+fn detect_upload_kind(file_path: &str) -> UploadKind {
+    let file_path_lower = file_path.to_lowercase();
+    if file_path_lower.ends_with(".zip") {
+        UploadKind::Zip
+    } else if file_path_lower.ends_with(".dll") {
+        UploadKind::Dll
+    } else {
+        UploadKind::Unsupported
+    }
+}
+
+fn parse_runtime_label(runtime: Option<&str>) -> Option<crate::types::Runtime> {
+    runtime.and_then(|value| match value.trim().to_lowercase().as_str() {
+        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+        "mono" => Some(crate::types::Runtime::Mono),
+        _ => None,
+    })
+}
+
+fn build_s1api_library_metadata(version_tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": "github",
+        "sourceId": "ifBars/S1API",
+        "sourceVersion": version_tag,
+        "sourceUrl": "https://github.com/ifBars/S1API",
+        "modName": "S1API",
+        "author": "ScheduleI-Dev",
+    })
+}
+
+fn build_mlvscan_library_metadata(version_tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": "github",
+        "sourceId": "ifBars/MLVScan",
+        "sourceVersion": version_tag,
+        "sourceUrl": "https://github.com/ifBars/MLVScan",
+        "modName": "MLVScan",
+        "author": "ifBars",
+    })
+}
+
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
     let mut service = FS_SERVICE.lock().await;
     if service.is_none() {
@@ -304,18 +352,18 @@ pub async fn upload_mod(
 
     let mods_service = ModsService::new(db.inner().clone());
     
-    // Check if file is ZIP or DLL
-    let file_path_lower = file_path.to_lowercase();
-    if file_path_lower.ends_with(".zip") {
+    match detect_upload_kind(&file_path) {
+        UploadKind::Zip => {
         mods_service.install_zip_mod(&env.output_dir, &file_path, &original_file_name, &runtime, &branch, metadata)
             .await
             .map_err(|e| e.to_string())
-    } else if file_path_lower.ends_with(".dll") {
+        }
+        UploadKind::Dll => {
         mods_service.install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
             .await
             .map_err(|e| e.to_string())
-    } else {
-        Err("Only .zip and .dll files are supported".to_string())
+        }
+        UploadKind::Unsupported => Err("Only .zip and .dll files are supported".to_string()),
     }
 }
 
@@ -329,11 +377,7 @@ pub async fn store_mod_archive(
     target: Option<String>,
     cleanup: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let runtime_parsed = runtime.as_deref().and_then(|value| match value.trim().to_lowercase().as_str() {
-        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
-        "mono" => Some(crate::types::Runtime::Mono),
-        _ => None,
-    });
+    let runtime_parsed = parse_runtime_label(runtime.as_deref());
 
     let mods_service = ModsService::new(db.inner().clone());
     let result = mods_service
@@ -551,14 +595,7 @@ pub async fn download_s1api_to_library(
     tokio::fs::write(&temp_zip_path, zip_bytes).await
         .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
 
-    let metadata = serde_json::json!({
-        "source": "github",
-        "sourceId": "ifBars/S1API",
-        "sourceVersion": version_tag,
-        "sourceUrl": "https://github.com/ifBars/S1API",
-        "modName": "S1API",
-        "author": "ScheduleI-Dev",
-    });
+    let metadata = build_s1api_library_metadata(&version_tag);
 
     let mods_service = ModsService::new(db.inner().clone());
     let result = mods_service
@@ -648,14 +685,7 @@ pub async fn download_mlvscan_to_library(
     tokio::fs::write(&temp_path, bytes).await
         .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
 
-    let metadata = serde_json::json!({
-        "source": "github",
-        "sourceId": "ifBars/MLVScan",
-        "sourceVersion": version_tag,
-        "sourceUrl": "https://github.com/ifBars/MLVScan",
-        "modName": "MLVScan",
-        "author": "ifBars",
-    });
+    let metadata = build_mlvscan_library_metadata(&version_tag);
 
     let mods_service = ModsService::new(db.inner().clone());
     let result = mods_service
@@ -692,4 +722,66 @@ pub async fn uninstall_s1api(
     mods_service.uninstall_s1api(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
+        parse_runtime_label, UploadKind,
+    };
+
+    #[test]
+    fn detect_upload_kind_matches_supported_extensions() {
+        assert_eq!(detect_upload_kind("C:/mods/a.zip"), UploadKind::Zip);
+        assert_eq!(detect_upload_kind("C:/mods/a.ZIP"), UploadKind::Zip);
+        assert_eq!(detect_upload_kind("C:/mods/a.dll"), UploadKind::Dll);
+        assert_eq!(detect_upload_kind("C:/mods/a.DLL"), UploadKind::Dll);
+        assert_eq!(
+            detect_upload_kind("C:/mods/readme.txt"),
+            UploadKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn parse_runtime_label_accepts_case_insensitive_values() {
+        assert!(matches!(
+            parse_runtime_label(Some("IL2CPP")),
+            Some(crate::types::Runtime::Il2cpp)
+        ));
+        assert!(matches!(
+            parse_runtime_label(Some("mono")),
+            Some(crate::types::Runtime::Mono)
+        ));
+        assert!(parse_runtime_label(Some("unknown")).is_none());
+        assert!(parse_runtime_label(None).is_none());
+    }
+
+    #[test]
+    fn s1api_library_metadata_is_github_sourced() {
+        let metadata = build_s1api_library_metadata("v1.2.3");
+        assert_eq!(metadata.get("source").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(
+            metadata.get("sourceId").and_then(|v| v.as_str()),
+            Some("ifBars/S1API")
+        );
+        assert_eq!(
+            metadata.get("sourceVersion").and_then(|v| v.as_str()),
+            Some("v1.2.3")
+        );
+    }
+
+    #[test]
+    fn mlvscan_library_metadata_is_github_sourced() {
+        let metadata = build_mlvscan_library_metadata("v0.9.1");
+        assert_eq!(metadata.get("source").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(
+            metadata.get("sourceId").and_then(|v| v.as_str()),
+            Some("ifBars/MLVScan")
+        );
+        assert_eq!(
+            metadata.get("sourceVersion").and_then(|v| v.as_str()),
+            Some("v0.9.1")
+        );
+    }
 }

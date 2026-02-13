@@ -3205,7 +3205,7 @@ mod tests {
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
     use crate::services::settings::SettingsService;
-    use crate::types::{schedule_i_config, ModMetadata, ModSource};
+    use crate::types::{schedule_i_config, ModMetadata, ModSource, Runtime};
     use serial_test::serial;
     use std::fs::File;
     use std::io::Write;
@@ -3787,6 +3787,221 @@ mod tests {
                 .unwrap_or("")
                 .contains("zip")
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_dll_mod_persists_selected_runtime_to_storage_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-runtime-dll");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let source_dll = temp.path().join("MonoOnly.dll");
+        fs::write(&source_dll, b"not-a-real-dotnet-assembly").await?;
+
+        let result = service
+            .install_dll_mod(
+                output_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "IL2CPP",
+                Some(serde_json::json!({
+                    "source": "unknown",
+                    "detectedRuntime": "Mono"
+                })),
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        let mods_dir = output_dir.join("Mods");
+        let metadata = service.load_mod_metadata(&mods_dir).await?;
+        let env_meta = metadata.get("MonoOnly.dll").expect("env metadata entry");
+        assert!(matches!(env_meta.detected_runtime, Some(Runtime::Mono)));
+        assert_eq!(env_meta.runtime_match, Some(false));
+
+        let storage_id = env_meta
+            .mod_storage_id
+            .clone()
+            .expect("storage id should be present");
+        let storage_dir = download_dir.join("Mods").join(storage_id);
+        let storage_meta = service
+            .load_storage_metadata(&storage_dir)
+            .await?
+            .expect("storage metadata should exist");
+
+        assert!(matches!(storage_meta.detected_runtime, Some(Runtime::Mono)));
+        assert_eq!(storage_meta.runtime_match, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_persists_selected_runtime_to_storage_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-runtime-zip");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("AmbiguousMod.zip");
+        let file = File::create(&zip_path)?;
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("AmbiguousMod.dll", FileOptions::default())?;
+        zip.write_all(b"not-a-real-dotnet-assembly")?;
+        zip.finish()?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "AmbiguousMod.zip",
+                "IL2CPP",
+                "main",
+                Some(serde_json::json!({
+                    "source": "unknown",
+                    "detectedRuntime": "Mono"
+                })),
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        let mods_dir = output_dir.join("Mods");
+        let metadata = service.load_mod_metadata(&mods_dir).await?;
+        let env_meta = metadata
+            .get("AmbiguousMod.dll")
+            .expect("env metadata entry for zip install");
+        assert!(matches!(env_meta.detected_runtime, Some(Runtime::Mono)));
+        assert_eq!(env_meta.runtime_match, Some(false));
+
+        let storage_id = env_meta
+            .mod_storage_id
+            .clone()
+            .expect("storage id should be present");
+        let storage_dir = download_dir.join("Mods").join(storage_id);
+        let storage_meta = service
+            .load_storage_metadata(&storage_dir)
+            .await?
+            .expect("storage metadata should exist");
+
+        assert!(matches!(storage_meta.detected_runtime, Some(Runtime::Mono)));
+        assert_eq!(storage_meta.runtime_match, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_uses_storage_metadata_runtime_for_ambiguous_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-library-runtime");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("AmbiguousMod.dll"), b"data").await?;
+
+        let storage_id = "storage-runtime-projection";
+        let mut env_meta = sample_metadata(Some(storage_id), Some("example/source"), Some("1.0.0"));
+        env_meta.mod_name = Some("Ambiguous Mod".to_string());
+        env_meta.detected_runtime = None;
+
+        let mut env_metadata = HashMap::new();
+        env_metadata.insert("AmbiguousMod.dll".to_string(), env_meta.clone());
+        service.save_mod_metadata(&mods_dir, &env_metadata).await?;
+
+        let storage_base = download_dir.join("Mods").join(storage_id);
+        let storage_mods = storage_base.join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("AmbiguousMod.dll"), b"data").await?;
+
+        let mut storage_meta = env_meta;
+        storage_meta.detected_runtime = Some(Runtime::Mono);
+        storage_meta.runtime_match = Some(false);
+        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+
+        let library = service.get_mod_library().await?;
+        let entry = library
+            .downloaded
+            .iter()
+            .find(|item| item.storage_id == storage_id)
+            .expect("library entry for storage id");
+
+        assert_eq!(entry.available_runtimes.len(), 1);
+        assert_eq!(entry.available_runtimes[0], "Mono");
+        assert!(entry.files_by_runtime.contains_key("Mono"));
+        assert!(!entry.files_by_runtime.contains_key("IL2CPP"));
+        assert_eq!(entry.storage_ids_by_runtime.get("Mono").map(|s| s.as_str()), Some(storage_id));
+        assert!(!entry.storage_ids_by_runtime.contains_key("IL2CPP"));
 
         Ok(())
     }
