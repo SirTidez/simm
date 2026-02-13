@@ -1,11 +1,29 @@
 use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use std::env;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct GitHubReleasesService {
-    client: Option<Octocrab>,
-    token: Option<String>,
+    client: Arc<RwLock<Option<Octocrab>>>,
+    token: Arc<RwLock<Option<String>>>,
+}
+
+fn build_client_from_token(token: &Option<String>) -> Option<Octocrab> {
+    let token = token
+        .as_ref()
+        .map(|s| s.clone())
+        .or_else(|| env::var("GITHUB_TOKEN").ok());
+
+    if let Some(ref token_val) = token {
+        Octocrab::builder()
+            .personal_token(token_val.clone())
+            .build()
+            .ok()
+    } else {
+        Octocrab::builder().build().ok()
+    }
 }
 
 impl GitHubReleasesService {
@@ -16,24 +34,24 @@ impl GitHubReleasesService {
     pub fn with_token(token: Option<String>) -> Self {
         // Try token parameter first, then env var
         // NEVER log the token value - only log that authentication is being used
-        let token = token
-            .or_else(|| env::var("GITHUB_TOKEN").ok());
+        let token = token.or_else(|| env::var("GITHUB_TOKEN").ok());
+        let client = build_client_from_token(&token);
 
-        let client = if let Some(ref token_val) = token {
-            // Token is present - use it but never log it
-            Octocrab::builder()
-                .personal_token(token_val.clone())
-                .build()
-                .ok()
-        } else {
-            Octocrab::builder().build().ok()
-        };
+        Self {
+            client: Arc::new(RwLock::new(client)),
+            token: Arc::new(RwLock::new(token)),
+        }
+    }
 
-        Self { client, token }
+    /// Update the GitHub token. Token changes in settings will be picked up on the next API call.
+    pub async fn set_token(&self, token: Option<String>) {
+        let token = token.or_else(|| env::var("GITHUB_TOKEN").ok());
+        *self.token.write().await = token.clone();
+        *self.client.write().await = build_client_from_token(&token);
     }
 
     pub async fn get_latest_release(&self, owner: &str, repo: &str, include_prereleases: bool) -> Result<Option<serde_json::Value>> {
-        let client = self.client.as_ref()
+        let client = self.client.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("Failed to initialize GitHub client"))?;
 
         let releases = client
@@ -72,7 +90,7 @@ impl GitHubReleasesService {
     }
 
     pub async fn get_all_releases(&self, owner: &str, repo: &str, include_prereleases: bool) -> Result<Vec<serde_json::Value>> {
-        let client = self.client.as_ref()
+        let client = self.client.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("Failed to initialize GitHub client"))?;
 
         let releases = client
@@ -117,7 +135,7 @@ impl GitHubReleasesService {
 
         // Add authentication if available (try stored token, then env var)
         // NEVER log the token value
-        if let Some(token) = self.token.as_ref() {
+        if let Some(token) = self.token.read().await.as_ref() {
             request = request.bearer_auth(token);
         } else if let Ok(env_token) = env::var("GITHUB_TOKEN") {
             request = request.bearer_auth(&env_token);
@@ -189,12 +207,24 @@ impl Default for GitHubReleasesService {
 }
 
 #[cfg(test)]
+impl GitHubReleasesService {
+    /// Creates a service with no client/token for unit tests that don't need API access.
+    /// Avoids Octocrab builder which requires a Tokio runtime.
+    fn for_testing() -> Self {
+        Self {
+            client: Arc::new(RwLock::new(None)),
+            token: Arc::new(RwLock::new(None)),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn get_zip_asset_url_picks_first_zip() {
-        let service = GitHubReleasesService { client: None, token: None };
+        let service = GitHubReleasesService::for_testing();
         let release = serde_json::json!({
             "assets": [
                 {"name": "file.tar.gz", "browser_download_url": "https://example.com/file.tar.gz"},
@@ -209,7 +239,7 @@ mod tests {
 
     #[test]
     fn get_melonloader_x64_asset_url_filters_non_windows_assets() {
-        let service = GitHubReleasesService { client: None, token: None };
+        let service = GitHubReleasesService::for_testing();
         let release = serde_json::json!({
             "assets": [
                 {"name": "MelonLoader.linux.x64.zip", "browser_download_url": "https://example.com/linux.zip"},
@@ -224,7 +254,7 @@ mod tests {
 
     #[test]
     fn get_zip_asset_url_returns_none_when_missing() {
-        let service = GitHubReleasesService { client: None, token: None };
+        let service = GitHubReleasesService::for_testing();
         let release = serde_json::json!({ "assets": [] });
         assert!(service.get_zip_asset_url(&release).is_none());
     }

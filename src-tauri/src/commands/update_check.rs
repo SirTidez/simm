@@ -57,12 +57,19 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
     let github_service = {
         let mut service = GITHUB_SERVICE.lock().await;
         if service.is_none() {
-            let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-            let token = settings_service.get_github_token().await.ok().flatten();
-            *service = Some(Arc::new(GitHubReleasesService::with_token(token)));
+            *service = Some(Arc::new(GitHubReleasesService::new()));
         }
         service.as_ref().unwrap().clone()
     };
+    // Fetch token on every call so settings changes take effect without app restart
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    match settings_service.get_github_token().await {
+        Ok(Some(token)) => github_service.set_token(Some(token)).await,
+        Ok(None) => github_service.set_token(None).await,
+        Err(e) => {
+            log::warn!("Failed to get GitHub token: {:?}", e);
+        }
+    }
     Ok(github_service)
 }
 
