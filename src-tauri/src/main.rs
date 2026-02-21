@@ -8,6 +8,9 @@ mod services;
 mod types;
 mod utils;
 mod events;
+mod db;
+#[cfg(test)]
+mod test_helpers;
 mod discord_rpc;
 
 use tauri::Manager;
@@ -30,9 +33,17 @@ fn main() {
 
             log::info!("SIMM directory initialized (was_created: {})", simm_was_created);
 
+            let db_pool = tauri::async_runtime::block_on(crate::db::initialize_pool())
+                .map_err(|e| {
+                    log::error!("Failed to initialize database: {}", e);
+                    e
+                })?;
+
+            app.manage(db_pool.clone());
+
             // Store flag in app state so frontend can check it
             app.manage(tauri::async_runtime::Mutex::new(simm_was_created));
-            
+
             // Initialize services (async)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -43,8 +54,16 @@ fn main() {
             });
 
             // Ensure window stays open even if frontend has errors
+            // Explicitly set window icon (taskbar + title bar) from bundle icon
             if let Some(window) = app.get_webview_window("main") {
                 log::info!("Main window found");
+                if let Some(icon) = app.default_window_icon() {
+                    if let Err(e) = window.set_icon(icon.clone()) {
+                        log::warn!("Failed to set window icon: {}", e);
+                    }
+                } else {
+                    log::warn!("No default window icon available");
+                }
                 #[cfg(debug_assertions)]
                 {
                     window.open_devtools();
@@ -99,13 +118,21 @@ fn main() {
             // Mods
             commands::mods::get_mods,
             commands::mods::get_mods_count,
+            commands::mods::get_mod_library,
+            commands::mods::install_downloaded_mod,
+            commands::mods::uninstall_downloaded_mod,
+            commands::mods::delete_downloaded_mod,
             commands::mods::delete_mod,
             commands::mods::enable_mod,
             commands::mods::disable_mod,
             commands::mods::open_mods_folder,
             commands::mods::check_mod_installed,
+            commands::mods::find_existing_mod_storage,
             commands::mods::cleanup_duplicate_mod_storage,
             commands::mods::get_s1api_installation_status,
+            commands::mods::store_mod_archive,
+            commands::mods::download_s1api_to_library,
+            commands::mods::download_mlvscan_to_library,
             // Plugins
             commands::plugins::get_plugins,
             commands::plugins::get_plugins_count,
@@ -156,6 +183,8 @@ fn main() {
             // Mod Updates
             commands::mod_update::check_mod_updates,
             commands::mod_update::update_mod,
+            commands::mod_update::get_mod_updates_summary,
+            commands::mod_update::get_all_mod_updates_summary,
             // Logs (game logs)
             commands::logs::get_log_files,
             commands::logs::read_log_file,
@@ -185,9 +214,6 @@ fn main() {
             commands::plugins::get_mlvscan_installation_status,
             commands::plugins::install_mlvscan,
             commands::plugins::uninstall_mlvscan,
-            commands::plugins::get_mlvscan_installation_status,
-            commands::plugins::install_mlvscan,
-            commands::plugins::uninstall_mlvscan,
             // Game Version
             commands::game_version::extract_game_version,
             commands::game_version::extract_game_version_from_path,
@@ -201,4 +227,3 @@ fn main() {
             std::process::exit(1);
         });
 }
-

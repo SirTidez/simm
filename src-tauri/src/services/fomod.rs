@@ -11,17 +11,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct FomodService;
 
-/// FOMOD archive type
-#[derive(Debug, Clone, PartialEq)]
-pub enum FomodType {
-    /// XML-based FOMOD installer
-    Xml,
-    /// C# script-based FOMOD installer (not yet supported)
-    CSharp,
-    /// Not a FOMOD archive
-    None,
-}
-
 /// FOMOD module configuration (parsed from ModuleConfig.xml)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,7 +234,7 @@ impl FomodService {
     pub fn detect_fomod(&self, zip_path: &Path) -> Result<FomodDetectionResult> {
         let file = File::open(zip_path)
             .context("Failed to open zip file")?;
-        
+
         let mut archive = ZipArchive::new(file)
             .context("Failed to read zip archive")?;
 
@@ -259,9 +248,9 @@ impl FomodService {
         for i in 0..archive.len() {
             let file = archive.by_index(i)
                 .context("Failed to read file from archive")?;
-            
+
             let file_name = file.name().to_lowercase();
-            
+
             if file_name == "fomod/moduleconfig.xml" || file_name == "fomod/script.xml" {
                 has_module_config = true;
                 config_index = Some(i);
@@ -277,7 +266,7 @@ impl FomodService {
             let mut content = String::new();
             file_reader.read_to_string(&mut content)
                 .context("Failed to read ModuleConfig.xml content")?;
-            
+
             // Parse XML (basic parsing for name and image)
             if let Ok(config) = from_str::<FomodConfig>(&content) {
                 module_name = config.module_name;
@@ -305,7 +294,7 @@ impl FomodService {
     pub fn parse_fomod_xml(&self, zip_path: &Path) -> Result<FomodConfig> {
         let file = File::open(zip_path)
             .context("Failed to open zip file")?;
-        
+
         let mut archive = ZipArchive::new(file)
             .context("Failed to read zip archive")?;
 
@@ -314,9 +303,9 @@ impl FomodService {
         for i in 0..archive.len() {
             let file = archive.by_index(i)
                 .context("Failed to read file from archive")?;
-            
+
             let file_name = file.name().to_lowercase();
-            
+
             if file_name == "fomod/moduleconfig.xml" || file_name == "fomod/script.xml" {
                 config_index = Some(i);
                 break;
@@ -341,6 +330,7 @@ impl FomodService {
     }
 
     /// Extract files from FOMOD archive based on selected options
+    #[allow(dead_code)]
     pub fn extract_fomod_files(
         &self,
         _zip_path: &Path,
@@ -353,4 +343,3 @@ impl FomodService {
         Ok(Vec::new())
     }
 }
-

@@ -31,6 +31,15 @@ impl NexusModsService {
         *self.validation_result.write().await = None;
     }
 
+    pub async fn clear_api_key(&self) {
+        *self.api_key.write().await = None;
+        *self.validation_result.write().await = None;
+    }
+
+    pub async fn get_api_key_optional(&self) -> Option<String> {
+        self.api_key.read().await.clone()
+    }
+
     pub async fn validate_api_key(&self) -> Result<Value> {
         let api_key = self.api_key.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
@@ -92,6 +101,7 @@ impl NexusModsService {
         }))
     }
 
+    #[allow(dead_code)]
     pub async fn get_validation_result(&self) -> Option<Value> {
         self.validation_result.read().await.clone()
     }
@@ -311,7 +321,7 @@ impl NexusModsService {
         let api_key = self.get_api_key().await?;
 
         let url = format!("{}/games/{}/mods/{}.json", NEXUS_MODS_API_BASE, game_id, mod_id);
-        
+
         let response = self.client
             .get(&url)
             .header("apikey", &api_key)
@@ -432,9 +442,9 @@ impl NexusModsService {
         let api_key = self.get_api_key().await?;
 
         // First get download link
-        let url = format!("{}/games/{}/mods/{}/files/{}/download_link.json", 
+        let url = format!("{}/games/{}/mods/{}/files/{}/download_link.json",
             NEXUS_MODS_API_BASE, game_id, mod_id, file_id);
-        
+
         let response = self.client
             .get(&url)
             .header("apikey", &api_key)
@@ -488,5 +498,70 @@ impl NexusModsService {
 impl Default for NexusModsService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::get_data_dir;
+    use crate::services::settings::SettingsService;
+    use serial_test::serial;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::SqlitePool;
+    use std::str::FromStr;
+    use std::sync::Arc;
+
+    async fn resolve_api_key() -> Result<Option<String>> {
+        if let Ok(key) = std::env::var("NEXUSMODS_API_KEY") {
+            if !key.trim().is_empty() {
+                return Ok(Some(key));
+            }
+        }
+
+        let data_dir = match get_data_dir() {
+            Ok(dir) => dir,
+            Err(_) => return Ok(None),
+        };
+        let db_path = data_dir.join("simmrust.db");
+        if !db_path.exists() {
+            return Ok(None);
+        }
+
+        let db_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+        let options = SqliteConnectOptions::from_str(&db_url)
+            .context("Failed to build sqlite options")?
+            .read_only(true);
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .context("Failed to open settings database")?;
+        let service = SettingsService::new(Arc::new(pool))?;
+
+        match service.get_nexus_mods_api_key().await {
+            Ok(Some(key)) if !key.trim().is_empty() => Ok(Some(key)),
+            Ok(_) => Ok(None),
+            Err(_) => Ok(None),
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_validate_api_key_and_rate_limits() -> Result<()> {
+        let api_key = match resolve_api_key().await? {
+            Some(key) => key,
+            None => return Ok(()),
+        };
+
+        let service = NexusModsService::new();
+        service.set_api_key(api_key).await;
+
+        let validation = service.validate_api_key().await?;
+        assert!(validation.is_object());
+
+        let limits = service.get_rate_limits().await?;
+        assert!(limits.get("daily").is_some());
+        assert!(limits.get("hourly").is_some());
+
+        Ok(())
     }
 }

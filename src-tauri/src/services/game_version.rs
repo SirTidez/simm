@@ -340,6 +340,7 @@ impl GameVersionService {
                     #[cfg(target_os = "windows")]
                     {
                         use tokio::process::Command;
+                        #[allow(unused_imports)]  // Required for CommandExt trait methods
                         use std::os::windows::process::CommandExt;
                         let path_str = assembly_path.to_string_lossy().replace('\'', "''");
                         let output = Command::new("powershell")
@@ -427,6 +428,7 @@ impl GameVersionService {
                 // Try ProductVersion instead of FileVersion - ProductVersion often contains the game version
                 let path_str = executable_path.to_string_lossy().replace('\'', "''");
                 eprintln!("[GameVersion] Running PowerShell command to get ProductVersion...");
+                #[allow(unused_imports)]  // Required for CommandExt trait methods
                 use std::os::windows::process::CommandExt;
                 let output = Command::new("powershell")
                     .arg("-Command")

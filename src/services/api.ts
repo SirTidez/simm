@@ -190,14 +190,14 @@ export class ApiService {
   }
 
   // Update checks
-  static async checkUpdate(environmentId: string): Promise<UpdateCheckResult> {
-    return invoke('check_update', { environmentId });
+  static async checkUpdate(environmentId: string, manual = false): Promise<UpdateCheckResult> {
+    return invoke('check_update', { environmentId, manual });
   }
 
-  static async checkAllUpdates(): Promise<
+  static async checkAllUpdates(manual = false): Promise<
     Array<{ environmentId: string } & UpdateCheckResult>
   > {
-    return invoke('check_all_updates');
+    return invoke('check_all_updates', { manual });
   }
 
   static async getUpdateStatus(environmentId: string): Promise<{
@@ -238,12 +238,71 @@ export class ApiService {
       path: string;
       version?: string;
       source?: string;
+      sourceUrl?: string;
       disabled?: boolean;
+      modStorageId?: string;
+      managed?: boolean;
     }>;
     modsDirectory: string;
     count: number;
   }> {
     return invoke('get_mods', { environmentId });
+  }
+
+  static async getModLibrary(): Promise<import('../types').ModLibraryResult> {
+    return invoke('get_mod_library');
+  }
+
+  static async installDownloadedMod(
+    storageId: string,
+    environmentIds: string[]
+  ): Promise<{ results: Array<{ environmentId: string; installedFiles: string[] }> }> {
+    return invoke('install_downloaded_mod', { storageId, environmentIds });
+  }
+
+  static async uninstallDownloadedMod(
+    storageId: string,
+    environmentIds: string[]
+  ): Promise<{ results: Array<{ environmentId: string; removedFiles: string[] }> }> {
+    return invoke('uninstall_downloaded_mod', { storageId, environmentIds });
+  }
+
+  static async deleteDownloadedMod(
+    storageId: string
+  ): Promise<{ deleted: boolean; removedFrom: string[] }> {
+    return invoke('delete_downloaded_mod', { storageId });
+  }
+
+  static async storeModArchive(
+    filePath: string,
+    originalFileName: string,
+    runtime?: 'IL2CPP' | 'Mono',
+    metadata?: {
+      source?: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
+      sourceUrl?: string;
+      modName?: string;
+      author?: string;
+      sourceId?: string;
+      sourceVersion?: string;
+    },
+    target?: 'mods' | 'plugins',
+    cleanup?: boolean
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    return invoke('store_mod_archive', {
+      filePath,
+      originalFileName,
+      runtime,
+      metadata: metadata ? {
+        source: metadata.source || 'unknown',
+        sourceUrl: metadata.sourceUrl,
+        modName: metadata.modName,
+        author: metadata.author,
+        sourceId: metadata.sourceId,
+        sourceVersion: metadata.sourceVersion,
+      } : null,
+      target,
+      cleanup,
+    });
   }
 
   static async getModsCount(environmentId: string): Promise<{ count: number }> {
@@ -285,12 +344,13 @@ export class ApiService {
     originalFileName: string,
     runtime: string,
     metadata?: {
-      source?: 'thunderstore' | 'nexusmods' | 'local' | 'unknown';
+      source?: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
       sourceUrl?: string;
       modName?: string;
       author?: string;
       sourceId?: string;
       sourceVersion?: string;
+      detectedRuntime?: 'IL2CPP' | 'Mono';
     }
   ): Promise<{
     success: boolean;
@@ -318,6 +378,7 @@ export class ApiService {
         author: metadata.author,
         sourceId: metadata.sourceId,
         sourceVersion: metadata.sourceVersion,
+        detectedRuntime: metadata.detectedRuntime,
       } : null,
     });
   }
@@ -489,7 +550,13 @@ export class ApiService {
     installedFiles?: string[];
   }> {
     try {
-      const result = await invoke('install_melon_loader', { environmentId, versionTag: versionTag });
+      const result = await invoke<{
+        success: boolean;
+        error?: string;
+        message?: string;
+        version?: string;
+        installedFiles?: string[];
+      }>('install_melon_loader', { environmentId, versionTag: versionTag });
       console.log('installMelonLoader result:', result);
       return result;
     } catch (err: any) {
@@ -497,7 +564,7 @@ export class ApiService {
       console.error('installMelonLoader error:', err);
       console.error('Error type:', typeof err);
       console.error('Error details:', JSON.stringify(err, null, 2));
-      
+
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
         errorMessage = err;
@@ -516,7 +583,7 @@ export class ApiService {
           errorMessage = JSON.stringify(err);
         }
       }
-      
+
       return {
         success: false,
         error: errorMessage
@@ -607,7 +674,8 @@ export class ApiService {
   static async installNexusModsMod(
     environmentId: string,
     modId: number,
-    fileId: number
+    fileId: number,
+    gameId?: string
   ): Promise<{
     success: boolean;
     message?: string;
@@ -623,6 +691,7 @@ export class ApiService {
   }> {
     return invoke('install_nexus_mods_mod', {
       environmentId,
+      game_id_param: gameId ?? null,
       modId,
       fileId,
     });
@@ -668,6 +737,34 @@ export class ApiService {
         source: u.source,
       })),
     };
+  }
+
+  static async getModUpdatesSummary(environmentId: string): Promise<{
+    count: number;
+    updates: Array<{
+      modFileName: string;
+      modName: string;
+      currentVersion: string;
+      latestVersion: string;
+      source: string;
+    }>;
+  }> {
+    return invoke('get_mod_updates_summary', { environmentId });
+  }
+
+  static async getAllModUpdatesSummary(): Promise<Array<{
+    environmentId: string;
+    environmentName: string;
+    count: number;
+    updates: Array<{
+      modFileName: string;
+      modName: string;
+      currentVersion: string;
+      latestVersion: string;
+      source: string;
+    }>;
+  }>> {
+    return invoke('get_all_mod_updates_summary', {});
   }
 
   static async getS1APIStatus(environmentId: string): Promise<{
@@ -733,7 +830,13 @@ export class ApiService {
     error?: string;
   }> {
     try {
-      const result = await invoke('install_s1api', { environmentId, versionTag });
+      const result = await invoke<{
+        success: boolean;
+        message?: string;
+        version?: string;
+        installedFiles?: string[];
+        error?: string;
+      }>('install_s1api', { environmentId, versionTag });
       console.log('installS1API result:', result);
       return result;
     } catch (err: any) {
@@ -823,7 +926,12 @@ export class ApiService {
     error?: string;
   }> {
     try {
-      const result = await invoke('install_mlvscan', { environmentId, versionTag });
+      const result = await invoke<{
+        success: boolean;
+        message?: string;
+        version?: string;
+        error?: string;
+      }>('install_mlvscan', { environmentId, versionTag });
       console.log('installMLVScan result:', result);
       return result;
     } catch (err: any) {
@@ -886,33 +994,48 @@ export class ApiService {
   }> {
     // Use hardcoded game ID for Schedule I
     const gameId = 'schedule-i';
-    
+
     // Fetch package info first to get metadata
     const packageInfo = await invoke<any>('get_thunderstore_package', {
       packageUuid,
       gameId
     });
-    
+
     if (!packageInfo) {
       throw new Error('Package not found');
     }
-    
+
     // Extract package metadata
     const latestVersion = packageInfo.versions?.[0];
     const packageUrl = packageInfo.package_url || '';
     const modName = packageInfo.name || '';
     const owner = packageInfo.owner || '';
     const versionNumber = latestVersion?.version_number || '';
-    
+
+    const env = await this.getEnvironment(environmentId);
+    const runtime = env.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+
     // Check if mod is already installed before downloading
     // Thunderstore mods use "owner/name" format for sourceId (matches manifest.json format)
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
+    const storageCheck = await invoke<any>('find_existing_mod_storage', {
+      sourceId,
+      sourceVersion: versionNumber,
+      runtime,
+    });
+    if (storageCheck?.found && storageCheck.storageId) {
+      await this.installDownloadedMod(storageCheck.storageId, [environmentId]);
+      return {
+        success: true,
+        message: 'Installed from library',
+      };
+    }
     const checkResult = await invoke<any>('check_mod_installed', {
       environmentId,
       sourceId: sourceId,
       sourceVersion: versionNumber
     });
-    
+
     if (checkResult.installed) {
       console.log(`Mod ${modName} version ${versionNumber} is already installed, skipping download`);
       return {
@@ -921,17 +1044,14 @@ export class ApiService {
         alreadyInstalled: true
       };
     }
-    
+
     // Download package
-    const zipPath = await invoke<string>('download_thunderstore_package', { 
+    const zipPath = await invoke<string>('download_thunderstore_package', {
       packageUuid,
-      gameId 
+      gameId
     });
-    
-    // Get environment to determine runtime
-    const env = await this.getEnvironment(environmentId);
-    const runtime = env.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
-    
+
+
     // Install using upload_mod with full metadata
     return invoke('upload_mod', {
       environmentId,
@@ -948,6 +1068,105 @@ export class ApiService {
         author: owner,
       },
     });
+  }
+
+  static async downloadThunderstoreToLibrary(
+    packageUuid: string,
+    runtime?: 'IL2CPP' | 'Mono'
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    const gameId = 'schedule-i';
+    const packageInfo = await invoke<any>('get_thunderstore_package', {
+      packageUuid,
+      gameId
+    });
+
+    if (!packageInfo) {
+      throw new Error('Package not found');
+    }
+
+    const latestVersion = packageInfo.versions?.[0];
+    const packageUrl = packageInfo.package_url || '';
+    const modName = packageInfo.name || '';
+    const owner = packageInfo.owner || '';
+    const versionNumber = latestVersion?.version_number || '';
+    const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
+
+    const storageCheck = await invoke<any>('find_existing_mod_storage', {
+      sourceId,
+      sourceVersion: versionNumber,
+      runtime,
+    });
+    if (storageCheck?.found && storageCheck.storageId) {
+      return { success: true, storageId: storageCheck.storageId, alreadyStored: true };
+    }
+
+    const zipPath = await invoke<string>('download_thunderstore_package', {
+      packageUuid,
+      gameId
+    });
+
+    return this.storeModArchive(
+      zipPath,
+      `${packageUuid}.zip`,
+      runtime,
+      {
+        source: 'thunderstore',
+        sourceId,
+        sourceVersion: versionNumber,
+        sourceUrl: packageUrl,
+        modName,
+        author: owner,
+      },
+      undefined,
+      true
+    );
+  }
+
+  static async downloadNexusModToLibrary(
+    modId: number,
+    fileId: number,
+    runtime?: 'IL2CPP' | 'Mono'
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    const gameId = 'schedule1';
+    const modInfo = await invoke<any>('get_nexus_mods_mod', { gameId, modId });
+    const files = await invoke<any[]>('get_nexus_mods_mod_files', { gameId, modId });
+    const fileInfo = files.find(f => f.file_id === fileId || f.file_id === Number(fileId));
+
+    if (!fileInfo) {
+      throw new Error(`File ${fileId} not found for mod ${modId}`);
+    }
+
+    const version = fileInfo.version || fileInfo.mod_version || '1.0.0';
+    const sourceUrl = `https://www.nexusmods.com/${gameId}/mods/${modId}`;
+    const zipPath = await invoke<string>('download_nexus_mods_mod_file', {
+      gameId,
+      modId,
+      fileId,
+    });
+
+    return this.storeModArchive(
+      zipPath,
+      fileInfo.file_name || `nexusmods-${modId}-${fileId}.zip`,
+      runtime,
+      {
+        source: 'nexusmods',
+        sourceId: modId.toString(),
+        sourceVersion: version,
+        sourceUrl,
+        modName: modInfo?.name || 'Unknown Mod',
+        author: modInfo?.author || 'Unknown',
+      },
+      undefined,
+      true
+    );
+  }
+
+  static async downloadS1APIToLibrary(versionTag: string): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    return invoke('download_s1api_to_library', { versionTag });
+  }
+
+  static async downloadMLVScanToLibrary(versionTag: string): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    return invoke('download_mlvscan_to_library', { versionTag });
   }
 
   // Logs
@@ -1009,4 +1228,3 @@ export class ApiService {
     return invoke('update_config', { filePath, updates });
   }
 }
-

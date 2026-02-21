@@ -154,3 +154,62 @@ impl Default for UserLibsService {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::UserLibsService;
+    use anyhow::Result;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    #[tokio::test]
+    async fn list_and_count_userlibs_reflect_enabled_and_disabled_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let service = UserLibsService::new();
+
+        let userlibs_dir = temp.path().join("UserLibs");
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::write(userlibs_dir.join("LibA.dll"), b"data").await?;
+        fs::write(userlibs_dir.join("LibB.dll.disabled"), b"data").await?;
+
+        let listed = service
+            .list_user_libs(temp.path().to_string_lossy().as_ref())
+            .await?;
+        let count = service
+            .count_user_libs(temp.path().to_string_lossy().as_ref())
+            .await?;
+
+        assert_eq!(count, 2);
+        let entries = listed
+            .get("userLibs")
+            .and_then(|v| v.as_array())
+            .expect("entries");
+        assert_eq!(entries.len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disable_and_enable_userlib_rename_roundtrip() -> Result<()> {
+        let temp = tempdir()?;
+        let service = UserLibsService::new();
+
+        let userlibs_dir = temp.path().join("UserLibs");
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::write(userlibs_dir.join("LibA.dll"), b"data").await?;
+
+        service
+            .disable_user_lib(temp.path().to_string_lossy().as_ref(), "LibA.dll")
+            .await?;
+        assert!(!userlibs_dir.join("LibA.dll").exists());
+        assert!(userlibs_dir.join("LibA.dll.disabled").exists());
+
+        service
+            .enable_user_lib(temp.path().to_string_lossy().as_ref(), "LibA.dll")
+            .await?;
+        assert!(userlibs_dir.join("LibA.dll").exists());
+        assert!(!userlibs_dir.join("LibA.dll.disabled").exists());
+
+        Ok(())
+    }
+}

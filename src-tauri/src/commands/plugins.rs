@@ -1,34 +1,63 @@
 use crate::services::plugins::PluginsService;
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
-use crate::services::mods::ModsService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
+use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::State;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
-static PLUGINS_SERVICE: Lazy<AsyncMutex<Option<Arc<PluginsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<ModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
-async fn get_plugins_service() -> Result<Arc<PluginsService>, String> {
-    let mut service = PLUGINS_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(PluginsService::new()));
+fn map_source_to_mod_source(source_str: Option<&str>) -> Option<crate::types::ModSource> {
+    match source_str {
+        Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
+        Some("nexusmods") => Some(crate::types::ModSource::Nexusmods),
+        Some("github") => Some(crate::types::ModSource::Github),
+        Some("unknown") => Some(crate::types::ModSource::Unknown),
+        _ => Some(crate::types::ModSource::Local),
     }
-    Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
+fn response_source_label(mod_source: Option<crate::types::ModSource>) -> &'static str {
+    match mod_source {
+        Some(crate::types::ModSource::Thunderstore) => "thunderstore",
+        Some(crate::types::ModSource::Nexusmods) => "nexusmods",
+        Some(crate::types::ModSource::Github) => "github",
+        Some(crate::types::ModSource::Unknown) => "unknown",
+        Some(crate::types::ModSource::Local) => "local",
+        _ => "unknown",
     }
-    Ok(service.as_ref().unwrap().clone())
+}
+
+async fn get_environment_output_dir(db: Arc<SqlitePool>, environment_id: &str) -> Result<String, String> {
+    let env_service = EnvironmentService::new(db).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    Ok(env.output_dir)
+}
+
+async fn get_mlvscan_installation_status_impl(
+    db: Arc<SqlitePool>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let output_dir = get_environment_output_dir(db.clone(), &environment_id).await?;
+    let plugins_service = PluginsService::new(db);
+    plugins_service
+        .get_mlvscan_installation_status(&output_dir)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
@@ -39,28 +68,9 @@ async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_mods_service() -> Result<Arc<ModsService>, String> {
-    let mut service = MODS_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(ModsService::new()));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
-
-async fn get_github_service() -> Result<Arc<GitHubReleasesService>, String> {
-    let mut service = GITHUB_SERVICE.lock().await;
-    if service.is_none() {
-        // Load GitHub token from encrypted storage
-        let settings_service = SettingsService::new().map_err(|e| e.to_string())?;
-        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
-        *service = Some(Arc::new(GitHubReleasesService::with_token(token)));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
-
 #[tauri::command]
-pub async fn get_plugins(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_plugins(db: State<'_, Arc<SqlitePool>>, environment_id: String) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -70,15 +80,15 @@ pub async fn get_plugins(environment_id: String) -> Result<serde_json::Value, St
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
     plugins_service.list_plugins(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_plugins_count(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_plugins_count(db: State<'_, Arc<SqlitePool>>, environment_id: String) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -88,7 +98,7 @@ pub async fn get_plugins_count(environment_id: String) -> Result<serde_json::Val
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
     let count = plugins_service.count_plugins(&env.output_dir)
         .await
         .map_err(|e| e.to_string())?;
@@ -97,8 +107,12 @@ pub async fn get_plugins_count(environment_id: String) -> Result<serde_json::Val
 }
 
 #[tauri::command]
-pub async fn delete_plugin(environment_id: String, plugin_file_name: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn delete_plugin(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    plugin_file_name: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -108,15 +122,19 @@ pub async fn delete_plugin(environment_id: String, plugin_file_name: String) -> 
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
     plugins_service.delete_plugin(&env.output_dir, &plugin_file_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn enable_plugin(environment_id: String, plugin_file_name: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn enable_plugin(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    plugin_file_name: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -126,15 +144,19 @@ pub async fn enable_plugin(environment_id: String, plugin_file_name: String) -> 
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
     plugins_service.enable_plugin(&env.output_dir, &plugin_file_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn disable_plugin(environment_id: String, plugin_file_name: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn disable_plugin(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    plugin_file_name: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -144,15 +166,18 @@ pub async fn disable_plugin(environment_id: String, plugin_file_name: String) ->
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
     plugins_service.disable_plugin(&env.output_dir, &plugin_file_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn open_plugins_folder(environment_id: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn open_plugins_folder(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -171,13 +196,14 @@ pub async fn open_plugins_folder(environment_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn upload_plugin(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     file_path: String,
     original_file_name: String,
     _runtime: String,
     metadata: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -187,7 +213,7 @@ pub async fn upload_plugin(
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
 
     // Check if file is ZIP or DLL
     let file_path_lower = file_path.to_lowercase();
@@ -212,12 +238,7 @@ pub async fn upload_plugin(
             .as_ref()
             .and_then(|m| m.get("source").and_then(|s| s.as_str()));
 
-        let mod_source = match source_str {
-            Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
-            Some("nexusmods") => Some(crate::types::ModSource::Nexusmods),
-            Some("unknown") => Some(crate::types::ModSource::Unknown),
-            _ => Some(crate::types::ModSource::Local),
-        };
+        let mod_source = map_source_to_mod_source(source_str);
 
         let source_id = metadata
             .as_ref()
@@ -236,7 +257,9 @@ pub async fn upload_plugin(
             .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
 
         // Update plugin metadata
-        let mut plugin_metadata = plugins_service.load_plugin_metadata(&plugins_directory).await
+        let mut plugin_metadata = plugins_service
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .map_err(|e| e.to_string())?;
 
         plugin_metadata.insert(original_file_name.clone(), crate::types::ModMetadata {
@@ -260,13 +283,7 @@ pub async fn upload_plugin(
         plugins_service.save_plugin_metadata(&plugins_directory, &plugin_metadata).await
             .map_err(|e| e.to_string())?;
 
-        let response_source = match mod_source {
-            Some(crate::types::ModSource::Thunderstore) => "thunderstore",
-            Some(crate::types::ModSource::Nexusmods) => "nexusmods",
-            Some(crate::types::ModSource::Unknown) => "unknown",
-            Some(crate::types::ModSource::Local) => "local",
-            _ => "unknown",
-        };
+        let response_source = response_source_label(mod_source.clone());
 
         Ok(serde_json::json!({
             "success": true,
@@ -279,25 +296,16 @@ pub async fn upload_plugin(
 }
 
 #[tauri::command]
-pub async fn get_mlvscan_installation_status(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
-    let env = env_service.get_environment(&environment_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
-
-    if env.output_dir.is_empty() {
-        return Err("Output directory not set".to_string());
-    }
-
-    let plugins_service = get_plugins_service().await?;
-    plugins_service.get_mlvscan_installation_status(&env.output_dir)
-        .await
-        .map_err(|e| e.to_string())
+pub async fn get_mlvscan_installation_status(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    get_mlvscan_installation_status_impl(db.inner().clone(), environment_id).await
 }
 
 #[tauri::command]
 pub async fn install_mlvscan(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
@@ -312,7 +320,7 @@ pub async fn install_mlvscan(
         }))
     };
     
-    let env_service = match get_env_service().await {
+    let env_service = match EnvironmentService::new(db.inner().clone()) {
         Ok(service) => service,
         Err(e) => return error_json(format!("Failed to get environment service: {}", e))
     };
@@ -329,12 +337,17 @@ pub async fn install_mlvscan(
 
     // Get GitHub service and fetch MLVScan releases
     eprintln!("[install_mlvscan] Getting GitHub service...");
-    let github_service = match get_github_service().await {
-        Ok(service) => {
-            eprintln!("[install_mlvscan] GitHub service obtained");
-            service
-        },
-        Err(e) => return error_json(format!("Failed to get GitHub service: {}", e))
+    let github_service = {
+        let settings_service = match SettingsService::new(db.inner().clone()) {
+            Ok(service) => service,
+            Err(e) => return error_json(format!("Failed to get settings service: {}", e)),
+        };
+        let token = match settings_service.get_github_token().await {
+            Ok(token) => token,
+            Err(e) => return error_json(format!("Failed to load GitHub token: {}", e)),
+        };
+        eprintln!("[install_mlvscan] GitHub service obtained");
+        GitHubReleasesService::with_token(token)
     };
     
     eprintln!("[install_mlvscan] Fetching MLVScan releases from GitHub...");
@@ -448,10 +461,7 @@ pub async fn install_mlvscan(
     let temp_dir = std::env::temp_dir();
     let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
     
-    let plugins_service = match get_plugins_service().await {
-        Ok(service) => service,
-        Err(e) => return error_json(format!("Failed to get plugins service: {}", e))
-    };
+    let plugins_service = PluginsService::new(db.inner().clone());
     
     let result = if is_zip {
         // Extract MLVScan.dll from ZIP
@@ -589,8 +599,11 @@ pub async fn install_mlvscan(
 }
 
 #[tauri::command]
-pub async fn uninstall_mlvscan(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn uninstall_mlvscan(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -600,9 +613,92 @@ pub async fn uninstall_mlvscan(environment_id: String) -> Result<serde_json::Val
         return Err("Output directory not set".to_string());
     }
 
-    let plugins_service = get_plugins_service().await?;
+    let plugins_service = PluginsService::new(db.inner().clone());
     plugins_service.uninstall_mlvscan(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        get_mlvscan_installation_status_impl, map_source_to_mod_source, response_source_label,
+    };
+    use crate::services::environment::EnvironmentService;
+    use crate::services::plugins::PluginsService;
+    use crate::test_helpers::init_test_pool_with_temp_data_dir;
+    use crate::types::{schedule_i_config, ModSource};
+    use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    #[test]
+    fn upload_source_mapping_supports_github_and_round_trips_response_label() {
+        assert!(matches!(
+            map_source_to_mod_source(Some("github")),
+            Some(ModSource::Github)
+        ));
+        assert_eq!(
+            response_source_label(map_source_to_mod_source(Some("github"))),
+            "github"
+        );
+        assert_eq!(
+            response_source_label(map_source_to_mod_source(Some("unknown"))),
+            "unknown"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mlvscan_installation_status_reports_installed_and_not_installed() {
+        let (_temp, _guard, pool) = init_test_pool_with_temp_data_dir().await.expect("test pool");
+        let env_root = tempdir().expect("env temp");
+        let env_service = EnvironmentService::new(pool.clone()).expect("env service");
+
+        let output_dir = env_root.path().join("env-plugins");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await
+            .expect("create env");
+
+        let status = get_mlvscan_installation_status_impl(pool.clone(), env.id.clone())
+            .await
+            .expect("status");
+        assert_eq!(status.get("installed").and_then(|v| v.as_bool()), Some(false));
+
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&plugins_dir).await.expect("plugins dir");
+        let source_dll = env_root.path().join("MLVScanSource.dll");
+        fs::write(&source_dll, b"not-a-real-dotnet-assembly")
+            .await
+            .expect("dll source");
+
+        let plugins_service = PluginsService::new(pool.clone());
+        plugins_service
+            .install_mlvscan(
+                output_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "v1.0.0",
+            )
+            .await
+            .expect("install mlvscan");
+
+        let installed_status = get_mlvscan_installation_status_impl(pool.clone(), env.id.clone())
+            .await
+            .expect("installed status");
+        assert_eq!(
+            installed_status.get("installed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            installed_status.get("enabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+}

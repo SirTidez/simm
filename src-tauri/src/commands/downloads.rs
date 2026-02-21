@@ -2,12 +2,13 @@ use crate::services::depot_downloader::DepotDownloaderService;
 use crate::services::environment::EnvironmentService;
 use crate::types::{DepotDownloadOptions, DownloadProgress};
 use tauri::AppHandle;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
+use tauri::State;
 
 static DOWNLOAD_SERVICE: Lazy<AsyncMutex<Option<Arc<DepotDownloaderService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_download_service() -> Result<Arc<DepotDownloaderService>, String> {
     let mut service = DOWNLOAD_SERVICE.lock().await;
@@ -17,26 +18,20 @@ async fn get_download_service() -> Result<Arc<DepotDownloaderService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
 
 #[tauri::command]
 pub async fn start_download(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
 
-    let mut settings_service = crate::services::settings::SettingsService::new()
+    let mut settings_service = crate::services::settings::SettingsService::new(db.inner().clone())
         .map_err(|e| e.to_string())?;
     let settings = settings_service.load_settings()
         .await
@@ -90,4 +85,3 @@ pub async fn get_download_progress(download_id: String) -> Result<Option<Downloa
     let download_service = get_download_service().await?;
     Ok(download_service.get_progress(&download_id).await)
 }
-

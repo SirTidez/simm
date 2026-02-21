@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,7 +140,7 @@ pub struct Settings {
     pub mod_update_check_interval: Option<u32>, // minutes
     pub custom_theme: Option<CustomTheme>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
-    // Note: github_token is NOT stored here - it's stored encrypted separately
+                                         // Note: github_token is NOT stored here - it's stored encrypted separately
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,24 +204,6 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthState {
-    pub authenticated: bool,
-    pub username: Option<String>,
-    pub method: Option<AuthMethod>,
-    #[serde(with = "chrono::serde::ts_seconds_option")]
-    pub session_expiry: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthMethod {
-    Qr,
-    Password,
-    Session,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct UpdateCheckResult {
     pub update_available: bool,
     pub current_manifest_id: Option<String>,
@@ -242,6 +224,7 @@ pub enum ModSource {
     Local,
     Thunderstore,
     Nexusmods,
+    Github,
     Unknown,
 }
 
@@ -265,6 +248,34 @@ pub struct ModMetadata {
     pub runtime_match: Option<bool>,
     pub mod_storage_id: Option<String>,
     pub symlink_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModLibraryEntry {
+    pub storage_id: String,
+    pub display_name: String,
+    pub files: Vec<String>,
+    pub source: Option<ModSource>,
+    pub source_id: Option<String>,
+    pub source_version: Option<String>,
+    pub source_url: Option<String>,
+    pub installed_version: Option<String>,
+    pub author: Option<String>,
+    pub update_available: Option<bool>,
+    pub remote_version: Option<String>,
+    pub managed: bool,
+    pub installed_in: Vec<String>,
+    pub available_runtimes: Vec<String>,
+    pub storage_ids_by_runtime: std::collections::HashMap<String, String>,
+    pub installed_in_by_runtime: std::collections::HashMap<String, Vec<String>>,
+    pub files_by_runtime: std::collections::HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModLibraryResult {
+    pub downloaded: Vec<ModLibraryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,3 +330,65 @@ pub fn schedule_i_config() -> AppConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mod_source_serializes_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ModSource::Thunderstore).expect("serialize"),
+            "\"thunderstore\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModSource::Nexusmods).expect("serialize"),
+            "\"nexusmods\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModSource::Github).expect("serialize"),
+            "\"github\""
+        );
+    }
+
+    #[test]
+    fn runtime_serializes_as_uppercase() {
+        assert_eq!(
+            serde_json::to_string(&Runtime::Il2cpp).expect("serialize"),
+            "\"IL2CPP\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Runtime::Mono).expect("serialize"),
+            "\"MONO\""
+        );
+    }
+
+    #[test]
+    fn mod_library_entry_serializes_camel_case_fields() {
+        let entry = ModLibraryEntry {
+            storage_id: "s-1".to_string(),
+            display_name: "Example".to_string(),
+            files: vec!["Example.dll".to_string()],
+            source: Some(ModSource::Github),
+            source_id: Some("owner/repo".to_string()),
+            source_version: Some("v1.0.0".to_string()),
+            source_url: Some("https://example.com".to_string()),
+            installed_version: Some("v1.0.0".to_string()),
+            author: Some("Author".to_string()),
+            update_available: Some(true),
+            remote_version: Some("v1.1.0".to_string()),
+            managed: true,
+            installed_in: vec!["env-1".to_string()],
+            available_runtimes: vec!["Mono".to_string()],
+            storage_ids_by_runtime: std::collections::HashMap::new(),
+            installed_in_by_runtime: std::collections::HashMap::new(),
+            files_by_runtime: std::collections::HashMap::new(),
+        };
+
+        let json = serde_json::to_value(entry).expect("serialize");
+        assert!(json.get("storageId").is_some());
+        assert!(json.get("displayName").is_some());
+        assert!(json.get("sourceId").is_some());
+        assert!(json.get("availableRuntimes").is_some());
+        assert!(json.get("storage_ids_by_runtime").is_none());
+    }
+}

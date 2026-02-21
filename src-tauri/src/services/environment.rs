@@ -1,106 +1,71 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use tokio::fs;
-use tokio::sync::RwLock;
+
 use anyhow::{Context, Result};
-use serde_json;
 use chrono::{DateTime, Utc};
+use sqlx::SqlitePool;
+
 use crate::types::{Environment, schedule_i_config};
 
 pub struct EnvironmentService {
-    environments: Arc<RwLock<HashMap<String, Environment>>>,
-    data_dir: PathBuf,
+    pool: Arc<SqlitePool>,
 }
 
 impl EnvironmentService {
-    pub fn new() -> Result<Self> {
-        let data_dir = Self::get_data_dir()?;
-        Ok(Self {
-            environments: Arc::new(RwLock::new(HashMap::new())),
-            data_dir,
-        })
+    pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
+        Ok(Self { pool })
     }
 
-    fn get_data_dir() -> Result<PathBuf> {
-        let data_dir = dirs::data_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
-            .join("s1devenvmanager");
-        
-        // Ensure directory exists
-        std::fs::create_dir_all(&data_dir)
-            .context("Failed to create data directory")?;
-        
-        Ok(data_dir)
-    }
-
-    fn environments_file(&self) -> PathBuf {
-        self.data_dir.join("environments.json")
-    }
-
-    async fn load_environments(&self) -> Result<Vec<Environment>> {
-        let file_path = self.environments_file();
-        
-        if !file_path.exists() {
-            return Ok(vec![]);
-        }
-
-        let content = fs::read_to_string(&file_path)
+    async fn fetch_environments(&self) -> Result<Vec<Environment>> {
+        let rows = sqlx::query_scalar::<_, String>("SELECT data FROM environments")
+            .fetch_all(&*self.pool)
             .await
-            .context("Failed to read environments file")?;
-        
-        let mut envs: Vec<Environment> = serde_json::from_str(&content)
-            .context("Failed to parse environments file")?;
-        
-        // Data migration: Set environment_type for existing environments
-        let mut needs_save = false;
-        for env in &mut envs {
-            if env.environment_type.is_none() {
-                env.environment_type = Some(crate::types::EnvironmentType::DepotDownloader);
-                needs_save = true;
+            .context("Failed to query environments")?;
+
+        let mut envs = Vec::new();
+        for row in rows {
+            match serde_json::from_str::<Environment>(&row) {
+                Ok(env) => envs.push(env),
+                Err(err) => {
+                    log::warn!("Skipping invalid environment record: {}", err);
+                }
             }
         }
-        
-        // Save if migration was needed
-        if needs_save {
-            let content = serde_json::to_string_pretty(&envs)
-                .context("Failed to serialize environments for migration")?;
-            fs::write(&file_path, content).await
-                .context("Failed to save migrated environments")?;
-        }
-        
-        let mut map = self.environments.write().await;
-        map.clear();
-        for env in &envs {
-            map.insert(env.id.clone(), env.clone());
-        }
-        
+
         Ok(envs)
     }
 
-    async fn save_environments(&self) -> Result<()> {
-        let map = self.environments.read().await;
-        let envs: Vec<Environment> = map.values().cloned().collect();
-        drop(map);
-        
-        let content = serde_json::to_string_pretty(&envs)
-            .context("Failed to serialize environments")?;
-        
-        fs::write(self.environments_file(), content)
-            .await
-            .context("Failed to write environments file")?;
-        
+    async fn save_environment(&self, env: &Environment) -> Result<()> {
+        let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
+        )
+        .bind(&env.id)
+        .bind(&env.output_dir)
+        .bind(serialized)
+        .execute(&*self.pool)
+        .await
+        .context("Failed to save environment")?;
+
         Ok(())
     }
 
     pub async fn get_environments(&self) -> Result<Vec<Environment>> {
-        self.load_environments().await
+        self.fetch_environments().await
     }
 
     pub async fn get_environment(&self, id: &str) -> Result<Option<Environment>> {
-        self.load_environments().await?;
-        let map = self.environments.read().await;
-        Ok(map.get(id).cloned())
+        let row = sqlx::query_scalar::<_, String>("SELECT data FROM environments WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to query environment")?;
+
+        match row {
+            Some(data) => Ok(serde_json::from_str::<Environment>(&data).ok()),
+            None => Ok(None),
+        }
     }
 
     pub async fn create_environment(
@@ -111,23 +76,22 @@ impl EnvironmentService {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<Environment> {
-        self.load_environments().await?;
-
         let app_config = if app_id == schedule_i_config().app_id {
             schedule_i_config()
         } else {
             return Err(anyhow::anyhow!("Unknown app ID: {}", app_id));
         };
 
-        let branch_config = app_config.branches
+        let branch_config = app_config
+            .branches
             .iter()
             .find(|b| b.name == branch)
             .ok_or_else(|| anyhow::anyhow!("Unknown branch: {} for app {}", branch, app_id))?;
 
         let id = format!("{}-{}-{}", app_id, branch, chrono::Utc::now().timestamp_millis());
-        
-        // Generate name - remove runtime suffix from display name
-        let branch_name = branch_config.display_name
+
+        let branch_name = branch_config
+            .display_name
             .replace(" (IL2CPP)", "")
             .replace(" (Mono)", "")
             .trim()
@@ -155,12 +119,7 @@ impl EnvironmentService {
             environment_type: Some(crate::types::EnvironmentType::DepotDownloader),
         };
 
-        let mut map = self.environments.write().await;
-        map.insert(id.clone(), env.clone());
-        drop(map);
-        
-        self.save_environments().await?;
-        
+        self.save_environment(&env).await?;
         Ok(env)
     }
 
@@ -170,20 +129,24 @@ impl EnvironmentService {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<Environment> {
-        self.load_environments().await?;
+        let existing_envs = self.fetch_environments().await?;
+        if existing_envs.iter().any(|env| {
+            env.environment_type == Some(crate::types::EnvironmentType::Steam)
+                || env.id.starts_with("steam-")
+        }) {
+            return Err(anyhow::anyhow!(
+                "Steam installation already exists and is managed by Steam"
+            ));
+        }
 
-        // Validate Steam installation
         let path = Path::new(&steam_path);
         if !crate::services::steam::SteamService::validate_steam_installation(path)? {
             return Err(anyhow::anyhow!("Invalid Steam installation path: {}", steam_path));
         }
 
-        // Extract game version
         let game_version_service = crate::services::game_version::GameVersionService::new();
         let current_game_version = game_version_service.extract_game_version(&steam_path).await?;
 
-        // Determine runtime by checking for Mono/IL2CPP indicators
-        // Default to IL2CPP for Steam installations (most common)
         let runtime = if steam_path.to_lowercase().contains("mono") {
             crate::types::Runtime::Mono
         } else {
@@ -191,16 +154,16 @@ impl EnvironmentService {
         };
 
         let id = format!("steam-{}", chrono::Utc::now().timestamp_millis());
-        
+
         let env = Environment {
             id: id.clone(),
             name: name.unwrap_or_else(|| "Steam Installation".to_string()),
             description,
             app_id: crate::services::steam::SteamService::get_steam_app_id(),
-            branch: "main".to_string(), // Steam typically has main branch
+            branch: "main".to_string(),
             output_dir: steam_path,
             runtime,
-            status: crate::types::EnvironmentStatus::Completed, // Steam manages installation
+            status: crate::types::EnvironmentStatus::Completed,
             last_updated: Some(chrono::Utc::now()),
             size: None,
             last_manifest_id: None,
@@ -214,12 +177,7 @@ impl EnvironmentService {
             environment_type: Some(crate::types::EnvironmentType::Steam),
         };
 
-        let mut map = self.environments.write().await;
-        map.insert(id.clone(), env.clone());
-        drop(map);
-        
-        self.save_environments().await?;
-        
+        self.save_environment(&env).await?;
         Ok(env)
     }
 
@@ -228,160 +186,384 @@ impl EnvironmentService {
         id: &str,
         updates: impl IntoIterator<Item = (String, serde_json::Value)>,
     ) -> Result<Environment> {
-        self.load_environments().await?;
-        
-        let mut map = self.environments.write().await;
-        let env = map.get_mut(id)
+        let mut env = self
+            .get_environment(id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Environment {} not found", id))?;
-        
-        // Apply updates
+
         for (key, value) in updates {
             match key.as_str() {
-                "name" => if let Some(v) = value.as_str() {
-                    env.name = v.to_string();
-                },
+                "name" => {
+                    if let Some(v) = value.as_str() {
+                        env.name = v.to_string();
+                    }
+                }
                 "description" => {
                     env.description = value.as_str().map(|s| s.to_string());
-                },
-                "status" => if let Some(v) = value.as_str() {
-                    env.status = match v {
-                        "not_downloaded" => crate::types::EnvironmentStatus::NotDownloaded,
-                        "downloading" => crate::types::EnvironmentStatus::Downloading,
-                        "completed" => crate::types::EnvironmentStatus::Completed,
-                        "error" => crate::types::EnvironmentStatus::Error,
-                        _ => return Err(anyhow::anyhow!("Invalid status: {}", v)),
-                    };
-                },
-                "lastUpdated" => {
-                    // Handle timestamp conversion
-                },
-                "size" => if let Some(v) = value.as_u64() {
-                    env.size = Some(v);
-                },
-                "lastManifestId" => if let Some(v) = value.as_str() {
-                    env.last_manifest_id = Some(v.to_string());
-                },
+                }
+                "status" => {
+                    if let Some(v) = value.as_str() {
+                        env.status = match v {
+                            "not_downloaded" => crate::types::EnvironmentStatus::NotDownloaded,
+                            "downloading" => crate::types::EnvironmentStatus::Downloading,
+                            "completed" => crate::types::EnvironmentStatus::Completed,
+                            "error" => crate::types::EnvironmentStatus::Error,
+                            _ => return Err(anyhow::anyhow!("Invalid status: {}", v)),
+                        };
+                    }
+                }
+                "lastUpdated" => {}
+                "size" => {
+                    if let Some(v) = value.as_u64() {
+                        env.size = Some(v);
+                    }
+                }
+                "lastManifestId" => {
+                    if let Some(v) = value.as_str() {
+                        env.last_manifest_id = Some(v.to_string());
+                    }
+                }
                 "lastUpdateCheck" => {
-                    // Convert timestamp (seconds since epoch) to DateTime<Utc>
                     if let Some(timestamp) = value.as_i64() {
-                        match DateTime::from_timestamp(timestamp, 0) {
-                            Some(dt) => {
-                                env.last_update_check = Some(dt.with_timezone(&Utc));
-                            },
-                            None => {
-                                eprintln!("[EnvironmentService] Invalid timestamp for lastUpdateCheck: {}", timestamp);
-                                // Don't fail, just skip the update
-                            }
+                        if let Some(dt) = DateTime::from_timestamp(timestamp, 0) {
+                            env.last_update_check = Some(dt.with_timezone(&Utc));
+                        } else {
+                            log::warn!("Invalid timestamp for lastUpdateCheck: {}", timestamp);
                         }
                     } else if value.is_null() {
                         env.last_update_check = None;
                     } else {
-                        eprintln!("[EnvironmentService] Unexpected type for lastUpdateCheck: {:?}", value);
+                        log::warn!("Unexpected type for lastUpdateCheck: {:?}", value);
                     }
-                },
-                "updateAvailable" => if let Some(v) = value.as_bool() {
-                    env.update_available = Some(v);
-                },
-                "remoteManifestId" => if let Some(v) = value.as_str() {
-                    env.remote_manifest_id = Some(v.to_string());
-                },
-                "remoteBuildId" => if let Some(v) = value.as_str() {
-                    env.remote_build_id = Some(v.to_string());
-                },
-                "currentGameVersion" => if let Some(v) = value.as_str() {
-                    env.current_game_version = Some(v.to_string());
-                },
-                "updateGameVersion" => if let Some(v) = value.as_str() {
-                    env.update_game_version = Some(v.to_string());
-                },
-                "melonLoaderVersion" => if let Some(v) = value.as_str() {
-                    env.melon_loader_version = Some(v.to_string());
-                },
+                }
+                "updateAvailable" => {
+                    if let Some(v) = value.as_bool() {
+                        env.update_available = Some(v);
+                    }
+                }
+                "remoteManifestId" => {
+                    if let Some(v) = value.as_str() {
+                        env.remote_manifest_id = Some(v.to_string());
+                    }
+                }
+                "remoteBuildId" => {
+                    if let Some(v) = value.as_str() {
+                        env.remote_build_id = Some(v.to_string());
+                    }
+                }
+                "currentGameVersion" => {
+                    if let Some(v) = value.as_str() {
+                        env.current_game_version = Some(v.to_string());
+                    }
+                }
+                "updateGameVersion" => {
+                    if let Some(v) = value.as_str() {
+                        env.update_game_version = Some(v.to_string());
+                    }
+                }
+                "melonLoaderVersion" => {
+                    if let Some(v) = value.as_str() {
+                        env.melon_loader_version = Some(v.to_string());
+                    }
+                }
                 _ => {}
             }
         }
-        
-        let updated = env.clone();
-        drop(map);
-        
-        self.save_environments().await?;
-        
-        Ok(updated)
+
+        self.save_environment(&env).await?;
+        Ok(env)
     }
 
     pub async fn delete_environment(&self, id: &str) -> Result<bool> {
-        self.load_environments().await?;
-        
-        let env = {
-            let map = self.environments.read().await;
-            map.get(id).cloned()
-        };
-        
+        let env = self.get_environment(id).await?;
         if let Some(env) = env {
-            // Delete the environment's directory if it exists
-            if Path::new(&env.output_dir).exists() {
-                if let Err(e) = fs::remove_dir_all(&env.output_dir).await {
-                    eprintln!("Failed to delete directory {}: {}", env.output_dir, e);
-                    // Continue with environment deletion even if directory deletion fails
-                }
+            if env.environment_type == Some(crate::types::EnvironmentType::Steam)
+                || env.id.starts_with("steam-")
+            {
+                return Err(anyhow::anyhow!(
+                    "Steam installations are managed by Steam and cannot be deleted"
+                ));
             }
-            
-            let mut map = self.environments.write().await;
-            map.remove(id);
-            drop(map);
-            
-            self.save_environments().await?;
+
+            if Path::new(&env.output_dir).exists() {
+                tokio::fs::remove_dir_all(&env.output_dir)
+                    .await
+                    .with_context(|| format!("Failed to delete output directory: {}", env.output_dir))?;
+            }
+
+            sqlx::query("DELETE FROM environments WHERE id = ?")
+                .bind(id)
+                .execute(&*self.pool)
+                .await
+                .context("Failed to delete environment")?;
+
             Ok(true)
         } else {
             Ok(false)
         }
-    }
-
-    pub async fn get_environment_size(&self, output_dir: &str) -> Result<u64> {
-        if !Path::new(output_dir).exists() {
-            return Ok(0);
-        }
-
-        Self::calculate_size(Path::new(output_dir)).await
-    }
-
-    async fn calculate_size(path: &Path) -> Result<u64> {
-        Self::calculate_size_impl(path.to_path_buf()).await
-    }
-
-    fn calculate_size_impl(path: PathBuf) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64>> + Send>> {
-        Box::pin(async move {
-            let mut size = 0u64;
-            
-            let mut entries = fs::read_dir(&path).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let entry_path = entry.path();
-                let metadata = entry.metadata().await?;
-                
-                if metadata.is_dir() {
-                    size += Self::calculate_size_impl(entry_path).await?;
-                } else {
-                    size += metadata.len();
-                }
-            }
-            
-            Ok(size)
-        })
     }
 }
 
 impl Clone for EnvironmentService {
     fn clone(&self) -> Self {
         Self {
-            environments: Arc::clone(&self.environments),
-            data_dir: self.data_dir.clone(),
+            pool: Arc::clone(&self.pool),
         }
     }
 }
 
-impl Default for EnvironmentService {
-    fn default() -> Self {
-        Self::new().expect("Failed to create EnvironmentService")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::initialize_pool;
+    use crate::types::{EnvironmentStatus, EnvironmentType, Runtime};
+    use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_and_fetch_environment() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+
+        let output_dir = temp.path().join("envs").join("env-1");
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                Some("Test env".to_string()),
+            )
+            .await?;
+
+        assert!(env.id.starts_with("3164500-main-"));
+        assert_eq!(env.name, "Main");
+        assert_eq!(env.description.as_deref(), Some("Test env"));
+        assert_eq!(env.branch, "main");
+        assert!(matches!(env.runtime, Runtime::Il2cpp));
+        assert!(matches!(env.status, EnvironmentStatus::NotDownloaded));
+        assert!(matches!(env.environment_type, Some(EnvironmentType::DepotDownloader)));
+
+        let stored = service.get_environment(&env.id).await?;
+        assert!(stored.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_environment_updates_fields() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+
+        let output_dir = temp.path().join("envs").join("env-2");
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let timestamp = 1_700_000_000i64;
+        let updates = vec![
+            ("name".to_string(), serde_json::json!("Updated")),
+            ("description".to_string(), serde_json::json!("New desc")),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("size".to_string(), serde_json::json!(1234)),
+            ("lastManifestId".to_string(), serde_json::json!("manifest")),
+            ("lastUpdateCheck".to_string(), serde_json::json!(timestamp)),
+            ("updateAvailable".to_string(), serde_json::json!(true)),
+            ("remoteManifestId".to_string(), serde_json::json!("remote")),
+            ("remoteBuildId".to_string(), serde_json::json!("build")),
+            ("currentGameVersion".to_string(), serde_json::json!("1.0.0")),
+            ("updateGameVersion".to_string(), serde_json::json!("1.0.1")),
+            ("melonLoaderVersion".to_string(), serde_json::json!("0.6.0")),
+        ];
+
+        let updated = service.update_environment(&env.id, updates).await?;
+        assert_eq!(updated.name, "Updated");
+        assert_eq!(updated.description.as_deref(), Some("New desc"));
+        assert!(matches!(updated.status, EnvironmentStatus::Completed));
+        assert_eq!(updated.size, Some(1234));
+        assert_eq!(updated.last_manifest_id.as_deref(), Some("manifest"));
+        assert_eq!(updated.last_update_check.map(|dt| dt.timestamp()), Some(timestamp));
+        assert_eq!(updated.update_available, Some(true));
+        assert_eq!(updated.remote_manifest_id.as_deref(), Some("remote"));
+        assert_eq!(updated.remote_build_id.as_deref(), Some("build"));
+        assert_eq!(updated.current_game_version.as_deref(), Some("1.0.0"));
+        assert_eq!(updated.update_game_version.as_deref(), Some("1.0.1"));
+        assert_eq!(updated.melon_loader_version.as_deref(), Some("0.6.0"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_environment_rejects_invalid_status() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+
+        let output_dir = temp.path().join("envs").join("env-3");
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let updates = vec![("status".to_string(), serde_json::json!("bad"))];
+        let err = service
+            .update_environment(&env.id, updates)
+            .await
+            .expect_err("expected invalid status error");
+        assert!(err.to_string().contains("Invalid status"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_removes_dir_and_row() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+
+        let output_dir = temp.path().join("envs").join("env-4");
+        fs::create_dir_all(&output_dir).await?;
+        fs::write(output_dir.join("file.txt"), b"test").await?;
+
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                Some("Delete".to_string()),
+                None,
+            )
+            .await?;
+
+        let deleted = service.delete_environment(&env.id).await?;
+        assert!(deleted);
+        assert!(!output_dir.exists());
+        assert!(service.get_environment(&env.id).await?.is_none());
+
+        let deleted_missing = service.delete_environment("missing").await?;
+        assert!(!deleted_missing);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_rejects_steam_install() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+
+        let steam_env = Environment {
+            id: "steam-1".to_string(),
+            name: "Steam Installation".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: temp.path().join("steam").to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::Steam),
+        };
+
+        let serialized = serde_json::to_string(&steam_env)?;
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)",
+        )
+        .bind(&steam_env.id)
+        .bind(&steam_env.output_dir)
+        .bind(serialized)
+        .execute(&*pool)
+        .await?;
+
+        let service = EnvironmentService::new(pool)?;
+        let err = service
+            .delete_environment(&steam_env.id)
+            .await
+            .expect_err("expected steam delete error");
+        assert!(err.to_string().contains("Steam installations"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_steam_environment_rejects_invalid_path() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+
+        let err = service
+            .create_steam_environment(
+                temp.path().to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await
+            .expect_err("expected invalid steam path error");
+        assert!(err.to_string().contains("Invalid Steam installation path"));
+
+        Ok(())
     }
 }
-

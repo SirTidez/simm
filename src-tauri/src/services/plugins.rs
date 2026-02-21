@@ -1,15 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::Arc;
 use std::io::Read;
 use anyhow::{Context, Result};
 use tokio::fs;
 use chrono;
 use zip::ZipArchive;
 use crate::types::{ModMetadata, ModSource};
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
-pub struct PluginsService;
+pub struct PluginsService {
+    pool: Arc<SqlitePool>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,8 +36,8 @@ struct PluginsListResult {
 }
 
 impl PluginsService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(pool: Arc<SqlitePool>) -> Self {
+        Self { pool }
     }
 
     fn get_plugins_directory(&self, output_dir: &str) -> PathBuf {
@@ -44,44 +48,122 @@ impl PluginsService {
         Path::new(output_dir).join("Mods")
     }
 
+    async fn environment_id_for_dir(&self, game_dir: &str) -> Result<Option<String>> {
+        if game_dir.is_empty() {
+            return Ok(None);
+        }
+
+        let id = sqlx::query_scalar::<_, String>("SELECT id FROM environments WHERE output_dir = ?")
+            .bind(game_dir)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to resolve environment id")?;
+
+        Ok(id)
+    }
+
     pub async fn load_plugin_metadata(&self, plugins_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = plugins_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = self.environment_id_for_dir(game_dir).await?;
+        let mut metadata = HashMap::new();
+
+        if let Some(env_id) = env_id {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT file_name, data FROM mod_metadata WHERE environment_id = ? AND kind = 'plugins'",
+            )
+            .bind(&env_id)
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load plugin metadata")?;
+
+            for (file_name, data) in rows {
+                if let Ok(entry) = serde_json::from_str::<ModMetadata>(&data) {
+                    metadata.insert(file_name, entry);
+                }
+            }
+        }
+
+        if metadata.is_empty() {
+            if let Ok(file_metadata) = self.load_plugin_metadata_from_file(plugins_directory).await {
+                if !file_metadata.is_empty() {
+                    self.save_plugin_metadata(plugins_directory, &file_metadata).await?;
+                    return Ok(file_metadata);
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    async fn load_mods_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = mods_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = self.environment_id_for_dir(game_dir).await?;
+        let mut metadata = HashMap::new();
+
+        if let Some(env_id) = env_id {
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT file_name, data FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'",
+            )
+            .bind(&env_id)
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load mods metadata")?;
+
+            for (file_name, data) in rows {
+                if let Ok(entry) = serde_json::from_str::<ModMetadata>(&data) {
+                    metadata.insert(file_name, entry);
+                }
+            }
+        }
+
+        Ok(metadata)
+    }
+
+    async fn load_plugin_metadata_from_file(&self, plugins_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
         let metadata_file = plugins_directory.join(".plugins-metadata.json");
-        
         if !metadata_file.exists() {
             return Ok(HashMap::new());
         }
 
         let content = fs::read_to_string(&metadata_file).await
             .context("Failed to read plugin metadata file")?;
-        
         let metadata: HashMap<String, ModMetadata> = serde_json::from_str(&content)
             .context("Failed to parse plugin metadata file")?;
-        
-        Ok(metadata)
-    }
-
-    async fn load_mods_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
-        let metadata_file = mods_directory.join(".mods-metadata.json");
-        
-        if !metadata_file.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let content = fs::read_to_string(&metadata_file).await
-            .context("Failed to read mods metadata file")?;
-        
-        let metadata: HashMap<String, ModMetadata> = serde_json::from_str(&content)
-            .context("Failed to parse mods metadata file")?;
-        
         Ok(metadata)
     }
 
     pub async fn save_plugin_metadata(&self, plugins_directory: &Path, metadata: &HashMap<String, ModMetadata>) -> Result<()> {
-        let metadata_file = plugins_directory.join(".plugins-metadata.json");
-        let content = serde_json::to_string_pretty(metadata)
-            .context("Failed to serialize plugin metadata")?;
-        fs::write(&metadata_file, content).await
-            .context("Failed to write plugin metadata file")?;
+        let game_dir = plugins_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let env_id = match self.environment_id_for_dir(game_dir).await? {
+            Some(id) => id,
+            None => {
+                log::warn!("Skipping plugin metadata save; environment not found for {}", game_dir);
+                return Ok(());
+            }
+        };
+
+        let mut tx = self.pool.begin().await.context("Failed to begin transaction for plugin metadata")?;
+
+        sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ? AND kind = 'plugins'")
+            .bind(&env_id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to clear plugin metadata")?;
+
+        for (file_name, meta) in metadata {
+            let serialized = serde_json::to_string(meta).context("Failed to serialize plugin metadata")?;
+            sqlx::query(
+                "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'plugins', ?, ?)",
+            )
+            .bind(&env_id)
+            .bind(file_name)
+            .bind(serialized)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to save plugin metadata")?;
+        }
+
+        tx.commit().await.context("Failed to commit plugin metadata transaction")?;
         Ok(())
     }
 
@@ -222,14 +304,14 @@ impl PluginsService {
             // Copy from Plugins/ folder
             let mut entries = fs::read_dir(&source_plugins_dir).await
                 .context("Failed to read Plugins directory from archive")?;
-            
+
             while let Some(entry) = entries.next_entry().await? {
                 let entry_path = entry.path();
                 if entry_path.is_file() {
                     let file_name = entry_path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    
+
                     if file_name.to_lowercase().ends_with(".dll") {
                         let dest_path = plugins_directory.join(file_name);
                         fs::copy(&entry_path, &dest_path).await
@@ -242,14 +324,14 @@ impl PluginsService {
             // Legacy structure: DLLs at root level
             let mut entries = fs::read_dir(&source_plugins_dir).await
                 .context("Failed to read temp directory")?;
-            
+
             while let Some(entry) = entries.next_entry().await? {
                 let entry_path = entry.path();
                 if entry_path.is_file() {
                     let file_name = entry_path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
-                    
+
                     // Only root-level DLLs (not in subdirectories)
                     if file_name.to_lowercase().ends_with(".dll") {
                         let dest_path = plugins_directory.join(file_name);
@@ -283,6 +365,7 @@ impl PluginsService {
         let mod_source = match source_str {
             Some("thunderstore") => Some(ModSource::Thunderstore),
             Some("nexusmods") => Some(ModSource::Nexusmods),
+            Some("github") => Some(ModSource::Github),
             Some("unknown") => Some(ModSource::Unknown),
             _ => Some(ModSource::Local),
         };
@@ -329,6 +412,7 @@ impl PluginsService {
         let response_source = match mod_source {
             Some(ModSource::Thunderstore) => "thunderstore",
             Some(ModSource::Nexusmods) => "nexusmods",
+            Some(ModSource::Github) => "github",
             Some(ModSource::Unknown) => "unknown",
             Some(ModSource::Local) => "local",
             _ => "unknown",
@@ -343,7 +427,7 @@ impl PluginsService {
 
     pub async fn list_plugins(&self, game_dir: &str) -> Result<serde_json::Value> {
         let plugins_directory = self.get_plugins_directory(game_dir);
-        
+
         if !plugins_directory.exists() {
             return Ok(serde_json::json!({
                 "plugins": [],
@@ -538,6 +622,7 @@ impl PluginsService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn install_dll_plugin(&self, _game_dir: &str, _dll_path: &str, _source: &str, _runtime: &str) -> Result<serde_json::Value> {
         // TODO: Implement DLL plugin installation
         Ok(serde_json::json!({ "success": false, "error": "Not implemented" }))
@@ -552,7 +637,7 @@ impl PluginsService {
         // The source file might be named MLVScan.MelonLoader.dll or similar
         // but we always install it as MLVScan.dll in the Plugins folder
         let dest_path = plugins_directory.join("MLVScan.dll");
-        
+
         // Copy the DLL file
         fs::copy(source_path, &dest_path).await
             .context("Failed to copy MLVScan.dll")?;
@@ -665,7 +750,7 @@ impl PluginsService {
         if version.is_none() && has_plugin {
             // Use mods service to extract version (plugins use same DLL structure)
             use crate::services::mods::ModsService;
-            let mods_service = ModsService::new();
+            let mods_service = ModsService::new(self.pool.clone());
             version = mods_service.extract_mod_version(&plugin_file).await;
         }
 
@@ -684,8 +769,136 @@ impl PluginsService {
     }
 }
 
-impl Default for PluginsService {
-    fn default() -> Self {
-        Self::new()
+#[cfg(test)]
+mod tests {
+    use super::PluginsService;
+    use crate::db::initialize_pool;
+    use crate::services::environment::EnvironmentService;
+    use crate::types::schedule_i_config;
+    use anyhow::Result;
+    use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_and_uninstall_mlvscan_updates_status_and_listing() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = PluginsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("plugins-env");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let source_dll = temp.path().join("MLVScan.Input.dll");
+        fs::write(&source_dll, b"not-a-real-dotnet-assembly").await?;
+
+        service
+            .install_mlvscan(
+                output_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "v1.2.3",
+            )
+            .await?;
+
+        let status = service
+            .get_mlvscan_installation_status(output_dir.to_string_lossy().as_ref())
+            .await?;
+        assert_eq!(status.get("installed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(status.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(status.get("version").and_then(|v| v.as_str()), Some("v1.2.3"));
+
+        let list = service
+            .list_plugins(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let count = list.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        assert_eq!(count, 1);
+
+        service
+            .uninstall_mlvscan(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let status_after = service
+            .get_mlvscan_installation_status(output_dir.to_string_lossy().as_ref())
+            .await?;
+        assert_eq!(
+            status_after.get("installed").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disable_and_enable_plugin_renames_file() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = PluginsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("plugins-toggle");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::write(plugins_dir.join("ExamplePlugin.dll"), b"data").await?;
+
+        service
+            .disable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
+            .await?;
+        assert!(plugins_dir.join("ExamplePlugin.dll.disabled").exists());
+
+        service
+            .enable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
+            .await?;
+        assert!(plugins_dir.join("ExamplePlugin.dll").exists());
+
+        Ok(())
     }
 }

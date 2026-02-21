@@ -1,11 +1,12 @@
 use crate::services::game_version::GameVersionService;
 use crate::services::environment::EnvironmentService;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
+use tauri::State;
 
 static GAME_VERSION_SERVICE: Lazy<AsyncMutex<Option<Arc<GameVersionService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_game_version_service() -> Result<Arc<GameVersionService>, String> {
     let mut service = GAME_VERSION_SERVICE.lock().await;
@@ -15,18 +16,14 @@ async fn get_game_version_service() -> Result<Arc<GameVersionService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
 
 /// Extract game version from a game directory
 #[tauri::command]
-pub async fn extract_game_version(environment_id: String) -> Result<Option<String>, String> {
-    let env_service = get_env_service().await?;
+pub async fn extract_game_version(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<Option<String>, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?

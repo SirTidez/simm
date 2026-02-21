@@ -313,3 +313,128 @@ impl ConfigService {
         merged_grouped
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    fn section_map(sections: &[ConfigSection]) -> HashMap<String, Vec<ConfigEntry>> {
+        let mut map = HashMap::new();
+        for section in sections {
+            map.insert(section.name.clone(), section.entries.clone());
+        }
+        map
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn parse_ini_file_collects_sections_and_comments() -> Result<()> {
+        let temp = tempdir()?;
+        let file_path = temp.path().join("test.cfg");
+        let content = "# comment for foo\nfoo=bar\n\n[Section One]\nkey = value\n";
+        fs::write(&file_path, content).await?;
+
+        let service = ConfigService::new();
+        let config = service
+            .parse_ini_file(&file_path, ConfigFileType::Other)
+            .await?;
+
+        let sections = section_map(&config.sections);
+        let general = sections
+            .get("General")
+            .expect("expected General section");
+        let foo_entry = general.iter().find(|entry| entry.key == "foo").unwrap();
+        assert_eq!(foo_entry.value, "bar");
+        assert_eq!(foo_entry.comment.as_deref(), Some("comment for foo"));
+
+        let section_one = sections
+            .get("Section One")
+            .expect("expected Section One section");
+        let key_entry = section_one.iter().find(|entry| entry.key == "key").unwrap();
+        assert_eq!(key_entry.value, "value");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_config_file_updates_values() -> Result<()> {
+        let temp = tempdir()?;
+        let file_path = temp.path().join("update.cfg");
+        let content = "# header\n[General]\nfoo = old\nbar = keep\n";
+        fs::write(&file_path, content).await?;
+
+        let mut updates = HashMap::new();
+        let mut general_updates = HashMap::new();
+        general_updates.insert("foo".to_string(), "new".to_string());
+        updates.insert("General".to_string(), general_updates);
+
+        let service = ConfigService::new();
+        service
+            .update_config_file(file_path.to_string_lossy().as_ref(), updates)
+            .await?;
+
+        let updated = fs::read_to_string(&file_path).await?;
+        assert!(updated.contains("foo = new"));
+        assert!(updated.contains("bar = keep"));
+        assert!(updated.contains("# header"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn parse_ini_file_ignores_invalid_lines() -> Result<()> {
+        let temp = tempdir()?;
+        let file_path = temp.path().join("invalid.cfg");
+        let content = "[General]\ninvalid line\nkey=value\n";
+        fs::write(&file_path, content).await?;
+
+        let service = ConfigService::new();
+        let config = service
+            .parse_ini_file(&file_path, ConfigFileType::Other)
+            .await?;
+
+        let sections = section_map(&config.sections);
+        let general = sections
+            .get("General")
+            .expect("expected General section");
+        assert_eq!(general.len(), 1);
+        assert_eq!(general[0].key, "key");
+        assert_eq!(general[0].value, "value");
+
+        Ok(())
+    }
+
+    #[test]
+    fn group_by_mod_merges_related_sections() {
+        let service = ConfigService::new();
+        let config = ConfigFile {
+            name: "MelonPreferences.cfg".to_string(),
+            path: "C:/fake/path/MelonPreferences.cfg".to_string(),
+            file_type: ConfigFileType::MelonPreferences,
+            sections: vec![
+                ConfigSection {
+                    name: "HighBaller_IL2CPP".to_string(),
+                    entries: Vec::new(),
+                },
+                ConfigSection {
+                    name: "HighBaller_IL2CPP_Automation".to_string(),
+                    entries: Vec::new(),
+                },
+                ConfigSection {
+                    name: "AnotherMod.Config".to_string(),
+                    entries: Vec::new(),
+                },
+            ],
+        };
+
+        let grouped = service.group_by_mod(&config);
+        let high_baller = grouped.get("HighBaller").expect("expected HighBaller group");
+        assert_eq!(high_baller.len(), 2);
+        assert!(grouped.contains_key("AnotherMod"));
+    }
+}
