@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { EnvironmentList } from './EnvironmentList';
+import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
 import { ModLibraryOverlay } from './ModLibraryOverlay';
@@ -25,6 +26,9 @@ function AppContent() {
   const handleInitialDetectionComplete = useCallback(() => {
     setShowStartupSplash(false);
   }, []);
+
+  // Discord Rich Presence - automatically initializes and sets presence
+  useDiscordPresence();
 
   // Initialize console logging interception after a short delay to avoid blocking startup
   useEffect(() => {
