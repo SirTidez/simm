@@ -1112,6 +1112,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
       'downloading': { text: 'Downloading', className: 'badge-blue' },
       'validating': { text: 'Validating', className: 'badge-yellow' },
       'completed': { text: 'Ready', className: 'badge-green' },
+      'unavailable': { text: 'Unavailable', className: 'badge-orange' },
       'error': { text: 'Error', className: 'badge-red' },
       'cancelled': { text: 'Cancelled', className: 'badge-gray' }
     };
@@ -1254,7 +1255,9 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
             </div>
             <div style={{ padding: '1.5rem' }}>
               <p style={{ marginBottom: '1rem', color: '#cccccc' }}>
-                Are you sure you want to remove <strong>"{deleteConfirm.env.name}"</strong> from the manager?
+                {deleteConfirm.env.environmentType === 'steam'
+                  ? <>Clear tracked mod records for <strong>"{deleteConfirm.env.name}"</strong>?</>
+                  : <>Are you sure you want to remove <strong>"{deleteConfirm.env.name}"</strong> from the manager?</>}
               </p>
 
               {(deleteConfirm.env.environmentType === 'depotDownloader' || deleteConfirm.env.environmentType === 'local') && (
@@ -1272,7 +1275,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
               {deleteConfirm.env.environmentType === 'steam' && (
                 <p style={{ fontSize: '0.85rem', color: '#888', marginBottom: '1rem' }}>
                   <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
-                  Game files will not be deleted - Steam manages this installation.
+                  Steam manages this installation. This action clears mod/plugin tracking only.
                 </p>
               )}
 
@@ -1285,7 +1288,9 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                   style={{ backgroundColor: deleteConfirm.deleteFiles ? '#dc3545' : 'var(--primary-btn-color, #646cff)' }}
                   onClick={handleConfirmDelete}
                 >
-                  {deleteConfirm.deleteFiles ? 'Delete Environment & Files' : 'Remove from Manager'}
+                  {deleteConfirm.env.environmentType === 'steam'
+                    ? 'Clear Mod Records'
+                    : (deleteConfirm.deleteFiles ? 'Delete Environment & Files' : 'Remove from Manager')}
                 </button>
               </div>
             </div>

@@ -97,7 +97,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const deleteEnvironment = useCallback(async (id: string, deleteFiles?: boolean) => {
     try {
       await ApiService.deleteEnvironment(id, deleteFiles);
-      setEnvironments(prev => prev.filter(env => env.id !== id));
+      await refreshEnvironments();
       setProgress(prev => {
         const next = new Map(prev);
         next.delete(id);
@@ -106,7 +106,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     } catch (err) {
       throw err;
     }
-  }, []);
+  }, [refreshEnvironments]);
 
   const startDownload = useCallback(async (environmentId: string) => {
     try {

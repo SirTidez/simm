@@ -36,17 +36,35 @@ impl EnvironmentService {
     }
 
     async fn save_environment(&self, env: &Environment) -> Result<()> {
+        let normalized_output_dir = Self::normalize_path(&env.output_dir);
         let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
         sqlx::query(
-            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
         )
         .bind(&env.id)
         .bind(&env.output_dir)
+        .bind(normalized_output_dir)
         .bind(serialized)
         .execute(&*self.pool)
         .await
         .context("Failed to save environment")?;
+
+        Ok(())
+    }
+
+    fn normalize_path(path: &str) -> String {
+        path.replace('/', "\\")
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase()
+    }
+
+    async fn clear_environment_metadata(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ?")
+            .bind(id)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to clear environment metadata")?;
 
         Ok(())
     }
@@ -66,6 +84,10 @@ impl EnvironmentService {
             Some(data) => Ok(serde_json::from_str::<Environment>(&data).ok()),
             None => Ok(None),
         }
+    }
+
+    pub async fn upsert_environment(&self, env: &Environment) -> Result<()> {
+        self.save_environment(env).await
     }
 
     pub async fn create_environment(
@@ -187,6 +209,17 @@ impl EnvironmentService {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<Environment> {
+        let normalized_local_path = Self::normalize_path(&local_path);
+        let existing_envs = self.fetch_environments().await?;
+        if existing_envs
+            .iter()
+            .any(|env| Self::normalize_path(&env.output_dir) == normalized_local_path)
+        {
+            return Err(anyhow::anyhow!(
+                "An environment already exists for this installation path"
+            ));
+        }
+
         let path = Path::new(&local_path);
 
         // Validate installation - check for game executable
@@ -310,6 +343,7 @@ impl EnvironmentService {
                             "not_downloaded" => crate::types::EnvironmentStatus::NotDownloaded,
                             "downloading" => crate::types::EnvironmentStatus::Downloading,
                             "completed" => crate::types::EnvironmentStatus::Completed,
+                            "unavailable" => crate::types::EnvironmentStatus::Unavailable,
                             "error" => crate::types::EnvironmentStatus::Error,
                             _ => return Err(anyhow::anyhow!("Invalid status: {}", v)),
                         };
@@ -381,6 +415,37 @@ impl EnvironmentService {
         let env = self.get_environment(id).await?;
 
         if let Some(env) = env {
+            if env.environment_type == Some(crate::types::EnvironmentType::Steam)
+                || env.id.starts_with("steam-")
+            {
+                self.clear_environment_metadata(id).await?;
+
+                let mut updated_env = env.clone();
+                let current_path_valid =
+                    crate::services::steam::SteamService::validate_steam_installation(Path::new(&updated_env.output_dir))
+                        .unwrap_or(false);
+
+                if current_path_valid {
+                    updated_env.status = crate::types::EnvironmentStatus::Completed;
+                } else {
+                    let steam_service = crate::services::steam::SteamService::new();
+                    if let Ok(installations) = steam_service.detect_steam_installations().await {
+                        if let Some(installation) = installations.first() {
+                            updated_env.output_dir = installation.path.clone();
+                            updated_env.status = crate::types::EnvironmentStatus::Completed;
+                        } else {
+                            updated_env.status = crate::types::EnvironmentStatus::Unavailable;
+                        }
+                    } else {
+                        updated_env.status = crate::types::EnvironmentStatus::Unavailable;
+                    }
+                }
+
+                updated_env.last_updated = Some(chrono::Utc::now());
+                self.save_environment(&updated_env).await?;
+                return Ok(true);
+            }
+
             // Only delete files if explicitly requested AND not a Steam environment
             // Steam environments are managed by Steam, so we never delete their files
             let should_delete_files = delete_files
@@ -398,6 +463,8 @@ impl EnvironmentService {
                 .execute(&*self.pool)
                 .await
                 .context("Failed to delete environment")?;
+
+            self.clear_environment_metadata(id).await?;
             Ok(true)
         } else {
             Ok(false)
@@ -529,6 +596,14 @@ mod tests {
         assert_eq!(updated.update_game_version.as_deref(), Some("1.0.1"));
         assert_eq!(updated.melon_loader_version.as_deref(), Some("0.6.0"));
 
+        let unavailable = service
+            .update_environment(
+                &env.id,
+                vec![("status".to_string(), serde_json::json!("unavailable"))],
+            )
+            .await?;
+        assert!(matches!(unavailable.status, EnvironmentStatus::Unavailable));
+
         Ok(())
     }
 
@@ -569,7 +644,7 @@ mod tests {
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
-        let service = EnvironmentService::new(pool)?;
+        let service = EnvironmentService::new(pool.clone())?;
 
         let output_dir = temp.path().join("envs").join("env-4");
         fs::create_dir_all(&output_dir).await?;
@@ -585,10 +660,27 @@ mod tests {
             )
             .await?;
 
+        sqlx::query(
+            "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?)",
+        )
+        .bind(&env.id)
+        .bind("example.dll")
+        .bind("{}")
+        .execute(&*pool)
+        .await?;
+
         let deleted = service.delete_environment(&env.id, true).await?;
         assert!(deleted);
         assert!(!output_dir.exists());
         assert!(service.get_environment(&env.id).await?.is_none());
+
+        let metadata_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?",
+        )
+        .bind(&env.id)
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(metadata_count, 0);
 
         let deleted_missing = service.delete_environment("missing", true).await?;
         assert!(!deleted_missing);
@@ -598,11 +690,15 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn delete_environment_removes_steam_record_only() -> Result<()> {
+    async fn delete_environment_for_steam_clears_mod_metadata_but_keeps_record() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
+
+        let steam_path = temp.path().join("steam");
+        fs::create_dir_all(&steam_path).await?;
+        fs::write(steam_path.join("Schedule I.exe"), b"").await?;
 
         let steam_env = Environment {
             id: "steam-1".to_string(),
@@ -610,7 +706,7 @@ mod tests {
             description: None,
             app_id: schedule_i_config().app_id,
             branch: "main".to_string(),
-            output_dir: temp.path().join("steam").to_string_lossy().to_string(),
+            output_dir: steam_path.to_string_lossy().to_string(),
             runtime: Runtime::Il2cpp,
             status: EnvironmentStatus::Completed,
             last_updated: None,
@@ -636,12 +732,65 @@ mod tests {
         .execute(&*pool)
         .await?;
 
-        let service = EnvironmentService::new(pool)?;
+        sqlx::query(
+            "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?)",
+        )
+        .bind(&steam_env.id)
+        .bind("steammod.dll")
+        .bind("{}")
+        .execute(&*pool)
+        .await?;
+
+        let service = EnvironmentService::new(pool.clone())?;
         let deleted = service
             .delete_environment(&steam_env.id, true)
             .await?;
         assert!(deleted);
-        assert!(service.get_environment(&steam_env.id).await?.is_none());
+        let after = service.get_environment(&steam_env.id).await?;
+        assert!(after.is_some());
+
+        let metadata_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?",
+        )
+        .bind(&steam_env.id)
+        .fetch_one(&*service.pool)
+        .await?;
+        assert_eq!(metadata_count, 0);
+
+        assert!(matches!(
+            after.expect("steam env should remain").status,
+            EnvironmentStatus::Completed
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_local_environment_rejects_duplicate_path() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+
+        let local_dir = temp.path().join("local");
+        fs::create_dir_all(&local_dir).await?;
+        fs::write(local_dir.join("Schedule I.exe"), b"").await?;
+        fs::write(local_dir.join("GameAssembly.dll"), b"").await?;
+
+        let created = service
+            .create_local_environment(local_dir.to_string_lossy().to_string(), None, None)
+            .await?;
+        assert!(created.id.starts_with("local-"));
+
+        let err = service
+            .create_local_environment(local_dir.to_string_lossy().to_string(), None, None)
+            .await
+            .expect_err("expected duplicate path error");
+        assert!(err
+            .to_string()
+            .contains("already exists for this installation path"));
 
         Ok(())
     }

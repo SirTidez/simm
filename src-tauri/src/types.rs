@@ -90,6 +90,7 @@ pub enum EnvironmentStatus {
     NotDownloaded,
     Downloading,
     Completed,
+    Unavailable,
     Error,
 }
 
