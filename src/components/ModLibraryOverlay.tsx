@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
@@ -232,6 +232,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [selectedMlvscanVersion, setSelectedMlvscanVersion] = useState('');
   const [downloadingS1API, setDownloadingS1API] = useState(false);
   const [downloadingMlvscan, setDownloadingMlvscan] = useState(false);
+
+  // Ref to track whether mousedown originated inside the modal content,
+  // used to prevent closing the overlay when the user drag-selects text
+  // and releases the mouse over the overlay background.
+  const mouseDownInside = useRef(false);
 
   const downloadedGroups = useMemo(
     () => buildDownloadedGroups(library?.downloaded ?? []),
@@ -738,8 +743,16 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           </div>
         </div>
       )}
-      <div className="modal-overlay" onClick={onClose}>
-        <div className="modal-content mods-overlay" onClick={e => e.stopPropagation()}>
+      <div
+        className="modal-overlay"
+        onMouseDown={() => { mouseDownInside.current = false; }}
+        onClick={() => { if (!mouseDownInside.current) onClose(); }}
+      >
+        <div
+          className="modal-content mods-overlay"
+          onMouseDown={e => { mouseDownInside.current = true; e.stopPropagation(); }}
+          onClick={e => e.stopPropagation()}
+        >
           <div className="modal-header">
             <h2>Mod Library</h2>
             <button className="modal-close" onClick={onClose}>×</button>
@@ -805,6 +818,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                         setSearchQuery(e.target.value);
                       } else {
                         setNexusModsSearchQuery(e.target.value);
+                      }
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        if (searchSource === 'thunderstore') handleSearch();
+                        else handleSearchNexusMods();
                       }
                     }}
                     style={{
@@ -1070,7 +1089,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               <div style={{ padding: '0 1.25rem 1rem' }}>
                 {showSearchResults && searchResults.length > 0 && (
                   <div style={{ display: 'grid', gap: '0.75rem' }}>
-                    {searchResults.map(pkg => {
+                    {searchResults.filter(pkg => {
+                      // Hide mods that are already in the downloaded library
+                      const tsKey = `thunderstore::${pkg.key}`;
+                      return !downloadedGroups.some(g => g.key === tsKey);
+                    }).map(pkg => {
                       const runtimes: ThunderstoreRuntime[] = [];
                       if (pkg.packagesByRuntime.IL2CPP) runtimes.push('IL2CPP');
                       if (pkg.packagesByRuntime.Mono) runtimes.push('Mono');

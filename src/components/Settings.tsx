@@ -3,28 +3,24 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
+import { CustomThemeEditor } from './CustomThemeEditor';
 
-type SettingsButtonProps = {
-  className?: string;
-  showLabel?: boolean;
-  label?: string;
+type SettingsProps = {
+  isOpen: boolean;
+  onClose: () => void;
 };
 
-export function Settings({
-  className = 'btn btn-icon',
-  showLabel = false,
-  label = 'Settings'
-}: SettingsButtonProps) {
+export function Settings({ isOpen, onClose }: SettingsProps) {
   const { settings, depotDownloader, loading, updateSettings, refreshDepotDownloader } = useSettingsStore();
   const { checkAllUpdates } = useEnvironmentStore();
-  const [isOpen, setIsOpen] = useState(false);
   const [checkingAllUpdates, setCheckingAllUpdates] = useState(false);
+  const [showThemeEditor, setShowThemeEditor] = useState(false);
   const [formData, setFormData] = useState({
     defaultDownloadDir: '',
     maxConcurrentDownloads: 2,
     platform: 'windows' as 'windows' | 'macos' | 'linux',
     language: 'english',
-    theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue',
+    theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue' | 'custom',
     melonLoaderVersion: '',
     autoInstallMelonLoader: false,
     updateCheckInterval: 60,
@@ -44,21 +40,21 @@ export function Settings({
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
-        setIsOpen(false);
+        onClose();
       }
     };
-    
+
     if (isOpen) {
       document.addEventListener('keydown', handleEscape);
       // Prevent body scroll when modal is open
       document.body.style.overflow = 'hidden';
     }
-    
+
     return () => {
       document.removeEventListener('keydown', handleEscape);
       document.body.style.overflow = '';
     };
-  }, [isOpen]);
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     if (settings) {
@@ -67,7 +63,7 @@ export function Settings({
         maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
         platform: 'windows' as 'windows' | 'macos' | 'linux', // Always Windows
         language: 'english', // Always English
-        theme: settings.theme || 'modern-blue',
+        theme: (settings.theme as 'light' | 'dark' | 'modern-blue' | 'custom') || 'modern-blue',
         melonLoaderVersion: settings.melonLoaderVersion || '',
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
         updateCheckInterval: settings.updateCheckInterval || 60,
@@ -98,7 +94,7 @@ export function Settings({
   // Auto-save with debouncing
   useEffect(() => {
     if (!settings) return; // Don't save on initial load
-    
+
     // Clear existing timeout
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -128,25 +124,25 @@ export function Settings({
     // Handle Windows paths (C:\, D:\, etc.)
     const isWindowsRoot = /^[A-Z]:\\?$/i.test(currentPath);
     if (isWindowsRoot) return null;
-    
+
     // Handle Unix paths (/)
     if (currentPath === '/' || currentPath === '\\') return null;
-    
+
     // Get parent by removing last segment
     const separator = currentPath.includes('/') ? '/' : '\\';
     const parts = currentPath.split(separator).filter(p => p);
-    
+
     // If we're at a drive root (C:\), return null
     if (parts.length <= 1 && currentPath.includes(':')) return null;
-    
+
     // Remove last part
     parts.pop();
-    
+
     if (parts.length === 0) {
       // Return root
       return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
     }
-    
+
     return parts.join(separator) + (separator === '/' ? '/' : '');
   };
 
@@ -169,25 +165,14 @@ export function Settings({
     setFormData({ ...formData, defaultDownloadDir: selectedPath });
     setShowDirectoryPicker(false);
   };
-  
+
   return (
     <>
-      <button
-        onClick={() => setIsOpen(true)}
-        className={className}
-        disabled={loading}
-        title={label}
-        aria-label={label}
-      >
-        <i className="fas fa-cog sidebar-icon"></i>
-        {showLabel && <span className="sidebar-label">{label}</span>}
-      </button>
-
       {isOpen && (
-        <div 
-          className="modal-overlay" 
-          onClick={() => setIsOpen(false)}
-          style={{ 
+        <div
+          className="modal-overlay"
+          onClick={onClose}
+          style={{
             position: 'fixed',
             top: 0,
             left: 0,
@@ -198,19 +183,48 @@ export function Settings({
             zIndex: 10000
           }}
         >
-          <div 
-            className="modal-content" 
+          <div
+            className="modal-content"
             onClick={(e) => e.stopPropagation()}
             style={{ zIndex: 10001 }}
           >
             <div className="modal-header">
               <h2>Settings</h2>
-              <button className="modal-close" onClick={() => setIsOpen(false)}>×</button>
+              <button className="modal-close" onClick={onClose}>×</button>
             </div>
 
             {error && <div className="error-message" style={{ margin: '0 1.25rem', padding: '0.75rem', backgroundColor: '#dc3545', color: '#fff', borderRadius: '4px' }}>{error}</div>}
 
             <div className="settings-content">
+              <div className="settings-section">
+                <h3>Appearance</h3>
+                <div className="form-group">
+                  <label>Theme</label>
+                  <select
+                    value={formData.theme || 'modern-blue'}
+                    onChange={(e) => setFormData({ ...formData, theme: e.target.value as 'light' | 'dark' | 'modern-blue' | 'custom' })}
+                    disabled={loading}
+                  >
+                    <option value="modern-blue">Modern Blue</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                {formData.theme === 'custom' && (
+                  <div className="form-group">
+                    <button
+                      type="button"
+                      onClick={() => setShowThemeEditor(true)}
+                      className="btn btn-secondary"
+                    >
+                      <i className="fas fa-paint-brush" style={{ marginRight: '0.5rem' }}></i>
+                      Edit Custom Theme
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <div className="settings-section">
                 <h3>DepotDownloader</h3>
                 {depotDownloader ? (
@@ -381,6 +395,8 @@ export function Settings({
           </div>
         </div>
       )}
+
+      <CustomThemeEditor isOpen={showThemeEditor} onClose={() => setShowThemeEditor(false)} />
 
       {/* Directory Picker Modal */}
       {showDirectoryPicker && (

@@ -36,7 +36,7 @@ export function ConfirmOverlay({
         <div style={{ padding: '1.5rem' }}>
           <p style={{ marginBottom: '1.5rem', color: '#cccccc' }}>{message}</p>
           <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
-            <button className="btn btn-secondary" onClick={onClose}>
+            <button className="btn btn-secondary" onClick={onClose} autoFocus>
               {cancelText}
             </button>
             <button className="btn btn-primary" onClick={handleConfirm}>

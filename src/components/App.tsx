@@ -20,6 +20,7 @@ function AppContent() {
   const [showModLibrary, setShowModLibrary] = useState(false);
   const [showSteamAccount, setShowSteamAccount] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showWelcome, setShowWelcome] = useState(false);
   const [showStartupSplash, setShowStartupSplash] = useState(true);
 
@@ -54,56 +55,61 @@ function AppContent() {
     };
     checkWelcome();
   }, []);
+
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="app-header-brand">
-          <img src={appIcon256} alt="" className="app-header-icon" aria-hidden />
-          <h1>Schedule I Mod Manager</h1>
-        </div>
-        <div className="header-actions">
-          <button
-            onClick={() => setShowHelp(true)}
-            className="btn btn-icon"
-            title="Help"
-            aria-label="Help"
-          >
-            <i className="fas fa-question-circle"></i>
-          </button>
-        </div>
-      </header>
-
       <div className="app-body">
-        <nav className="app-sidebar" aria-label="Primary">
-          <div className="sidebar-panel">
+        {/* Persistent 48px icon rail — full height, no titlebar */}
+        <nav className="app-rail" aria-label="Primary navigation">
+          {/* Logo mark at top */}
+          <div className="rail-logo">
+            <img src={appIcon256} alt="SIMM" className="rail-logo-icon" />
+          </div>
+
+          <div className="rail-top">
             <button
               onClick={() => setShowModLibrary(true)}
-              className="btn btn-icon sidebar-button"
+              className="btn btn-icon rail-btn"
               title="Mod Library"
               aria-label="Mod Library"
             >
-              <i className="fas fa-search sidebar-icon"></i>
-              <span className="sidebar-label">Mod Library</span>
+              <i className="fas fa-search"></i>
             </button>
             <button
               onClick={() => setShowWizard(true)}
-              className="btn btn-icon sidebar-button"
-              title="Add New Environment"
-              aria-label="Add New Environment"
+              className="btn btn-icon rail-btn"
+              title="New Environment"
+              aria-label="New Environment"
             >
-              <i className="fas fa-plus-circle sidebar-icon"></i>
-              <span className="sidebar-label">Add New Environment</span>
+              <i className="fas fa-plus-circle"></i>
             </button>
             <button
               onClick={() => setShowSteamAccount(true)}
-              className="btn btn-icon sidebar-button"
+              className="btn btn-icon rail-btn"
               title="Accounts"
               aria-label="Accounts"
             >
-              <i className="fas fa-user-circle sidebar-icon"></i>
-              <span className="sidebar-label">Accounts</span>
+              <i className="fas fa-user-circle"></i>
             </button>
-            <Settings className="btn btn-icon sidebar-button" showLabel label="Settings" />
+          </div>
+
+          <div className="rail-bottom">
+            <button
+              onClick={() => setShowHelp(true)}
+              className="btn btn-icon rail-btn"
+              title="Help"
+              aria-label="Help"
+            >
+              <i className="fas fa-question-circle"></i>
+            </button>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="btn btn-icon rail-btn"
+              title="Settings"
+              aria-label="Settings"
+            >
+              <i className="fas fa-cog"></i>
+            </button>
           </div>
         </nav>
 
@@ -137,6 +143,11 @@ function AppContent() {
       <WelcomeOverlay
         isOpen={showWelcome}
         onClose={() => setShowWelcome(false)}
+      />
+
+      <Settings
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
       />
 
       {showStartupSplash && (

@@ -285,8 +285,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setDisablingMod(mod.fileName);
     try {
       await ApiService.disableMod(environmentId, mod.fileName);
-      // Reload mods list after disabling
-      await loadMods();
+      // Update the specific mod in-place to avoid a full list reload flash
+      setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: true } : m));
       if (onModsChanged) {
         onModsChanged();
       }
@@ -301,8 +301,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setEnablingMod(mod.fileName);
     try {
       await ApiService.enableMod(environmentId, mod.fileName);
-      // Reload mods list after enabling
-      await loadMods();
+      // Update the specific mod in-place to avoid a full list reload flash
+      setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: false } : m));
       if (onModsChanged) {
         onModsChanged();
       }
@@ -1024,7 +1024,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const envRuntime = environment?.runtime;
   const downloadedNotInstalled = downloadedMods.filter(entry => {
     const installedIn = envRuntime ? entry.installedInByRuntime?.[envRuntime] || entry.installedIn : entry.installedIn;
-    return !installedIn.includes(environmentId);
+    if (installedIn.includes(environmentId)) return false;
+    // Exclude mods that have declared runtimes but none match the current environment runtime
+    if (envRuntime && entry.availableRuntimes.length > 0 && !entry.availableRuntimes.includes(envRuntime)) return false;
+    return true;
   });
   const showSearchInOverlay = false;
 

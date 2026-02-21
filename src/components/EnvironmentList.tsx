@@ -1629,12 +1629,19 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                   >
                     {env.branch}
                   </span>
-                  <span
-                    className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}
-                    style={{ display: 'inline-block', justifySelf: 'center' }}
-                  >
-                    {env.runtime}
-                  </span>
+                  <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center' }}>
+                    {(modsCounts.get(env.id) ?? 0) > 0 && modUpdatesCounts.has(env.id) && (
+                      (modUpdatesCounts.get(env.id) ?? 0) > 0 ? (
+                        <span className="badge badge-orange" title="Mods with updates available">
+                          {modUpdatesCounts.get(env.id)} update{(modUpdatesCounts.get(env.id) ?? 0) !== 1 ? 's' : ''}
+                        </span>
+                      ) : (
+                        <span className="badge badge-green" title="All mods up to date">
+                          Up to date
+                        </span>
+                      )
+                    )}
+                  </div>
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', justifySelf: 'end' }}>
                     {env.status === 'completed' && env.currentGameVersion && (
                       <span
@@ -1742,17 +1749,6 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                         <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
                           {modsCounts.get(env.id) ?? 0} Mods found
                         </span>
-                        {(modsCounts.get(env.id) ?? 0) > 0 && (
-                          (modUpdatesCounts.get(env.id) ?? 0) > 0 ? (
-                            <span className="badge badge-orange" style={{ width: 'auto', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }} title="Mods with updates available">
-                              {modUpdatesCounts.get(env.id)} update{(modUpdatesCounts.get(env.id) ?? 0) !== 1 ? 's' : ''} available
-                            </span>
-                          ) : (
-                            <span className="badge badge-green" style={{ width: 'auto', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }} title="All mods up to date">
-                              Up to date
-                            </span>
-                          )
-                        )}
                         <button
                           onClick={() => handleOpenModsOverlay(env.id)}
                           className="btn btn-secondary btn-small"
@@ -1867,7 +1863,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                 )}
                 {env.status === 'completed' && (
                   <>
-                    <div className="environment-actions-primary">
+                    <div className="environment-actions-grid">
                       <button
                         onClick={() => handleOpenFolder(env)}
                         className="btn btn-secondary"
@@ -1876,7 +1872,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                         <i className="fas fa-folder-open"></i>
                         <span>Open Folder</span>
                       </button>
-                      <div style={{ position: 'relative', display: 'inline-block' }} data-launch-dropdown>
+                      <div className="launch-game-cell" data-launch-dropdown>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1884,7 +1880,6 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                           }}
                           className="btn btn-primary"
                           title="Launch the game"
-                          style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                         >
                           <i className="fas fa-play"></i>
                           <span>Launch Game</span>
@@ -2028,46 +2023,46 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                           </div>
                         )}
                       </div>
-                    </div>
-                    <div className="environment-actions-secondary">
-                      {env.status === 'completed' && (
-                        <button
-                          onClick={() => handleManualUpdateCheck(env)}
-                          className="btn btn-secondary"
-                          disabled={checkingEnvironments.has(env.id)}
-                          title="Check for updates"
-                        >
-                          <i className={`fas ${checkingEnvironments.has(env.id) ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
-                          <span>Check Updates</span>
-                        </button>
-                      )}
-                      {env.updateAvailable && !isSteam && (
                       <button
-                          onClick={() => handleUpdate(env)}
-                          className="btn btn-primary"
-                          title="Update to the latest branch version"
+                        onClick={() => handleManualUpdateCheck(env)}
+                        className="btn btn-secondary"
+                        disabled={checkingEnvironments.has(env.id)}
+                        title="Check for updates"
                       >
-                          <i className="fas fa-arrow-up"></i>
-                          <span>Update</span>
+                        <i className={`fas ${checkingEnvironments.has(env.id) ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
+                        <span>Check Updates</span>
                       </button>
-                      )}
-                      {env.updateAvailable && isSteam && (
-                      <button
-                          className="btn btn-secondary"
-                          disabled
-                          title="Steam manages updates for this installation"
-                      >
-                          <i className="fab fa-steam" style={{ marginRight: '0.25rem' }}></i>
-                          <span>Steam Updates</span>
-                      </button>
-                      )}
-                      {!isSteam && (
+                      {!isSteam ? (
                         <button onClick={() => handleDelete(env)} className="btn btn-danger">
                           <i className="fas fa-trash"></i>
                           <span>Delete</span>
                         </button>
+                      ) : (
+                        <div />
                       )}
                     </div>
+                    {env.updateAvailable && !isSteam && (
+                      <button
+                        onClick={() => handleUpdate(env)}
+                        className="btn btn-primary"
+                        title="Update to the latest branch version"
+                        style={{ width: '100%' }}
+                      >
+                        <i className="fas fa-arrow-up"></i>
+                        <span>Update</span>
+                      </button>
+                    )}
+                    {env.updateAvailable && isSteam && (
+                      <button
+                        className="btn btn-secondary"
+                        disabled
+                        title="Steam manages updates for this installation"
+                        style={{ width: '100%' }}
+                      >
+                        <i className="fab fa-steam" style={{ marginRight: '0.25rem' }}></i>
+                        <span>Steam Updates</span>
+                      </button>
+                    )}
                   </>
                 )}
                 {env.status !== 'completed' && !isSteam && (
