@@ -72,14 +72,33 @@ impl ModsService {
         }
 
         let normalized_game_dir = Self::normalize_path(game_dir);
-        let id = sqlx::query_scalar::<_, String>(
+        let normalized_query = sqlx::query_scalar::<_, String>(
             "SELECT id FROM environments WHERE normalized_output_dir = ? OR output_dir = ? LIMIT 1",
         )
             .bind(normalized_game_dir)
             .bind(game_dir)
             .fetch_optional(&*self.pool)
-            .await
-            .context("Failed to resolve environment id")?;
+            .await;
+
+        let id = match normalized_query {
+            Ok(id) => id,
+            Err(err) if err
+                .to_string()
+                .to_lowercase()
+                .contains("no such column: normalized_output_dir") => {
+                let rows = sqlx::query_as::<_, (String, String)>(
+                    "SELECT id, output_dir FROM environments",
+                )
+                .fetch_all(&*self.pool)
+                .await
+                .context("Failed to resolve environment id")?;
+
+                rows.into_iter()
+                    .find(|(_, output_dir)| Self::normalize_path(output_dir) == Self::normalize_path(game_dir))
+                    .map(|(id, _)| id)
+            }
+            Err(err) => return Err(err).context("Failed to resolve environment id"),
+        };
 
         Ok(id)
     }
@@ -1174,11 +1193,16 @@ impl ModsService {
             let installed_version = template_meta.source_version.clone().or(template_meta.installed_version.clone());
             let managed = template_meta.mod_storage_id.is_some();
             let key_name = template_meta.mod_name.clone().unwrap_or_else(|| display_name.clone());
+            let version_key = template_meta
+                .source_version
+                .clone()
+                .or(template_meta.installed_version.clone())
+                .unwrap_or_default();
             let key = format!(
                 "{}::{}::{}",
                 key_name,
                 template_meta.source_id.clone().unwrap_or_default(),
-                template_meta.source_version.clone().unwrap_or_default()
+                version_key
             );
 
             let entry = grouped.entry(key).or_insert_with(|| ModLibraryEntry {
@@ -2477,11 +2501,13 @@ impl ModsService {
 
         let mut installed_files = Vec::new();
 
+        let content_root = self.resolve_archive_content_root(temp_dir).await?;
+
         // Detect if this archive has IL2CPP/Mono subdirectories (runtime-specific structure)
-        let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(temp_dir).await?;
+        let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(&content_root).await?;
 
         // Copy files from temp directory to appropriate locations
-        let mut entries = fs::read_dir(temp_dir).await?;
+        let mut entries = fs::read_dir(&content_root).await?;
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
             let file_name = entry_path.file_name()
@@ -2599,11 +2625,13 @@ impl ModsService {
 
         let mut installed_files = Vec::new();
 
+        let content_root = self.resolve_archive_content_root(temp_dir).await?;
+
         // Detect if this archive has IL2CPP/Mono subdirectories (runtime-specific structure)
-        let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(temp_dir).await?;
+        let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(&content_root).await?;
 
         // Now do async operations to copy files from temp directory to appropriate locations
-        let mut entries = fs::read_dir(temp_dir).await?;
+        let mut entries = fs::read_dir(&content_root).await?;
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
             let file_name = entry_path.file_name()
@@ -2693,6 +2721,47 @@ impl ModsService {
         } else {
             "unknown"
         }
+    }
+
+    async fn resolve_archive_content_root(&self, temp_dir: &Path) -> Result<PathBuf> {
+        let mut current = temp_dir.to_path_buf();
+
+        for _ in 0..8 {
+            let mut entries = fs::read_dir(&current).await?;
+            let mut child_dirs: Vec<PathBuf> = Vec::new();
+            let mut has_direct_content = false;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let meta = entry.metadata().await?;
+
+                if meta.is_dir() {
+                    if file_name == "mods"
+                        || file_name == "plugins"
+                        || file_name == "userlibs"
+                        || self.detect_mod_runtime_from_name(&file_name) != "unknown"
+                    {
+                        has_direct_content = true;
+                    }
+                    child_dirs.push(path);
+                } else if file_name.ends_with(".dll") {
+                    has_direct_content = true;
+                }
+            }
+
+            if has_direct_content || child_dirs.len() != 1 {
+                return Ok(current);
+            }
+
+            current = child_dirs.remove(0);
+        }
+
+        Ok(current)
     }
 
     /// Detects if the temp directory contains runtime-specific directories (IL2CPP, Mono)
@@ -3741,6 +3810,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_archive_content_root_unwraps_single_top_level_wrapper() -> Result<()> {
+        let temp = tempdir()?;
+        let wrapper = temp.path().join("WrappedPackage");
+        let il2cpp_dir = wrapper.join("IL2CPP");
+        let mono_dir = wrapper.join("Mono");
+        fs::create_dir_all(&il2cpp_dir).await?;
+        fs::create_dir_all(&mono_dir).await?;
+        fs::write(temp.path().join("README.txt"), b"wrapper readme").await?;
+
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+        let root = service.resolve_archive_content_root(temp.path()).await?;
+
+        assert_eq!(root, wrapper);
+        let (has_il2cpp, has_mono) = service.detect_runtime_directories(&root).await?;
+        assert!(has_il2cpp);
+        assert!(has_mono);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn extract_thunderstore_manifest_parses_manifest() -> Result<()> {
         let temp = tempdir()?;
         let zip_path = temp.path().join("mod.zip");
@@ -4013,6 +4103,72 @@ mod tests {
         assert!(!entry.files_by_runtime.contains_key("IL2CPP"));
         assert_eq!(entry.storage_ids_by_runtime.get("Mono").map(|s| s.as_str()), Some(storage_id));
         assert!(!entry.storage_ids_by_runtime.contains_key("IL2CPP"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_keeps_distinct_entries_for_distinct_installed_versions() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-library-version");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("Example-v1.dll"), b"data-v1").await?;
+        fs::write(mods_dir.join("Example-v2.dll"), b"data-v2").await?;
+
+        let mut metadata_v1 = sample_metadata(Some("storage-v1"), Some("example/mod"), None);
+        metadata_v1.mod_name = Some("Example Multi".to_string());
+        metadata_v1.installed_version = Some("1.0.0".to_string());
+
+        let mut metadata_v2 = sample_metadata(Some("storage-v2"), Some("example/mod"), None);
+        metadata_v2.mod_name = Some("Example Multi".to_string());
+        metadata_v2.installed_version = Some("2.0.0".to_string());
+
+        let mut env_metadata = HashMap::new();
+        env_metadata.insert("Example-v1.dll".to_string(), metadata_v1.clone());
+        env_metadata.insert("Example-v2.dll".to_string(), metadata_v2.clone());
+        service.save_mod_metadata(&mods_dir, &env_metadata).await?;
+
+        let storage_v1 = download_dir.join("Mods").join("storage-v1").join("Mods");
+        let storage_v2 = download_dir.join("Mods").join("storage-v2").join("Mods");
+        fs::create_dir_all(&storage_v1).await?;
+        fs::create_dir_all(&storage_v2).await?;
+        fs::write(storage_v1.join("Example-v1.dll"), b"data-v1").await?;
+        fs::write(storage_v2.join("Example-v2.dll"), b"data-v2").await?;
+
+        let library = service.get_mod_library().await?;
+        let matching: Vec<_> = library
+            .downloaded
+            .iter()
+            .filter(|entry| entry.display_name == "Example Multi")
+            .collect();
+
+        assert_eq!(matching.len(), 2);
 
         Ok(())
     }

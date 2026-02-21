@@ -12,6 +12,7 @@ use once_cell::sync::Lazy;
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
+#[cfg(test)]
 fn map_source_to_mod_source(source_str: Option<&str>) -> Option<crate::types::ModSource> {
     match source_str {
         Some("thunderstore") => Some(crate::types::ModSource::Thunderstore),
@@ -22,6 +23,7 @@ fn map_source_to_mod_source(source_str: Option<&str>) -> Option<crate::types::Mo
     }
 }
 
+#[cfg(test)]
 fn response_source_label(mod_source: Option<crate::types::ModSource>) -> &'static str {
     match mod_source {
         Some(crate::types::ModSource::Thunderstore) => "thunderstore",
@@ -223,73 +225,10 @@ pub async fn upload_plugin(
             .await
             .map_err(|e| e.to_string())
     } else if file_path_lower.ends_with(".dll") {
-        // Handle DLL files
-        let plugins_directory = Path::new(&env.output_dir).join("Plugins");
-        tokio::fs::create_dir_all(&plugins_directory).await
-            .map_err(|e| format!("Failed to create plugins directory: {}", e))?;
-
-        let source_path = Path::new(&file_path);
-        let dest_path = plugins_directory.join(&original_file_name);
-        tokio::fs::copy(source_path, &dest_path).await
-            .map_err(|e| format!("Failed to copy plugin file: {}", e))?;
-
-        // Extract metadata
-        let source_str = metadata
-            .as_ref()
-            .and_then(|m| m.get("source").and_then(|s| s.as_str()));
-
-        let mod_source = map_source_to_mod_source(source_str);
-
-        let source_id = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceId").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_version = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceVersion").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_url = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let mod_name = metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
-
-        // Update plugin metadata
-        let mut plugin_metadata = plugins_service
-            .load_plugin_metadata(&plugins_directory)
+        plugins_service
+            .install_dll_plugin(&env.output_dir, &file_path, &original_file_name, metadata)
             .await
-            .map_err(|e| e.to_string())?;
-
-        plugin_metadata.insert(original_file_name.clone(), crate::types::ModMetadata {
-            source: mod_source.clone(),
-            source_id,
-            source_version,
-            author,
-            mod_name,
-            source_url,
-            installed_version: None,
-            installed_at: Some(chrono::Utc::now()),
-            last_update_check: None,
-            update_available: None,
-            remote_version: None,
-            detected_runtime: None,
-            runtime_match: None,
-            mod_storage_id: None,
-            symlink_paths: None,
-        });
-
-        plugins_service.save_plugin_metadata(&plugins_directory, &plugin_metadata).await
-            .map_err(|e| e.to_string())?;
-
-        let response_source = response_source_label(mod_source.clone());
-
-        Ok(serde_json::json!({
-            "success": true,
-            "fileName": original_file_name,
-            "source": response_source
-        }))
+            .map_err(|e| e.to_string())
     } else {
         Err("Only .dll and .zip files are supported for plugins".to_string())
     }

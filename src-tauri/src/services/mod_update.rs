@@ -6,6 +6,7 @@ use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
 use std::collections::HashMap;
 use std::path::Path;
+use serde_json::Value;
 
 #[derive(Clone)]
 pub struct ModUpdateService;
@@ -191,12 +192,383 @@ impl ModUpdateService {
         Ok(results)
     }
 
-    pub async fn update_mod(&self, _environment_id: &str, _mod_file_name: &str) -> Result<serde_json::Value> {
-        // TODO: Implement mod updating - download new version and replace old one
-        Ok(serde_json::json!({
-            "success": false,
-            "error": "Not implemented"
-        }))
+    fn runtime_label(runtime: &crate::types::Runtime) -> &'static str {
+        match runtime {
+            crate::types::Runtime::Il2cpp => "IL2CPP",
+            crate::types::Runtime::Mono => "Mono",
+        }
+    }
+
+    fn extract_package_uuid(package: &Value) -> Option<String> {
+        for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
+            if let Some(value) = package.get(key).and_then(|v| v.as_str()) {
+                return Some(value.to_string());
+            }
+        }
+        package
+            .get("latest")
+            .and_then(|v| v.get("uuid4"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    }
+
+    fn extract_package_latest_version(package: &Value) -> Option<String> {
+        package
+            .get("versions")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("version_number"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    }
+
+    async fn resolve_thunderstore_package(
+        &self,
+        thunderstore_service: &ThunderStoreService,
+        source_id: &str,
+    ) -> Result<(String, Value)> {
+        if let Ok(Some(package)) = thunderstore_service.get_package(source_id, Some("schedule-i")).await {
+            return Ok((source_id.to_string(), package));
+        }
+
+        let (owner, name) = source_id
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("Invalid Thunderstore source id: {}", source_id))?;
+
+        let candidates = thunderstore_service
+            .search_packages_filtered_by_runtime("schedule-i", "unknown", Some(name))
+            .await
+            .context("Failed to search Thunderstore packages while resolving update")?;
+
+        let matching = candidates.into_iter().find(|pkg| {
+            let pkg_owner = pkg.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+            let pkg_name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            pkg_owner.eq_ignore_ascii_case(owner) && pkg_name.eq_ignore_ascii_case(name)
+        });
+
+        let package = matching.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not resolve Thunderstore package from source id {}",
+                source_id
+            )
+        })?;
+
+        let package_uuid = Self::extract_package_uuid(&package)
+            .ok_or_else(|| anyhow::anyhow!("Unable to determine Thunderstore package UUID"))?;
+
+        let package = thunderstore_service
+            .get_package(&package_uuid, Some("schedule-i"))
+            .await
+            .context("Failed to fetch resolved Thunderstore package")?
+            .ok_or_else(|| anyhow::anyhow!("Resolved Thunderstore package no longer exists"))?;
+
+        Ok((package_uuid, package))
+    }
+
+    fn select_nexus_file_for_runtime(
+        files: &[Value],
+        runtime_label: &str,
+    ) -> Option<Value> {
+        let runtime_lower = runtime_label.to_lowercase();
+        let compatible: Vec<Value> = files
+            .iter()
+            .filter(|f| {
+                let file_name = f
+                    .get("file_name")
+                    .or_else(|| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if runtime_lower == "il2cpp" {
+                    file_name.contains("il2cpp")
+                        || file_name.contains("main")
+                        || file_name.contains("beta")
+                } else {
+                    file_name.contains("mono") || file_name.contains("alternate")
+                }
+            })
+            .cloned()
+            .collect();
+
+        if !compatible.is_empty() {
+            if let Some(primary) = compatible
+                .iter()
+                .find(|f| f.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false))
+            {
+                return Some(primary.clone());
+            }
+            return compatible.first().cloned();
+        }
+
+        files
+            .iter()
+            .find(|f| f.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false))
+            .cloned()
+            .or_else(|| files.first().cloned())
+    }
+
+    pub async fn update_mod(
+        &self,
+        environment_id: &str,
+        mod_file_name: &str,
+        env_service: &EnvironmentService,
+        mods_service: &ModsService,
+        thunderstore_service: &ThunderStoreService,
+        nexus_mods_service: &NexusModsService,
+        github_service: &GitHubReleasesService,
+    ) -> Result<serde_json::Value> {
+        use crate::types::ModSource;
+
+        let env = env_service
+            .get_environment(environment_id)
+            .await
+            .context("Failed to get environment")?
+            .ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
+
+        if env.output_dir.is_empty() {
+            return Err(anyhow::anyhow!("Output directory not set"));
+        }
+
+        let mods_dir = Path::new(&env.output_dir).join("Mods");
+        let metadata_map = mods_service
+            .load_mod_metadata(&mods_dir)
+            .await
+            .unwrap_or_default();
+        let metadata = metadata_map
+            .get(mod_file_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Mod metadata not found for {}", mod_file_name))?;
+
+        let source = metadata
+            .source
+            .ok_or_else(|| anyhow::anyhow!("Mod source is unknown"))?;
+        let source_id = metadata
+            .source_id
+            .ok_or_else(|| anyhow::anyhow!("Mod source id is missing"))?;
+        let runtime_label = Self::runtime_label(&env.runtime);
+
+        let temp_file_name = format!(
+            "mod-update-{}-{}",
+            environment_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+
+        match source {
+            ModSource::Thunderstore => {
+                let (package_uuid, package) = self
+                    .resolve_thunderstore_package(thunderstore_service, &source_id)
+                    .await?;
+
+                let latest_version = Self::extract_package_latest_version(&package)
+                    .ok_or_else(|| anyhow::anyhow!("Thunderstore package has no version information"))?;
+                if !Self::versions_differ(metadata.source_version.as_deref(), &latest_version) {
+                    return Ok(serde_json::json!({
+                        "success": true,
+                        "message": "Already up to date",
+                        "alreadyUpToDate": true
+                    }));
+                }
+
+                let bytes = thunderstore_service
+                    .download_package(&package_uuid, Some("schedule-i"))
+                    .await
+                    .context("Failed to download Thunderstore update")?;
+                let temp_path = std::env::temp_dir().join(format!("{}.zip", temp_file_name));
+                tokio::fs::write(&temp_path, bytes)
+                    .await
+                    .context("Failed to write Thunderstore update archive")?;
+
+                let owner = package.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+                let name = package.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let source_id = if !owner.is_empty() && !name.is_empty() {
+                    format!("{}/{}", owner, name)
+                } else {
+                    source_id
+                };
+
+                let metadata_json = serde_json::json!({
+                    "source": "thunderstore",
+                    "sourceId": source_id,
+                    "sourceVersion": latest_version,
+                    "sourceUrl": package.get("package_url").and_then(|v| v.as_str()).unwrap_or_default(),
+                    "modName": name,
+                    "author": owner,
+                });
+
+                let result = mods_service
+                    .install_zip_mod(
+                        &env.output_dir,
+                        &temp_path.to_string_lossy(),
+                        &format!("{}.zip", package_uuid),
+                        runtime_label,
+                        &env.branch,
+                        Some(metadata_json),
+                    )
+                    .await;
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                result.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                Ok(serde_json::json!({ "success": true }))
+            }
+            ModSource::Nexusmods => {
+                let mod_id = source_id
+                    .parse::<u32>()
+                    .context("Invalid Nexus mod id in metadata")?;
+
+                let files = nexus_mods_service
+                    .get_mod_files("schedule1", mod_id)
+                    .await
+                    .context("Failed to fetch Nexus mod files")?;
+                let target_file = Self::select_nexus_file_for_runtime(&files, runtime_label)
+                    .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
+
+                let file_id = target_file
+                    .get("file_id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("Nexus file is missing file_id"))? as u32;
+                let latest_version = target_file
+                    .get("version")
+                    .or_else(|| target_file.get("mod_version"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                if !latest_version.is_empty()
+                    && !Self::versions_differ(metadata.source_version.as_deref(), &latest_version)
+                {
+                    return Ok(serde_json::json!({
+                        "success": true,
+                        "message": "Already up to date",
+                        "alreadyUpToDate": true
+                    }));
+                }
+
+                let bytes = nexus_mods_service
+                    .download_mod_file("schedule1", mod_id, file_id)
+                    .await
+                    .context("Failed to download Nexus update")?;
+                let original_file_name = target_file
+                    .get("file_name")
+                    .or_else(|| target_file.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("nexus-update.zip");
+                let extension = Path::new(original_file_name)
+                    .extension()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("zip");
+                let temp_path = std::env::temp_dir().join(format!("{}.{}", temp_file_name, extension));
+                tokio::fs::write(&temp_path, bytes)
+                    .await
+                    .context("Failed to write Nexus update file")?;
+
+                let mod_info = nexus_mods_service
+                    .get_mod("schedule1", mod_id)
+                    .await
+                    .ok();
+                let metadata_json = serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": source_id,
+                    "sourceVersion": latest_version,
+                    "sourceUrl": format!("https://www.nexusmods.com/schedule1/mods/{}", mod_id),
+                    "modName": mod_info.as_ref().and_then(|m| m.get("name")).and_then(|v| v.as_str()).unwrap_or_default(),
+                    "author": mod_info.as_ref().and_then(|m| m.get("author")).and_then(|v| v.as_str()).unwrap_or_default(),
+                });
+
+                let result = if extension.eq_ignore_ascii_case("dll") {
+                    mods_service
+                        .install_dll_mod(
+                            &env.output_dir,
+                            &temp_path.to_string_lossy(),
+                            runtime_label,
+                            Some(metadata_json),
+                        )
+                        .await
+                } else {
+                    mods_service
+                        .install_zip_mod(
+                            &env.output_dir,
+                            &temp_path.to_string_lossy(),
+                            original_file_name,
+                            runtime_label,
+                            &env.branch,
+                            Some(metadata_json),
+                        )
+                        .await
+                };
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                result.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                Ok(serde_json::json!({ "success": true }))
+            }
+            ModSource::Github => {
+                let (owner, repo) = source_id
+                    .split_once('/')
+                    .ok_or_else(|| anyhow::anyhow!("Invalid GitHub source id"))?;
+                let release = github_service
+                    .get_latest_release(owner, repo, false)
+                    .await
+                    .context("Failed to fetch latest GitHub release")?
+                    .ok_or_else(|| anyhow::anyhow!("No release found for GitHub source"))?;
+                let latest_version = release
+                    .get("tag_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                if !latest_version.is_empty()
+                    && !Self::versions_differ(metadata.source_version.as_deref(), &latest_version)
+                {
+                    return Ok(serde_json::json!({
+                        "success": true,
+                        "message": "Already up to date",
+                        "alreadyUpToDate": true
+                    }));
+                }
+
+                let asset_url = github_service
+                    .get_zip_asset_url(&release)
+                    .ok_or_else(|| anyhow::anyhow!("No ZIP asset found for latest GitHub release"))?;
+                let bytes = github_service
+                    .download_release_asset(&asset_url)
+                    .await
+                    .context("Failed to download GitHub release asset")?;
+                let temp_path = std::env::temp_dir().join(format!("{}.zip", temp_file_name));
+                tokio::fs::write(&temp_path, bytes)
+                    .await
+                    .context("Failed to write GitHub update archive")?;
+
+                let metadata_json = serde_json::json!({
+                    "source": "github",
+                    "sourceId": source_id,
+                    "sourceVersion": latest_version,
+                    "sourceUrl": format!("https://github.com/{}/{}", owner, repo),
+                    "modName": metadata.mod_name.unwrap_or_else(|| mod_file_name.to_string()),
+                    "author": owner,
+                });
+
+                let result = mods_service
+                    .install_zip_mod(
+                        &env.output_dir,
+                        &temp_path.to_string_lossy(),
+                        "github-update.zip",
+                        runtime_label,
+                        &env.branch,
+                        Some(metadata_json),
+                    )
+                    .await;
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                result.map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+                Ok(serde_json::json!({ "success": true }))
+            }
+            ModSource::Local | ModSource::Unknown => Ok(serde_json::json!({
+                "success": false,
+                "error": "This mod source does not support automatic updates"
+            })),
+        }
     }
 
     fn versions_differ(current: Option<&str>, latest: &str) -> bool {
@@ -295,11 +667,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_mod_returns_not_implemented() -> Result<()> {
+    #[serial]
+    async fn update_mod_returns_error_for_missing_environment() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let mods_service = ModsService::new(pool.clone());
+        let thunderstore_service = ThunderStoreService::new();
+        let nexus_mods_service = NexusModsService::new();
+        let github_service = GitHubReleasesService::new();
+
         let service = ModUpdateService::new();
-        let result = service.update_mod("env", "mod").await?;
-        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(result.get("error").and_then(|v| v.as_str()), Some("Not implemented"));
+        let err = service
+            .update_mod(
+                "missing-env",
+                "missing.dll",
+                &env_service,
+                &mods_service,
+                &thunderstore_service,
+                &nexus_mods_service,
+                &github_service,
+            )
+            .await
+            .expect_err("expected missing environment error");
+        assert!(err.to_string().contains("Environment not found"));
+
         Ok(())
     }
 

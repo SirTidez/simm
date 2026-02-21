@@ -221,9 +221,13 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
           // Update environment status based on progress
           if (data.status === 'completed') {
-            updateEnvironment(data.downloadId, { status: 'completed' });
+            void updateEnvironment(data.downloadId, { status: 'completed' }).catch((err) => {
+              console.error('Failed to apply completed status update from progress event:', err);
+            });
           } else if (data.status === 'error') {
-            updateEnvironment(data.downloadId, { status: 'error' });
+            void updateEnvironment(data.downloadId, { status: 'error' }).catch((err) => {
+              console.error('Failed to apply error status update from progress event:', err);
+            });
           }
         });
 
@@ -252,29 +256,41 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         });
 
         unlistenError = await onError(async ({ downloadId }: { downloadId: string }) => {
-          await updateEnvironment(downloadId, { status: 'error' });
+          try {
+            await updateEnvironment(downloadId, { status: 'error' });
+          } catch (err) {
+            console.error('Failed to apply error status update from event:', err);
+          }
         });
 
         unlistenUpdateAvailable = await onUpdateAvailable(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
-          await updateEnvironment(environmentId, {
-            lastUpdateCheck: updateResult.checkedAt,
-            updateAvailable: updateResult.updateAvailable,
-            remoteManifestId: updateResult.remoteManifestId,
-            remoteBuildId: updateResult.remoteBuildId,
-            ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
-            ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
-          });
+          try {
+            await updateEnvironment(environmentId, {
+              lastUpdateCheck: updateResult.checkedAt,
+              updateAvailable: updateResult.updateAvailable,
+              remoteManifestId: updateResult.remoteManifestId,
+              remoteBuildId: updateResult.remoteBuildId,
+              ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
+              ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
+            });
+          } catch (err) {
+            console.error('Failed to apply update-available event state:', err);
+          }
         });
 
         unlistenUpdateCheckComplete = await onUpdateCheckComplete(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
-          await updateEnvironment(environmentId, {
-            lastUpdateCheck: updateResult.checkedAt,
-            updateAvailable: updateResult.updateAvailable,
-            remoteManifestId: updateResult.remoteManifestId,
-            remoteBuildId: updateResult.remoteBuildId,
-            ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
-            ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
-          });
+          try {
+            await updateEnvironment(environmentId, {
+              lastUpdateCheck: updateResult.checkedAt,
+              updateAvailable: updateResult.updateAvailable,
+              remoteManifestId: updateResult.remoteManifestId,
+              remoteBuildId: updateResult.remoteBuildId,
+              ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
+              ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
+            });
+          } catch (err) {
+            console.error('Failed to apply update-check-complete event state:', err);
+          }
         });
       } catch (error) {
         console.error('Failed to set up event listeners:', error);

@@ -38,17 +38,70 @@ impl EnvironmentService {
     async fn save_environment(&self, env: &Environment) -> Result<()> {
         let normalized_output_dir = Self::normalize_path(&env.output_dir);
         let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
-        sqlx::query(
+        let upsert_with_normalized = sqlx::query(
             "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
         )
         .bind(&env.id)
         .bind(&env.output_dir)
-        .bind(normalized_output_dir)
+        .bind(&normalized_output_dir)
         .bind(serialized)
         .execute(&*self.pool)
-        .await
-        .context("Failed to save environment")?;
+        .await;
+
+        match upsert_with_normalized {
+            Ok(_) => Ok(()),
+            Err(err) if err
+                .to_string()
+                .to_lowercase()
+                .contains("no such column: normalized_output_dir") => {
+                let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
+                sqlx::query(
+                    "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
+                     ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
+                )
+                .bind(&env.id)
+                .bind(&env.output_dir)
+                .bind(serialized)
+                .execute(&*self.pool)
+                .await
+                .context("Failed to save environment")?;
+
+                Ok(())
+            }
+            Err(err) if err
+                .to_string()
+                .to_lowercase()
+                .contains("unique constraint failed") => {
+                let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
+                let updated = sqlx::query(
+                    "UPDATE environments SET output_dir = ?, data = ? WHERE normalized_output_dir = ?",
+                )
+                .bind(&env.output_dir)
+                .bind(serialized)
+                .bind(normalized_output_dir)
+                .execute(&*self.pool)
+                .await
+                .context("Failed to resolve environment save conflict")?;
+
+                if updated.rows_affected() > 0 {
+                    return Ok(());
+                }
+
+                Err(err).context("Failed to save environment")
+            }
+            Err(err) => Err(err).context("Failed to save environment"),
+        }
+    }
+
+    pub async fn hard_delete_environment_record(&self, id: &str) -> Result<()> {
+        self.clear_environment_metadata(id).await?;
+
+        sqlx::query("DELETE FROM environments WHERE id = ?")
+            .bind(id)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to hard delete environment")?;
 
         Ok(())
     }

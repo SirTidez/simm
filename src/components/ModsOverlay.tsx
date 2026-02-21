@@ -73,6 +73,8 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
 }
 
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked }: Props) {
+  type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
+
   const [mods, setMods] = useState<ModInfo[]>([]);
   const [downloadedMods, setDownloadedMods] = useState<ModLibraryEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -107,6 +109,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   // Mod updates state
   const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
   const [checkingModUpdates, setCheckingModUpdates] = useState(false);
+  const [updatingMod, setUpdatingMod] = useState<string | null>(null);
+  const [updatingAllMods, setUpdatingAllMods] = useState(false);
+  const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
+  const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
 
   useEffect(() => {
     if (isOpen && environmentId) {
@@ -151,6 +157,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       setShowNexusModsResults(false);
       setNexusModsFiles(new Map());
       setModUpdates(new Map());
+      setUpdatingAllMods(false);
+      setShowSearchInOverlay(false);
+      setModListFilter('all');
       setConfirmDialog(null);
       setPendingRuntimeSelection(null);
       setPendingUpload(null);
@@ -268,6 +277,67 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       setError(err instanceof Error ? err.message : 'Failed to delete mod');
     } finally {
       setDeletingMod(null);
+    }
+  };
+
+  const handleUpdateMod = async (mod: ModInfo) => {
+    setUpdatingMod(mod.fileName);
+    setError(null);
+    try {
+      const result = await ApiService.updateMod(environmentId, mod.fileName);
+      if (!result.success) {
+        throw new Error(result.error || result.message || 'Failed to update mod');
+      }
+
+      await loadMods();
+      if (onModsChanged) {
+        onModsChanged();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update mod');
+    } finally {
+      setUpdatingMod(null);
+    }
+  };
+
+  const handleUpdateAllMods = async () => {
+    const updatableMods = mods.filter((mod) => {
+      const updateInfo = modUpdates.get(mod.fileName);
+      const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
+      return !!updateInfo?.updateAvailable && canAutoUpdate;
+    });
+
+    if (updatableMods.length === 0) {
+      setError('No supported mod updates are currently available');
+      return;
+    }
+
+    setUpdatingAllMods(true);
+    setError(null);
+
+    const failed: string[] = [];
+    for (const mod of updatableMods) {
+      setUpdatingMod(mod.fileName);
+      try {
+        const result = await ApiService.updateMod(environmentId, mod.fileName);
+        if (!result.success) {
+          failed.push(mod.name);
+        }
+      } catch {
+        failed.push(mod.name);
+      }
+    }
+
+    setUpdatingMod(null);
+    setUpdatingAllMods(false);
+
+    await loadMods();
+    if (onModsChanged) {
+      onModsChanged();
+    }
+
+    if (failed.length > 0) {
+      setError(`Updated ${updatableMods.length - failed.length}/${updatableMods.length} mods. Failed: ${failed.join(', ')}`);
     }
   };
 
@@ -999,6 +1069,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         return 'ThunderStore';
       case 'nexusmods':
         return 'NexusMods';
+      case 'github':
+        return 'GitHub';
       case 'local':
         return 'Local';
       default:
@@ -1012,6 +1084,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         return '#7c3aed'; // Purple
       case 'nexusmods':
         return '#ea4335'; // Red
+      case 'github':
+        return '#2ea44f'; // Green
       case 'local':
         return '#34a853'; // Green
       default:
@@ -1029,7 +1103,25 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     if (envRuntime && entry.availableRuntimes.length > 0 && !entry.availableRuntimes.includes(envRuntime)) return false;
     return true;
   });
-  const showSearchInOverlay = false;
+  const totalUpdatesAvailable = mods.filter((mod) => {
+    const updateInfo = modUpdates.get(mod.fileName);
+    const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
+    return !!updateInfo?.updateAvailable && canAutoUpdate;
+  }).length;
+
+  const filteredMods = mods.filter((mod) => {
+    const updateAvailable = !!modUpdates.get(mod.fileName)?.updateAvailable;
+    switch (modListFilter) {
+      case 'updates':
+        return updateAvailable;
+      case 'enabled':
+        return !mod.disabled;
+      case 'disabled':
+        return !!mod.disabled;
+      default:
+        return true;
+    }
+  });
 
   return (
     <>
@@ -1696,8 +1788,26 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   {modsDirectory}
                 </p>
               )}
+              <p style={{ margin: '0.35rem 0 0 0', color: '#9aa4b2', fontSize: '0.8rem' }}>
+                {mods.length} installed, {mods.filter(m => !!m.disabled).length} disabled, {totalUpdatesAvailable} updates
+              </p>
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                onClick={() => {
+                  const next = !showSearchInOverlay;
+                  setShowSearchInOverlay(next);
+                  if (!next) {
+                    setShowSearchResults(false);
+                    setShowNexusModsResults(false);
+                  }
+                }}
+                className="btn btn-secondary"
+                title="Browse mods from Thunderstore/NexusMods"
+              >
+                <i className="fas fa-compass" style={{ marginRight: '0.5rem' }}></i>
+                {showSearchInOverlay ? 'Hide Browser' : 'Browse Mods'}
+              </button>
               <button
                 onClick={handleCheckModUpdates}
                 className="btn btn-secondary"
@@ -1713,6 +1823,24 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   <>
                     <i className="fas fa-sync-alt" style={{ marginRight: '0.5rem' }}></i>
                     Check Updates
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handleUpdateAllMods}
+                className="btn btn-primary"
+                disabled={updatingAllMods || totalUpdatesAvailable === 0}
+                title="Update all supported mods with updates"
+              >
+                {updatingAllMods ? (
+                  <>
+                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                    Updating...
+                  </>
+                ) : (
+                  <>
+                    <i className="fas fa-arrow-up" style={{ marginRight: '0.5rem' }}></i>
+                    Update All ({totalUpdatesAvailable})
                   </>
                 )}
               </button>
@@ -1821,16 +1949,38 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                 </div>
 
                 <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Installed in This Environment</h3>
-                {mods.length === 0 ? (
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                  {(['all', 'updates', 'enabled', 'disabled'] as ModListFilter[]).map(filter => (
+                    <button
+                      key={filter}
+                      className="btn btn-small"
+                      onClick={() => setModListFilter(filter)}
+                      style={{
+                        backgroundColor: modListFilter === filter ? '#4a90e2' : '#2a2a2a',
+                        border: `1px solid ${modListFilter === filter ? '#4a90e2' : '#3a3a3a'}`,
+                        color: modListFilter === filter ? '#fff' : '#ccc'
+                      }}
+                    >
+                      {filter === 'all' ? 'All' : filter === 'updates' ? 'Needs Update' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
+                    </button>
+                  ))}
+                </div>
+
+                {filteredMods.length === 0 ? (
                   <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
                     <i className="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
-                    <p>No other mods found</p>
+                    <p>No mods match this filter</p>
                     <p style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
                       Mods should be placed in the Mods directory as .dll files
                     </p>
                   </div>
                 ) : (
-                  mods.map((mod) => (
+                  filteredMods.map((mod) => {
+                  const updateInfo = modUpdates.get(mod.fileName);
+                  const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
+                  const updateAvailable = !!updateInfo?.updateAvailable;
+
+                  return (
                   <div
                     key={`${mod.fileName}-${mod.path}`}
                     className="mod-card"
@@ -1877,8 +2027,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                           {mod.fileName}
                         </span>
                         {mod.version && (() => {
-                          const updateInfo = modUpdates.get(mod.fileName);
-
                           // Determine color: vibrant green if latest, yellow if needs update, default gray otherwise
                           let versionColor = '#888'; // Default gray
 
@@ -1902,8 +2050,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             </span>
                           );
                         })()}
+                        {updateAvailable && updateInfo?.latestVersion && (
+                          <span style={{ color: '#ffd700', fontWeight: 600 }}>
+                            Update available: {updateInfo.latestVersion}
+                          </span>
+                        )}
                         {mod.source && (
-                          (mod.source === 'thunderstore' || mod.source === 'nexusmods') && mod.sourceUrl ? (
+                          (mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github') && mod.sourceUrl ? (
                             <a
                               href={safeExternalUrl(mod.sourceUrl)}
                               target="_blank"
@@ -1928,7 +2081,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                 e.currentTarget.style.backgroundColor = `${getSourceColor(mod.source)}20`;
                                 e.currentTarget.style.textDecoration = 'none';
                               }}
-                              title={`View ${mod.name} on ${mod.source === 'thunderstore' ? 'Thunderstore' : 'NexusMods'}`}
+                              title={`View ${mod.name} on ${getSourceLabel(mod.source)}`}
                               onClick={(e) => {
                                 if (!safeExternalUrl(mod.sourceUrl)) {
                                   e.preventDefault();
@@ -1955,7 +2108,24 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         )}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
+                    <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      {canAutoUpdate && updateAvailable && (
+                        <button
+                          onClick={() => handleUpdateMod(mod)}
+                          className="btn btn-primary btn-small"
+                          disabled={updatingMod === mod.fileName}
+                          title={`Update ${mod.name}`}
+                        >
+                          {updatingMod === mod.fileName ? (
+                            <i className="fas fa-spinner fa-spin"></i>
+                          ) : (
+                            <>
+                              <i className="fas fa-arrow-up"></i>
+                              <span style={{ marginLeft: '0.5rem' }}>Update</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                       {mod.disabled ? (
                         <button
                           onClick={() => handleEnableMod(mod)}
@@ -2006,7 +2176,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       </button>
                     </div>
                   </div>
-                  ))
+                  );
+                  })
                 )}
               </div>
             </div>

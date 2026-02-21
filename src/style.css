@@ -1022,13 +1022,16 @@ body::before {
 
 /* Help Overlay */
 .help-overlay {
-  max-width: clamp(30rem, 80vw, 50rem);
+  width: min(100%, 50rem);
+  max-width: clamp(20rem, 88vw, 50rem);
   max-height: 90vh;
 }
 
 .help-content {
   padding: clamp(1rem, 2.5vw, 1.5rem);
   overflow-y: auto;
+  overflow-x: hidden;
+  word-break: break-word;
 }
 
 .help-section {
@@ -1085,6 +1088,9 @@ body::before {
   font-family: 'Courier New', monospace;
   font-size: 0.85em;
   color: #646cff;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* Wizard */

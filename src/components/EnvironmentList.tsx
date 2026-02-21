@@ -381,10 +381,27 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
         });
 
         const handleUpdateCheckStart = () => {
-          const completedEnvIds = environments
-            .filter(env => env.status === 'completed')
+          const now = Date.now();
+          const checkIntervalMs = (settings?.updateCheckInterval || 60) * 60 * 1000;
+          const dueEnvironmentIds = environments
+            .filter(env => {
+              if (env.status !== 'completed') return false;
+              if (!env.lastUpdateCheck) return true;
+
+              const lastCheckMs = typeof env.lastUpdateCheck === 'number'
+                ? env.lastUpdateCheck * 1000
+                : new Date(env.lastUpdateCheck).getTime();
+
+              if (Number.isNaN(lastCheckMs)) return true;
+              return now - lastCheckMs >= checkIntervalMs;
+            })
             .map(env => env.id);
-          setCheckingEnvironments(new Set(completedEnvIds));
+
+          setCheckingEnvironments(new Set(dueEnvironmentIds));
+
+          if (dueEnvironmentIds.length === 0) {
+            checkInProgressRef.current = false;
+          }
         };
 
         const handleFirstUpdateEvent = () => {

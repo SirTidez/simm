@@ -719,7 +719,7 @@ export class ApiService {
     updateAvailable: boolean;
     currentVersion?: string;
     latestVersion?: string;
-    source?: 'thunderstore' | 'nexusmods';
+    source?: 'thunderstore' | 'nexusmods' | 'github';
     packageInfo?: any;
   }>> {
     return invoke('check_mod_updates', { environmentId });
@@ -734,13 +734,13 @@ export class ApiService {
 
   static async getAvailableModUpdates(environmentId: string): Promise<{
     count: number;
-    updates: Array<{
-      modFileName: string;
-      updateAvailable: boolean;
-      currentVersion?: string;
-      latestVersion?: string;
-      source?: 'thunderstore' | 'nexusmods';
-    }>;
+      updates: Array<{
+        modFileName: string;
+        updateAvailable: boolean;
+        currentVersion?: string;
+        latestVersion?: string;
+        source?: 'thunderstore' | 'nexusmods' | 'github';
+      }>;
   }> {
     const updates = await this.checkModUpdates(environmentId);
     const available = updates.filter(u => u.updateAvailable);

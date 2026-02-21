@@ -54,6 +54,8 @@ interface DownloadedModGroup {
   remoteVersion?: string;
 }
 
+type DownloadedFilter = 'all' | 'updates' | 'managed' | 'external' | 'installed';
+
 const runtimeSuffixPatterns = [
   /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
@@ -182,6 +184,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [searchResults, setSearchResults] = useState<ThunderstorePackageGroup[]>([]);
   const [searching, setSearching] = useState(false);
   const [showSearchResults, setShowSearchResults] = useState(false);
+  const [showDiscovery, setShowDiscovery] = useState(true);
 
   const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState('');
   const [nexusModsSearchResults, setNexusModsSearchResults] = useState<NexusMod[]>([]);
@@ -193,6 +196,8 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [downloading, setDownloading] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [runtimePrompt, setRuntimePrompt] = useState<RuntimePromptState | null>(null);
+  const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
+  const [downloadedSearch, setDownloadedSearch] = useState('');
 
   const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
     tag_name: string;
@@ -243,6 +248,33 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     [library]
   );
 
+  const downloadedSummary = useMemo(() => {
+    const total = downloadedGroups.length;
+    const updates = downloadedGroups.filter(group => !!group.updateAvailable).length;
+    const installed = downloadedGroups.filter(group => group.installedIn.length > 0).length;
+    const managed = downloadedGroups.filter(group => group.managed).length;
+    return { total, updates, installed, managed };
+  }, [downloadedGroups]);
+
+  const filteredDownloadedGroups = useMemo(() => {
+    const query = downloadedSearch.trim().toLowerCase();
+    return downloadedGroups.filter(group => {
+      if (downloadedFilter === 'updates' && !group.updateAvailable) return false;
+      if (downloadedFilter === 'managed' && !group.managed) return false;
+      if (downloadedFilter === 'external' && group.managed) return false;
+      if (downloadedFilter === 'installed' && group.installedIn.length === 0) return false;
+
+      if (!query) return true;
+      const author = group.author?.toLowerCase() || '';
+      const version = group.sourceVersion?.toLowerCase() || '';
+      return (
+        group.displayName.toLowerCase().includes(query)
+        || author.includes(query)
+        || version.includes(query)
+      );
+    });
+  }, [downloadedGroups, downloadedFilter, downloadedSearch]);
+
   const handleLoadNexusModFiles = useCallback(async (modId: number) => {
     setNexusModsLoading(prev => new Set(prev).add(modId));
     try {
@@ -263,13 +295,17 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     }
   }, []);
 
+  const refreshLibrary = useCallback(async () => {
+    const data = await ApiService.getModLibrary();
+    setLibrary(data);
+  }, []);
+
   useEffect(() => {
     if (!isOpen) return;
     const loadLibrary = async () => {
       setLoadingLibrary(true);
       try {
-        const data = await ApiService.getModLibrary();
-        setLibrary(data);
+        await refreshLibrary();
       } catch (err) {
         console.error('Failed to load mod library:', err);
         setLibrary({ downloaded: [] });
@@ -278,7 +314,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       }
     };
     loadLibrary();
-  }, [isOpen]);
+  }, [isOpen, refreshLibrary]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -318,14 +354,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     });
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
+  const runThunderstoreSearch = useCallback(async (query: string) => {
+    if (!query.trim()) return;
     setSearching(true);
     setShowSearchResults(false);
     try {
       const [il2cppResult, monoResult] = await Promise.all([
-        ApiService.searchThunderstore('schedule-i', searchQuery.trim(), 'IL2CPP'),
-        ApiService.searchThunderstore('schedule-i', searchQuery.trim(), 'Mono'),
+        ApiService.searchThunderstore('schedule-i', query.trim(), 'IL2CPP'),
+        ApiService.searchThunderstore('schedule-i', query.trim(), 'Mono'),
       ]);
 
       const merged = new Map<string, ThunderstorePackageGroup>();
@@ -364,14 +400,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     } finally {
       setSearching(false);
     }
-  };
+  }, []);
 
-  const handleSearchNexusMods = async () => {
-    if (!nexusModsSearchQuery.trim()) return;
+  const runNexusSearch = useCallback(async (query: string) => {
+    if (!query.trim()) return;
     setSearchingNexusMods(true);
     setShowNexusModsResults(false);
     try {
-      const result = await ApiService.searchNexusMods('schedule1', nexusModsSearchQuery.trim());
+      const result = await ApiService.searchNexusMods('schedule1', query.trim());
       setNexusModsSearchResults(result.mods || []);
       setShowNexusModsResults(true);
     } catch (err) {
@@ -380,6 +416,30 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     } finally {
       setSearchingNexusMods(false);
     }
+  }, []);
+
+  const handleSearch = () => runThunderstoreSearch(searchQuery);
+
+  const handleSearchNexusMods = () => runNexusSearch(nexusModsSearchQuery);
+
+  const handleFindGroupUpdate = async (group: DownloadedModGroup) => {
+    const source = group.entries.find(entry => entry.source === 'thunderstore' || entry.source === 'nexusmods')?.source;
+    const query = group.displayName;
+
+    setShowDiscovery(true);
+    setShowSearchResults(false);
+    setShowNexusModsResults(false);
+
+    if (source === 'nexusmods') {
+      setSearchSource('nexusmods');
+      setNexusModsSearchQuery(query);
+      await runNexusSearch(query);
+      return;
+    }
+
+    setSearchSource('thunderstore');
+    setSearchQuery(query);
+    await runThunderstoreSearch(query);
   };
 
   const loadS1APIReleases = async () => {
@@ -430,8 +490,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     setDownloadingS1API(true);
     try {
       await ApiService.downloadS1APIToLibrary(selectedS1APIVersion);
-      const updated = await ApiService.getModLibrary();
-      setLibrary(updated);
+      await refreshLibrary();
     } catch (err) {
       console.error('Failed to download S1API:', err);
     } finally {
@@ -448,8 +507,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     setDownloadingMlvscan(true);
     try {
       await ApiService.downloadMLVScanToLibrary(selectedMlvscanVersion);
-      const updated = await ApiService.getModLibrary();
-      setLibrary(updated);
+      await refreshLibrary();
     } catch (err) {
       console.error('Failed to download MLVScan:', err);
     } finally {
@@ -482,8 +540,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               await ApiService.deleteDownloadedMod(storageId);
             }
           }
-          const updated = await ApiService.getModLibrary();
-          setLibrary(updated);
+          await refreshLibrary();
           setSelectedModIds(prev => {
             const next = new Set(prev);
             group.storageIds.forEach(id => next.delete(id));
@@ -517,8 +574,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               await ApiService.deleteDownloadedMod(storageId);
             }
           }
-          const updated = await ApiService.getModLibrary();
-          setLibrary(updated);
+          await refreshLibrary();
           setSelectedModIds(new Set());
         } catch (err) {
           console.error('Failed to bulk delete downloaded mods:', err);
@@ -545,8 +601,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         } else if (pkg.packagesByRuntime[runtime]) {
           await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime);
         }
-        const updated = await ApiService.getModLibrary();
-        setLibrary(updated);
+        await refreshLibrary();
       } catch (err) {
         console.error('Failed to download Thunderstore mod:', err);
       } finally {
@@ -619,8 +674,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           if (!targetFile?.file_id) return;
           await ApiService.downloadNexusModToLibrary(modId, targetFile.file_id, runtime);
         }
-        const updated = await ApiService.getModLibrary();
-        setLibrary(updated);
+        await refreshLibrary();
       } catch (err) {
         console.error('Failed to download Nexus mod:', err);
       } finally {
@@ -759,6 +813,33 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           </div>
 
           <div className="mods-content">
+            <div style={{ padding: '0.9rem 1.25rem 0.75rem', borderBottom: '1px solid #3a3a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <div style={{ color: '#9aa4b2', fontSize: '0.85rem' }}>
+                {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed in envs
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-secondary btn-small"
+                  onClick={() => setShowDiscovery(prev => !prev)}
+                  title="Show or hide discovery results"
+                >
+                  <i className={`fas ${showDiscovery ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ marginRight: '0.4rem' }}></i>
+                  {showDiscovery ? 'Hide Discovery' : 'Browse Mods'}
+                </button>
+                <button
+                  className="btn btn-secondary btn-small"
+                  onClick={refreshLibrary}
+                  disabled={loadingLibrary}
+                  title="Refresh library entries"
+                >
+                  <i className={`fas ${loadingLibrary ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`} style={{ marginRight: '0.4rem' }}></i>
+                  Refresh
+                </button>
+              </div>
+            </div>
+
+            {showDiscovery && (
+            <>
             <div style={{ padding: '17px 1.25rem 1rem', borderBottom: '1px solid #3a3a3a' }}>
               <div style={{ marginBottom: '1rem', color: '#888', fontSize: '0.85rem' }}>
                 Download mods to the library, then install them from each environment's mod list.
@@ -1209,11 +1290,16 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 )}
               </div>
             )}
+            </>
+            )}
 
             <div style={{ padding: '0.75rem 1.25rem 1rem', borderTop: '1px solid #3a3a3a' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                 <h3 style={{ margin: 0 }}>Downloaded Mods</h3>
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <span style={{ color: '#9aa4b2', fontSize: '0.8rem', alignSelf: 'center' }}>
+                    {selectedModIds.size} selected
+                  </span>
                   <button
                     className="btn btn-danger btn-small"
                     disabled={selectedModIds.size === 0 || deleting === 'bulk'}
@@ -1223,13 +1309,52 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   </button>
                 </div>
               </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.65rem', flexWrap: 'wrap' }}>
+                {(['all', 'updates', 'managed', 'external', 'installed'] as DownloadedFilter[]).map((filter) => (
+                  <button
+                    key={filter}
+                    className="btn btn-small"
+                    onClick={() => setDownloadedFilter(filter)}
+                    style={{
+                      backgroundColor: downloadedFilter === filter ? '#4a90e2' : '#2a2a2a',
+                      border: `1px solid ${downloadedFilter === filter ? '#4a90e2' : '#3a3a3a'}`,
+                      color: downloadedFilter === filter ? '#fff' : '#ccc'
+                    }}
+                  >
+                    {filter === 'all' ? 'All' : filter === 'updates' ? 'Needs Update' : filter === 'managed' ? 'Managed' : filter === 'external' ? 'External' : 'Installed'}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ marginBottom: '0.75rem' }}>
+                <input
+                  type="text"
+                  value={downloadedSearch}
+                  onChange={(e) => setDownloadedSearch(e.target.value)}
+                  placeholder="Filter downloaded mods by name, author, or version"
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.75rem',
+                    backgroundColor: '#1a1a1a',
+                    border: '1px solid #3a3a3a',
+                    borderRadius: '4px',
+                    color: '#fff',
+                    fontSize: '0.875rem'
+                  }}
+                />
+              </div>
+
               {loadingLibrary && <div style={{ color: '#888' }}>Loading mod library...</div>}
               {!loadingLibrary && downloadedGroups.length === 0 && (
                 <div style={{ color: '#888' }}>No downloaded mods yet.</div>
               )}
-              {!loadingLibrary && downloadedGroups.length ? (
+              {!loadingLibrary && downloadedGroups.length > 0 && filteredDownloadedGroups.length === 0 && (
+                <div style={{ color: '#888' }}>No downloaded mods match this filter.</div>
+              )}
+              {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  {downloadedGroups.map(group => (
+                  {filteredDownloadedGroups.map(group => (
                     <div key={group.key} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1 }}>
@@ -1262,14 +1387,26 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                             </span>
                           )}
                         </label>
-                        <button
-                          className="btn btn-danger btn-small"
-                          disabled={deleting === group.key}
-                          onClick={() => handleDeleteDownloadedGroup(group)}
-                          title="Delete downloaded files from library"
-                        >
-                          {deleting === group.key ? 'Deleting...' : 'Delete Files'}
-                        </button>
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          {group.updateAvailable && (
+                            <button
+                              className="btn btn-warning btn-small"
+                              onClick={() => handleFindGroupUpdate(group)}
+                              title="Search for the latest version"
+                            >
+                              <i className="fas fa-search" style={{ marginRight: '0.35rem' }}></i>
+                              Find Update
+                            </button>
+                          )}
+                          <button
+                            className="btn btn-danger btn-small"
+                            disabled={deleting === group.key}
+                            onClick={() => handleDeleteDownloadedGroup(group)}
+                            title="Delete downloaded files from library"
+                          >
+                            {deleting === group.key ? 'Deleting...' : 'Delete Files'}
+                          </button>
+                        </div>
                       </div>
                       <div style={{ fontSize: '0.8rem', color: '#888', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                         {group.author && (

@@ -110,9 +110,28 @@ pub async fn check_mod_updates(
 }
 
 #[tauri::command]
-pub async fn update_mod(environment_id: String, mod_file_name: String) -> Result<serde_json::Value, String> {
+pub async fn update_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    mod_file_name: String,
+) -> Result<serde_json::Value, String> {
     let mod_update_service = get_mod_update_service().await?;
-    mod_update_service.update_mod(&environment_id, &mod_file_name)
+    let mods_service = ModsService::new(db.inner().clone());
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let thunderstore_service = get_thunderstore_service().await?;
+    let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
+    let github_service = get_github_service(db.inner().clone()).await?;
+
+    mod_update_service
+        .update_mod(
+            &environment_id,
+            &mod_file_name,
+            &env_service,
+            &mods_service,
+            &thunderstore_service,
+            &nexus_mods_service,
+            &github_service,
+        )
         .await
         .map_err(|e| e.to_string())
 }

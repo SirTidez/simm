@@ -60,14 +60,33 @@ impl PluginsService {
         }
 
         let normalized_game_dir = Self::normalize_path(game_dir);
-        let id = sqlx::query_scalar::<_, String>(
+        let normalized_query = sqlx::query_scalar::<_, String>(
             "SELECT id FROM environments WHERE normalized_output_dir = ? OR output_dir = ? LIMIT 1",
         )
             .bind(normalized_game_dir)
             .bind(game_dir)
             .fetch_optional(&*self.pool)
-            .await
-            .context("Failed to resolve environment id")?;
+            .await;
+
+        let id = match normalized_query {
+            Ok(id) => id,
+            Err(err) if err
+                .to_string()
+                .to_lowercase()
+                .contains("no such column: normalized_output_dir") => {
+                let rows = sqlx::query_as::<_, (String, String)>(
+                    "SELECT id, output_dir FROM environments",
+                )
+                .fetch_all(&*self.pool)
+                .await
+                .context("Failed to resolve environment id")?;
+
+                rows.into_iter()
+                    .find(|(_, output_dir)| Self::normalize_path(output_dir) == Self::normalize_path(game_dir))
+                    .map(|(id, _)| id)
+            }
+            Err(err) => return Err(err).context("Failed to resolve environment id"),
+        };
 
         Ok(id)
     }
@@ -632,10 +651,104 @@ impl PluginsService {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn install_dll_plugin(&self, _game_dir: &str, _dll_path: &str, _source: &str, _runtime: &str) -> Result<serde_json::Value> {
-        // TODO: Implement DLL plugin installation
-        Ok(serde_json::json!({ "success": false, "error": "Not implemented" }))
+    pub async fn install_dll_plugin(
+        &self,
+        game_dir: &str,
+        dll_path: &str,
+        original_file_name: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let plugins_directory = self.get_plugins_directory(game_dir);
+        fs::create_dir_all(&plugins_directory).await
+            .context("Failed to create plugins directory")?;
+
+        let source_path = Path::new(dll_path);
+        if !source_path.exists() {
+            return Err(anyhow::anyhow!("Plugin file not found"));
+        }
+
+        if !original_file_name.to_lowercase().ends_with(".dll") {
+            return Err(anyhow::anyhow!("Only .dll files are supported for plugin installation"));
+        }
+
+        let dest_path = plugins_directory.join(original_file_name);
+        fs::copy(source_path, &dest_path).await
+            .context("Failed to copy plugin file")?;
+
+        let source_str = metadata
+            .as_ref()
+            .and_then(|m| m.get("source").and_then(|s| s.as_str()));
+        let mod_source = match source_str {
+            Some("thunderstore") => Some(ModSource::Thunderstore),
+            Some("nexusmods") => Some(ModSource::Nexusmods),
+            Some("github") => Some(ModSource::Github),
+            Some("unknown") => Some(ModSource::Unknown),
+            _ => Some(ModSource::Local),
+        };
+
+        let source_id = metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceId").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_version = metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceVersion").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_url = metadata
+            .as_ref()
+            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let mod_name = metadata
+            .as_ref()
+            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                Some(
+                    original_file_name
+                        .trim_end_matches(".dll")
+                        .trim_end_matches(".DLL")
+                        .to_string(),
+                )
+            });
+        let author = metadata
+            .as_ref()
+            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+
+        let mut plugin_metadata = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
+            .unwrap_or_else(|_| HashMap::new());
+
+        plugin_metadata.insert(original_file_name.to_string(), ModMetadata {
+            source: mod_source.clone(),
+            source_id,
+            source_version,
+            author,
+            mod_name,
+            source_url,
+            installed_version: None,
+            installed_at: Some(chrono::Utc::now()),
+            last_update_check: None,
+            update_available: None,
+            remote_version: None,
+            detected_runtime: None,
+            runtime_match: None,
+            mod_storage_id: None,
+            symlink_paths: None,
+        });
+
+        self.save_plugin_metadata(&plugins_directory, &plugin_metadata).await?;
+
+        let response_source = match mod_source {
+            Some(ModSource::Thunderstore) => "thunderstore",
+            Some(ModSource::Nexusmods) => "nexusmods",
+            Some(ModSource::Github) => "github",
+            Some(ModSource::Unknown) => "unknown",
+            Some(ModSource::Local) => "local",
+            _ => "unknown",
+        };
+
+        Ok(serde_json::json!({
+            "success": true,
+            "fileName": original_file_name,
+            "source": response_source
+        }))
     }
 
     pub async fn install_mlvscan(&self, game_dir: &str, dll_path: &str, version: &str) -> Result<serde_json::Value> {
@@ -784,7 +897,7 @@ mod tests {
     use super::PluginsService;
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
-    use crate::types::schedule_i_config;
+    use crate::types::{schedule_i_config, ModSource};
     use anyhow::Result;
     use serial_test::serial;
     use tempfile::tempdir;
@@ -908,6 +1021,65 @@ mod tests {
             .enable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
             .await?;
         assert!(plugins_dir.join("ExamplePlugin.dll").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_dll_plugin_copies_file_and_persists_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = PluginsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("plugins-dll");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let source_dll = temp.path().join("Plugin.Source.dll");
+        fs::write(&source_dll, b"not-a-real-dotnet-assembly").await?;
+
+        let result = service
+            .install_dll_plugin(
+                output_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "InstalledPlugin.dll",
+                Some(serde_json::json!({
+                    "source": "github",
+                    "sourceId": "example/repo",
+                    "sourceVersion": "1.2.3",
+                    "sourceUrl": "https://github.com/example/repo",
+                    "modName": "Installed Plugin",
+                    "author": "example"
+                })),
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(result.get("source").and_then(|v| v.as_str()), Some("github"));
+
+        let plugins_dir = output_dir.join("Plugins");
+        assert!(plugins_dir.join("InstalledPlugin.dll").exists());
+
+        let metadata = service.load_plugin_metadata(&plugins_dir).await?;
+        let entry = metadata
+            .get("InstalledPlugin.dll")
+            .expect("metadata entry for installed plugin");
+
+        assert!(matches!(entry.source, Some(ModSource::Github)));
+        assert_eq!(entry.source_id.as_deref(), Some("example/repo"));
+        assert_eq!(entry.source_version.as_deref(), Some("1.2.3"));
 
         Ok(())
     }
