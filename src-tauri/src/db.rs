@@ -10,6 +10,7 @@ use tokio::fs;
 use crate::types::{Environment, EnvironmentType, ModMetadata, Settings};
 
 const MIGRATION_FLAG_KEY: &str = "storage.migrated";
+const SQLITE_SIDE_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 fn normalize_path(path: &str) -> String {
     path.replace('/', "\\")
@@ -22,6 +23,8 @@ pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create database directory")?;
     }
+
+    migrate_legacy_database_if_needed(&db_path)?;
 
     let options = SqliteConnectOptions::new()
         .filename(&db_path)
@@ -64,33 +67,117 @@ pub fn get_database_path() -> Result<PathBuf> {
 }
 
 pub fn get_data_dir() -> Result<PathBuf> {
+    if let Some(override_path) = get_data_dir_override() {
+        return Ok(override_path);
+    }
+
+    let (simm_dir, _) = crate::utils::directory_init::initialize_simm_directory()
+        .context("Failed to initialize SIMM data directory")?;
+
+    Ok(simm_dir)
+}
+
+fn get_data_dir_override() -> Option<PathBuf> {
     if let Ok(override_dir) = std::env::var("SIMMRUST_DATA_DIR") {
         let trimmed = override_dir.trim();
         if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
+            return Some(PathBuf::from(trimmed));
         }
     }
 
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
-        .join("simmrust");
+    None
+}
 
-    Ok(data_dir)
+fn legacy_database_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for dir in legacy_data_dirs() {
+        paths.push(dir.join("data.db"));
+        paths.push(dir.join("simmrust.db"));
+    }
+
+    paths
+}
+
+fn sqlite_bundle_path(base: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        return base.to_path_buf();
+    }
+
+    PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
+}
+
+fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
+    if target_db_path.exists() {
+        return Ok(());
+    }
+
+    let target_normalized = normalize_path(&target_db_path.to_string_lossy());
+    let source = legacy_database_paths()
+        .into_iter()
+        .find(|candidate| {
+            let candidate_normalized = normalize_path(&candidate.to_string_lossy());
+            candidate_normalized != target_normalized && candidate.exists()
+        });
+
+    let Some(source_db_path) = source else {
+        return Ok(());
+    };
+
+    if let Some(parent) = target_db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create target directory {}", parent.display()))?;
+    }
+
+    log::info!(
+        "Migrating SQLite database from {} to {}",
+        source_db_path.display(),
+        target_db_path.display()
+    );
+
+    let mut migrated_any = false;
+
+    for suffix in std::iter::once("").chain(SQLITE_SIDE_SUFFIXES.iter().copied()) {
+        let src = sqlite_bundle_path(&source_db_path, suffix);
+        if !src.exists() {
+            continue;
+        }
+
+        let dst = sqlite_bundle_path(target_db_path, suffix);
+        if dst.exists() {
+            std::fs::remove_file(&dst)
+                .with_context(|| format!("Failed to clear existing file {}", dst.display()))?;
+        }
+
+        std::fs::copy(&src, &dst).with_context(|| {
+            format!(
+                "Failed to copy database file from {} to {}",
+                src.display(),
+                dst.display()
+            )
+        })?;
+
+        std::fs::remove_file(&src)
+            .with_context(|| format!("Failed to remove legacy file {}", src.display()))?;
+
+        migrated_any = true;
+    }
+
+    if !migrated_any {
+        return Err(anyhow::anyhow!(
+            "Legacy database migration candidate found but no files were copied"
+        ));
+    }
+
+    Ok(())
 }
 
 fn legacy_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(override_dir) = std::env::var("SIMMRUST_DATA_DIR") {
-        let trimmed = override_dir.trim();
-        if trimmed.is_empty() {
-            // fall through to dirs::data_dir() below
-        } else {
-            let override_path = PathBuf::from(trimmed);
-            if let Some(base) = override_path.parent() {
-                dirs.push(base.join("s1devenvmanager"));
-                dirs.push(base.join("simmrust"));
-                return dirs;
-            }
+    if let Some(override_path) = get_data_dir_override() {
+        if let Some(base) = override_path.parent() {
+            dirs.push(base.join("s1devenvmanager"));
+            dirs.push(base.join("simmrust"));
+            return dirs;
         }
     }
 
@@ -321,6 +408,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, original }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -411,6 +504,63 @@ mod tests {
 
         let data_dir = get_data_dir()?;
         assert_eq!(data_dir, override_dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_data_dir_defaults_to_simm_home_directory() -> Result<()> {
+        let temp = tempdir()?;
+        let _data_guard = EnvVarGuard::unset("SIMMRUST_DATA_DIR");
+        let _home_guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+
+        let data_dir = get_data_dir()?;
+        assert_eq!(data_dir, temp.path().join("SIMM"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_migrates_legacy_database_file_to_simm_directory() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let legacy_db_path = temp.path().join("simmrust").join("data.db");
+
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        if let Some(parent) = legacy_db_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let legacy_options = SqliteConnectOptions::new()
+            .filename(&legacy_db_path)
+            .create_if_missing(true);
+        let legacy_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(legacy_options)
+            .await?;
+
+        sqlx::query("CREATE TABLE legacy_marker (value TEXT)")
+            .execute(&legacy_pool)
+            .await?;
+        sqlx::query("INSERT INTO legacy_marker (value) VALUES ('migrated')")
+            .execute(&legacy_pool)
+            .await?;
+
+        legacy_pool.close().await;
+
+        let pool = initialize_pool().await?;
+        let target_db_path = get_database_path()?;
+
+        assert!(target_db_path.exists());
+        assert!(!legacy_db_path.exists());
+
+        let marker: String = sqlx::query_scalar("SELECT value FROM legacy_marker LIMIT 1")
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(marker, "migrated");
+
         Ok(())
     }
 

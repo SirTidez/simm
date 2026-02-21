@@ -47,6 +47,7 @@ interface DownloadedModGroup {
   entries: ModLibraryEntry[];
   storageIds: string[];
   installedIn: string[];
+  installedInByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
   availableRuntimes: Array<'IL2CPP' | 'Mono'>;
   author?: string;
   sourceVersion?: string;
@@ -86,17 +87,39 @@ const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: st
   return { owner: owner || '', name: rest.join('/') };
 };
 
+const normalizeVersionToken = (value?: string): string => {
+  return (value || '').trim().replace(/^v/i, '').toLowerCase();
+};
+
+const compareVersionTokensDesc = (a?: string, b?: string): number => {
+  const aParts = normalizeVersionToken(a).split('.').map(v => parseInt(v, 10) || 0);
+  const bParts = normalizeVersionToken(b).split('.').map(v => parseInt(v, 10) || 0);
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i++) {
+    const av = aParts[i] || 0;
+    const bv = bParts[i] || 0;
+    if (av !== bv) {
+      return bv - av;
+    }
+  }
+  return 0;
+};
+
 const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGroup[] => {
   const groups = new Map<string, {
     key: string;
     displayName: string;
-    entries: ModLibraryEntry[];
-    storageIds: string[];
-    installedIn: Set<string>;
-    availableRuntimes: Set<'IL2CPP' | 'Mono'>;
-    managedStates: Set<boolean>;
-    authors: Set<string>;
-    sourceVersions: Set<string>;
+      entries: ModLibraryEntry[];
+      storageIds: string[];
+      installedIn: Set<string>;
+      installedInByRuntime: {
+        IL2CPP: Set<string>;
+        Mono: Set<string>;
+      };
+      availableRuntimes: Set<'IL2CPP' | 'Mono'>;
+      managedStates: Set<boolean>;
+      authors: Set<string>;
+      sourceVersions: Set<string>;
     updateAvailable: boolean;
     remoteVersions: Set<string>;
   }>();
@@ -104,13 +127,19 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
   downloaded.forEach(entry => {
     let key = entry.storageId;
     let displayName = entry.displayName;
+    const normalizedDisplayName = normalizeThunderstoreName(entry.displayName).toLowerCase();
 
     if (entry.source === 'thunderstore') {
-      const { owner, name } = parseThunderstoreSourceId(entry.sourceId);
+      const { name } = parseThunderstoreSourceId(entry.sourceId);
       const baseName = normalizeThunderstoreName(name || entry.displayName);
-      const ownerKey = owner.toLowerCase();
-      key = `thunderstore::${ownerKey}::${baseName.toLowerCase()}`;
+      key = `thunderstore::${normalizeThunderstoreName(baseName).toLowerCase()}`;
       displayName = baseName || entry.displayName;
+    } else if ((entry.source === 'nexusmods' || entry.source === 'github') && entry.sourceId) {
+      key = `${entry.source}::${entry.sourceId.toLowerCase()}`;
+    } else if ((entry.source === 'nexusmods' || entry.source === 'github') && !entry.sourceId) {
+      key = `${entry.source}::${normalizedDisplayName}`;
+    } else if (entry.managed) {
+      key = `managed::${normalizedDisplayName}`;
     }
 
     const group = groups.get(key) || {
@@ -119,6 +148,10 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
       entries: [],
       storageIds: [],
       installedIn: new Set<string>(),
+      installedInByRuntime: {
+        IL2CPP: new Set<string>(),
+        Mono: new Set<string>(),
+      },
       availableRuntimes: new Set<'IL2CPP' | 'Mono'>(),
       managedStates: new Set<boolean>(),
       authors: new Set<string>(),
@@ -130,6 +163,8 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
     group.entries.push(entry);
     group.storageIds.push(entry.storageId);
     entry.installedIn.forEach(envId => group.installedIn.add(envId));
+    (entry.installedInByRuntime?.IL2CPP || []).forEach(envId => group.installedInByRuntime.IL2CPP.add(envId));
+    (entry.installedInByRuntime?.Mono || []).forEach(envId => group.installedInByRuntime.Mono.add(envId));
     entry.availableRuntimes.forEach(runtime => group.availableRuntimes.add(runtime));
     group.managedStates.add(entry.managed);
     if (entry.author) group.authors.add(entry.author);
@@ -141,19 +176,32 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
   });
 
   return Array.from(groups.values())
-    .map(group => ({
-      key: group.key,
-      displayName: group.displayName,
-      managed: group.managedStates.size === 1 && group.managedStates.has(true),
-      entries: group.entries,
-      storageIds: group.storageIds,
-      installedIn: Array.from(group.installedIn),
-      availableRuntimes: Array.from(group.availableRuntimes),
-      author: group.authors.size === 1 ? Array.from(group.authors)[0] : undefined,
-      sourceVersion: group.sourceVersions.size === 1 ? Array.from(group.sourceVersions)[0] : undefined,
-      updateAvailable: group.updateAvailable,
-      remoteVersion: group.remoteVersions.size === 1 ? Array.from(group.remoteVersions)[0] : undefined,
-    }))
+    .map(group => {
+      const remoteVersions = Array.from(group.remoteVersions).sort((a, b) => compareVersionTokensDesc(a, b));
+      const remoteVersion = remoteVersions[0];
+      const hasRemoteDownloaded = !!remoteVersion && group.entries.some(entry => {
+        const localVersion = normalizeVersionToken(entry.sourceVersion || entry.installedVersion);
+        return localVersion.length > 0 && localVersion === normalizeVersionToken(remoteVersion);
+      });
+
+      return {
+        key: group.key,
+        displayName: group.displayName,
+        managed: group.managedStates.size === 1 && group.managedStates.has(true),
+        entries: group.entries,
+        storageIds: group.storageIds,
+        installedIn: Array.from(group.installedIn),
+        installedInByRuntime: {
+          IL2CPP: Array.from(group.installedInByRuntime.IL2CPP),
+          Mono: Array.from(group.installedInByRuntime.Mono),
+        },
+        availableRuntimes: Array.from(group.availableRuntimes),
+        author: group.authors.size === 1 ? Array.from(group.authors)[0] : undefined,
+        sourceVersion: group.sourceVersions.size === 1 ? Array.from(group.sourceVersions)[0] : undefined,
+        updateAvailable: group.updateAvailable && !hasRemoteDownloaded,
+        remoteVersion,
+      };
+    })
     .sort((a, b) => a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase()));
 };
 
@@ -195,6 +243,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
   const [downloading, setDownloading] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [activatingGroup, setActivatingGroup] = useState<string | null>(null);
+  const [updatingGroup, setUpdatingGroup] = useState<string | null>(null);
+  const [selectedStorageByGroup, setSelectedStorageByGroup] = useState<Record<string, string>>({});
   const [runtimePrompt, setRuntimePrompt] = useState<RuntimePromptState | null>(null);
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
   const [downloadedSearch, setDownloadedSearch] = useState('');
@@ -274,6 +325,28 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       );
     });
   }, [downloadedGroups, downloadedFilter, downloadedSearch]);
+
+  useEffect(() => {
+    setSelectedStorageByGroup(prev => {
+      const next: Record<string, string> = { ...prev };
+
+      for (const group of downloadedGroups) {
+        const current = next[group.key];
+        if (current && group.entries.some(entry => entry.storageId === current)) {
+          continue;
+        }
+
+        const sorted = [...group.entries].sort((a, b) => compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion));
+        const installed = sorted.find(entry => entry.installedIn.length > 0);
+        const selected = installed || sorted[0];
+        if (selected) {
+          next[group.key] = selected.storageId;
+        }
+      }
+
+      return next;
+    });
+  }, [downloadedGroups]);
 
   const handleLoadNexusModFiles = useCallback(async (modId: number) => {
     setNexusModsLoading(prev => new Set(prev).add(modId));
@@ -422,25 +495,215 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
   const handleSearchNexusMods = () => runNexusSearch(nexusModsSearchQuery);
 
-  const handleFindGroupUpdate = async (group: DownloadedModGroup) => {
-    const source = group.entries.find(entry => entry.source === 'thunderstore' || entry.source === 'nexusmods')?.source;
-    const query = group.displayName;
+  const getEntryVersionLabel = useCallback((entry: ModLibraryEntry): string => {
+    return entry.sourceVersion || entry.installedVersion || 'unknown';
+  }, []);
 
-    setShowDiscovery(true);
-    setShowSearchResults(false);
-    setShowNexusModsResults(false);
-
-    if (source === 'nexusmods') {
-      setSearchSource('nexusmods');
-      setNexusModsSearchQuery(query);
-      await runNexusSearch(query);
+  const activateGroupEntry = useCallback(async (group: DownloadedModGroup, targetEntry: ModLibraryEntry) => {
+    if (group.installedIn.length === 0) {
       return;
     }
 
-    setSearchSource('thunderstore');
-    setSearchQuery(query);
-    await runThunderstoreSearch(query);
-  };
+    setActivatingGroup(group.key);
+    try {
+      const allStorageIds = Array.from(new Set(
+        group.entries.flatMap(entry => [
+          entry.storageId,
+          ...Object.values(entry.storageIdsByRuntime || {}),
+        ].filter(Boolean) as string[])
+      ));
+
+      const runtimeTargets = (['IL2CPP', 'Mono'] as const)
+        .map(runtime => ({ runtime, envIds: group.installedInByRuntime[runtime] || [] }))
+        .filter((target): target is { runtime: 'IL2CPP' | 'Mono'; envIds: string[] } => target.envIds.length > 0);
+
+      const handledEnvIds = new Set<string>();
+
+      for (const target of runtimeTargets) {
+        target.envIds.forEach(id => handledEnvIds.add(id));
+
+        const selectedStorageId = targetEntry.storageIdsByRuntime?.[target.runtime] || targetEntry.storageId;
+        if (!selectedStorageId) {
+          continue;
+        }
+
+        const previousStorageIds = allStorageIds.filter(id => id !== selectedStorageId);
+        for (const oldStorageId of previousStorageIds) {
+          await ApiService.uninstallDownloadedMod(oldStorageId, target.envIds);
+        }
+
+        await ApiService.installDownloadedMod(selectedStorageId, target.envIds);
+      }
+
+      const remainingEnvIds = group.installedIn.filter(id => !handledEnvIds.has(id));
+      if (remainingEnvIds.length > 0) {
+        const fallbackStorageId = targetEntry.storageId;
+        if (fallbackStorageId) {
+          const previousStorageIds = allStorageIds.filter(id => id !== fallbackStorageId);
+          for (const oldStorageId of previousStorageIds) {
+            await ApiService.uninstallDownloadedMod(oldStorageId, remainingEnvIds);
+          }
+          await ApiService.installDownloadedMod(fallbackStorageId, remainingEnvIds);
+        }
+      }
+
+      await refreshLibrary();
+      setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: targetEntry.storageId }));
+    } finally {
+      setActivatingGroup(null);
+    }
+  }, [refreshLibrary]);
+
+  const findThunderstorePackageForRuntime = useCallback(async (
+    sourceId: string,
+    runtime: 'IL2CPP' | 'Mono'
+  ): Promise<ThunderstorePackage | null> => {
+    const parsed = parseThunderstoreSourceId(sourceId);
+    if (!parsed.owner || !parsed.name) {
+      return null;
+    }
+
+    const targetOwner = parsed.owner.toLowerCase();
+    const targetName = normalizeThunderstoreName(parsed.name).toLowerCase();
+    const searchResult = await ApiService.searchThunderstore('schedule-i', parsed.name, runtime);
+    const packages = (searchResult?.packages || []) as ThunderstorePackage[];
+
+    const exact = packages.find(pkg => {
+      const pkgOwner = (pkg.owner || '').toLowerCase();
+      const pkgName = normalizeThunderstoreName(pkg.name || pkg.full_name || '').toLowerCase();
+      return pkgOwner === targetOwner && pkgName === targetName;
+    });
+    if (exact) {
+      return exact;
+    }
+
+    const ownerMatch = packages.find(pkg => (pkg.owner || '').toLowerCase() === targetOwner);
+    return ownerMatch || null;
+  }, []);
+
+  const pickNexusFileForVersionAndRuntime = useCallback((
+    files: NexusModFile[],
+    runtime: 'IL2CPP' | 'Mono',
+    targetVersion?: string,
+  ): NexusModFile | undefined => {
+    if (!files.length) {
+      return undefined;
+    }
+
+    const runtimeLower = runtime.toLowerCase();
+    const runtimeFiles = files.filter(file => {
+      const fileName = (file.file_name || file.name || '').toLowerCase();
+      return fileName.includes(runtimeLower);
+    });
+
+    if (targetVersion) {
+      const versionToken = normalizeVersionToken(targetVersion);
+      const versionMatchInRuntime = runtimeFiles.find(file => {
+        const fileVersion = normalizeVersionToken(file.version || file.mod_version || '');
+        return fileVersion === versionToken;
+      });
+      if (versionMatchInRuntime) {
+        return versionMatchInRuntime;
+      }
+
+      const versionMatchAny = files.find(file => {
+        const fileVersion = normalizeVersionToken(file.version || file.mod_version || '');
+        return fileVersion === versionToken;
+      });
+      if (versionMatchAny) {
+        return versionMatchAny;
+      }
+    }
+
+    return selectNexusFileForRuntime(files, runtime);
+  }, []);
+
+  const handleUpdateAndActivateGroup = useCallback(async (group: DownloadedModGroup) => {
+    const sourceEntry = group.entries.find(entry => entry.source === 'thunderstore' || entry.source === 'nexusmods');
+    if (!sourceEntry || !sourceEntry.source) {
+      console.warn('No supported source found for group update');
+      return;
+    }
+
+    const targetRuntimes = (['IL2CPP', 'Mono'] as const).filter(runtime => {
+      return (group.installedInByRuntime[runtime] || []).length > 0;
+    });
+    const runtimesToUpdate: Array<'IL2CPP' | 'Mono'> = targetRuntimes.length > 0
+      ? [...targetRuntimes]
+      : (group.availableRuntimes.length > 0 ? [...group.availableRuntimes] : ['IL2CPP']);
+
+    setUpdatingGroup(group.key);
+    try {
+      const downloadedStorageByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>> = {};
+
+      if (sourceEntry.source === 'thunderstore') {
+        if (!sourceEntry.sourceId) {
+          throw new Error('Missing Thunderstore source id for update');
+        }
+
+        for (const runtime of runtimesToUpdate) {
+          const pkg = await findThunderstorePackageForRuntime(sourceEntry.sourceId, runtime);
+          if (!pkg) {
+            continue;
+          }
+          const result = await ApiService.downloadThunderstoreToLibrary(pkg.uuid4, runtime);
+          if (result.storageId) {
+            downloadedStorageByRuntime[runtime] = result.storageId;
+          }
+        }
+      } else if (sourceEntry.source === 'nexusmods') {
+        const modId = Number(sourceEntry.sourceId || '0');
+        if (!Number.isFinite(modId) || modId <= 0) {
+          throw new Error('Missing NexusMods mod id for update');
+        }
+
+        const files = await ApiService.getNexusModsModFiles('schedule1', modId);
+        for (const runtime of runtimesToUpdate) {
+          const file = pickNexusFileForVersionAndRuntime(files, runtime, group.remoteVersion);
+          if (!file?.file_id) {
+            continue;
+          }
+          const result = await ApiService.downloadNexusModToLibrary(modId, file.file_id, runtime);
+          if (result.storageId) {
+            downloadedStorageByRuntime[runtime] = result.storageId;
+          }
+        }
+      }
+
+      const nextLibrary = await ApiService.getModLibrary();
+      setLibrary(nextLibrary);
+
+      const refreshedGroup = buildDownloadedGroups(nextLibrary.downloaded).find(item => item.key === group.key);
+      const selectedEntry = refreshedGroup?.entries.find(entry => {
+        return (group.remoteVersion && normalizeVersionToken(getEntryVersionLabel(entry)) === normalizeVersionToken(group.remoteVersion))
+          || Object.values(entry.storageIdsByRuntime || {}).some(id => Object.values(downloadedStorageByRuntime).includes(id));
+      })
+        || refreshedGroup?.entries[0];
+
+      if (refreshedGroup && selectedEntry) {
+        await activateGroupEntry(refreshedGroup, selectedEntry);
+      }
+    } catch (err) {
+      console.error('Failed to update and activate mod version:', err);
+    } finally {
+      setUpdatingGroup(null);
+    }
+  }, [activateGroupEntry, findThunderstorePackageForRuntime, getEntryVersionLabel, pickNexusFileForVersionAndRuntime]);
+
+  const handleSelectVersion = useCallback(async (group: DownloadedModGroup, storageId: string) => {
+    setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: storageId }));
+
+    const selectedEntry = group.entries.find(entry => entry.storageId === storageId) || group.entries[0];
+    if (!selectedEntry) {
+      return;
+    }
+
+    try {
+      await activateGroupEntry(group, selectedEntry);
+    } catch (err) {
+      console.error('Failed to activate selected mod version:', err);
+    }
+  }, [activateGroupEntry]);
 
   const loadS1APIReleases = async () => {
     setLoadingS1APIReleases(true);
@@ -815,7 +1078,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           <div className="mods-content">
             <div style={{ padding: '0.9rem 1.25rem 0.75rem', borderBottom: '1px solid #3a3a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
               <div style={{ color: '#9aa4b2', fontSize: '0.85rem' }}>
-                {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed in envs
+                {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed in envs, {downloadedSummary.managed} managed
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button
@@ -956,17 +1219,17 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                 <h3 style={{ margin: 0 }}>Featured Downloads</h3>
               </div>
-              <div style={{ display: 'grid', gap: '0.75rem' }}>
+              <div style={{ display: 'grid', gap: '1rem' }}>
                 <div
                   className="mod-card"
                   style={{
-                    padding: '0.75rem',
+                    padding: '1rem',
                     backgroundColor: '#2a2a2a',
-                    borderRadius: '6px',
+                    borderRadius: '8px',
                     border: '1px solid #3a3a3a',
                     display: 'flex',
                     justifyContent: 'space-between',
-                    alignItems: 'center',
+                    alignItems: 'flex-start',
                     gap: '1rem'
                   }}
                 >
@@ -1029,7 +1292,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       )}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     <button
                       className={`btn btn-small ${s1apiNeedsUpdate ? 'btn-warning' : 'btn-primary'}`}
                       onClick={handleDownloadS1APIClick}
@@ -1062,13 +1325,13 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <div
                   className="mod-card"
                   style={{
-                    padding: '0.75rem',
+                    padding: '1rem',
                     backgroundColor: '#2a2a2a',
-                    borderRadius: '6px',
+                    borderRadius: '8px',
                     border: '1px solid #3a3a3a',
                     display: 'flex',
                     justifyContent: 'space-between',
-                    alignItems: 'center',
+                    alignItems: 'flex-start',
                     gap: '1rem'
                   }}
                 >
@@ -1134,7 +1397,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       )}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     <button
                       className={`btn btn-small ${mlvscanNeedsUpdate ? 'btn-warning' : 'btn-primary'}`}
                       onClick={handleDownloadMlvscanClick}
@@ -1169,7 +1432,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             {(showSearchResults || showNexusModsResults) && (
               <div style={{ padding: '0 1.25rem 1rem' }}>
                 {showSearchResults && searchResults.length > 0 && (
-                  <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  <div style={{ display: 'grid', gap: '1rem' }}>
                     {searchResults.filter(pkg => {
                       // Hide mods that are already in the downloaded library
                       const tsKey = `thunderstore::${pkg.key}`;
@@ -1179,11 +1442,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       if (pkg.packagesByRuntime.IL2CPP) runtimes.push('IL2CPP');
                       if (pkg.packagesByRuntime.Mono) runtimes.push('Mono');
                       return (
-                        <div key={pkg.key} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-                            <div>
-                              <strong>{pkg.name}</strong>
-                              <div style={{ fontSize: '0.8rem', color: '#888' }}>{pkg.owner}</div>
+                        <div key={pkg.key} className="mod-card" style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <strong style={{ fontSize: '1rem' }}>{pkg.name}</strong>
+                              <div style={{ fontSize: '0.85rem', color: '#9aa4b2' }}>{pkg.owner}</div>
                               <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
                                 {runtimes.length > 0 ? runtimes.map(runtime => (
                                   <span key={`${pkg.key}-${runtime}`} style={{
@@ -1209,13 +1472,15 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                                 )}
                               </div>
                             </div>
-                            <button
-                              className="btn btn-primary btn-small"
-                              disabled={downloading === pkg.key}
-                              onClick={() => handleDownloadThunderstore(pkg)}
-                            >
-                              {downloading === pkg.key ? 'Downloading...' : 'Download'}
-                            </button>
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                              <button
+                                className="btn btn-primary btn-small"
+                                disabled={downloading === pkg.key}
+                                onClick={() => handleDownloadThunderstore(pkg)}
+                              >
+                                {downloading === pkg.key ? 'Downloading...' : 'Download'}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -1224,7 +1489,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 )}
 
                 {showNexusModsResults && nexusModsSearchResults.length > 0 && (
-                  <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  <div style={{ display: 'grid', gap: '1rem' }}>
                     {nexusModsSearchResults.map(mod => {
                       const files = nexusModsFiles.get(mod.mod_id) ?? null;
                       const loading = nexusModsLoading.has(mod.mod_id);
@@ -1232,11 +1497,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       const hasIl2cpp = fileNames.some(name => name.includes('il2cpp'));
                       const hasMono = fileNames.some(name => name.includes('mono'));
                       return (
-                        <div key={mod.mod_id} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-                            <div>
-                              <strong>{mod.name}</strong>
-                              <div style={{ fontSize: '0.8rem', color: '#888' }}>{mod.author}</div>
+                        <div key={mod.mod_id} className="mod-card" style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <strong style={{ fontSize: '1rem' }}>{mod.name}</strong>
+                              <div style={{ fontSize: '0.85rem', color: '#9aa4b2' }}>{mod.author}</div>
                               <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
                                 {hasIl2cpp && (
                                   <span style={{
@@ -1275,13 +1540,15 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                                 )}
                               </div>
                             </div>
-                            <button
-                              className="btn btn-primary btn-small"
-                              disabled={downloading === `nexus-${mod.mod_id}` || loading}
-                              onClick={() => handleDownloadNexusMod(mod.mod_id)}
-                            >
-                              {downloading === `nexus-${mod.mod_id}` ? 'Downloading...' : loading ? 'Loading...' : 'Download'}
-                            </button>
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                              <button
+                                className="btn btn-primary btn-small"
+                                disabled={downloading === `nexus-${mod.mod_id}` || loading}
+                                onClick={() => handleDownloadNexusMod(mod.mod_id)}
+                              >
+                                {downloading === `nexus-${mod.mod_id}` ? 'Downloading...' : loading ? 'Loading...' : 'Download'}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -1293,10 +1560,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             </>
             )}
 
-            <div style={{ padding: '0.75rem 1.25rem 1rem', borderTop: '1px solid #3a3a3a' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <div style={{ padding: '0.9rem 1.25rem 1rem', borderTop: '1px solid #3a3a3a' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
                 <h3 style={{ margin: 0 }}>Downloaded Mods</h3>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <span style={{ color: '#9aa4b2', fontSize: '0.8rem', alignSelf: 'center' }}>
                     {selectedModIds.size} selected
                   </span>
@@ -1353,54 +1620,109 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <div style={{ color: '#888' }}>No downloaded mods match this filter.</div>
               )}
               {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                <div style={{ display: 'grid', gap: '1rem' }}>
                   {filteredDownloadedGroups.map(group => (
-                    <div key={group.key} className="mod-card" style={{ padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1 }}>
+                    <div key={group.key} className="mod-card" style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', flex: 1 }}>
                           <input
                             type="checkbox"
                             checked={group.storageIds.every(id => selectedModIds.has(id))}
                             onChange={() => toggleGroupSelection(group.storageIds)}
+                            style={{ marginTop: '0.2rem' }}
                           />
-                          <strong>{group.displayName}</strong>
-                          <span style={{
-                            fontSize: '0.7rem',
-                            padding: '0.15rem 0.4rem',
-                            borderRadius: '4px',
-                            backgroundColor: group.managed ? '#28a745' : '#6c757d',
-                            color: '#fff'
-                          }}>
-                            {group.managed ? 'Managed' : 'External'}
-                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                              <strong style={{ fontSize: '1rem' }}>{group.displayName}</strong>
+                              <span style={{
+                                fontSize: '0.7rem',
+                                padding: '0.15rem 0.4rem',
+                                borderRadius: '4px',
+                                backgroundColor: group.managed ? '#28a745' : '#6c757d',
+                                color: '#fff'
+                              }}>
+                                {group.managed ? 'Managed' : 'External'}
+                              </span>
+                              {group.updateAvailable && (
+                                <span style={{
+                                  fontSize: '0.7rem',
+                                  padding: '0.15rem 0.4rem',
+                                  borderRadius: '4px',
+                                  backgroundColor: 'rgba(255, 170, 0, 0.15)',
+                                  color: '#ffaa00',
+                                  border: '1px solid rgba(255, 170, 0, 0.3)'
+                                }}>
+                                  <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem' }}></i>
+                                  Update Available
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </label>
+                        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
                           {group.updateAvailable && (
                             <span style={{
-                              fontSize: '0.7rem',
-                              padding: '0.15rem 0.4rem',
-                              borderRadius: '4px',
-                              backgroundColor: 'rgba(255, 170, 0, 0.15)',
-                              color: '#ffaa00',
-                              border: '1px solid rgba(255, 170, 0, 0.3)'
+                              fontSize: '0.68rem',
+                              alignSelf: 'center',
+                              color: '#ffd480'
                             }}>
-                              <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem' }}></i>
-                              Update Available
+                              {group.remoteVersion ? `Latest v${group.remoteVersion}` : 'Update available'}
                             </span>
                           )}
-                        </label>
-                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                          <select
+                            value={selectedStorageByGroup[group.key] || group.entries[0]?.storageId || ''}
+                            onChange={(event) => {
+                              void handleSelectVersion(group, event.target.value);
+                            }}
+                            style={{
+                              minWidth: '130px',
+                              maxWidth: '190px',
+                              padding: '0.25rem 0.35rem',
+                              backgroundColor: '#1a1a1a',
+                              border: '1px solid #3a3a3a',
+                              borderRadius: '4px',
+                              color: '#fff',
+                              fontSize: '0.72rem'
+                            }}
+                            title="Active version"
+                            disabled={activatingGroup === group.key || updatingGroup === group.key}
+                          >
+                            {[...group.entries]
+                              .sort((a, b) => compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion))
+                              .map(entry => {
+                                const versionLabel = getEntryVersionLabel(entry);
+                                const runtimeLabel = entry.availableRuntimes.length > 0 ? entry.availableRuntimes.join('/') : 'Unknown runtime';
+                                const activeTag = entry.installedIn.length > 0 ? ' *' : '';
+                                return (
+                                  <option key={`${group.key}-${entry.storageId}`} value={entry.storageId}>
+                                    {`v${versionLabel} ${runtimeLabel}${activeTag}`}
+                                  </option>
+                                );
+                              })}
+                          </select>
                           {group.updateAvailable && (
                             <button
                               className="btn btn-warning btn-small"
-                              onClick={() => handleFindGroupUpdate(group)}
-                              title="Search for the latest version"
+                              onClick={() => handleUpdateAndActivateGroup(group)}
+                              disabled={updatingGroup === group.key || activatingGroup === group.key}
+                              title="Download latest update and make it active"
                             >
-                              <i className="fas fa-search" style={{ marginRight: '0.35rem' }}></i>
-                              Find Update
+                              {updatingGroup === group.key ? (
+                                <>
+                                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.35rem' }}></i>
+                                  Updating...
+                                </>
+                              ) : (
+                                <>
+                                  <i className="fas fa-arrow-up" style={{ marginRight: '0.35rem' }}></i>
+                                  Update
+                                </>
+                              )}
                             </button>
                           )}
                           <button
                             className="btn btn-danger btn-small"
-                            disabled={deleting === group.key}
+                            disabled={deleting === group.key || activatingGroup === group.key || updatingGroup === group.key}
                             onClick={() => handleDeleteDownloadedGroup(group)}
                             title="Delete downloaded files from library"
                           >
@@ -1408,7 +1730,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           </button>
                         </div>
                       </div>
-                      <div style={{ fontSize: '0.8rem', color: '#888', marginTop: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <div style={{ fontSize: '0.82rem', color: '#9aa4b2', marginTop: '0.55rem', display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap', lineHeight: 1.45 }}>
                         {group.author && (
                           <span>
                             <i className="fas fa-user" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
@@ -1419,12 +1741,6 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           <span>
                             <i className="fas fa-tag" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
                             v{group.sourceVersion}
-                          </span>
-                        )}
-                        {group.updateAvailable && group.remoteVersion && (
-                          <span style={{ color: '#ffaa00' }}>
-                            <i className="fas fa-cloud-download-alt" style={{ marginRight: '0.25rem' }}></i>
-                            Latest: v{group.remoteVersion}
                           </span>
                         )}
                         <span>

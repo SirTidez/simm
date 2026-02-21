@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
+use tokio::time::{sleep, Duration};
 
 use crate::types::{Environment, schedule_i_config};
 
@@ -35,19 +36,52 @@ impl EnvironmentService {
         Ok(envs)
     }
 
+    fn is_retryable_write_error(err: &sqlx::Error) -> bool {
+        let msg = err.to_string().to_lowercase();
+        msg.contains("database is locked") || msg.contains("database is busy")
+    }
+
     async fn save_environment(&self, env: &Environment) -> Result<()> {
         let normalized_output_dir = Self::normalize_path(&env.output_dir);
         let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
-        let upsert_with_normalized = sqlx::query(
-            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
-        )
-        .bind(&env.id)
-        .bind(&env.output_dir)
-        .bind(&normalized_output_dir)
-        .bind(serialized)
-        .execute(&*self.pool)
-        .await;
+        let upsert_with_normalized = {
+            let mut last_error: Option<sqlx::Error> = None;
+            let mut success = None;
+
+            for attempt in 0..3 {
+                let result = sqlx::query(
+                    "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
+                     ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
+                )
+                .bind(&env.id)
+                .bind(&env.output_dir)
+                .bind(&normalized_output_dir)
+                .bind(&serialized)
+                .execute(&*self.pool)
+                .await;
+
+                match result {
+                    Ok(done) => {
+                        success = Some(done);
+                        break;
+                    }
+                    Err(err) if Self::is_retryable_write_error(&err) && attempt < 2 => {
+                        let backoff_ms = 25 * (attempt + 1);
+                        sleep(Duration::from_millis(backoff_ms)).await;
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                        break;
+                    }
+                }
+            }
+
+            if success.is_some() {
+                Ok(())
+            } else {
+                Err(last_error.unwrap_or_else(|| sqlx::Error::Protocol("unknown sqlite write failure".to_string())))
+            }
+        };
 
         match upsert_with_normalized {
             Ok(_) => Ok(()),
@@ -73,18 +107,31 @@ impl EnvironmentService {
                 .to_string()
                 .to_lowercase()
                 .contains("unique constraint failed") => {
-                let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
-                let updated = sqlx::query(
+                let update_by_normalized = sqlx::query(
                     "UPDATE environments SET output_dir = ?, data = ? WHERE normalized_output_dir = ?",
                 )
                 .bind(&env.output_dir)
-                .bind(serialized)
-                .bind(normalized_output_dir)
+                .bind(&serialized)
+                .bind(&normalized_output_dir)
+                .execute(&*self.pool)
+                .await;
+
+                if let Ok(updated) = update_by_normalized {
+                    if updated.rows_affected() > 0 {
+                        return Ok(());
+                    }
+                }
+
+                let update_by_output_dir = sqlx::query(
+                    "UPDATE environments SET data = ? WHERE output_dir = ?",
+                )
+                .bind(&serialized)
+                .bind(&env.output_dir)
                 .execute(&*self.pool)
                 .await
-                .context("Failed to resolve environment save conflict")?;
+                .context("Failed to resolve environment save conflict by output_dir")?;
 
-                if updated.rows_affected() > 0 {
+                if update_by_output_dir.rows_affected() > 0 {
                     return Ok(());
                 }
 

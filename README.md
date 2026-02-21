@@ -70,7 +70,7 @@ React component -> `ApiService` -> `invoke()` -> Rust command -> service -> resu
 
 ### Data Storage
 
-- **Windows data directory**: `%APPDATA%\simmrust\`
+- **Windows data directory**: `%USERPROFILE%\SIMM\` (legacy `%APPDATA%\simmrust\data.db` is auto-migrated)
 - **Persistence**: Environments and settings in SQLite
 - **Credentials**: Encrypted and stored separately
 - **Mod files**: Shared library with symlinked environment installs

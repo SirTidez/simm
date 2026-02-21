@@ -504,7 +504,7 @@ impl Default for NexusModsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::get_data_dir;
+    use crate::db::get_database_path;
     use crate::services::settings::SettingsService;
     use serial_test::serial;
     use sqlx::sqlite::SqliteConnectOptions;
@@ -519,11 +519,10 @@ mod tests {
             }
         }
 
-        let data_dir = match get_data_dir() {
-            Ok(dir) => dir,
+        let db_path = match get_database_path() {
+            Ok(path) => path,
             Err(_) => return Ok(None),
         };
-        let db_path = data_dir.join("simmrust.db");
         if !db_path.exists() {
             return Ok(None);
         }

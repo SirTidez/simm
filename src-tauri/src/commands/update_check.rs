@@ -266,7 +266,7 @@ pub async fn check_all_updates(
 
         // Update the environment
         if let Err(e) = env_service.update_environment(env_id, updates).await {
-            eprintln!("[UpdateCheck] Failed to update environment {}: {}", env_id, e);
+            eprintln!("[UpdateCheck] Failed to update environment {}: {:#}", env_id, e);
         }
 
         // Emit update check complete event

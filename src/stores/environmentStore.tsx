@@ -197,6 +197,24 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, []);
 
+  const applyUpdateResultLocally = useCallback((environmentId: string, updateResult: import('../types').UpdateCheckResult) => {
+    setEnvironments(prev => prev.map(env => {
+      if (env.id !== environmentId) {
+        return env;
+      }
+
+      return {
+        ...env,
+        lastUpdateCheck: updateResult.checkedAt,
+        updateAvailable: updateResult.updateAvailable,
+        remoteManifestId: updateResult.remoteManifestId,
+        remoteBuildId: updateResult.remoteBuildId,
+        ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
+        ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
+      };
+    }));
+  }, []);
+
   // Load environments on mount
   useEffect(() => {
     refreshEnvironments();
@@ -265,14 +283,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
         unlistenUpdateAvailable = await onUpdateAvailable(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
           try {
-            await updateEnvironment(environmentId, {
-              lastUpdateCheck: updateResult.checkedAt,
-              updateAvailable: updateResult.updateAvailable,
-              remoteManifestId: updateResult.remoteManifestId,
-              remoteBuildId: updateResult.remoteBuildId,
-              ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
-              ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
-            });
+            applyUpdateResultLocally(environmentId, updateResult);
           } catch (err) {
             console.error('Failed to apply update-available event state:', err);
           }
@@ -280,14 +291,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
         unlistenUpdateCheckComplete = await onUpdateCheckComplete(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
           try {
-            await updateEnvironment(environmentId, {
-              lastUpdateCheck: updateResult.checkedAt,
-              updateAvailable: updateResult.updateAvailable,
-              remoteManifestId: updateResult.remoteManifestId,
-              remoteBuildId: updateResult.remoteBuildId,
-              ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
-              ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
-            });
+            applyUpdateResultLocally(environmentId, updateResult);
           } catch (err) {
             console.error('Failed to apply update-check-complete event state:', err);
           }
@@ -306,7 +310,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       if (unlistenUpdateAvailable) unlistenUpdateAvailable();
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
     };
-  }, [updateEnvironment]);
+  }, [updateEnvironment, applyUpdateResultLocally]);
 
   return (
     <EnvironmentStoreContext.Provider

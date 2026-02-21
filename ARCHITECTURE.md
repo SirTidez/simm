@@ -173,7 +173,7 @@ SQLite is initialized with WAL mode and foreign keys enabled in `src-tauri/src/d
 
 ### Filesystem
 
-- App data root: `%APPDATA%\simmrust\` (or `SIMMRUST_DATA_DIR` override)
+- App data root: `%USERPROFILE%\SIMM\` (or `SIMMRUST_DATA_DIR` override)
 - Environment directories: include `Mods`, `Plugins`, `UserLibs`
 - Shared mod storage: under `settings.default_download_dir` (library-first design)
 - Metadata files:
