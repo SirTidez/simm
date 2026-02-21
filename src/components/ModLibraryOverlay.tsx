@@ -373,6 +373,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     setLibrary(data);
   }, []);
 
+  const notifyModUpdateStateChanged = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('mod-updates-checked'));
+  }, []);
+
   useEffect(() => {
     if (!isOpen) return;
     const loadLibrary = async () => {
@@ -549,10 +553,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
       await refreshLibrary();
       setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: targetEntry.storageId }));
+      notifyModUpdateStateChanged();
     } finally {
       setActivatingGroup(null);
     }
-  }, [refreshLibrary]);
+  }, [refreshLibrary, notifyModUpdateStateChanged]);
 
   const findThunderstorePackageForRuntime = useCallback(async (
     sourceId: string,

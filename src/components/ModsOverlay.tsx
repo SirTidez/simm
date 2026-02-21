@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { onModsChanged as onModsChangedEvent } from '../services/events';
@@ -31,6 +31,7 @@ interface ConfirmDialog {
   confirmText?: string;
   cancelText?: string;
   onConfirm: () => Promise<void> | void;
+  readyAt?: number;
 }
 
 interface ThunderstorePackage {
@@ -113,6 +114,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [updatingAllMods, setUpdatingAllMods] = useState(false);
   const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
+  const suppressWatcherReloadUntilRef = useRef(0);
 
   useEffect(() => {
     if (isOpen && environmentId) {
@@ -126,6 +128,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         try {
           unlistenModsChanged = await onModsChangedEvent((data) => {
             if (data.environmentId === environmentId) {
+              if (Date.now() < suppressWatcherReloadUntilRef.current) {
+                return;
+              }
               loadMods();
               if (onModsChanged) {
                 onModsChanged();
@@ -342,18 +347,24 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   };
 
   const requestDeleteMod = (mod: ModInfo) => {
-    setConfirmDialog({
+    const dialog: ConfirmDialog = {
       title: 'Delete Mod',
       message: `Are you sure you want to delete "${mod.name}"?`,
       confirmText: 'Delete',
       cancelText: 'Cancel',
-      onConfirm: () => handleDeleteMod(mod)
-    });
+      onConfirm: () => handleDeleteMod(mod),
+      readyAt: Date.now() + 200,
+    };
+
+    window.setTimeout(() => {
+      setConfirmDialog(dialog);
+    }, 0);
   };
 
   const handleDisableMod = async (mod: ModInfo) => {
     setDisablingMod(mod.fileName);
     try {
+      suppressWatcherReloadUntilRef.current = Date.now() + 1500;
       await ApiService.disableMod(environmentId, mod.fileName);
       // Update the specific mod in-place to avoid a full list reload flash
       setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: true } : m));
@@ -370,6 +381,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const handleEnableMod = async (mod: ModInfo) => {
     setEnablingMod(mod.fileName);
     try {
+      suppressWatcherReloadUntilRef.current = Date.now() + 1500;
       await ApiService.enableMod(environmentId, mod.fileName);
       // Update the specific mod in-place to avoid a full list reload flash
       setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: false } : m));
@@ -418,6 +430,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const handleConfirmDialog = () => {
     if (!confirmDialog) return;
+    if (confirmDialog.readyAt && Date.now() < confirmDialog.readyAt) {
+      return;
+    }
     const action = confirmDialog.onConfirm;
     setConfirmDialog(null);
     Promise.resolve(action()).catch((err) => {
@@ -2160,7 +2175,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         </button>
                       )}
                       <button
-                        onClick={() => requestDeleteMod(mod)}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          requestDeleteMod(mod);
+                        }}
                         className="btn btn-danger btn-small"
                         disabled={deletingMod === mod.fileName}
                         title={`Delete ${mod.name}`}
