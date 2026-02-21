@@ -5,9 +5,10 @@ use once_cell::sync::Lazy;
 use crate::services::config::ConfigService;
 use crate::services::environment::EnvironmentService;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use tauri::State;
 
 static CONFIG_SERVICE: Lazy<AsyncMutex<Option<Arc<ConfigService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_config_service() -> Result<Arc<ConfigService>, String> {
     let mut service = CONFIG_SERVICE.lock().await;
@@ -17,13 +18,6 @@ async fn get_config_service() -> Result<Arc<ConfigService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,9 +29,10 @@ pub struct ConfigUpdate {
 
 #[tauri::command]
 pub async fn get_config_files(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
 ) -> Result<Vec<crate::services::config::ConfigFile>, String> {
-    let env_service = get_env_service().await?;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let config_service = get_config_service().await?;
 
     // Get the environment to find the game directory
@@ -58,9 +53,10 @@ pub async fn get_config_files(
 
 #[tauri::command]
 pub async fn get_grouped_config(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
 ) -> Result<HashMap<String, Vec<crate::services::config::ConfigSection>>, String> {
-    let env_service = get_env_service().await?;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let config_service = get_config_service().await?;
 
     // Get the environment

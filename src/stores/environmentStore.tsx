@@ -14,9 +14,9 @@ interface EnvironmentStoreContextValue {
   deleteEnvironment: (id: string, deleteFiles?: boolean) => Promise<void>;
   startDownload: (environmentId: string) => Promise<void>;
   cancelDownload: (downloadId: string) => Promise<void>;
-  checkUpdate: (environmentId: string) => Promise<void>;
+  checkUpdate: (environmentId: string, manual?: boolean) => Promise<void>;
   refreshGameVersion: (environmentId: string) => Promise<string | null>;
-  checkAllUpdates: () => Promise<void>;
+  checkAllUpdates: (manual?: boolean) => Promise<void>;
 }
 
 const EnvironmentStoreContext = createContext<EnvironmentStoreContextValue | null>(null);
@@ -33,35 +33,40 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       setError(null);
       const envs = await ApiService.getEnvironments();
       setEnvironments(envs);
-      
+
       // Automatically extract versions for completed environments that don't have one
-      const envsNeedingVersion = envs.filter(env => 
+      const envsNeedingVersion = envs.filter(env =>
         env.status === 'completed' && !env.currentGameVersion
       );
-      
+
       if (envsNeedingVersion.length > 0) {
-        // Extract versions in the background (don't block UI)
-        // Use setTimeout to avoid blocking the initial render
-        setTimeout(() => {
-          Promise.all(
-            envsNeedingVersion.map(async (env) => {
-              try {
-                const version = await ApiService.extractGameVersion(env.id);
-                if (version) {
-                  // Update the environment state directly
-                  setEnvironments(prev => prev.map(e => 
-                    e.id === env.id 
-                      ? { ...e, currentGameVersion: version }
-                      : e
-                  ));
-                }
-              } catch (err) {
-                // Silently fail - version extraction can be done manually later
-                console.warn(`Failed to auto-extract version for environment ${env.id}:`, err);
-              }
-            })
-          );
-        }, 100); // Small delay to let UI render first
+        const detectedVersions = await Promise.all(
+          envsNeedingVersion.map(async (env) => {
+            try {
+              const version = await ApiService.extractGameVersion(env.id);
+              return version ? { id: env.id, version } : null;
+            } catch (err) {
+              // Silently fail - version extraction can be done manually later
+              console.warn(`Failed to auto-extract version for environment ${env.id}:`, err);
+              return null;
+            }
+          })
+        );
+
+        const versionMap = new Map(
+          detectedVersions
+            .filter((entry): entry is { id: string; version: string } => entry !== null)
+            .map(entry => [entry.id, entry.version])
+        );
+
+        if (versionMap.size > 0) {
+          setEnvironments(prev => prev.map(env => {
+            const detectedVersion = versionMap.get(env.id);
+            return detectedVersion
+              ? { ...env, currentGameVersion: detectedVersion }
+              : env;
+          }));
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load environments');
@@ -126,9 +131,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, [updateEnvironment]);
 
-  const checkUpdate = useCallback(async (environmentId: string) => {
+  const checkUpdate = useCallback(async (environmentId: string, manual: boolean = false) => {
     try {
-      const result = await ApiService.checkUpdate(environmentId);
+      const result = await ApiService.checkUpdate(environmentId, manual);
       await updateEnvironment(environmentId, {
         lastUpdateCheck: result.checkedAt,
         updateAvailable: result.updateAvailable,
@@ -154,12 +159,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, [updateEnvironment]);
 
-  const checkAllUpdates = useCallback(async () => {
+  const checkAllUpdates = useCallback(async (manual: boolean = false) => {
     try {
       console.log('EnvironmentStore: checkAllUpdates called');
-      const results = await ApiService.checkAllUpdates();
+      const results = await ApiService.checkAllUpdates(manual);
       console.log(`EnvironmentStore: API call completed, got ${results?.length || 0} result(s)`, { results });
-      
+
       // Update environments in place without triggering loading state
       // This prevents the page from appearing to refresh
       setEnvironments(prev => {
@@ -180,11 +185,11 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         });
         return updated;
       });
-      
+
       console.log('EnvironmentStore: Environments updated in place');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      console.error(`EnvironmentStore: checkAllUpdates failed - ${errorMessage}`, { 
+      console.error(`EnvironmentStore: checkAllUpdates failed - ${errorMessage}`, {
         error: err instanceof Error ? err.stack : String(err),
         errorType: err instanceof Error ? err.constructor.name : typeof err
       });
@@ -233,7 +238,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             next.delete(downloadId);
             return next;
           });
-          
+
           // Automatically extract game version when download completes
           try {
             const version = await ApiService.extractGameVersion(downloadId);
@@ -317,4 +322,3 @@ export function useEnvironmentStore() {
   }
   return context;
 }
-

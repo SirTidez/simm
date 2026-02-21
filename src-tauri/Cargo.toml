@@ -11,7 +11,7 @@ edition = "2021"
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.0", features = [] }
+tauri = { version = "2.0", features = ["test"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.6"
 tauri-plugin-fs = "2.0"
@@ -39,6 +39,12 @@ urlencoding = "2.1"
 quick-xml = { version = "0.31", features = ["serialize"] }
 log = "0.4"
 env_logger = "0.11"
+discord-rich-presence = "1.0"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+
+[dev-dependencies]
+serial_test = "3.0"
+tempfile = "3.10"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "shellapi"] }
@@ -48,4 +54,3 @@ libc = "0.2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-

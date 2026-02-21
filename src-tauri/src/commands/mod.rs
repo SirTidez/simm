@@ -18,4 +18,4 @@ pub mod mod_update;
 pub mod game_version;
 pub mod logs;
 pub mod config;
-
+pub mod discord_rpc;

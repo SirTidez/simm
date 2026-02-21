@@ -67,6 +67,7 @@ impl MelonLoaderService {
     #[cfg(target_os = "windows")]
     async fn extract_version_from_dll(&self, dll_path: &Path) -> Result<String> {
         use tokio::process::Command;
+        #[allow(unused_imports)]  // Required for CommandExt trait methods
         use std::os::windows::process::CommandExt;
 
         let path_str = dll_path.to_string_lossy().replace('\'', "''");

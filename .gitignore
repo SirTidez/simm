@@ -2,6 +2,7 @@
 /node_modules
 package-lock.json
 /dist
+/new-app-icon-square.png
 /assets/plan
 /depots
 # Encrypted credential files (never commit these)
@@ -21,3 +22,4 @@ package-lock.json
 CLAUDE.md
 bun.lock
 AGENTS.md
+TEST_PLAN.md

@@ -2,8 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { logger } from '../services/logger';
-import { lastUpdateCheckTimeRef } from './EnvironmentList';
+import { ApiService } from '../services/api';
+import { onModUpdatesChecked } from '../services/events';
+import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 import { CustomThemeEditor } from './CustomThemeEditor';
+
+interface ModUpdatesEntry {
+  count: number;
+  updates: Array<{ modFileName: string; modName: string; currentVersion: string; latestVersion: string; source: string }>;
+}
 
 // Version injected at build time by Vite
 declare const __APP_VERSION__: string;
@@ -14,18 +21,62 @@ export function Footer() {
   const { settings, updateSettings } = useSettingsStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
+  const [modUpdatesByEnv, setModUpdatesByEnv] = useState<Map<string, ModUpdatesEntry>>(new Map());
   const [themeDropdownOpen, setThemeDropdownOpen] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const themeDropdownRef = useRef<HTMLDivElement>(null);
-  
+
+  const totalModsNeedingUpdate = Array.from(modUpdatesByEnv.values()).reduce((sum, e) => sum + e.count, 0);
+
   // Update current time every 30 seconds to refresh the "Last check" display
   useEffect(() => {
     const interval = setInterval(() => {
       setCurrentTime(Date.now());
     }, 30000); // Update every 30 seconds
-    
+
     return () => clearInterval(interval);
   }, []);
+
+  // Load mod updates summary for completed environments
+  const loadModUpdatesSummary = React.useCallback(async () => {
+    try {
+      const summary = await ApiService.getAllModUpdatesSummary();
+      const map = new Map<string, ModUpdatesEntry>();
+      for (const entry of summary) {
+        map.set(entry.environmentId, { count: entry.count, updates: entry.updates });
+      }
+      setModUpdatesByEnv(map);
+    } catch (err) {
+      console.warn('Failed to load mod updates summary:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    const completedCount = environments.filter(env => env.status === 'completed').length;
+    if (completedCount > 0) {
+      loadModUpdatesSummary();
+    }
+  }, [environments, loadModUpdatesSummary]);
+
+  // Subscribe to mod_updates_checked (from backend) to refresh when mod checks complete
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    onModUpdatesChecked((data) => {
+      setModUpdatesByEnv(prev => {
+        const next = new Map(prev);
+        next.set(data.environmentId, { count: data.count, updates: data.updates });
+        return next;
+      });
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  // Also refresh when ModsOverlay runs check (custom event from EnvironmentList)
+  useEffect(() => {
+    const handler = () => loadModUpdatesSummary();
+    window.addEventListener('mod-updates-checked', handler);
+    return () => window.removeEventListener('mod-updates-checked', handler);
+  }, [loadModUpdatesSummary]);
 
   // Close theme dropdown when clicking outside
   useEffect(() => {
@@ -43,29 +94,29 @@ export function Footer() {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [themeDropdownOpen]);
-  
+
   // Recalculate most recent check whenever environments change
 
   // Calculate update check statistics
   const completedEnvs = environments.filter(env => env.status === 'completed');
   const envsWithUpdates = completedEnvs.filter(env => env.updateAvailable);
   const envsChecked = completedEnvs.filter(env => env.lastUpdateCheck);
-  
+
   // Get the most recent update check time (handle both string and number timestamps)
   const mostRecentCheck = envsChecked.length > 0
     ? envsChecked.reduce((latest, env) => {
         if (!env.lastUpdateCheck) return latest;
-        
+
         // Convert to timestamp (milliseconds) for comparison
         let envCheckTime: number;
         if (typeof env.lastUpdateCheck === 'number') {
-          envCheckTime = env.lastUpdateCheck < 946684800000 
+          envCheckTime = env.lastUpdateCheck < 946684800000
             ? env.lastUpdateCheck * 1000 // Convert seconds to milliseconds
             : env.lastUpdateCheck; // Already in milliseconds
         } else {
           envCheckTime = new Date(env.lastUpdateCheck).getTime();
         }
-        
+
         let latestTime: number;
         if (latest) {
           if (typeof latest === 'number') {
@@ -76,7 +127,7 @@ export function Footer() {
         } else {
           latestTime = 0;
         }
-        
+
         return envCheckTime > latestTime ? env.lastUpdateCheck : latest;
       }, envsChecked[0].lastUpdateCheck || null)
     : null;
@@ -90,18 +141,18 @@ export function Footer() {
         // If it's a number, check if it's seconds (less than year 2000 in ms) or milliseconds
         // Timestamps after 2000-01-01 in seconds would be > 946684800
         // Timestamps after 2000-01-01 in milliseconds would be > 946684800000
-        date = dateValue < 946684800000 
+        date = dateValue < 946684800000
           ? new Date(dateValue * 1000) // Convert seconds to milliseconds
           : new Date(dateValue); // Already in milliseconds
       } else {
         date = new Date(dateValue);
       }
-      
+
       // Check if date is valid
       if (isNaN(date.getTime())) {
         return 'Invalid date';
       }
-      
+
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -121,46 +172,50 @@ export function Footer() {
   const handleCheckAllUpdates = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     logger.info('Footer: Check updates button clicked');
     console.log('Footer: Check updates button clicked (console)');
-    
+
     // Check all registered environments, not just completed ones
     const allEnvs = environments.filter(env => env.status !== 'error');
-    logger.debug(`Footer: Found ${allEnvs.length} environments to check (excluding errors)`, { 
+    logger.debug(`Footer: Found ${allEnvs.length} environments to check (excluding errors)`, {
       totalEnvs: environments.length,
-      validEnvs: allEnvs.length 
+      validEnvs: allEnvs.length
     });
-    
+
     if (checkingAll) {
       logger.warn('Footer: Already checking updates, ignoring click');
       return;
     }
-    
+
     if (allEnvs.length === 0) {
       logger.warn('Footer: No environments to check');
       return;
     }
-    
+
     logger.info(`Footer: Starting update check for ${allEnvs.length} environment(s)`);
-    
+
     try {
       setCheckingAll(true);
+      batchUpdateCheckRef.current = true;
       logger.info('Footer: Calling checkAllUpdates from store...');
       // Update last check time before calling (manual check bypasses interval)
       lastUpdateCheckTimeRef.current = Date.now();
-      await checkAllUpdates();
+      await checkAllUpdates(true);
       logger.info('Footer: Update check completed successfully');
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      logger.error(`Footer: Update check failed - ${errorMessage}`, { 
+      logger.error(`Footer: Update check failed - ${errorMessage}`, {
         error: err instanceof Error ? err.stack : String(err),
         environmentCount: allEnvs.length
       });
       // Errors are now logged to the backend log file, not shown to user
     } finally {
+      batchUpdateCheckRef.current = false;
       setCheckingAll(false);
       logger.debug('Footer: Reset checkingAll state');
+      // Refresh mod updates summary after check (mod checks run as part of checkAllUpdates)
+      loadModUpdatesSummary();
     }
   };
 
@@ -203,6 +258,19 @@ export function Footer() {
                 <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem' }}></i>
                 {envsWithUpdates.length} update{envsWithUpdates.length !== 1 ? 's' : ''} available
               </span>
+            )}
+            {completedEnvs.length > 0 && (
+              totalModsNeedingUpdate > 0 ? (
+                <span className="footer-stat footer-stat-update">
+                  <i className="fas fa-puzzle-piece" style={{ marginRight: '0.5rem' }}></i>
+                  {totalModsNeedingUpdate} mod{totalModsNeedingUpdate !== 1 ? 's' : ''} need updating
+                </span>
+              ) : (
+                <span className="footer-stat footer-stat-success">
+                  <i className="fas fa-puzzle-piece" style={{ marginRight: '0.5rem' }}></i>
+                  All mods up to date
+                </span>
+              )
             )}
             <span className="footer-stat">
               {checkingAll ? (
@@ -313,4 +381,3 @@ export function Footer() {
     </footer>
   );
 }
-

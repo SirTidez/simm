@@ -46,10 +46,10 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
             }}
           >
             <p style={{ margin: '0 0 1rem 0', lineHeight: '1.6' }}>
-              We've created a <strong>SIMM</strong> folder in your home directory to help organize your modding files. 
+              We've created a <strong>SIMM</strong> folder in your home directory to help organize your modding files.
               This folder will be used for downloads, backups, and application logs.
             </p>
-            
+
             <div style={{ marginTop: '1.5rem' }}>
               <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1.1rem', color: '#ffffff' }}>
                 <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
@@ -105,4 +105,3 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
     </div>
   );
 }
-

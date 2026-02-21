@@ -1,57 +1,54 @@
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
+use tauri::State;
 
 static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static SETTINGS_SERVICE: Lazy<AsyncMutex<Option<Arc<AsyncMutex<SettingsService>>>>> = Lazy::new(|| AsyncMutex::new(None));
 
-async fn get_settings_service() -> Result<Arc<AsyncMutex<SettingsService>>, String> {
-    let mut service = SETTINGS_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(AsyncMutex::new(SettingsService::new().map_err(|e| e.to_string())?)));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
-
-async fn get_nexus_mods_service() -> Result<Arc<NexusModsService>, String> {
+async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
     let mut service = NEXUS_MODS_SERVICE.lock().await;
     if service.is_none() {
-        let nexus_service = Arc::new(NexusModsService::new());
-        
-        // Try to load API key from encrypted storage
-        let settings_service = get_settings_service().await?;
-        let settings = settings_service.lock().await;
-        if let Ok(Some(api_key)) = settings.get_nexus_mods_api_key().await {
-            nexus_service.set_api_key(api_key).await;
-        }
-        
-        *service = Some(nexus_service);
+        *service = Some(Arc::new(NexusModsService::new()));
     }
-    Ok(service.as_ref().unwrap().clone())
+    let nexus_service = service.as_ref().unwrap().clone();
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
+        nexus_service.set_api_key(api_key).await;
+    }
+    Ok(nexus_service)
 }
 
 #[tauri::command]
-pub async fn validate_nexus_mods_api_key(api_key: String) -> Result<serde_json::Value, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn validate_nexus_mods_api_key(
+    db: State<'_, Arc<SqlitePool>>,
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    let db_pool = db.inner().clone();
+    let service = get_nexus_mods_service(db_pool.clone()).await?;
+    let previous_key = service.get_api_key_optional().await;
     service.set_api_key(api_key.clone()).await;
-    
+
     match service.validate_api_key().await {
         Ok(validation) => {
-            // If valid, save to encrypted storage
-            let settings_service = get_settings_service().await?;
-            let settings = settings_service.lock().await;
-            if let Err(e) = settings.save_nexus_mods_api_key(api_key).await {
+            let settings_service = SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
+            if let Err(e) = settings_service.save_nexus_mods_api_key(api_key).await {
+                if let Some(prev) = previous_key {
+                    service.set_api_key(prev).await;
+                } else {
+                    service.clear_api_key().await;
+                }
                 return Ok(serde_json::json!({
                     "success": false,
                     "error": format!("Failed to save API key: {}", e)
                 }));
             }
-            
+
             let rate_limits = service.get_rate_limits().await
                 .unwrap_or_else(|_| serde_json::json!({ "daily": 0, "hourly": 0 }));
-            
+
             Ok(serde_json::json!({
                 "success": true,
                 "rateLimits": rate_limits,
@@ -63,6 +60,11 @@ pub async fn validate_nexus_mods_api_key(api_key: String) -> Result<serde_json::
             }))
         }
         Err(e) => {
+            if let Some(prev) = previous_key {
+                service.set_api_key(prev).await;
+            } else {
+                service.clear_api_key().await;
+            }
             Ok(serde_json::json!({
                 "success": false,
                 "error": e.to_string()
@@ -72,16 +74,16 @@ pub async fn validate_nexus_mods_api_key(api_key: String) -> Result<serde_json::
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_rate_limits() -> Result<serde_json::Value, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_rate_limits(db: State<'_, Arc<SqlitePool>>) -> Result<serde_json::Value, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_rate_limits()
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_games() -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_games(db: State<'_, Arc<SqlitePool>>) -> Result<Vec<serde_json::Value>, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_games()
         .await
         .map_err(|e| e.to_string())
@@ -89,50 +91,68 @@ pub async fn get_nexus_mods_games() -> Result<Vec<serde_json::Value>, String> {
 
 #[tauri::command]
 pub async fn search_nexus_mods_mods(
+    db: State<'_, Arc<SqlitePool>>,
     game_id: String,
     query: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.search_mods(&game_id, &query)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_latest_added(game_id: String) -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_latest_added(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_latest_added_mods(&game_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_latest_updated(game_id: String) -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_latest_updated(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_latest_updated_mods(&game_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_trending(game_id: String) -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_trending(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_trending_mods(&game_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_mod(game_id: String, mod_id: u32) -> Result<serde_json::Value, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    mod_id: u32,
+) -> Result<serde_json::Value, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_mod(&game_id, mod_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_nexus_mods_mod_files(game_id: String, mod_id: u32) -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+pub async fn get_nexus_mods_mod_files(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    mod_id: u32,
+) -> Result<Vec<serde_json::Value>, String> {
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.get_mod_files(&game_id, mod_id)
         .await
         .map_err(|e| e.to_string())
@@ -140,11 +160,12 @@ pub async fn get_nexus_mods_mod_files(game_id: String, mod_id: u32) -> Result<Ve
 
 #[tauri::command]
 pub async fn download_nexus_mods_mod_file(
+    db: State<'_, Arc<SqlitePool>>,
     game_id: String,
     mod_id: u32,
     file_id: u32,
 ) -> Result<String, String> {
-    let service = get_nexus_mods_service().await?;
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     let bytes = service.download_mod_file(&game_id, mod_id, file_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -159,11 +180,12 @@ pub async fn download_nexus_mods_mod_file(
 }
 #[tauri::command]
 pub async fn check_nexus_mods_mod_update(
+    db: State<'_, Arc<SqlitePool>>,
     game_domain: String,
     mod_id: u32,
     current_version: String,
 ) -> Result<serde_json::Value, String> {
-    let service = get_nexus_mods_service().await?;
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.check_mod_update(&game_domain, mod_id, &current_version)
         .await
         .map_err(|e| e.to_string())
@@ -171,48 +193,46 @@ pub async fn check_nexus_mods_mod_update(
 
 #[tauri::command]
 pub async fn check_nexus_mods_for_updates(
+    db: State<'_, Arc<SqlitePool>>,
     game_domain: String,
     mods: Vec<(u32, String)>, // Vec of (mod_id, current_version)
 ) -> Result<Vec<serde_json::Value>, String> {
-    let service = get_nexus_mods_service().await?;
+    let service = get_nexus_mods_service(db.inner().clone()).await?;
     service.check_mods_for_updates(&game_domain, mods)
         .await
         .map_err(|e| e.to_string())
 }
 
+fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
+    let s = game_id.map(|s| s.trim()).unwrap_or("").to_string();
+    if s.is_empty() {
+        "schedule1".to_string()
+    } else {
+        s
+    }
+}
+
 #[tauri::command]
 pub async fn install_nexus_mods_mod(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
+    game_id_param: Option<String>,
     mod_id: u32,
     file_id: u32,
 ) -> Result<serde_json::Value, String> {
     use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
-    use std::sync::Arc;
-    use tokio::sync::Mutex as AsyncMutex;
-    use once_cell::sync::Lazy;
-    
-    static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
-    static MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<ModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-    
-    async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-        let mut service = ENV_SERVICE.lock().await;
-        if service.is_none() {
-            *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
-        }
-        Ok(service.as_ref().unwrap().clone())
-    }
-    
-    async fn get_mods_service() -> Result<Arc<ModsService>, String> {
-        let mut service = MODS_SERVICE.lock().await;
-        if service.is_none() {
-            *service = Some(Arc::new(ModsService::new()));
-        }
-        Ok(service.as_ref().unwrap().clone())
-    }
-    
-    // Get environment
-    let env_service = get_env_service().await?;
+
+    let db_pool = db.inner().clone();
+    let game_id = if let Some(ref id) = game_id_param {
+        normalize_nexus_game_id(Some(id))
+    } else {
+        let mut settings_service = SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
+        let settings = settings_service.load_settings().await.map_err(|e| e.to_string())?;
+        normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
+    };
+
+    let env_service = EnvironmentService::new(db_pool.clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -227,10 +247,8 @@ pub async fn install_nexus_mods_mod(
         crate::types::Runtime::Mono => "Mono",
     };
 
-    // Get mod info for metadata
-    let nexus_service = get_nexus_mods_service().await
+    let nexus_service = get_nexus_mods_service(db_pool.clone()).await
         .map_err(|e| format!("Failed to get NexusMods service: {}", e))?;
-    let game_id = "schedule1".to_string();
     let mod_info = nexus_service.get_mod(&game_id, mod_id)
         .await
         .map_err(|e| format!("Failed to fetch mod info for mod {}: {}", mod_id, e))?;
@@ -244,22 +262,26 @@ pub async fn install_nexus_mods_mod(
         .find(|f| f.get("file_id").and_then(|id| id.as_u64()) == Some(file_id as u64))
         .ok_or_else(|| format!("File {} not found in mod {}", file_id, mod_id))?;
 
-    // Extract metadata for duplicate check
     let version = file_info.get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("1.0.0")
         .to_string();
-    let source_id = Some(mod_id.to_string());
-    let source_version = Some(version.clone());
 
-    // Check if we already have this mod/version installed before downloading
-    let mods_service = get_mods_service().await?;
-    if let Ok(Some(existing_mod_id)) = mods_service.find_existing_mod_installation(&env.output_dir, &source_id, &source_version).await {
-        eprintln!("[DEBUG] install_nexus_mods_mod: Mod {} version {} already installed with storage_id: {}, skipping download", mod_id, version, existing_mod_id);
+    // Check if we already have this mod/version stored anywhere before downloading
+    let mods_service = ModsService::new(db_pool.clone());
+    if let Ok(Some(existing_mod_id)) = mods_service
+        .find_existing_mod_storage_by_source_version(&mod_id.to_string(), &version, Some(env.runtime.clone()))
+        .await
+    {
+        eprintln!("[DEBUG] install_nexus_mods_mod: Found existing storage for mod {} version {}: {}, installing from storage", mod_id, version, existing_mod_id);
+        let install_result = mods_service
+            .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(serde_json::json!({
             "success": true,
-            "message": "Mod already installed",
-            "alreadyInstalled": true
+            "fromStorage": true,
+            "result": install_result
         }));
     }
 
@@ -295,10 +317,10 @@ pub async fn install_nexus_mods_mod(
         .and_then(|v| v.as_str())
         .unwrap_or("1.0.0")
         .to_string();
-    let source_url = format!("https://www.nexusmods.com/schedule1/mods/{}", mod_id);
+    let source_url = format!("https://www.nexusmods.com/{}/mods/{}", game_id, mod_id);
 
     // Install using mods service
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db_pool.clone());
     let metadata = serde_json::json!({
         "source": "nexusmods",
         "sourceId": mod_id.to_string(),

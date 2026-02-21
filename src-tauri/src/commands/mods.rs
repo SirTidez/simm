@@ -3,30 +3,61 @@ use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
+use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
+use tauri::State;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
-static MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<ModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static ENV_SERVICE: Lazy<AsyncMutex<Option<Arc<EnvironmentService>>>> = Lazy::new(|| AsyncMutex::new(None));
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
-async fn get_mods_service() -> Result<Arc<ModsService>, String> {
-    let mut service = MODS_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(ModsService::new()));
-    }
-    Ok(service.as_ref().unwrap().clone())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadKind {
+    Zip,
+    Dll,
+    Unsupported,
 }
 
-async fn get_env_service() -> Result<Arc<EnvironmentService>, String> {
-    let mut service = ENV_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(EnvironmentService::new().map_err(|e| e.to_string())?));
+fn detect_upload_kind(file_path: &str) -> UploadKind {
+    let file_path_lower = file_path.to_lowercase();
+    if file_path_lower.ends_with(".zip") {
+        UploadKind::Zip
+    } else if file_path_lower.ends_with(".dll") {
+        UploadKind::Dll
+    } else {
+        UploadKind::Unsupported
     }
-    Ok(service.as_ref().unwrap().clone())
+}
+
+fn parse_runtime_label(runtime: Option<&str>) -> Option<crate::types::Runtime> {
+    runtime.and_then(|value| match value.trim().to_lowercase().as_str() {
+        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+        "mono" => Some(crate::types::Runtime::Mono),
+        _ => None,
+    })
+}
+
+fn build_s1api_library_metadata(version_tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": "github",
+        "sourceId": "ifBars/S1API",
+        "sourceVersion": version_tag,
+        "sourceUrl": "https://github.com/ifBars/S1API",
+        "modName": "S1API",
+        "author": "ScheduleI-Dev",
+    })
+}
+
+fn build_mlvscan_library_metadata(version_tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": "github",
+        "sourceId": "ifBars/MLVScan",
+        "sourceVersion": version_tag,
+        "sourceUrl": "https://github.com/ifBars/MLVScan",
+        "modName": "MLVScan",
+        "author": "ifBars",
+    })
 }
 
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
@@ -37,20 +68,9 @@ async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_github_service() -> Result<Arc<GitHubReleasesService>, String> {
-    let mut service = GITHUB_SERVICE.lock().await;
-    if service.is_none() {
-        // Load GitHub token from encrypted storage
-        let settings_service = SettingsService::new().map_err(|e| e.to_string())?;
-        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
-        *service = Some(Arc::new(GitHubReleasesService::with_token(token)));
-    }
-    Ok(service.as_ref().unwrap().clone())
-}
-
 #[tauri::command]
-pub async fn get_mods(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_mods(db: State<'_, Arc<SqlitePool>>, environment_id: String) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -60,15 +80,15 @@ pub async fn get_mods(environment_id: String) -> Result<serde_json::Value, Strin
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.list_mods(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_mods_count(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_mods_count(db: State<'_, Arc<SqlitePool>>, environment_id: String) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -78,7 +98,7 @@ pub async fn get_mods_count(environment_id: String) -> Result<serde_json::Value,
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     let count = mods_service.count_mods(&env.output_dir)
         .await
         .map_err(|e| e.to_string())?;
@@ -87,8 +107,57 @@ pub async fn get_mods_count(environment_id: String) -> Result<serde_json::Value,
 }
 
 #[tauri::command]
-pub async fn delete_mod(environment_id: String, mod_file_name: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn get_mod_library(db: State<'_, Arc<SqlitePool>>) -> Result<serde_json::Value, String> {
+    let mods_service = ModsService::new(db.inner().clone());
+    let library = mods_service.get_mod_library().await.map_err(|e| e.to_string())?;
+    serde_json::to_value(library).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn install_downloaded_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    storage_id: String,
+    environment_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .install_storage_mod_to_envs(&storage_id, environment_ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn uninstall_downloaded_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    storage_id: String,
+    environment_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .uninstall_storage_mod_from_envs(&storage_id, environment_ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_downloaded_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    storage_id: String,
+) -> Result<serde_json::Value, String> {
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .delete_downloaded_mod(&storage_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    mod_file_name: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -98,15 +167,19 @@ pub async fn delete_mod(environment_id: String, mod_file_name: String) -> Result
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.delete_mod(&env.output_dir, &mod_file_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn enable_mod(environment_id: String, mod_file_name: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn enable_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    mod_file_name: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -116,15 +189,19 @@ pub async fn enable_mod(environment_id: String, mod_file_name: String) -> Result
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.enable_mod(&env.output_dir, &mod_file_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn disable_mod(environment_id: String, mod_file_name: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn disable_mod(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    mod_file_name: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -134,15 +211,18 @@ pub async fn disable_mod(environment_id: String, mod_file_name: String) -> Resul
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.disable_mod(&env.output_dir, &mod_file_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn open_mods_folder(environment_id: String) -> Result<(), String> {
-    let env_service = get_env_service().await?;
+pub async fn open_mods_folder(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<(), String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -161,11 +241,12 @@ pub async fn open_mods_folder(environment_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn check_mod_installed(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     source_id: Option<String>,
     source_version: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -175,7 +256,7 @@ pub async fn check_mod_installed(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     match mods_service.find_existing_mod_installation(&env.output_dir, &source_id, &source_version).await {
         Ok(Some(mod_storage_id)) => Ok(serde_json::json!({
             "installed": true,
@@ -189,15 +270,46 @@ pub async fn check_mod_installed(
 }
 
 #[tauri::command]
-pub async fn cleanup_duplicate_mod_storage() -> Result<serde_json::Value, String> {
-    let mods_service = get_mods_service().await?;
+pub async fn find_existing_mod_storage(
+    db: State<'_, Arc<SqlitePool>>,
+    source_id: String,
+    source_version: String,
+    runtime: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let mods_service = ModsService::new(db.inner().clone());
+    let runtime_parsed = runtime.as_deref().and_then(|value| match value.trim().to_lowercase().as_str() {
+        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+        "mono" => Some(crate::types::Runtime::Mono),
+        _ => None,
+    });
+    match mods_service
+        .find_existing_mod_storage_by_source_version(&source_id, &source_version, runtime_parsed)
+        .await
+    {
+        Ok(Some(storage_id)) => Ok(serde_json::json!({
+            "found": true,
+            "storageId": storage_id
+        })),
+        Ok(None) => Ok(serde_json::json!({
+            "found": false
+        })),
+        Err(e) => Err(format!("Failed to check mod storage: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn cleanup_duplicate_mod_storage(db: State<'_, Arc<SqlitePool>>) -> Result<serde_json::Value, String> {
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.cleanup_duplicate_mod_storage().await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_s1api_installation_status(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn get_s1api_installation_status(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -212,7 +324,7 @@ pub async fn get_s1api_installation_status(environment_id: String) -> Result<ser
         crate::types::Runtime::Mono => "Mono",
     };
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.get_s1api_installation_status(&env.output_dir, runtime_str)
         .await
         .map_err(|e| e.to_string())
@@ -220,6 +332,7 @@ pub async fn get_s1api_installation_status(environment_id: String) -> Result<ser
 
 #[tauri::command]
 pub async fn upload_mod(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     file_path: String,
     original_file_name: String,
@@ -227,7 +340,7 @@ pub async fn upload_mod(
     branch: String,
     metadata: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -237,25 +350,51 @@ pub async fn upload_mod(
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     
-    // Check if file is ZIP or DLL
-    let file_path_lower = file_path.to_lowercase();
-    if file_path_lower.ends_with(".zip") {
+    match detect_upload_kind(&file_path) {
+        UploadKind::Zip => {
         mods_service.install_zip_mod(&env.output_dir, &file_path, &original_file_name, &runtime, &branch, metadata)
             .await
             .map_err(|e| e.to_string())
-    } else if file_path_lower.ends_with(".dll") {
+        }
+        UploadKind::Dll => {
         mods_service.install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
             .await
             .map_err(|e| e.to_string())
-    } else {
-        Err("Only .zip and .dll files are supported".to_string())
+        }
+        UploadKind::Unsupported => Err("Only .zip and .dll files are supported".to_string()),
     }
 }
 
 #[tauri::command]
+pub async fn store_mod_archive(
+    db: State<'_, Arc<SqlitePool>>,
+    file_path: String,
+    original_file_name: String,
+    runtime: Option<String>,
+    metadata: Option<serde_json::Value>,
+    target: Option<String>,
+    cleanup: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let runtime_parsed = parse_runtime_label(runtime.as_deref());
+
+    let mods_service = ModsService::new(db.inner().clone());
+    let result = mods_service
+        .store_mod_archive(&file_path, &original_file_name, runtime_parsed, metadata, target)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if cleanup.unwrap_or(false) {
+        let _ = tokio::fs::remove_file(&file_path).await;
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn install_s1api(
+    db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
@@ -270,7 +409,7 @@ pub async fn install_s1api(
         }))
     };
     
-    let env_service = match get_env_service().await {
+    let env_service = match EnvironmentService::new(db.inner().clone()) {
         Ok(service) => service,
         Err(e) => return error_json(format!("Failed to get environment service: {}", e))
     };
@@ -290,31 +429,38 @@ pub async fn install_s1api(
         crate::types::Runtime::Mono => "Mono",
     };
 
-    // Check if we already have this version installed before downloading
-    let mods_service = match get_mods_service().await {
-        Ok(service) => service,
-        Err(e) => return error_json(format!("Failed to get mods service: {}", e))
-    };
-    
-    let source_id = Some("ifBars/S1API".to_string());
-    let source_version = Some(version_tag.clone());
-    if let Ok(Some(existing_mod_id)) = mods_service.find_existing_mod_installation(&env.output_dir, &source_id, &source_version).await {
-        eprintln!("[install_s1api] S1API version {} already installed with storage_id: {}, skipping download", version_tag, existing_mod_id);
+    // Check if we already have this version stored before downloading
+    let mods_service = ModsService::new(db.inner().clone());
+    let source_id = "ifBars/S1API".to_string();
+    if let Ok(Some(existing_mod_id)) = mods_service
+        .find_existing_mod_storage_by_source_version(&source_id, &version_tag, Some(env.runtime.clone()))
+        .await
+    {
+        eprintln!("[install_s1api] S1API version {} already stored with storage_id: {}, installing from storage", version_tag, existing_mod_id);
+        let install_result = mods_service
+            .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(serde_json::json!({
             "success": true,
-            "message": "S1API already installed",
-            "alreadyInstalled": true
+            "fromStorage": true,
+            "result": install_result
         }));
     }
 
     // Get GitHub service and fetch S1API releases
     eprintln!("[install_s1api] Getting GitHub service...");
-    let github_service = match get_github_service().await {
-        Ok(service) => {
-            eprintln!("[install_s1api] GitHub service obtained");
-            service
-        },
-        Err(e) => return error_json(format!("Failed to get GitHub service: {}", e))
+    let github_service = {
+        let settings_service = match SettingsService::new(db.inner().clone()) {
+            Ok(service) => service,
+            Err(e) => return error_json(format!("Failed to get settings service: {}", e)),
+        };
+        let token = match settings_service.get_github_token().await {
+            Ok(token) => token,
+            Err(e) => return error_json(format!("Failed to load GitHub token: {}", e)),
+        };
+        eprintln!("[install_s1api] GitHub service obtained");
+        GitHubReleasesService::with_token(token)
     };
     
     eprintln!("[install_s1api] Fetching S1API releases from GitHub...");
@@ -382,13 +528,7 @@ pub async fn install_s1api(
     }
     
     // Install from the temp file
-    let mods_service = match get_mods_service().await {
-        Ok(service) => service,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&temp_zip_path).await;
-            return error_json(format!("Failed to get mods service: {}", e));
-        }
-    };
+    let mods_service = ModsService::new(db.inner().clone());
     
     let result = mods_service.install_s1api(
         &env.output_dir,
@@ -410,8 +550,165 @@ pub async fn install_s1api(
 }
 
 #[tauri::command]
-pub async fn uninstall_s1api(environment_id: String) -> Result<serde_json::Value, String> {
-    let env_service = get_env_service().await?;
+pub async fn download_s1api_to_library(
+    db: State<'_, Arc<SqlitePool>>,
+    version_tag: String,
+) -> Result<serde_json::Value, String> {
+    let error_json = |msg: String| -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({
+            "success": false,
+            "error": msg
+        }))
+    };
+
+    let github_service = {
+        let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
+        GitHubReleasesService::with_token(token)
+    };
+
+    let releases = github_service.get_all_releases("ifBars", "S1API", false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let release = match releases.iter()
+        .find(|r| r.get("tag_name")
+            .and_then(|t| t.as_str())
+            .map(|t| t == version_tag)
+            .unwrap_or(false)) {
+        Some(release) => release,
+        None => return error_json(format!("S1API version {} not found", version_tag)),
+    };
+
+    let zip_url = match github_service.get_zip_asset_url(release) {
+        Some(url) => url,
+        None => return error_json(format!("No ZIP asset found for S1API version {}", version_tag)),
+    };
+
+    let zip_bytes = github_service.download_release_asset(&zip_url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let temp_dir = std::env::temp_dir();
+    let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
+    let temp_zip_path = temp_dir.join(format!("s1api-{}.zip", sanitized_tag));
+    tokio::fs::write(&temp_zip_path, zip_bytes).await
+        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+
+    let metadata = build_s1api_library_metadata(&version_tag);
+
+    let mods_service = ModsService::new(db.inner().clone());
+    let result = mods_service
+        .store_mod_archive(
+            &temp_zip_path.to_string_lossy(),
+            "S1API.zip",
+            None,
+            Some(metadata),
+            None,
+        )
+        .await;
+
+    let _ = tokio::fs::remove_file(&temp_zip_path).await;
+
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn download_mlvscan_to_library(
+    db: State<'_, Arc<SqlitePool>>,
+    version_tag: String,
+) -> Result<serde_json::Value, String> {
+    let error_json = |msg: String| -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({
+            "success": false,
+            "error": msg
+        }))
+    };
+
+    let github_service = {
+        let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
+        GitHubReleasesService::with_token(token)
+    };
+
+    let releases = github_service.get_all_releases("ifBars", "MLVScan", false)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let release = match releases.iter()
+        .find(|r| r.get("tag_name")
+            .and_then(|t| t.as_str())
+            .map(|t| t == version_tag)
+            .unwrap_or(false)) {
+        Some(release) => release,
+        None => return error_json(format!("MLVScan version {} not found", version_tag)),
+    };
+
+    let assets = release.get("assets").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    let zip_asset = assets.iter().find(|asset| {
+        asset.get("name")
+            .and_then(|n| n.as_str())
+            .map(|name| name.to_lowercase().ends_with(".zip"))
+            .unwrap_or(false)
+    });
+    let dll_asset = assets.iter().find(|asset| {
+        asset.get("name")
+            .and_then(|n| n.as_str())
+            .map(|name| name.to_lowercase().ends_with(".dll") && name.to_lowercase().contains("mlvscan"))
+            .unwrap_or(false)
+    });
+
+    let (asset_url, asset_name, target) = if let Some(asset) = zip_asset {
+        let url = asset.get("browser_download_url").and_then(|v| v.as_str());
+        let name = asset.get("name").and_then(|v| v.as_str());
+        match (url, name) {
+            (Some(url), Some(name)) => (url.to_string(), name.to_string(), None),
+            _ => return error_json(format!("Invalid ZIP asset for MLVScan version {}", version_tag)),
+        }
+    } else if let Some(asset) = dll_asset {
+        let url = asset.get("browser_download_url").and_then(|v| v.as_str());
+        match url {
+            Some(url) => (url.to_string(), "MLVScan.dll".to_string(), Some("plugins".to_string())),
+            None => return error_json(format!("Invalid DLL asset for MLVScan version {}", version_tag)),
+        }
+    } else {
+        return error_json(format!("No ZIP or DLL asset found for MLVScan version {}", version_tag));
+    };
+
+    let bytes = github_service.download_release_asset(&asset_url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let temp_dir = std::env::temp_dir();
+    let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
+    let temp_path = temp_dir.join(format!("mlvscan-{}-{}", sanitized_tag, asset_name));
+    tokio::fs::write(&temp_path, bytes).await
+        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+
+    let metadata = build_mlvscan_library_metadata(&version_tag);
+
+    let mods_service = ModsService::new(db.inner().clone());
+    let result = mods_service
+        .store_mod_archive(
+            &temp_path.to_string_lossy(),
+            &asset_name,
+            None,
+            Some(metadata),
+            target,
+        )
+        .await;
+
+    let _ = tokio::fs::remove_file(&temp_path).await;
+
+    result.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn uninstall_s1api(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -421,8 +718,70 @@ pub async fn uninstall_s1api(environment_id: String) -> Result<serde_json::Value
         return Err("Output directory not set".to_string());
     }
 
-    let mods_service = get_mods_service().await?;
+    let mods_service = ModsService::new(db.inner().clone());
     mods_service.uninstall_s1api(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
+        parse_runtime_label, UploadKind,
+    };
+
+    #[test]
+    fn detect_upload_kind_matches_supported_extensions() {
+        assert_eq!(detect_upload_kind("C:/mods/a.zip"), UploadKind::Zip);
+        assert_eq!(detect_upload_kind("C:/mods/a.ZIP"), UploadKind::Zip);
+        assert_eq!(detect_upload_kind("C:/mods/a.dll"), UploadKind::Dll);
+        assert_eq!(detect_upload_kind("C:/mods/a.DLL"), UploadKind::Dll);
+        assert_eq!(
+            detect_upload_kind("C:/mods/readme.txt"),
+            UploadKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn parse_runtime_label_accepts_case_insensitive_values() {
+        assert!(matches!(
+            parse_runtime_label(Some("IL2CPP")),
+            Some(crate::types::Runtime::Il2cpp)
+        ));
+        assert!(matches!(
+            parse_runtime_label(Some("mono")),
+            Some(crate::types::Runtime::Mono)
+        ));
+        assert!(parse_runtime_label(Some("unknown")).is_none());
+        assert!(parse_runtime_label(None).is_none());
+    }
+
+    #[test]
+    fn s1api_library_metadata_is_github_sourced() {
+        let metadata = build_s1api_library_metadata("v1.2.3");
+        assert_eq!(metadata.get("source").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(
+            metadata.get("sourceId").and_then(|v| v.as_str()),
+            Some("ifBars/S1API")
+        );
+        assert_eq!(
+            metadata.get("sourceVersion").and_then(|v| v.as_str()),
+            Some("v1.2.3")
+        );
+    }
+
+    #[test]
+    fn mlvscan_library_metadata_is_github_sourced() {
+        let metadata = build_mlvscan_library_metadata("v0.9.1");
+        assert_eq!(metadata.get("source").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(
+            metadata.get("sourceId").and_then(|v| v.as_str()),
+            Some("ifBars/MLVScan")
+        );
+        assert_eq!(
+            metadata.get("sourceVersion").and_then(|v| v.as_str()),
+            Some("v0.9.1")
+        );
+    }
 }

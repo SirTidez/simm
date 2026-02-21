@@ -1,0 +1,41 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Tauri Windows NSIS bundle
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Upload Windows EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simm-windows-exe
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Upload full bundle output
+        uses: actions/upload-artifact@v4
+        with:
+          name: simm-windows-bundle-all
+          path: src-tauri/target/release/bundle/**
