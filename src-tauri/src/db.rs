@@ -11,6 +11,12 @@ use crate::types::{Environment, EnvironmentType, ModMetadata, Settings};
 
 const MIGRATION_FLAG_KEY: &str = "storage.migrated";
 
+fn normalize_path(path: &str) -> String {
+    path.replace('/', "\\")
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
 pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
     let db_path = get_database_path()?;
     if let Some(parent) = db_path.parent() {
@@ -156,13 +162,15 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
     }
 
     for env in &environments {
+        let normalized_output_dir = normalize_path(&env.output_dir);
         let serialized = serde_json::to_string(env)?;
         sqlx::query(
-            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
         )
         .bind(&env.id)
         .bind(&env.output_dir)
+        .bind(normalized_output_dir)
         .bind(serialized)
         .execute(pool)
         .await
@@ -533,12 +541,14 @@ mod tests {
         let env_dir = temp.path().join("envs").join("env-2");
         let env = sample_environment(&env_dir);
         let serialized_env = serde_json::to_string(&env)?;
+        let normalized_output_dir = normalize_path(&env.output_dir);
 
         sqlx::query(
-            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)",
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
         )
         .bind(&env.id)
         .bind(&env.output_dir)
+        .bind(&normalized_output_dir)
         .bind(&serialized_env)
         .execute(&*pool)
         .await?;
@@ -557,12 +567,14 @@ mod tests {
             ..env.clone()
         };
         let updated_serialized = serde_json::to_string(&updated_env)?;
+        let updated_normalized_output_dir = normalize_path(&updated_env.output_dir);
         sqlx::query(
-            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
         )
         .bind(&updated_env.id)
         .bind(&updated_env.output_dir)
+        .bind(&updated_normalized_output_dir)
         .bind(&updated_serialized)
         .execute(&*pool)
         .await?;
@@ -613,6 +625,42 @@ mod tests {
         .fetch_one(&*pool)
         .await?;
         assert_eq!(stored_secret, "secret-data");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn environments_enforce_normalized_output_dir_uniqueness() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+
+        let first_dir = "C:/Games/Schedule I";
+        let second_dir = "C:\\Games\\Schedule I\\";
+
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind("env-a")
+        .bind(first_dir)
+        .bind(normalize_path(first_dir))
+        .bind("{}")
+        .execute(&*pool)
+        .await?;
+
+        let duplicate_result = sqlx::query(
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind("env-b")
+        .bind(second_dir)
+        .bind(normalize_path(second_dir))
+        .bind("{}")
+        .execute(&*pool)
+        .await;
+
+        assert!(duplicate_result.is_err());
 
         Ok(())
     }

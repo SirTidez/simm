@@ -11,7 +11,7 @@ interface EnvironmentStoreContextValue {
   refreshEnvironments: () => Promise<void>;
   createEnvironment: (data: { appId: string; branch: string; outputDir: string; name?: string; description?: string }) => Promise<Environment>;
   updateEnvironment: (id: string, updates: Partial<Environment>) => Promise<void>;
-  deleteEnvironment: (id: string) => Promise<void>;
+  deleteEnvironment: (id: string, deleteFiles?: boolean) => Promise<void>;
   startDownload: (environmentId: string) => Promise<void>;
   cancelDownload: (downloadId: string) => Promise<void>;
   checkUpdate: (environmentId: string, manual?: boolean) => Promise<void>;
@@ -94,10 +94,10 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
   }, []);
 
-  const deleteEnvironment = useCallback(async (id: string) => {
+  const deleteEnvironment = useCallback(async (id: string, deleteFiles?: boolean) => {
     try {
-      await ApiService.deleteEnvironment(id);
-      setEnvironments(prev => prev.filter(env => env.id !== id));
+      await ApiService.deleteEnvironment(id, deleteFiles);
+      await refreshEnvironments();
       setProgress(prev => {
         const next = new Map(prev);
         next.delete(id);
@@ -106,7 +106,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     } catch (err) {
       throw err;
     }
-  }, []);
+  }, [refreshEnvironments]);
 
   const startDownload = useCallback(async (environmentId: string) => {
     try {

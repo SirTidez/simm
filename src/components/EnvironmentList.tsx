@@ -106,6 +106,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
   const [installingMelonLoader, setInstallingMelonLoader] = useState<Set<string>>(new Set());
   const [messageOverlay, setMessageOverlay] = useState<{ isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info' }>({ isOpen: false, title: '', message: '', type: 'info' });
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
+  const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
   const [launchDropdownOpen, setLaunchDropdownOpen] = useState<string | null>(null);
   const initialDetectionNotifiedRef = useRef(false);
 
@@ -574,13 +575,25 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
     }
   };
 
-  const handleDelete = async (env: Environment) => {
-    if (confirm(`Are you sure you want to delete "${env.name}"?`)) {
-      try {
-        await deleteEnvironment(env.id);
-      } catch (err) {
-        alert(`Failed to delete game install: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      }
+  const handleDelete = (env: Environment) => {
+    setDeleteConfirm({ isOpen: true, env, deleteFiles: false });
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteConfirm.env) return;
+    const env = deleteConfirm.env;
+    const deleteFiles = deleteConfirm.deleteFiles;
+    setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false });
+
+    try {
+      await deleteEnvironment(env.id, deleteFiles);
+    } catch (err) {
+      setMessageOverlay({
+        isOpen: true,
+        title: 'Delete Failed',
+        message: `Failed to delete game install: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        type: 'error'
+      });
     }
   };
 
@@ -1099,6 +1112,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
       'downloading': { text: 'Downloading', className: 'badge-blue' },
       'validating': { text: 'Validating', className: 'badge-yellow' },
       'completed': { text: 'Ready', className: 'badge-green' },
+      'unavailable': { text: 'Unavailable', className: 'badge-orange' },
       'error': { text: 'Error', className: 'badge-red' },
       'cancelled': { text: 'Cancelled', className: 'badge-gray' }
     };
@@ -1230,6 +1244,59 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
         title={confirmOverlay.title}
         message={confirmOverlay.message}
       />
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirm.isOpen && deleteConfirm.env && (
+        <div className="modal-overlay" onClick={() => setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false })}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '450px' }}>
+            <div className="modal-header">
+              <h2>Delete Environment</h2>
+              <button className="modal-close" onClick={() => setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false })}>×</button>
+            </div>
+            <div style={{ padding: '1.5rem' }}>
+              <p style={{ marginBottom: '1rem', color: '#cccccc' }}>
+                {deleteConfirm.env.environmentType === 'steam'
+                  ? <>Clear tracked mod records for <strong>"{deleteConfirm.env.name}"</strong>?</>
+                  : <>Are you sure you want to remove <strong>"{deleteConfirm.env.name}"</strong> from the manager?</>}
+              </p>
+
+              {(deleteConfirm.env.environmentType === 'depotDownloader' || deleteConfirm.env.environmentType === 'local') && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={deleteConfirm.deleteFiles}
+                    onChange={(e) => setDeleteConfirm(prev => ({ ...prev, deleteFiles: e.target.checked }))}
+                    style={{ width: '18px', height: '18px' }}
+                  />
+                  <span style={{ color: '#ff6b6b' }}>Also delete game files from disk</span>
+                </label>
+              )}
+
+              {deleteConfirm.env.environmentType === 'steam' && (
+                <p style={{ fontSize: '0.85rem', color: '#888', marginBottom: '1rem' }}>
+                  <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
+                  Steam manages this installation. This action clears mod/plugin tracking only.
+                </p>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+                <button className="btn btn-secondary" onClick={() => setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false })}>
+                  Cancel
+                </button>
+                <button
+                  className="btn"
+                  style={{ backgroundColor: deleteConfirm.deleteFiles ? '#dc3545' : 'var(--primary-btn-color, #646cff)' }}
+                  onClick={handleConfirmDelete}
+                >
+                  {deleteConfirm.env.environmentType === 'steam'
+                    ? 'Clear Mod Records'
+                    : (deleteConfirm.deleteFiles ? 'Delete Environment & Files' : 'Remove from Manager')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <MessageOverlay
         isOpen={messageOverlay.isOpen}

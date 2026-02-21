@@ -7,6 +7,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::State;
 
+fn normalize_path(path: &str) -> String {
+    path.replace('/', "\\")
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
 fn parse_updates_object(
     updates: serde_json::Value,
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
@@ -60,9 +66,16 @@ async fn update_environment_impl(
         .map_err(|e| e.to_string())
 }
 
-async fn delete_environment_impl(db: Arc<SqlitePool>, id: String) -> Result<bool, String> {
+async fn delete_environment_impl(
+    db: Arc<SqlitePool>,
+    id: String,
+    delete_files: bool,
+) -> Result<bool, String> {
     let service = EnvironmentService::new(db).map_err(|e| e.to_string())?;
-    service.delete_environment(&id).await.map_err(|e| e.to_string())
+    service
+        .delete_environment(&id, delete_files)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Start filesystem watchers for an environment's Mods/Plugins/UserLibs (reused by get_environments and create_*).
@@ -89,11 +102,49 @@ pub async fn get_environments(
         .await
         .map_err(|e| e.to_string())?;
 
-    let normalize_path = |path: &str| {
-        path.replace('/', "\\")
-            .trim_end_matches(['\\', '/'])
-            .to_ascii_lowercase()
-    };
+    let steam_service = crate::services::steam::SteamService::new();
+    let detected_steam_path = steam_service
+        .detect_steam_installations()
+        .await
+        .ok()
+        .and_then(|installations| installations.into_iter().next().map(|i| i.path));
+
+    for env in envs.iter_mut() {
+        let is_steam = env.environment_type == Some(crate::types::EnvironmentType::Steam)
+            || env.id.starts_with("steam-");
+        if !is_steam {
+            continue;
+        }
+
+        let is_current_path_valid = crate::services::steam::SteamService::validate_steam_installation(
+            std::path::Path::new(&env.output_dir),
+        )
+        .unwrap_or(false);
+
+        if is_current_path_valid {
+            if !matches!(env.status, crate::types::EnvironmentStatus::Completed) {
+                env.status = crate::types::EnvironmentStatus::Completed;
+                env.last_updated = Some(chrono::Utc::now());
+                service.upsert_environment(env).await.map_err(|e| e.to_string())?;
+            }
+            continue;
+        }
+
+        if let Some(path) = &detected_steam_path {
+            if normalize_path(&env.output_dir) != normalize_path(path)
+                || !matches!(env.status, crate::types::EnvironmentStatus::Completed)
+            {
+                env.output_dir = path.clone();
+                env.status = crate::types::EnvironmentStatus::Completed;
+                env.last_updated = Some(chrono::Utc::now());
+                service.upsert_environment(env).await.map_err(|e| e.to_string())?;
+            }
+        } else if !matches!(env.status, crate::types::EnvironmentStatus::Unavailable) {
+            env.status = crate::types::EnvironmentStatus::Unavailable;
+            env.last_updated = Some(chrono::Utc::now());
+            service.upsert_environment(env).await.map_err(|e| e.to_string())?;
+        }
+    }
 
     let has_steam_env = envs.iter().any(|env| {
         env.environment_type == Some(crate::types::EnvironmentType::Steam)
@@ -102,17 +153,12 @@ pub async fn get_environments(
 
     // Auto-detect and create Steam environment only if none exists
     if !has_steam_env {
-        let steam_service = crate::services::steam::SteamService::new();
-        if let Ok(steam_installations) = steam_service.detect_steam_installations().await {
-            if let Some(installation) = steam_installations.first() {
-                let steam_env = service
-                    .create_steam_environment(installation.path.clone(), None, None)
-                    .await;
-                if let Ok(env) = steam_env {
-                    let watcher_guard = watcher.lock().await;
-                    start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
-                    envs.push(env);
-                }
+        if let Some(path) = detected_steam_path {
+            let steam_env = service.create_steam_environment(path, None, None).await;
+            if let Ok(env) = steam_env {
+                let watcher_guard = watcher.lock().await;
+                start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
+                envs.push(env);
             }
         }
     }
@@ -194,13 +240,32 @@ pub async fn delete_environment(
     db: State<'_, Arc<SqlitePool>>,
     watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
     id: String,
+    delete_files: Option<bool>,
 ) -> Result<bool, String> {
-    // Stop watching directories before deleting
-    let watcher_guard = watcher.lock().await;
-    let _ = watcher_guard.stop_watching_environment(&id).await;
-    drop(watcher_guard);
+    let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let existing_env = service.get_environment(&id).await.map_err(|e| e.to_string())?;
+    let is_steam_env = existing_env.as_ref().is_some_and(|env| {
+        env.environment_type == Some(crate::types::EnvironmentType::Steam)
+            || env.id.starts_with("steam-")
+    });
 
-    delete_environment_impl(db.inner().clone(), id).await
+    if !is_steam_env {
+        // Stop watching directories before deleting non-Steam environments.
+        let watcher_guard = watcher.lock().await;
+        let _ = watcher_guard.stop_watching_environment(&id).await;
+    }
+
+    let deleted = delete_environment_impl(db.inner().clone(), id.clone(), delete_files.unwrap_or(false)).await?;
+
+    if is_steam_env {
+        // Steam delete action clears metadata only; keep watchers active and aligned.
+        if let Some(updated_env) = service.get_environment(&id).await.map_err(|e| e.to_string())? {
+            let watcher_guard = watcher.lock().await;
+            start_watchers_for_env(&watcher_guard, &updated_env.id, &updated_env.output_dir).await;
+        }
+    }
+
+    Ok(deleted)
 }
 
 #[tauri::command]
@@ -230,6 +295,26 @@ pub async fn create_steam_environment(
 ) -> Result<Environment, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = service.create_steam_environment(steam_path.clone(), name, description)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let watcher_guard = watcher.lock().await;
+    start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
+
+    Ok(env)
+}
+
+#[tauri::command]
+pub async fn import_local_environment(
+    db: State<'_, Arc<SqlitePool>>,
+    watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
+    local_path: String,
+    name: Option<String>,
+    description: Option<String>,
+) -> Result<Environment, String> {
+    let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = service
+        .create_local_environment(local_path, name, description)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -284,7 +369,7 @@ mod tests {
         .expect("update");
         assert_eq!(updated.name, "Env A Updated");
 
-        let deleted = delete_environment_impl(pool.clone(), created.id.clone())
+        let deleted = delete_environment_impl(pool.clone(), created.id.clone(), true)
             .await
             .expect("delete");
         assert!(deleted);

@@ -60,12 +60,22 @@ impl ModsService {
         Path::new(output_dir).join("Plugins")
     }
 
+    fn normalize_path(path: &str) -> String {
+        path.replace('/', "\\")
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase()
+    }
+
     async fn environment_id_for_dir(&self, game_dir: &str) -> Result<Option<String>> {
         if game_dir.is_empty() {
             return Ok(None);
         }
 
-        let id = sqlx::query_scalar::<_, String>("SELECT id FROM environments WHERE output_dir = ?")
+        let normalized_game_dir = Self::normalize_path(game_dir);
+        let id = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM environments WHERE normalized_output_dir = ? OR output_dir = ? LIMIT 1",
+        )
+            .bind(normalized_game_dir)
             .bind(game_dir)
             .fetch_optional(&*self.pool)
             .await

@@ -90,6 +90,7 @@ pub enum EnvironmentStatus {
     NotDownloaded,
     Downloading,
     Completed,
+    Unavailable,
     Error,
 }
 
@@ -98,6 +99,7 @@ pub enum EnvironmentStatus {
 pub enum EnvironmentType {
     Steam,
     DepotDownloader,
+    Local,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

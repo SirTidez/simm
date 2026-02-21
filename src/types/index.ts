@@ -25,7 +25,7 @@ export interface Environment {
   branch: string;
   outputDir: string;
   runtime: 'IL2CPP' | 'Mono';
-  status: 'not_downloaded' | 'downloading' | 'completed' | 'error';
+  status: 'not_downloaded' | 'downloading' | 'completed' | 'unavailable' | 'error';
   lastUpdated?: string;
   size?: number;
   lastManifestId?: string;
@@ -36,7 +36,7 @@ export interface Environment {
   currentGameVersion?: string;
   updateGameVersion?: string;
   melonLoaderVersion?: string;
-  environmentType?: 'Steam' | 'DepotDownloader';
+  environmentType?: 'Steam' | 'DepotDownloader' | 'steam' | 'depotDownloader' | 'local';
 }
 
 export interface UpdateCheckResult {

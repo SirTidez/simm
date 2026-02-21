@@ -8,7 +8,7 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     clearMocks: true,
     restoreMocks: true,
-    exclude: ['e2e/**', 'node_modules/**'],
+    exclude: ['e2e/**', 'node_modules/**', '**/node_modules/**', '.browser-pilot/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
