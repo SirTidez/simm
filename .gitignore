@@ -1,5 +1,6 @@
 /target
 /node_modules
+/.worktrees
 package-lock.json
 /dist
 /new-app-icon-square.png
