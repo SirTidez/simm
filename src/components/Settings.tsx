@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
@@ -34,27 +34,31 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [browsing, setBrowsing] = useState(false);
   const [melonLoaderVersions, setMelonLoaderVersions] = useState<Array<{ tag: string; name: string }>>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Handle escape key to close modal
+  // Keep escape close behavior predictable in docked mode
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
+        if (showThemeEditor) {
+          return;
+        }
+        if (showDirectoryPicker) {
+          setShowDirectoryPicker(false);
+          return;
+        }
         onClose();
       }
     };
 
     if (isOpen) {
       document.addEventListener('keydown', handleEscape);
-      // Prevent body scroll when modal is open
-      document.body.style.overflow = 'hidden';
     }
 
     return () => {
       document.removeEventListener('keydown', handleEscape);
-      document.body.style.overflow = '';
     };
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, showDirectoryPicker, showThemeEditor]);
 
   useEffect(() => {
     if (settings) {
@@ -169,33 +173,27 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   return (
     <>
       {isOpen && (
-        <div
-          className="modal-overlay"
-          onClick={onClose}
+        <section
+          className="modal-content"
           style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            width: '100vw',
-            height: '100vh',
-            zIndex: 10000
+            width: '100%',
+            height: '100%',
+            maxWidth: 'none',
+            margin: 0,
+            borderRadius: '0.75rem',
+            display: 'flex',
+            flexDirection: 'column'
           }}
+          aria-label="Settings panel"
         >
-          <div
-            className="modal-content"
-            onClick={(e) => e.stopPropagation()}
-            style={{ zIndex: 10001 }}
-          >
             <div className="modal-header">
               <h2>Settings</h2>
-              <button className="modal-close" onClick={onClose}>×</button>
+              <button className="modal-close" onClick={onClose} aria-label="Close settings panel">×</button>
             </div>
 
             {error && <div className="error-message" style={{ margin: '0 1.25rem', padding: '0.75rem', backgroundColor: '#dc3545', color: '#fff', borderRadius: '4px' }}>{error}</div>}
 
-            <div className="settings-content">
+            <div className="settings-content" style={{ flex: 1, overflowY: 'auto' }}>
               <div className="settings-section">
                 <h3>Appearance</h3>
                 <div className="form-group">
@@ -219,7 +217,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       className="btn btn-secondary"
                     >
                       <i className="fas fa-paint-brush" style={{ marginRight: '0.5rem' }}></i>
-                      Edit Custom Theme
+                      Open Custom Theme Editor
                     </button>
                   </div>
                 )}
@@ -239,7 +237,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 ) : (
                   <div className="warning-box">
                     <p>DepotDownloader is not installed.</p>
-                    <p>Install it using:</p>
+                    <p>Install with:</p>
                     <code>winget install --exact --id SteamRE.DepotDownloader</code>
                   </div>
                 )}
@@ -307,7 +305,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     )}
                   </select>
                   <small style={{ color: '#888', display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
-                    Select a version to automatically install when creating new environments
+                    Automatically install this version for newly created environments.
                   </small>
                 </div>
                 <div className="form-group">
@@ -317,7 +315,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       checked={formData.autoInstallMelonLoader || false}
                       onChange={(e) => setFormData({ ...formData, autoInstallMelonLoader: e.target.checked })}
                     />
-                    Automatically install MelonLoader after download completes
+                    Automatically install MelonLoader after download completion
                   </label>
                 </div>
               </div>
@@ -344,7 +342,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     max="1440"
                   />
                   <small style={{ color: '#888', display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
-                    How often to automatically check for game updates (1-1440 minutes)
+                    Automatic check interval (1-1440 minutes).
                   </small>
                 </div>
                 <div className="form-group">
@@ -368,7 +366,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     className="btn btn-secondary"
                     style={{ opacity: checkingAllUpdates ? 0.6 : 1 }}
                   >
-                    {checkingAllUpdates ? 'Checking...' : 'Check All Updates Now'}
+                    {checkingAllUpdates ? 'Checking...' : 'Check All Updates'}
                   </button>
                 </div>
               </div>
@@ -392,8 +390,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 </div>
               </div>
             </div>
-          </div>
-        </div>
+        </section>
       )}
 
       <CustomThemeEditor isOpen={showThemeEditor} onClose={() => setShowThemeEditor(false)} />

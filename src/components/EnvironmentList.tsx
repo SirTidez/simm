@@ -47,9 +47,33 @@ const LAST_ENV_KEY = 'simm:lastEnvId';
 
 interface EnvironmentListProps {
   onInitialDetectionComplete?: () => void;
+  compactMode?: boolean;
+  activeWorkspace?: WorkspaceRoute;
+  onOpenWorkspace?: (workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => void;
+  onSelectEnvironment?: (environmentId: string) => void;
 }
 
-export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListProps) {
+export type WorkspaceRoute =
+  | { view: 'home' }
+  | { view: 'library' }
+  | { view: 'mods'; environmentId: string }
+  | { view: 'plugins'; environmentId: string }
+  | { view: 'userLibs'; environmentId: string }
+  | { view: 'logs'; environmentId: string }
+  | { view: 'config'; environmentId: string }
+  | { view: 'settings' }
+  | { view: 'accounts' }
+  | { view: 'help' }
+  | { view: 'welcome' }
+  | { view: 'wizard' };
+
+export function EnvironmentList({
+  onInitialDetectionComplete,
+  compactMode = false,
+  activeWorkspace,
+  onOpenWorkspace,
+  onSelectEnvironment
+}: EnvironmentListProps) {
   const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
   const { settings } = useSettingsStore();
   const autoCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -130,7 +154,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
 
       if (!hasCredentials) {
         // Show authentication modal
-        setAuthModal({ isOpen: true, envId: env.id });
+        setAuthModal({ isOpen: true, envId: env.id, waiting: false });
         return;
       }
 
@@ -139,7 +163,7 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
     } catch (err: any) {
       // Check if error indicates authentication is required
       if (err?.response?.data?.requiresAuth || err?.message?.includes('authentication')) {
-        setAuthModal({ isOpen: true, envId: env.id });
+        setAuthModal({ isOpen: true, envId: env.id, waiting: false });
       } else {
         alert(`Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`);
       }
@@ -794,6 +818,10 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
 
   const handleOpenModsOverlay = (envId: string) => {
     rememberEnvironment(envId);
+    if (onOpenWorkspace) {
+      onOpenWorkspace({ view: 'mods', environmentId: envId });
+      return;
+    }
     setModsOverlay({ isOpen: true, envId });
   };
 
@@ -836,6 +864,10 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
 
   const handleOpenPluginsOverlay = (envId: string) => {
     rememberEnvironment(envId);
+    if (onOpenWorkspace) {
+      onOpenWorkspace({ view: 'plugins', environmentId: envId });
+      return;
+    }
     setPluginsOverlay({ isOpen: true, envId });
   };
 
@@ -869,11 +901,19 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
 
   const handleOpenUserLibsOverlay = (envId: string) => {
     rememberEnvironment(envId);
+    if (onOpenWorkspace) {
+      onOpenWorkspace({ view: 'userLibs', environmentId: envId });
+      return;
+    }
     setUserLibsOverlay({ isOpen: true, envId });
   };
 
   const handleOpenLogsOverlay = (envId: string) => {
     rememberEnvironment(envId);
+    if (onOpenWorkspace) {
+      onOpenWorkspace({ view: 'logs', environmentId: envId });
+      return;
+    }
     setLogsOverlay({ isOpen: true, envId });
   };
 
@@ -883,6 +923,10 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
 
   const handleOpenConfigOverlay = (envId: string) => {
     rememberEnvironment(envId);
+    if (onOpenWorkspace) {
+      onOpenWorkspace({ view: 'config', environmentId: envId });
+      return;
+    }
     setConfigOverlay({ isOpen: true, envId });
   };
 
@@ -1084,42 +1128,6 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
     );
   };
 
-  const formatLastCheck = (dateValue?: string | number) => {
-    if (!dateValue) return 'Never';
-    try {
-      // Handle both string dates and timestamp numbers (seconds or milliseconds)
-      let date: Date;
-      if (typeof dateValue === 'number') {
-        // If it's a number, check if it's seconds (less than year 2000 in ms) or milliseconds
-        // Timestamps after 2000-01-01 in seconds would be > 946684800
-        // Timestamps after 2000-01-01 in milliseconds would be > 946684800000
-        date = dateValue < 946684800000
-          ? new Date(dateValue * 1000) // Convert seconds to milliseconds
-          : new Date(dateValue); // Already in milliseconds
-      } else {
-        date = new Date(dateValue);
-      }
-
-      // Check if date is valid
-      if (isNaN(date.getTime())) {
-        return 'Invalid date';
-      }
-
-      const now = new Date();
-      const diffMs = now.getTime() - date.getTime();
-      const diffMins = Math.floor(diffMs / 60000);
-      const diffHours = Math.floor(diffMs / 3600000);
-      const diffDays = Math.floor(diffMs / 86400000);
-
-      if (diffMins < 1) return 'Just now';
-      if (diffMins < 60) return `${diffMins} minute${diffMins !== 1 ? 's' : ''} ago`;
-      if (diffHours < 24) return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
-      return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
-    } catch {
-      return 'Unknown';
-    }
-  };
-
   const getStatusBadge = (env: Environment) => {
     const prog = progress.get(env.id);
     const status = prog?.status || env.status;
@@ -1172,6 +1180,44 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
     return (
       <div className="empty-state">
         <p>No game installs yet. Create one to get started!</p>
+      </div>
+    );
+  }
+
+  if (compactMode) {
+    const selectedEnvironmentId =
+      activeWorkspace && 'environmentId' in activeWorkspace
+        ? activeWorkspace.environmentId
+        : null;
+
+    return (
+      <div className="workspace-environment-sidebar" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <h3 style={{ margin: 0 }}>Environments</h3>
+        <p style={{ margin: 0, color: 'var(--text-secondary, #9aa4b2)', fontSize: '0.72rem' }}>
+          Select an environment to open its active tools workspace.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+          {[...environments].sort((a, b) => a.name.localeCompare(b.name)).map((env) => (
+            <button
+              key={env.id}
+              onClick={() => {
+                rememberEnvironment(env.id);
+                onSelectEnvironment?.(env.id);
+              }}
+              className="btn btn-secondary"
+              style={{
+                justifyContent: 'flex-start',
+                textAlign: 'left',
+                width: '100%',
+                borderColor: selectedEnvironmentId === env.id ? 'var(--primary-btn-color, #646cff)' : undefined,
+                backgroundColor: selectedEnvironmentId === env.id ? 'rgba(100, 108, 255, 0.18)' : undefined
+              }}
+              title={env.name}
+            >
+              {env.name}
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
@@ -1836,18 +1882,12 @@ export function EnvironmentList({ onInitialDetectionComplete }: EnvironmentListP
                     </div>
                   </>
                 )}
-                {env.status === 'completed' && (
+                {env.status === 'completed' && checkingEnvironments.has(env.id) && (
                   <div className="environment-info-panel">
                     <p className="info-panel-text">
-                      {checkingEnvironments.has(env.id) ? (
-                        <>
-                          <strong>Checking</strong><span className="checking-dots"></span>
-                        </>
-                      ) : (
-                        <>
-                          <strong>Last checked:</strong> {formatLastCheck(env.lastUpdateCheck)}
-                        </>
-                      )}
+                      <>
+                        <strong>Checking</strong><span className="checking-dots"></span>
+                      </>
                     </p>
                   </div>
                 )}

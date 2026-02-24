@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
@@ -16,6 +16,19 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   const [nexusModsApiKey, setNexusModsApiKey] = useState('');
   const [validatingNexusMods, setValidatingNexusMods] = useState(false);
   const [nexusModsError, setNexusModsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !showAuthModal) {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [isOpen, onClose, showAuthModal]);
 
   // Check if GitHub token is set on mount
   useEffect(() => {
@@ -146,14 +159,25 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
   return (
     <>
-      <div className="modal-overlay" onClick={onClose}>
-        <div className="modal-content steam-account-overlay" onClick={(e) => e.stopPropagation()}>
+      <section
+        className="modal-content steam-account-overlay"
+        style={{
+          width: '100%',
+          height: '100%',
+          maxWidth: 'none',
+          margin: 0,
+          borderRadius: '0.75rem',
+          display: 'flex',
+          flexDirection: 'column'
+        }}
+        aria-label="Account panel"
+      >
           <div className="modal-header">
-            <h2>Steam Account</h2>
-            <button className="modal-close" onClick={onClose}>×</button>
+            <h2>Accounts</h2>
+            <button className="modal-close" onClick={onClose} aria-label="Close accounts panel">×</button>
           </div>
 
-          <div className="steam-account-content">
+          <div className="steam-account-content" style={{ flex: 1, overflowY: 'auto' }}>
             {settings?.steamUsername ? (
               <div className="steam-account-info">
                 <div className="steam-account-avatar">
@@ -161,21 +185,21 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 </div>
                 <div className="steam-account-details">
                   <div className="steam-account-username">
-                    <strong>Username:</strong>
+                    <strong>Account:</strong>
                     <span>{settings.steamUsername}</span>
                   </div>
                   <div className="steam-account-status">
                     <i className="fas fa-check-circle" style={{ color: '#4caf50', marginRight: '0.5rem' }}></i>
-                    <span>Authenticated</span>
+                    <span>Connected</span>
                   </div>
                 </div>
               </div>
             ) : (
               <div className="steam-account-not-authenticated">
                 <i className="fas fa-exclamation-triangle" style={{ fontSize: '2rem', color: '#ffaa00', marginBottom: '1rem' }}></i>
-                <p>No Steam account authenticated</p>
+                <p>No Steam account connected</p>
                 <p style={{ color: '#888', fontSize: '0.9rem', marginTop: '0.5rem' }}>
-                  Authenticate with Steam to download game branches
+                  Connect Steam to download protected branches.
                 </p>
               </div>
             )}
@@ -189,12 +213,12 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 {settings?.steamUsername ? (
                   <>
                     <i className="fas fa-sync-alt" style={{ marginRight: '0.5rem' }}></i>
-                    Re-authenticate with Steam
+                    Reconnect Steam
                   </>
                 ) : (
                   <>
                     <i className="fas fa-sign-in-alt" style={{ marginRight: '0.5rem' }}></i>
-                    Authenticate with Steam
+                    Connect Steam
                   </>
                 )}
               </button>
@@ -203,7 +227,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             <div className="steam-account-note">
               <p>
                 <i className="fas fa-info-circle" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-                Your credentials are encrypted and stored locally. They are only used to authenticate with Steam for downloading game branches.
+                Credentials are encrypted and kept local. They are only used for Steam branch access.
               </p>
             </div>
 
@@ -222,7 +246,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 gap: '0.5rem'
               }}>
                 <i className="fab fa-github"></i>
-                GitHub Authentication
+                GitHub Access
               </h3>
               {githubTokenSet ? (
                 <div style={{
@@ -235,7 +259,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       <i className="fas fa-check-circle" style={{ color: '#4caf50' }}></i>
-                      <span>GitHub API token is set (encrypted)</span>
+                      <span>GitHub token is saved (encrypted)</span>
                     </div>
                     <button
                       onClick={handleRemoveGithubToken}
@@ -304,12 +328,12 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                       {validatingGithub ? (
                         <>
                           <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                          Setting...
+                           Saving...
                         </>
                       ) : (
                         <>
                           <i className="fas fa-key" style={{ marginRight: '0.5rem' }}></i>
-                          Set Token
+                           Save Token
                         </>
                       )}
                     </button>
@@ -322,7 +346,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 marginTop: '0.5rem',
                 lineHeight: '1.4'
               }}>
-                Used for authenticated GitHub API requests to fetch MelonLoader releases. Get your token from{' '}
+                Used for authenticated GitHub API requests for MelonLoader releases. Generate a token in{' '}
                 <a
                   href="https://github.com/settings/tokens"
                   target="_blank"
@@ -350,7 +374,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 gap: '0.5rem'
               }}>
                 <i className="fas fa-download"></i>
-                NexusMods Authentication
+                NexusMods Access
               </h3>
               {nexusModsApiKeySet ? (
                 <div style={{
@@ -363,7 +387,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       <i className="fas fa-check-circle" style={{ color: '#4caf50' }}></i>
-                      <span>NexusMods API key is set (encrypted)</span>
+                      <span>NexusMods API key is saved (encrypted)</span>
                     </div>
                     <button
                       onClick={handleRemoveNexusModsApiKey}
@@ -459,7 +483,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                       ) : (
                         <>
                           <i className="fas fa-key" style={{ marginRight: '0.5rem' }}></i>
-                          Set API Key
+                           Save API Key
                         </>
                       )}
                     </button>
@@ -472,7 +496,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 marginTop: '0.5rem',
                 lineHeight: '1.4'
               }}>
-                Used for searching and downloading mods from NexusMods. Get your API key from{' '}
+                Used for searching and downloading mods from NexusMods. Get your key from{' '}
                 <a
                   href="https://www.nexusmods.com/users/myaccount?tab=api"
                   target="_blank"
@@ -485,8 +509,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
               </p>
             </div>
           </div>
-        </div>
-      </div>
+      </section>
 
       {showAuthModal && (
         <AuthenticationModal

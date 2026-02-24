@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { ApiService } from '../services/api';
 import type { Environment, ConfigFile, ConfigSection, ConfigUpdate } from '../types';
 
@@ -134,22 +134,26 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content config-overlay" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '90vw', height: '85vh', display: 'flex', flexDirection: 'column' }}>
-        {/* Header */}
-        <div className="modal-header">
-          <h2>Mod Configuration</h2>
+    <div className="config-overlay" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* Header */}
+      <div className="modal-header" style={{ borderBottom: '1px solid #3a3a3a', padding: '0.9rem 1.25rem' }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Configuration - {environment.name}</h2>
+            <p style={{ margin: '0.35rem 0 0 0', color: '#888', fontSize: '0.8rem' }}>
+              Edit loader and mod configuration values for this environment.
+            </p>
+          </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             {hasChanges && (
               <>
                 <button
                   onClick={handleDiscard}
                   disabled={saving}
-                  className="btn btn-secondary"
-                  style={{ fontSize: '0.875rem' }}
-                >
-                  Discard Changes
-                </button>
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.875rem' }}
+                  >
+                    Revert Draft
+                  </button>
                 <button
                   onClick={handleSave}
                   disabled={saving}
@@ -164,18 +168,21 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                   ) : (
                     <>
                       <i className="fas fa-save" style={{ marginRight: '0.5rem' }}></i>
-                      Save Changes
+                      Save Draft
                     </>
                   )}
                 </button>
               </>
             )}
-            <button className="modal-close" onClick={onClose}>×</button>
+            <button className="btn btn-secondary btn-small" onClick={onClose}>
+              <i className="fas fa-arrow-left" style={{ marginRight: '0.4rem' }}></i>
+              Back
+            </button>
           </div>
         </div>
 
         {/* Content */}
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
           {/* Left Sidebar - Mod List */}
           <div style={{ width: '250px', borderRight: '1px solid #3a3a3a', overflowY: 'auto', backgroundColor: '#1a1a1a' }}>
             {/* Loader Settings */}
@@ -339,7 +346,6 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
             )}
           </div>
         </div>
-      </div>
     </div>
   );
 }

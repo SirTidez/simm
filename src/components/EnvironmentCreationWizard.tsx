@@ -33,6 +33,22 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [importingLocal, setImportingLocal] = useState(false);
 
   useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+
+      if (showDirectoryPicker) {
+        setShowDirectoryPicker(false);
+        return;
+      }
+
+      onClose();
+    };
+
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose, showDirectoryPicker]);
+
+  useEffect(() => {
     loadSchedule1Config();
     // Don't auto-set outputDir here - wait for branch selection
   }, [settings]);
@@ -222,15 +238,27 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const isSteamAuthenticated = Boolean(settings?.steamUsername);
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+    <section
+      className="modal-content"
+      style={{
+        width: '100%',
+        height: '100%',
+        maxWidth: 'none',
+        margin: 0,
+        borderRadius: '0.75rem',
+        display: 'flex',
+        flexDirection: 'column'
+      }}
+      aria-label="Create environment panel"
+    >
         <div className="modal-header">
-          <h2>Create New Game Install</h2>
-          <button className="modal-close" onClick={onClose}>×</button>
+          <h2>Create Environment</h2>
+          <button className="modal-close" onClick={onClose} aria-label="Close create environment panel">×</button>
         </div>
 
         {error && <div className="error-message">{error}</div>}
 
+        <div style={{ flex: 1, overflowY: 'auto' }}>
         {!showSteamDetection && !showImportLocal && step === 1 && (
           <div className="wizard-step">
             {!hasSteamEnvironment && (
@@ -238,10 +266,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
                   <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     <i className="fab fa-steam" style={{ color: '#00bcd4' }}></i>
-                    Steam Installation
+                    Link Existing Steam Install
                   </h4>
                   <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
-                    Add your existing Steam installation to manage mods, plugins, and view logs. Steam will handle game updates.
+                    Add your current Steam install to manage mods, plugins, and logs. Steam continues to handle updates.
                   </p>
                   <button
                     onClick={handleDetectSteam}
@@ -257,23 +285,23 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     ) : (
                       <>
                         <i className="fab fa-steam" style={{ marginRight: '0.5rem' }}></i>
-                        Detect Steam Installation
+                        Detect Steam Install
                       </>
                     )}
                   </button>
                 </div>
                 <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
-                  <span>OR</span>
+                  <span>or</span>
                 </div>
               </>
             )}
             <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
               <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <i className="fas fa-folder-open" style={{ color: '#4caf50' }}></i>
-                Import Existing Installation
+                Import Existing Folder
               </h4>
               <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
-                Add an existing game folder you've already downloaded or copied. Detects runtime, version, and installed mods automatically.
+                Add a game folder that is already downloaded or copied. Runtime, version, and installed mods are detected automatically.
               </p>
               <button
                 onClick={() => setShowImportLocal(true)}
@@ -281,14 +309,14 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 style={{ width: '100%' }}
               >
                 <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
-                Import Existing Folder
+                Import Folder
               </button>
             </div>
 
             <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
-              <span>OR</span>
+              <span>or</span>
             </div>
-            <h3>Select Branch (DepotDownloader)</h3>
+            <h3>Download New Branch (DepotDownloader)</h3>
             {appConfig ? (
               <div className="branch-list">
                 {appConfig.branches.map(branch => {
@@ -443,7 +471,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 className="btn btn-primary"
                 disabled={loading || !outputDir}
               >
-                {loading ? 'Creating...' : 'Create Game Install'}
+                {loading ? 'Creating...' : 'Create Environment'}
               </button>
             </div>
           </div>
@@ -452,7 +480,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         {showSteamDetection && (
           <div className="wizard-step">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>Steam Installation Detected</h3>
+              <h3>Detected Steam Installs</h3>
               <button
                 onClick={() => {
                   setShowSteamDetection(false);
@@ -545,7 +573,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         {showImportLocal && (
           <div className="wizard-step">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>Import Existing Installation</h3>
+              <h3>Import Existing Folder</h3>
               <button
                 onClick={() => {
                   setShowImportLocal(false);
@@ -641,7 +669,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             </div>
           </div>
         )}
-      </div>
+        </div>
 
       {/* Directory Picker Modal */}
       {showDirectoryPicker && (
@@ -744,7 +772,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     const parentPath = getParentPath(directoryPath);
                     return parentPath ? (
                       <div
-                        onClick={() => loadDirectory(parentPath)}
+                        onClick={() => {
+                          if (parentPath) {
+                            loadDirectory(parentPath);
+                          }
+                        }}
                         style={{
                           padding: '0.75rem',
                           cursor: 'pointer',
@@ -802,6 +834,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 }

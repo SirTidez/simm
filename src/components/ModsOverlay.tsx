@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { onModsChanged as onModsChangedEvent } from '../services/events';
@@ -73,6 +73,15 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
   }
 }
 
+function normalizeModNameKey(name: string): string {
+  return name
+    .replace(/\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i, '')
+    .replace(/\s*[_-]\s*(mono|il2cpp)\s*$/i, '')
+    .replace(/\s+(mono|il2cpp)\s*$/i, '')
+    .trim()
+    .toLowerCase();
+}
+
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked }: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
 
@@ -115,6 +124,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
   const suppressWatcherReloadUntilRef = useRef(0);
+
+  const libraryVersionCountByName = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of downloadedMods) {
+      const key = normalizeModNameKey(entry.displayName || '');
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return counts;
+  }, [downloadedMods]);
 
   useEffect(() => {
     if (isOpen && environmentId) {
@@ -1195,11 +1213,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
           </div>
         </div>
       )}
-      <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content mods-overlay" onClick={(e) => e.stopPropagation()}>
+      <div className="mods-overlay" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         <div className="modal-header">
-          <h2>Installed Mods</h2>
-          <button className="modal-close" onClick={onClose}>×</button>
+          <h2>Mods</h2>
+          <button className="btn btn-secondary btn-small" onClick={onClose}>
+            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+            Back
+          </button>
         </div>
 
         <div className="mods-content">
@@ -1332,10 +1352,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                 )}
               </div>
               {environment && (
-                <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.75rem', color: '#888' }}>
-                  Filtering mods for Schedule I - <strong>{environment.runtime}</strong> runtime
-                </p>
-              )}
+                  <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.75rem', color: '#888' }}>
+                    Showing Schedule I results for <strong>{environment.runtime}</strong>
+                  </p>
+                )}
             </div>
           )}
 
@@ -1349,7 +1369,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
           {/* Thunderstore Search Results */}
           {!searching && showSearchResults && searchResults.length > 0 && (
-            <div style={{ padding: '0 1.25rem', marginBottom: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
+            <div style={{ padding: '0 1.25rem', marginBottom: '1rem' }}>
               <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
                 Search Results ({searchResults.length})
               </h3>
@@ -1598,7 +1618,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
             });
 
             return compatibleMods.length > 0 ? (
-              <div style={{ padding: '0 1.25rem', marginBottom: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
+              <div style={{ padding: '0 1.25rem', marginBottom: '1rem' }}>
                 <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
                   Search Results ({compatibleMods.length})
                 </h3>
@@ -1821,7 +1841,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                 title="Browse mods from Thunderstore/NexusMods"
               >
                 <i className="fas fa-compass" style={{ marginRight: '0.5rem' }}></i>
-                {showSearchInOverlay ? 'Hide Browser' : 'Browse Mods'}
+                {showSearchInOverlay ? 'Hide Browse' : 'Browse Mods'}
               </button>
               <button
                 onClick={handleCheckModUpdates}
@@ -1894,11 +1914,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               <p>Loading mods...</p>
             </div>
           ) : !showSearchResults && (
-            <div style={{ padding: '0 1.25rem 1.25rem', maxHeight: '500px', overflowY: 'auto' }}>
+            <div style={{ padding: '0 1.25rem 1.25rem', flex: 1, minHeight: 0, overflowY: 'auto' }}>
               <div style={{ display: 'grid', gap: '1rem' }}>
                 {/* Regular Mods List */}
                 <div style={{ marginBottom: '1.5rem' }}>
-                  <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Downloaded (Not Installed Here)</h3>
+                  <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Library Downloads</h3>
                   {downloadedNotInstalled.length === 0 ? (
                     <div style={{ padding: '1rem', textAlign: 'center', color: '#888' }}>
                       <p>No downloaded mods waiting to be installed in this environment.</p>
@@ -1909,25 +1929,25 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       return (
                         <div
                           key={entry.storageId}
-                          className="mod-card"
+                          className="mod-card compact-row"
                           style={{
                             backgroundColor: '#2a2a2a',
                             border: '1px solid #3a3a3a',
-                            borderRadius: '8px',
-                            padding: '0.75rem',
-                            marginBottom: '0.5rem'
+                            borderRadius: '7px',
+                            padding: '0.65rem 0.75rem',
+                            marginBottom: '0.4rem'
                           }}
                         >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.6rem' }}>
                             <div>
-                              <strong>{entry.displayName}</strong>
-                              <div style={{ fontSize: '0.8rem', color: '#888' }}>{entry.files.length} file(s)</div>
-                              <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                              <strong style={{ fontSize: '0.94rem' }}>{entry.displayName}</strong>
+                              <div style={{ fontSize: '0.74rem', color: '#8d9bb0', marginTop: '0.2rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                                <span>{entry.files.length} file(s)</span>
                                 {entry.availableRuntimes?.map(runtime => (
                                   <span key={`${entry.storageId}-${runtime}`} style={{
-                                    fontSize: '0.7rem',
-                                    padding: '0.15rem 0.4rem',
-                                    borderRadius: '4px',
+                                    fontSize: '0.64rem',
+                                    padding: '0.1rem 0.38rem',
+                                    borderRadius: '999px',
                                     backgroundColor: '#4a90e220',
                                     color: '#4a90e2',
                                     border: '1px solid #4a90e240'
@@ -1939,9 +1959,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                               <span style={{
-                                fontSize: '0.7rem',
-                                padding: '0.15rem 0.4rem',
-                                borderRadius: '4px',
+                                fontSize: '0.64rem',
+                                padding: '0.1rem 0.38rem',
+                                borderRadius: '999px',
                                 backgroundColor: entry.managed ? '#28a745' : '#6c757d',
                                 color: '#fff'
                               }}>
@@ -1963,7 +1983,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   )}
                 </div>
 
-                <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Installed in This Environment</h3>
+                 <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Installed Here</h3>
                 <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
                   {(['all', 'updates', 'enabled', 'disabled'] as ModListFilter[]).map(filter => (
                     <button
@@ -1976,7 +1996,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         color: modListFilter === filter ? '#fff' : '#ccc'
                       }}
                     >
-                      {filter === 'all' ? 'All' : filter === 'updates' ? 'Needs Update' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
+                      {filter === 'all' ? 'All' : filter === 'updates' ? 'Updates' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
                     </button>
                   ))}
                 </div>
@@ -1994,31 +2014,34 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   const updateInfo = modUpdates.get(mod.fileName);
                   const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
                   const updateAvailable = !!updateInfo?.updateAvailable;
+                  const libraryVersionCount = mod.managed
+                    ? (libraryVersionCountByName.get(normalizeModNameKey(mod.name)) || 0)
+                    : 0;
 
                   return (
                   <div
                     key={`${mod.fileName}-${mod.path}`}
-                    className="mod-card"
+                    className="mod-card compact-row"
                     style={{
                       backgroundColor: '#2a2a2a',
                       border: '1px solid #3a3a3a',
-                      borderRadius: '8px',
-                      padding: '1rem',
+                      borderRadius: '7px',
+                      padding: '0.72rem 0.8rem',
                       display: 'flex',
                       justifyContent: 'space-between',
-                      alignItems: 'center'
+                      alignItems: 'flex-start'
                     }}
                   >
                     <div style={{ flex: 1 }}>
-                      <h3 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1.1rem', color: mod.disabled ? '#888' : '#fff', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <h3 style={{ margin: 0, marginBottom: '0.32rem', fontSize: '0.98rem', color: mod.disabled ? '#93a0b2' : '#fff', display: 'flex', alignItems: 'center', gap: '0.42rem', flexWrap: 'wrap' }}>
                         {mod.name}
                         {mod.disabled && (
                           <span style={{
-                            fontSize: '0.75rem',
-                            padding: '0.25rem 0.5rem',
+                            fontSize: '0.64rem',
+                            padding: '0.12rem 0.38rem',
                             backgroundColor: '#ff6b6b20',
                             color: '#ff6b6b',
-                            borderRadius: '4px',
+                            borderRadius: '999px',
                             border: '1px solid #ff6b6b40'
                           }}>
                             Disabled
@@ -2026,17 +2049,29 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         )}
                         {mod.managed !== undefined && (
                           <span style={{
-                            fontSize: '0.75rem',
-                            padding: '0.25rem 0.5rem',
+                            fontSize: '0.64rem',
+                            padding: '0.12rem 0.38rem',
                             backgroundColor: mod.managed ? '#28a745' : '#6c757d',
                             color: '#fff',
-                            borderRadius: '4px'
+                            borderRadius: '999px'
                           }}>
                             {mod.managed ? 'Managed' : 'External'}
                           </span>
                         )}
+                        {libraryVersionCount > 1 && (
+                          <span style={{
+                            fontSize: '0.64rem',
+                            padding: '0.12rem 0.38rem',
+                            backgroundColor: '#4a90e220',
+                            color: '#8fc0ff',
+                            borderRadius: '999px',
+                            border: '1px solid #4a90e240'
+                          }}>
+                            {libraryVersionCount} versions
+                          </span>
+                        )}
                       </h3>
-                      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', fontSize: '0.875rem', color: '#888', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'center', fontSize: '0.78rem', color: '#8f9cb0', flexWrap: 'wrap' }}>
                         <span>
                           <i className="fas fa-file-code" style={{ marginRight: '0.25rem' }}></i>
                           {mod.fileName}
@@ -2073,17 +2108,17 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         {mod.source && (
                           (mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github') && mod.sourceUrl ? (
                             <a
-                              href={safeExternalUrl(mod.sourceUrl)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                padding: '0.25rem 0.5rem',
-                                borderRadius: '4px',
-                                backgroundColor: `${getSourceColor(mod.source)}20`,
-                                color: getSourceColor(mod.source),
-                                border: `1px solid ${getSourceColor(mod.source)}40`,
+                                href={safeExternalUrl(mod.sourceUrl)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  padding: '0.12rem 0.42rem',
+                                  borderRadius: '999px',
+                                  backgroundColor: `${getSourceColor(mod.source)}20`,
+                                  color: getSourceColor(mod.source),
+                                  border: `1px solid ${getSourceColor(mod.source)}40`,
                                 textDecoration: 'none',
                                 cursor: 'pointer',
                                 transition: 'all 0.2s'
@@ -2110,8 +2145,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             <span style={{
                               display: 'inline-flex',
                               alignItems: 'center',
-                              padding: '0.25rem 0.5rem',
-                              borderRadius: '4px',
+                              padding: '0.12rem 0.42rem',
+                              borderRadius: '999px',
                               backgroundColor: `${getSourceColor(mod.source)}20`,
                               color: getSourceColor(mod.source),
                               border: `1px solid ${getSourceColor(mod.source)}40`
@@ -2123,7 +2158,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         )}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                    <div style={{ display: 'flex', gap: '0.35rem', marginLeft: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                       {canAutoUpdate && updateAvailable && (
                         <button
                           onClick={() => handleUpdateMod(mod)}
@@ -2203,7 +2238,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
           )}
         </div>
       </div>
-    </div>
 
     </>
   );

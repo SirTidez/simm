@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
@@ -89,6 +89,11 @@ const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: st
 
 const normalizeVersionToken = (value?: string): string => {
   return (value || '').trim().replace(/^v/i, '').toLowerCase();
+};
+
+const formatVersionTag = (value?: string): string => {
+  const normalized = normalizeVersionToken(value);
+  return normalized ? `v${normalized}` : 'unknown';
 };
 
 const compareVersionTokensDesc = (a?: string, b?: string): number => {
@@ -245,6 +250,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [activatingGroup, setActivatingGroup] = useState<string | null>(null);
   const [updatingGroup, setUpdatingGroup] = useState<string | null>(null);
+  const [openVersionMenuGroup, setOpenVersionMenuGroup] = useState<string | null>(null);
   const [selectedStorageByGroup, setSelectedStorageByGroup] = useState<Record<string, string>>({});
   const [runtimePrompt, setRuntimePrompt] = useState<RuntimePromptState | null>(null);
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
@@ -288,11 +294,6 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [selectedMlvscanVersion, setSelectedMlvscanVersion] = useState('');
   const [downloadingS1API, setDownloadingS1API] = useState(false);
   const [downloadingMlvscan, setDownloadingMlvscan] = useState(false);
-
-  // Ref to track whether mousedown originated inside the modal content,
-  // used to prevent closing the overlay when the user drag-selects text
-  // and releases the mouse over the overlay background.
-  const mouseDownInside = useRef(false);
 
   const downloadedGroups = useMemo(
     () => buildDownloadedGroups(library?.downloaded ?? []),
@@ -347,6 +348,24 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       return next;
     });
   }, [downloadedGroups]);
+
+  useEffect(() => {
+    if (!openVersionMenuGroup) {
+      return;
+    }
+
+    const onDocumentMouseDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest('[data-version-switcher]')) {
+        setOpenVersionMenuGroup(null);
+      }
+    };
+
+    document.addEventListener('mousedown', onDocumentMouseDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocumentMouseDown);
+    };
+  }, [openVersionMenuGroup]);
 
   const handleLoadNexusModFiles = useCallback(async (modId: number) => {
     setNexusModsLoading(prev => new Set(prev).add(modId));
@@ -697,6 +716,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
   const handleSelectVersion = useCallback(async (group: DownloadedModGroup, storageId: string) => {
     setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: storageId }));
+    setOpenVersionMenuGroup(null);
 
     const selectedEntry = group.entries.find(entry => entry.storageId === storageId) || group.entries[0];
     if (!selectedEntry) {
@@ -709,6 +729,42 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       console.error('Failed to activate selected mod version:', err);
     }
   }, [activateGroupEntry]);
+
+  const getSortedGroupEntries = useCallback((group: DownloadedModGroup) => {
+    return [...group.entries].sort((a, b) =>
+      compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion)
+    );
+  }, []);
+
+  const getActiveEntryForGroup = useCallback((group: DownloadedModGroup) => {
+    const sorted = getSortedGroupEntries(group);
+    const selectedStorageId = selectedStorageByGroup[group.key];
+    return sorted.find(entry => entry.storageId === selectedStorageId)
+      || sorted.find(entry => entry.installedIn.length > 0)
+      || sorted[0]
+      || null;
+  }, [getSortedGroupEntries, selectedStorageByGroup]);
+
+  const handleStepGroupVersion = useCallback(async (group: DownloadedModGroup, direction: 'older' | 'newer') => {
+    const sorted = getSortedGroupEntries(group);
+    if (sorted.length <= 1) {
+      return;
+    }
+
+    const active = getActiveEntryForGroup(group);
+    const currentIndex = active ? sorted.findIndex(entry => entry.storageId === active.storageId) : 0;
+    const nextIndex = direction === 'older' ? currentIndex + 1 : currentIndex - 1;
+    if (nextIndex < 0 || nextIndex >= sorted.length) {
+      return;
+    }
+    const nextEntry = sorted[nextIndex];
+
+    if (!nextEntry) {
+      return;
+    }
+
+    await handleSelectVersion(group, nextEntry.storageId);
+  }, [getActiveEntryForGroup, getSortedGroupEntries, handleSelectVersion]);
 
   const loadS1APIReleases = async () => {
     setLoadingS1APIReleases(true);
@@ -1066,24 +1122,21 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         </div>
       )}
       <div
-        className="modal-overlay"
-        onMouseDown={() => { mouseDownInside.current = false; }}
-        onClick={() => { if (!mouseDownInside.current) onClose(); }}
+        className="mods-overlay"
+        style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}
       >
-        <div
-          className="modal-content mods-overlay"
-          onMouseDown={e => { mouseDownInside.current = true; e.stopPropagation(); }}
-          onClick={e => e.stopPropagation()}
-        >
           <div className="modal-header">
             <h2>Mod Library</h2>
-            <button className="modal-close" onClick={onClose}>×</button>
+            <button className="btn btn-secondary btn-small" onClick={onClose}>
+              <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+              Back
+            </button>
           </div>
 
           <div className="mods-content">
             <div style={{ padding: '0.9rem 1.25rem 0.75rem', borderBottom: '1px solid #3a3a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
               <div style={{ color: '#9aa4b2', fontSize: '0.85rem' }}>
-                {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed in envs, {downloadedSummary.managed} managed
+                {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed, {downloadedSummary.managed} managed
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button
@@ -1092,7 +1145,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   title="Show or hide discovery results"
                 >
                   <i className={`fas ${showDiscovery ? 'fa-chevron-up' : 'fa-chevron-down'}`} style={{ marginRight: '0.4rem' }}></i>
-                  {showDiscovery ? 'Hide Discovery' : 'Browse Mods'}
+                  {showDiscovery ? 'Hide Browse' : 'Browse Mods'}
                 </button>
                 <button
                   className="btn btn-secondary btn-small"
@@ -1110,7 +1163,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             <>
             <div style={{ padding: '17px 1.25rem 1rem', borderBottom: '1px solid #3a3a3a' }}>
               <div style={{ marginBottom: '1rem', color: '#888', fontSize: '0.85rem' }}>
-                Download mods to the library, then install them from each environment's mod list.
+                Download to library, then install from each environment's Mods view.
               </div>
 
               <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
@@ -1222,7 +1275,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
             <div style={{ padding: '0 1.25rem 1rem', borderBottom: '1px solid #3a3a3a' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                <h3 style={{ margin: 0 }}>Featured Downloads</h3>
+                <h3 style={{ margin: 0 }}>Featured</h3>
               </div>
               <div style={{ display: 'grid', gap: '1rem' }}>
                 <div
@@ -1286,13 +1339,13 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       {s1apiInstalledVersion && (
                         <span>
                           <i className="fas fa-tag" style={{ marginRight: '0.35rem' }}></i>
-                          Installed: {s1apiInstalledVersion}
+                          Installed: {formatVersionTag(s1apiInstalledVersion)}
                         </span>
                       )}
                       {s1apiLatestRelease && (
                         <span style={s1apiNeedsUpdate ? { color: '#ffaa00' } : {}}>
                           <i className="fas fa-cloud" style={{ marginRight: '0.35rem' }}></i>
-                          Latest: {s1apiLatestRelease.tag_name}
+                          Latest: {formatVersionTag(s1apiLatestRelease.tag_name)}
                         </span>
                       )}
                     </div>
@@ -1391,13 +1444,13 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       {mlvscanInstalledVersion && (
                         <span>
                           <i className="fas fa-tag" style={{ marginRight: '0.35rem' }}></i>
-                          Installed: {mlvscanInstalledVersion}
+                          Installed: {formatVersionTag(mlvscanInstalledVersion)}
                         </span>
                       )}
                       {mlvscanLatestRelease && (
                         <span style={mlvscanNeedsUpdate ? { color: '#ffaa00' } : {}}>
                           <i className="fas fa-cloud" style={{ marginRight: '0.35rem' }}></i>
-                          Latest: {mlvscanLatestRelease.tag_name}
+                          Latest: {formatVersionTag(mlvscanLatestRelease.tag_name)}
                         </span>
                       )}
                     </div>
@@ -1577,7 +1630,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                     disabled={selectedModIds.size === 0 || deleting === 'bulk'}
                     onClick={handleBulkDelete}
                   >
-                    {deleting === 'bulk' ? 'Deleting...' : 'Delete Selected'}
+                    {deleting === 'bulk' ? 'Deleting...' : 'Delete selected'}
                   </button>
                 </div>
               </div>
@@ -1594,7 +1647,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       color: downloadedFilter === filter ? '#fff' : '#ccc'
                     }}
                   >
-                    {filter === 'all' ? 'All' : filter === 'updates' ? 'Needs Update' : filter === 'managed' ? 'Managed' : filter === 'external' ? 'External' : 'Installed'}
+                    {filter === 'all' ? 'All' : filter === 'updates' ? 'Updates' : filter === 'managed' ? 'Managed' : filter === 'external' ? 'External' : 'Installed'}
                   </button>
                 ))}
               </div>
@@ -1604,7 +1657,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   type="text"
                   value={downloadedSearch}
                   onChange={(e) => setDownloadedSearch(e.target.value)}
-                  placeholder="Filter downloaded mods by name, author, or version"
+                  placeholder="Filter by mod, author, or version"
                   style={{
                     width: '100%',
                     padding: '0.5rem 0.75rem',
@@ -1625,11 +1678,24 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <div style={{ color: '#888' }}>No downloaded mods match this filter.</div>
               )}
               {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
-                <div style={{ display: 'grid', gap: '1rem' }}>
-                  {filteredDownloadedGroups.map(group => (
-                    <div key={group.key} className="mod-card" style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', flex: 1 }}>
+                <div style={{ display: 'grid', gap: '0.55rem' }}>
+                  {filteredDownloadedGroups.map(group => {
+                    const sortedEntries = getSortedGroupEntries(group);
+                    const activeEntry = getActiveEntryForGroup(group);
+                    const activeVersionLabel = activeEntry ? getEntryVersionLabel(activeEntry) : 'unknown';
+                    const activeRuntimeLabel = activeEntry?.availableRuntimes?.length
+                      ? activeEntry.availableRuntimes.join('/')
+                      : 'Runtime?';
+                    const activeIndex = activeEntry
+                      ? sortedEntries.findIndex(entry => entry.storageId === activeEntry.storageId)
+                      : -1;
+                    const hasOlderVersion = sortedEntries.length > 1 && activeIndex >= 0 && activeIndex < sortedEntries.length - 1;
+                    const hasNewerVersion = sortedEntries.length > 1 && activeIndex > 0;
+
+                    return (
+                    <div key={group.key} className="mod-card compact-row" style={{ padding: '0.68rem 0.75rem', backgroundColor: '#2a2a2a', borderRadius: '7px', border: '1px solid #3a3a3a' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.7rem' }}>
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', flex: 1 }}>
                           <input
                             type="checkbox"
                             checked={group.storageIds.every(id => selectedModIds.has(id))}
@@ -1637,22 +1703,32 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                             style={{ marginTop: '0.2rem' }}
                           />
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
-                              <strong style={{ fontSize: '1rem' }}>{group.displayName}</strong>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                              <strong style={{ fontSize: '0.94rem' }}>{group.displayName}</strong>
                               <span style={{
-                                fontSize: '0.7rem',
-                                padding: '0.15rem 0.4rem',
-                                borderRadius: '4px',
+                                fontSize: '0.64rem',
+                                padding: '0.1rem 0.35rem',
+                                borderRadius: '999px',
                                 backgroundColor: group.managed ? '#28a745' : '#6c757d',
                                 color: '#fff'
                               }}>
                                 {group.managed ? 'Managed' : 'External'}
                               </span>
+                              <span style={{
+                                fontSize: '0.64rem',
+                                padding: '0.1rem 0.35rem',
+                                borderRadius: '999px',
+                                backgroundColor: '#4a90e220',
+                                color: '#8fc0ff',
+                                border: '1px solid #4a90e240'
+                              }}>
+                                {sortedEntries.length} version{sortedEntries.length === 1 ? '' : 's'}
+                              </span>
                               {group.updateAvailable && (
                                 <span style={{
-                                  fontSize: '0.7rem',
-                                  padding: '0.15rem 0.4rem',
-                                  borderRadius: '4px',
+                                  fontSize: '0.64rem',
+                                  padding: '0.1rem 0.35rem',
+                                  borderRadius: '999px',
                                   backgroundColor: 'rgba(255, 170, 0, 0.15)',
                                   color: '#ffaa00',
                                   border: '1px solid rgba(255, 170, 0, 0.3)'
@@ -1664,47 +1740,134 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                             </div>
                           </div>
                         </label>
-                        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+                         <div style={{ display: 'flex', gap: '0.32rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
                           {group.updateAvailable && (
                             <span style={{
-                              fontSize: '0.68rem',
+                              fontSize: '0.64rem',
                               alignSelf: 'center',
                               color: '#ffd480'
                             }}>
-                              {group.remoteVersion ? `Latest v${group.remoteVersion}` : 'Update available'}
+                              {group.remoteVersion ? `Latest ${formatVersionTag(group.remoteVersion)}` : 'Update available'}
                             </span>
                           )}
-                          <select
-                            value={selectedStorageByGroup[group.key] || group.entries[0]?.storageId || ''}
-                            onChange={(event) => {
-                              void handleSelectVersion(group, event.target.value);
-                            }}
-                            style={{
-                              minWidth: '130px',
-                              maxWidth: '190px',
-                              padding: '0.25rem 0.35rem',
-                              backgroundColor: '#1a1a1a',
-                              border: '1px solid #3a3a3a',
-                              borderRadius: '4px',
-                              color: '#fff',
-                              fontSize: '0.72rem'
-                            }}
-                            title="Active version"
-                            disabled={activatingGroup === group.key || updatingGroup === group.key}
-                          >
-                            {[...group.entries]
-                              .sort((a, b) => compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion))
-                              .map(entry => {
-                                const versionLabel = getEntryVersionLabel(entry);
-                                const runtimeLabel = entry.availableRuntimes.length > 0 ? entry.availableRuntimes.join('/') : 'Unknown runtime';
-                                const activeTag = entry.installedIn.length > 0 ? ' *' : '';
-                                return (
-                                  <option key={`${group.key}-${entry.storageId}`} value={entry.storageId}>
-                                    {`v${versionLabel} ${runtimeLabel}${activeTag}`}
-                                  </option>
-                                );
-                              })}
-                          </select>
+                           <div style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }}>
+                              <div
+                                data-version-switcher
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  border: '1px solid #3a3a3a',
+                                  borderRadius: '999px',
+                                  overflow: 'hidden',
+                                  backgroundColor: '#131a25'
+                                }}
+                                title="Cycle active version"
+                              >
+                                {hasOlderVersion && (
+                                  <button
+                                    className="btn btn-secondary btn-small"
+                                    onClick={() => void handleStepGroupVersion(group, 'older')}
+                                    disabled={activatingGroup === group.key || updatingGroup === group.key}
+                                    style={{
+                                      borderRadius: 0,
+                                      border: 'none',
+                                      borderRight: '1px solid #2d3b52',
+                                      padding: '0.1rem 0.35rem',
+                                      minHeight: '1.4rem'
+                                    }}
+                                    title="Older version"
+                                  >
+                                    <i className="fas fa-chevron-left" style={{ fontSize: '0.62rem' }}></i>
+                                  </button>
+                                )}
+                                <button
+                                  className="btn btn-secondary btn-small"
+                                  onClick={() => {
+                                    if (sortedEntries.length > 1) {
+                                      setOpenVersionMenuGroup(prev => prev === group.key ? null : group.key);
+                                    }
+                                  }}
+                                  disabled={activatingGroup === group.key || updatingGroup === group.key}
+                                  style={{
+                                    borderRadius: 0,
+                                    border: 'none',
+                                    padding: '0.12rem 0.42rem',
+                                    minHeight: '1.4rem',
+                                    backgroundColor: '#131a25',
+                                    color: '#d9e6fb'
+                                  }}
+                                  title={sortedEntries.length > 1 ? 'Choose version' : 'Active version'}
+                                >
+                                  <span style={{ fontSize: '0.67rem', minWidth: '106px', textAlign: 'center' }}>
+                                    {`${formatVersionTag(activeVersionLabel)} · ${activeRuntimeLabel}`}
+                                    {sortedEntries.length > 1 ? ' ▾' : ''}
+                                  </span>
+                                </button>
+                                {hasNewerVersion && (
+                                  <button
+                                    className="btn btn-secondary btn-small"
+                                    onClick={() => void handleStepGroupVersion(group, 'newer')}
+                                    disabled={activatingGroup === group.key || updatingGroup === group.key}
+                                    style={{
+                                      borderRadius: 0,
+                                      border: 'none',
+                                      borderLeft: '1px solid #2d3b52',
+                                      padding: '0.1rem 0.35rem',
+                                      minHeight: '1.4rem'
+                                    }}
+                                    title="Newer version"
+                                  >
+                                    <i className="fas fa-chevron-right" style={{ fontSize: '0.62rem' }}></i>
+                                  </button>
+                                )}
+                              </div>
+                            {openVersionMenuGroup === group.key && sortedEntries.length > 1 && (
+                              <div style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                minWidth: '180px',
+                                backgroundColor: '#172131',
+                                border: '1px solid #31445f',
+                                borderRadius: '8px',
+                                boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+                                zIndex: 1000,
+                                padding: '0.25rem'
+                              }}>
+                                {sortedEntries.map(entry => {
+                                  const isActive = activeEntry?.storageId === entry.storageId;
+                                  return (
+                                    <button
+                                      key={`${group.key}-pick-${entry.storageId}`}
+                                      onClick={() => void handleSelectVersion(group, entry.storageId)}
+                                      style={{
+                                        display: 'block',
+                                        width: '100%',
+                                        textAlign: 'left',
+                                        border: 'none',
+                                        borderRadius: '6px',
+                                        padding: '0.35rem 0.5rem',
+                                        marginBottom: '2px',
+                                        backgroundColor: isActive ? '#2b4666' : 'transparent',
+                                        color: isActive ? '#e8f3ff' : '#c8d8ee',
+                                        fontSize: '0.72rem',
+                                        cursor: 'pointer',
+                                        transition: 'background-color 0.1s'
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        if (!isActive) e.currentTarget.style.backgroundColor = '#1e3048';
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        if (!isActive) e.currentTarget.style.backgroundColor = 'transparent';
+                                      }}
+                                    >
+                                      {`${formatVersionTag(getEntryVersionLabel(entry))} · ${entry.availableRuntimes.length ? entry.availableRuntimes.join('/') : 'Runtime?'}`}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                           </div>
                           {group.updateAvailable && (
                             <button
                               className="btn btn-warning btn-small"
@@ -1725,40 +1888,38 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                               )}
                             </button>
                           )}
-                          <button
-                            className="btn btn-danger btn-small"
+                            <button
+                              className="btn btn-danger btn-small"
                             disabled={deleting === group.key || activatingGroup === group.key || updatingGroup === group.key}
                             onClick={() => handleDeleteDownloadedGroup(group)}
                             title="Delete downloaded files from library"
                           >
                             {deleting === group.key ? 'Deleting...' : 'Delete Files'}
-                          </button>
+                            </button>
                         </div>
                       </div>
-                      <div style={{ fontSize: '0.82rem', color: '#9aa4b2', marginTop: '0.55rem', display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap', lineHeight: 1.45 }}>
+                      <div style={{ fontSize: '0.74rem', color: '#94a4bb', marginTop: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap', lineHeight: 1.35 }}>
                         {group.author && (
                           <span>
                             <i className="fas fa-user" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
                             {group.author}
                           </span>
                         )}
-                        {group.sourceVersion && (
-                          <span>
-                            <i className="fas fa-tag" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
-                            v{group.sourceVersion}
-                          </span>
-                        )}
+                        <span>
+                          <i className="fas fa-tag" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
+                          Active {formatVersionTag(activeVersionLabel)}
+                        </span>
                         <span>
                           <i className="fas fa-folder" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
-                          {group.installedIn.length ? group.installedIn.length : '0'} env(s)
+                          {group.installedIn.length ? group.installedIn.length : '0'} envs
                         </span>
                         {group.availableRuntimes?.map(runtime => (
                           <span
                             key={`${group.key}-${runtime}`}
                             style={{
-                              fontSize: '0.7rem',
-                              padding: '0.15rem 0.4rem',
-                              borderRadius: '4px',
+                              fontSize: '0.62rem',
+                              padding: '0.08rem 0.34rem',
+                              borderRadius: '999px',
                               backgroundColor: '#4a90e220',
                               color: '#4a90e2',
                               border: '1px solid #4a90e240'
@@ -1769,12 +1930,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                         ))}
                       </div>
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               ) : null}
             </div>
           </div>
-        </div>
       </div>
 
       {showS1APIVersionSelector && (

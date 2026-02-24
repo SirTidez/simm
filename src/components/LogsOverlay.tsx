@@ -460,19 +460,26 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content mods-overlay" onClick={(e) => e.stopPropagation()} style={{ width: '95vw', maxWidth: '1600px', height: '95vh', display: 'flex', flexDirection: 'column' }}>
-        <div className="modal-header">
-          <h2>
-            MelonLoader Logs - {environment.name}
+    <div className="mods-overlay" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div className="modal-header" style={{ borderBottom: '1px solid #3a3a3a', padding: '0.9rem 1.25rem' }}>
+        <div>
+          <h2 style={{ margin: 0 }}>
+            Logs - {environment.name}
             {isWatching && <span style={{ marginLeft: '0.5rem', fontSize: '0.9rem', color: '#4a90e2' }}>
               <i className="fas fa-circle" style={{ fontSize: '0.5rem', marginRight: '0.25rem' }}></i> Live
             </span>}
           </h2>
-          <button className="modal-close" onClick={onClose}>×</button>
+          <p style={{ margin: '0.35rem 0 0 0', color: '#888', fontSize: '0.8rem' }}>
+            Inspect MelonLoader and mod logs with live filtering.
+          </p>
+        </div>
+        <button className="btn btn-secondary btn-small" onClick={onClose}>
+          <i className="fas fa-arrow-left" style={{ marginRight: '0.4rem' }}></i>
+          Back
+        </button>
         </div>
 
-        <div className="mods-content" style={{ display: 'flex', flex: 1, gap: '1rem', overflow: 'hidden', minHeight: 0, padding: 0 }}>
+      <div className="mods-content" style={{ display: 'flex', flex: 1, gap: '1rem', overflow: 'hidden', minHeight: 0, padding: 0 }}>
           {/* Log Files Sidebar */}
           <div style={{ width: '250px', borderRight: '1px solid #3a3a3a', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '1rem', borderBottom: '1px solid #3a3a3a' }}>
@@ -938,7 +945,6 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
               </div>
             </div>
           )}
-        </div>
       </div>
     </div>
   );

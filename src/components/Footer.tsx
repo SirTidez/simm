@@ -172,20 +172,39 @@ export function Footer() {
             {completedEnvs.length} install{completedEnvs.length !== 1 ? 's' : ''}
           </span>
         )}
-        {envsWithUpdates.length > 0 && (
-          <span className="statusbar-stat statusbar-stat-warn">
-            &bull; {envsWithUpdates.length} update{envsWithUpdates.length !== 1 ? 's' : ''} available
-          </span>
+        {completedEnvs.length > 0 && (
+          <>
+            {envsWithUpdates.length === 0 ? (
+              <span className="statusbar-stat statusbar-stat-ok">
+                &bull; Games up to date
+              </span>
+            ) : envsWithUpdates.length === 1 ? (
+              <span className="statusbar-stat statusbar-stat-warn">
+                &bull; 1 Game needs updating
+              </span>
+            ) : (
+              <span className="statusbar-stat statusbar-stat-warn">
+                &bull; {envsWithUpdates.length} Games need updating
+              </span>
+            )}
+          </>
         )}
-        {completedEnvs.length > 0 && totalModsNeedingUpdate > 0 && (
-          <span className="statusbar-stat statusbar-stat-warn">
-            &bull; {totalModsNeedingUpdate} mod{totalModsNeedingUpdate !== 1 ? 's' : ''} need updating
-          </span>
-        )}
-        {completedEnvs.length > 0 && totalModsNeedingUpdate === 0 && (
-          <span className="statusbar-stat statusbar-stat-ok">
-            &bull; All mods up to date
-          </span>
+        {completedEnvs.length > 0 && (
+          <>
+            {totalModsNeedingUpdate === 0 ? (
+              <span className="statusbar-stat statusbar-stat-ok">
+                &bull; Mods up to date
+              </span>
+            ) : totalModsNeedingUpdate === 1 ? (
+              <span className="statusbar-stat statusbar-stat-warn">
+                &bull; 1 Mod needs updating
+              </span>
+            ) : (
+              <span className="statusbar-stat statusbar-stat-warn">
+                &bull; {totalModsNeedingUpdate} Mods need updating
+              </span>
+            )}
+          </>
         )}
         {mostRecentCheck ? (
           <span className="statusbar-stat statusbar-check">
@@ -206,11 +225,11 @@ export function Footer() {
             onClick={handleCheckAllUpdates}
             className="btn btn-icon-small statusbar-refresh-btn"
             disabled={checkingAll}
-            title="Check for updates"
+            title={checkingAll ? 'Checking for updates...' : 'Check for updates'}
             type="button"
             aria-label="Check for updates"
           >
-            <i className={`fas ${checkingAll ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
+            <i className={`fas ${checkingAll ? 'fa-sync-alt fa-spin' : 'fa-sync-alt'}`}></i>
           </button>
         )}
       </div>

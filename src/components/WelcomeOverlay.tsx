@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 interface WelcomeOverlayProps {
@@ -8,6 +8,19 @@ interface WelcomeOverlayProps {
 
 export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
   const [homePath, setHomePath] = useState<string>('');
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [isOpen, onClose]);
 
   useEffect(() => {
     if (isOpen) {
@@ -25,16 +38,27 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
     : 'your home directory\\SIMM';
 
   return (
-    <div className="modal-overlay" onClick={onClose} style={{ zIndex: 10002 }}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px', zIndex: 10003 }}>
+    <section
+      className="modal-content"
+      style={{
+        width: '100%',
+        height: '100%',
+        maxWidth: 'none',
+        margin: 0,
+        borderRadius: '0.75rem',
+        display: 'flex',
+        flexDirection: 'column'
+      }}
+      aria-label="Welcome panel"
+    >
         <div className="modal-header">
           <h2>
             <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
             Welcome to Schedule I Mod Manager
           </h2>
-          <button className="modal-close" onClick={onClose}>×</button>
+          <button className="modal-close" onClick={onClose} aria-label="Close welcome panel">×</button>
         </div>
-        <div style={{ padding: '1.5rem' }}>
+        <div style={{ padding: '1.5rem', overflowY: 'auto', flex: 1 }}>
           <div
             style={{
               padding: '1rem',
@@ -46,8 +70,8 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
             }}
           >
             <p style={{ margin: '0 0 1rem 0', lineHeight: '1.6' }}>
-              We've created a <strong>SIMM</strong> folder in your home directory to help organize your modding files.
-              This folder will be used for downloads, backups, and application logs.
+              A <strong>SIMM</strong> folder was created in your home directory to keep modding data organized.
+              This location stores downloads, backups, and application logs.
             </p>
 
             <div style={{ marginTop: '1.5rem' }}>
@@ -97,11 +121,10 @@ export function WelcomeOverlay({ isOpen, onClose }: WelcomeOverlayProps) {
           </div>
           <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
             <button className="btn btn-primary" onClick={onClose}>
-              Got it!
+              Continue
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </section>
   );
 }

@@ -203,14 +203,21 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
         confirmText="Continue Anyway"
         cancelText="Cancel"
       />
-      <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content mods-overlay" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Installed Plugins</h2>
-          <button className="modal-close" onClick={onClose}>×</button>
+      <div className="mods-overlay" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <div className="modal-header" style={{ borderBottom: '1px solid #3a3a3a', padding: '0.9rem 1.25rem' }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Plugins</h2>
+            <p style={{ margin: '0.35rem 0 0 0', color: '#888', fontSize: '0.8rem' }}>
+              Manage plugin files for this environment.
+            </p>
+          </div>
+          <button className="btn btn-secondary btn-small" onClick={onClose}>
+            <i className="fas fa-arrow-left" style={{ marginRight: '0.4rem' }}></i>
+            Back
+          </button>
         </div>
 
-        <div className="mods-content">
+        <div className="mods-content" style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           {error && (
             <div className="error-message" style={{ margin: '0 1.25rem', padding: '0.75rem', backgroundColor: '#dc3545', color: '#fff', borderRadius: '4px' }}>
               {error}
@@ -257,15 +264,15 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
           </div>
 
           {!loading && (
-            <div style={{ padding: '0 1.25rem 1.25rem', maxHeight: '500px', overflowY: 'auto' }}>
+            <div style={{ padding: '0 1.25rem 1.25rem', flex: 1, overflowY: 'auto' }}>
               <div style={{ display: 'grid', gap: '1rem' }}>
                 {/* Regular Plugins List */}
                 {plugins.length === 0 ? (
                   <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
                     <i className="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
-                    <p>No other plugins found</p>
+                     <p>No plugins detected</p>
                     <p style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
-                      Plugins should be placed in the Plugins directory as .dll files
+                       Add `.dll` or plugin archive files to the Plugins directory.
                     </p>
                   </div>
                 ) : (
@@ -327,8 +334,7 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
             </div>
           )}
         </div>
-      </div>
-      </div>
+       </div>
 
     </>
   );
