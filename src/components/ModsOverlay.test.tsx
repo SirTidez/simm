@@ -9,6 +9,7 @@ const apiMocks = vi.hoisted(() => ({
   getMods: vi.fn(),
   getModLibrary: vi.fn(),
   checkModUpdates: vi.fn(),
+  getModUpdatesSummary: vi.fn(),
   installDownloadedMod: vi.fn(),
   hasNexusModsApiKey: vi.fn(),
   searchNexusMods: vi.fn(),
@@ -17,6 +18,7 @@ const apiMocks = vi.hoisted(() => ({
 
 const eventMocks = vi.hoisted(() => ({
   onModsChanged: vi.fn(),
+  onModsSnapshotUpdated: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -25,6 +27,7 @@ vi.mock('../services/api', () => ({
 
 vi.mock('../services/events', () => ({
   onModsChanged: eventMocks.onModsChanged,
+  onModsSnapshotUpdated: eventMocks.onModsSnapshotUpdated,
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -49,11 +52,13 @@ describe('ModsOverlay', () => {
     apiMocks.getMods.mockReset();
     apiMocks.getModLibrary.mockReset();
     apiMocks.checkModUpdates.mockReset();
+    apiMocks.getModUpdatesSummary.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.hasNexusModsApiKey.mockReset();
     apiMocks.searchNexusMods.mockReset();
     apiMocks.uploadMod.mockReset();
     eventMocks.onModsChanged.mockReset();
+    eventMocks.onModsSnapshotUpdated.mockReset();
     openMock.mockReset();
 
     apiMocks.getEnvironment.mockResolvedValue(baseEnvironment);
@@ -64,11 +69,13 @@ describe('ModsOverlay', () => {
     });
     apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
     apiMocks.checkModUpdates.mockResolvedValue([]);
+    apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 0, updates: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.hasNexusModsApiKey.mockResolvedValue(false);
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
     apiMocks.uploadMod.mockResolvedValue({ success: false, error: 'test' });
     eventMocks.onModsChanged.mockResolvedValue(() => {});
+    eventMocks.onModsSnapshotUpdated.mockResolvedValue(() => {});
   });
 
   afterEach(() => {

@@ -100,7 +100,7 @@ describe('Footer', () => {
 
     render(<Footer />);
 
-    expect(await screen.findByText('2 mods need updating')).toBeTruthy();
+    expect(await screen.findByText(/2\s+Mods need updating/i)).toBeTruthy();
   });
 
   it('shows all mods up to date when completed environments have no mod updates', async () => {
@@ -117,7 +117,7 @@ describe('Footer', () => {
     render(<Footer />);
 
     await waitFor(() => {
-      expect(screen.getByText('All mods up to date')).toBeTruthy();
+      expect(screen.getByText(/Mods up to date/i)).toBeTruthy();
     });
   });
 
@@ -133,7 +133,7 @@ describe('Footer', () => {
     render(<Footer />);
 
     await waitFor(() => {
-      expect(screen.queryByText('All mods up to date')).toBeNull();
+      expect(screen.queryByText(/Mods up to date/i)).toBeNull();
       expect(screen.queryByText(/mod(s)? need updating/i)).toBeNull();
     });
   });

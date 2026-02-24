@@ -4,13 +4,29 @@ import { App } from './App';
 import type { ReactNode } from 'react';
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const environmentStoreMocks = vi.hoisted(() => ({
+  useEnvironmentStore: vi.fn(),
+}));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
 }));
 
+const windowMocks = vi.hoisted(() => ({
+  isMaximized: vi.fn(),
+  onResized: vi.fn(),
+  minimize: vi.fn(),
+  toggleMaximize: vi.fn(),
+  close: vi.fn(),
+}));
+
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => windowMocks,
+}));
+
 vi.mock('../stores/environmentStore', () => ({
   EnvironmentStoreProvider: ({ children }: { children: ReactNode }) => children,
+  useEnvironmentStore: environmentStoreMocks.useEnvironmentStore,
 }));
 
 vi.mock('../stores/settingsStore', () => ({
@@ -92,6 +108,23 @@ describe('App', () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
+
+    windowMocks.isMaximized.mockReset();
+    windowMocks.onResized.mockReset();
+    windowMocks.minimize.mockReset();
+    windowMocks.toggleMaximize.mockReset();
+    windowMocks.close.mockReset();
+
+    windowMocks.isMaximized.mockResolvedValue(false);
+    windowMocks.onResized.mockResolvedValue(() => {});
+    windowMocks.minimize.mockResolvedValue(undefined);
+    windowMocks.toggleMaximize.mockResolvedValue(undefined);
+    windowMocks.close.mockResolvedValue(undefined);
+
+    environmentStoreMocks.useEnvironmentStore.mockReset();
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [],
+    });
   });
 
   afterEach(() => {
@@ -117,7 +150,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
     await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Environment' }));
+    fireEvent.click(screen.getByRole('button', { name: 'New Game' }));
     expect(await screen.findByText('Wizard Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Wizard' }));
     await waitFor(() => expect(screen.queryByText('Wizard Overlay')).toBeNull());

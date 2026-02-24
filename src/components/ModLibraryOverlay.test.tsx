@@ -119,8 +119,8 @@ describe('ModLibraryOverlay', () => {
 
     expect(await screen.findByText('Mono Utility')).toBeTruthy();
     expect(await screen.findByText('TestAuthor')).toBeTruthy();
-    expect(await screen.findByText('v1.2.3')).toBeTruthy();
-    expect(await screen.findByText('Latest: v1.3.0')).toBeTruthy();
+    expect(await screen.findByText(/Active\s+v1\.2\.3/i)).toBeTruthy();
+    expect(await screen.findByText(/Latest:?\s+v1\.3\.0/i)).toBeTruthy();
     expect(await screen.findByText('Mono')).toBeTruthy();
   });
 });
