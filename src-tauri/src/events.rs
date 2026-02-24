@@ -148,6 +148,20 @@ pub fn emit_mods_changed<R: Runtime>(
     )
 }
 
+pub fn emit_mods_snapshot_updated<R: Runtime>(
+    app: &AppHandle<R>,
+    environment_id: String,
+    snapshot: serde_json::Value,
+) -> Result<(), tauri::Error> {
+    app.emit(
+        "mods_snapshot_updated",
+        serde_json::json!({
+            "environmentId": environment_id,
+            "snapshot": snapshot
+        }),
+    )
+}
+
 pub fn emit_plugins_changed<R: Runtime>(
     app: &AppHandle<R>,
     environment_id: String,

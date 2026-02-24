@@ -1,4 +1,5 @@
 use crate::services::mods::ModsService;
+use crate::services::mods_snapshot_cache;
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
@@ -69,7 +70,48 @@ async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
 }
 
 #[tauri::command]
-pub async fn get_mods(db: State<'_, Arc<SqlitePool>>, environment_id: String) -> Result<serde_json::Value, String> {
+pub async fn get_mods(
+    app: tauri::AppHandle,
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    refresh: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if !refresh.unwrap_or(false) {
+        if let Some(cached) = mods_snapshot_cache::get(&environment_id).await {
+            let db_pool = db.inner().clone();
+            let environment_id_for_refresh = environment_id.clone();
+            let app_for_refresh = app.clone();
+
+            tokio::spawn(async move {
+                let env_service = match EnvironmentService::new(db_pool.clone()) {
+                    Ok(service) => service,
+                    Err(_) => return,
+                };
+
+                let env = match env_service.get_environment(&environment_id_for_refresh).await {
+                    Ok(Some(env)) => env,
+                    _ => return,
+                };
+
+                if env.output_dir.is_empty() {
+                    return;
+                }
+
+                let mods_service = ModsService::new(db_pool);
+                if let Ok(snapshot) = mods_service.list_mods(&env.output_dir).await {
+                    mods_snapshot_cache::set(environment_id_for_refresh.clone(), snapshot.clone()).await;
+                    let _ = crate::events::emit_mods_snapshot_updated(
+                        &app_for_refresh,
+                        environment_id_for_refresh,
+                        snapshot,
+                    );
+                }
+            });
+
+            return Ok(cached);
+        }
+    }
+
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service.get_environment(&environment_id)
         .await
@@ -81,9 +123,13 @@ pub async fn get_mods(db: State<'_, Arc<SqlitePool>>, environment_id: String) ->
     }
 
     let mods_service = ModsService::new(db.inner().clone());
-    mods_service.list_mods(&env.output_dir)
+    let result = mods_service
+        .list_mods(&env.output_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    mods_snapshot_cache::set(environment_id, result.clone()).await;
+    Ok(result)
 }
 
 #[tauri::command]

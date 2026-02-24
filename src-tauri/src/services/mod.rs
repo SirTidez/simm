@@ -4,6 +4,7 @@ pub mod settings;
 pub mod auth;
 pub mod melon_loader;
 pub mod mods;
+pub mod mods_snapshot_cache;
 pub mod plugins;
 pub mod fomod;
 pub mod userlibs;

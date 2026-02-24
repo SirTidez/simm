@@ -248,7 +248,7 @@ export class ApiService {
   }
 
   // Mods operations
-  static async getMods(environmentId: string): Promise<{
+  static async getMods(environmentId: string, refresh: boolean = false): Promise<{
     mods: Array<{
       name: string;
       fileName: string;
@@ -263,7 +263,7 @@ export class ApiService {
     modsDirectory: string;
     count: number;
   }> {
-    return invoke('get_mods', { environmentId });
+    return invoke('get_mods', { environmentId, refresh });
   }
 
   static async getModLibrary(): Promise<import('../types').ModLibraryResult> {

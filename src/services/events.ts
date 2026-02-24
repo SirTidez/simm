@@ -60,6 +60,25 @@ export interface ModsChangedEvent {
   environmentId: string;
 }
 
+export interface ModsSnapshotUpdatedEvent {
+  environmentId: string;
+  snapshot: {
+    mods: Array<{
+      name: string;
+      fileName: string;
+      path: string;
+      version?: string;
+      source?: string;
+      sourceUrl?: string;
+      disabled?: boolean;
+      modStorageId?: string;
+      managed?: boolean;
+    }>;
+    modsDirectory: string;
+    count: number;
+  };
+}
+
 export interface PluginsChangedEvent {
   environmentId: string;
 }
@@ -148,6 +167,12 @@ export async function onUpdateCheckComplete(handler: (data: UpdateCheckCompleteE
 
 export async function onModsChanged(handler: (data: ModsChangedEvent) => void): Promise<() => void> {
   return await listen<ModsChangedEvent>('mods_changed', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onModsSnapshotUpdated(handler: (data: ModsSnapshotUpdatedEvent) => void): Promise<() => void> {
+  return await listen<ModsSnapshotUpdatedEvent>('mods_snapshot_updated', (event) => {
     handler(event.payload);
   });
 }

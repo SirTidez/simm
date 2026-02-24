@@ -4,6 +4,11 @@ use tokio::sync::RwLock;
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::events;
+use crate::services::environment::EnvironmentService;
+use crate::services::mods::ModsService;
+use crate::services::mods_snapshot_cache;
+use sqlx::SqlitePool;
+use tauri::Manager;
 
 pub struct FileSystemWatcherService {
     watchers: Arc<RwLock<std::collections::HashMap<String, RecommendedWatcher>>>,
@@ -57,6 +62,64 @@ impl FileSystemWatcherService {
                             "userlibs" => events::emit_userlibs_changed(app_ref, environment_id_clone.clone()),
                             _ => Ok(()),
                         };
+
+                        if watch_type_clone == "mods" {
+                            let app_for_refresh = app_ref.clone();
+                            let environment_id_for_refresh = environment_id_clone.clone();
+                            tokio::spawn(async move {
+                                let Some(pool_state) = app_for_refresh.try_state::<Arc<SqlitePool>>() else {
+                                    return;
+                                };
+                                let pool = pool_state.inner().clone();
+
+                                let env_service = match EnvironmentService::new(pool.clone()) {
+                                    Ok(service) => service,
+                                    Err(err) => {
+                                        log::warn!("Failed to create EnvironmentService during mods snapshot refresh: {}", err);
+                                        return;
+                                    }
+                                };
+
+                                let environment = match env_service.get_environment(&environment_id_for_refresh).await {
+                                    Ok(Some(env)) => env,
+                                    Ok(None) => return,
+                                    Err(err) => {
+                                        log::warn!(
+                                            "Failed to load environment {} during mods snapshot refresh: {}",
+                                            environment_id_for_refresh,
+                                            err
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                if environment.output_dir.is_empty() {
+                                    return;
+                                }
+
+                                let mods_service = ModsService::new(pool);
+                                match mods_service.list_mods(&environment.output_dir).await {
+                                    Ok(snapshot) => {
+                                        mods_snapshot_cache::set(
+                                            environment_id_for_refresh.clone(),
+                                            snapshot.clone(),
+                                        )
+                                        .await;
+
+                                        if let Err(err) = events::emit_mods_snapshot_updated(
+                                            &app_for_refresh,
+                                            environment_id_for_refresh,
+                                            snapshot,
+                                        ) {
+                                            log::warn!("Failed to emit mods_snapshot_updated event: {}", err);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        log::warn!("Failed to refresh mods snapshot from watcher event: {}", err);
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 Err(e) => {

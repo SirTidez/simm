@@ -966,8 +966,6 @@ impl ModsService {
     }
 
     pub async fn list_mods(&self, game_dir: &str) -> Result<serde_json::Value> {
-        self.reconcile_tracked_mod_state().await?;
-
         let mods_directory = self.get_mods_directory(game_dir);
 
         if !mods_directory.exists() {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
-import { onModsChanged as onModsChangedEvent } from '../services/events';
+import { onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import type { Environment, ModLibraryEntry, NexusMod, NexusModFile } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 
@@ -82,6 +82,33 @@ function normalizeModNameKey(name: string): string {
     .toLowerCase();
 }
 
+function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] {
+  const nextByKey = new Map<string, ModInfo>();
+  for (const mod of incoming) {
+    nextByKey.set(`${mod.fileName}::${mod.path}`, mod);
+  }
+
+  const merged: ModInfo[] = [];
+  for (const existing of previous) {
+    const key = `${existing.fileName}::${existing.path}`;
+    const updated = nextByKey.get(key);
+    if (updated) {
+      merged.push(updated);
+      nextByKey.delete(key);
+    }
+  }
+
+  for (const mod of incoming) {
+    const key = `${mod.fileName}::${mod.path}`;
+    if (nextByKey.has(key)) {
+      merged.push(mod);
+      nextByKey.delete(key);
+    }
+  }
+
+  return merged;
+}
+
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked }: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
 
@@ -124,6 +151,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
   const suppressWatcherReloadUntilRef = useRef(0);
+  const modsReloadTimerRef = useRef<number | null>(null);
+  const activeLoadRequestRef = useRef(0);
 
   const libraryVersionCountByName = useMemo(() => {
     const counts = new Map<string, number>();
@@ -134,59 +163,174 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     return counts;
   }, [downloadedMods]);
 
+  const loadEnvironment = async () => {
+    try {
+      const env = await ApiService.getEnvironment(environmentId);
+      setEnvironment(env);
+    } catch (err) {
+      console.error('Failed to load environment:', err);
+    }
+  };
+
+  const loadInstalledMods = async (showSpinner: boolean = true, refresh: boolean = false) => {
+    const requestId = ++activeLoadRequestRef.current;
+    if (showSpinner) {
+      setLoading(true);
+      setError(null);
+    }
+
+    try {
+      const result = await ApiService.getMods(environmentId, refresh);
+      if (requestId !== activeLoadRequestRef.current) {
+        return;
+      }
+
+      const normalizedMods = result.mods.map(mod => ({
+        ...mod,
+        source: mod.source as ModInfo['source'],
+      }));
+      setMods(previous => mergeModSnapshots(previous, normalizedMods));
+      setModsDirectory(result.modsDirectory);
+    } catch (err) {
+      if (requestId !== activeLoadRequestRef.current) {
+        return;
+      }
+
+      if (showSpinner) {
+        setError(err instanceof Error ? err.message : 'Failed to load mods');
+      } else {
+        console.warn('Failed to refresh installed mods:', err);
+      }
+    } finally {
+      if (showSpinner && requestId === activeLoadRequestRef.current) {
+        setLoading(false);
+      }
+    }
+  };
+
+  const loadDownloadedLibrary = async () => {
+    try {
+      const library = await ApiService.getModLibrary();
+      setDownloadedMods(library.downloaded || []);
+    } catch (err) {
+      console.warn('Failed to load downloaded mod library:', err);
+    }
+  };
+
+  const loadCachedModUpdates = async () => {
+    try {
+      const summary = await ApiService.getModUpdatesSummary(environmentId);
+      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
+      for (const update of summary.updates || []) {
+        updatesMap.set(update.modFileName, {
+          updateAvailable: true,
+          currentVersion: update.currentVersion,
+          latestVersion: update.latestVersion,
+        });
+      }
+      setModUpdates(updatesMap);
+      onModUpdatesChecked?.(summary.count || updatesMap.size);
+    } catch (err) {
+      console.warn('Failed to load cached mod update summary:', err);
+    }
+  };
+
+  const loadModsPanelData = async () => {
+    await loadInstalledMods(true, false);
+    void loadDownloadedLibrary();
+    void loadCachedModUpdates();
+  };
+
   useEffect(() => {
     if (isOpen && environmentId) {
-      loadEnvironment();
-      loadMods();
+      void loadEnvironment();
+      void loadModsPanelData();
 
       // Listen for filesystem changes
       let unlistenModsChanged: (() => void) | null = null;
+      let unlistenModsSnapshot: (() => void) | null = null;
+
+      const scheduleInstalledModsRefresh = () => {
+        if (modsReloadTimerRef.current) {
+          window.clearTimeout(modsReloadTimerRef.current);
+        }
+
+        modsReloadTimerRef.current = window.setTimeout(() => {
+          modsReloadTimerRef.current = null;
+          if (Date.now() < suppressWatcherReloadUntilRef.current) {
+            return;
+          }
+          void loadInstalledMods(false, true);
+          void loadCachedModUpdates();
+          onModsChanged?.();
+        }, 350);
+      };
 
       const setupListener = async () => {
         try {
           unlistenModsChanged = await onModsChangedEvent((data) => {
             if (data.environmentId === environmentId) {
-              if (Date.now() < suppressWatcherReloadUntilRef.current) {
-                return;
-              }
-              loadMods();
-              if (onModsChanged) {
-                onModsChanged();
-              }
+              scheduleInstalledModsRefresh();
             }
+          });
+
+          unlistenModsSnapshot = await onModsSnapshotUpdated((data) => {
+            if (data.environmentId !== environmentId || !data.snapshot) {
+              return;
+            }
+
+            const normalizedMods = (data.snapshot.mods || []).map(mod => ({
+              ...mod,
+              source: mod.source as ModInfo['source'],
+            }));
+
+            setMods(previous => mergeModSnapshots(previous, normalizedMods));
+            setModsDirectory(data.snapshot.modsDirectory || '');
           });
         } catch (error) {
           console.error('Failed to set up mods changed listener:', error);
         }
       };
 
-      setupListener();
+      void setupListener();
 
       return () => {
+        activeLoadRequestRef.current += 1;
+        if (modsReloadTimerRef.current) {
+          window.clearTimeout(modsReloadTimerRef.current);
+          modsReloadTimerRef.current = null;
+        }
         if (unlistenModsChanged) unlistenModsChanged();
+        if (unlistenModsSnapshot) unlistenModsSnapshot();
       };
-    } else {
-      // Reset state when closing
-      setMods([]);
-      setError(null);
-      setModsDirectory('');
-      setEnvironment(null);
-      setSearchQuery('');
-      setSearchResults([]);
-      setShowSearchResults(false);
-      setSearchSource('thunderstore');
-      setNexusModsSearchQuery('');
-      setNexusModsSearchResults([]);
-      setShowNexusModsResults(false);
-      setNexusModsFiles(new Map());
-      setModUpdates(new Map());
-      setUpdatingAllMods(false);
-      setShowSearchInOverlay(false);
-      setModListFilter('all');
-      setConfirmDialog(null);
-      setPendingRuntimeSelection(null);
-      setPendingUpload(null);
     }
+
+    activeLoadRequestRef.current += 1;
+    if (modsReloadTimerRef.current) {
+      window.clearTimeout(modsReloadTimerRef.current);
+      modsReloadTimerRef.current = null;
+    }
+
+    // Reset state when closing
+    setMods([]);
+    setError(null);
+    setModsDirectory('');
+    setEnvironment(null);
+    setSearchQuery('');
+    setSearchResults([]);
+    setShowSearchResults(false);
+    setSearchSource('thunderstore');
+    setNexusModsSearchQuery('');
+    setNexusModsSearchResults([]);
+    setShowNexusModsResults(false);
+    setNexusModsFiles(new Map());
+    setModUpdates(new Map());
+    setUpdatingAllMods(false);
+    setShowSearchInOverlay(false);
+    setModListFilter('all');
+    setConfirmDialog(null);
+    setPendingRuntimeSelection(null);
+    setPendingUpload(null);
   }, [isOpen, environmentId]);
 
   // Auto-load files for NexusMods search results
@@ -199,41 +343,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       });
     }
   }, [showNexusModsResults, nexusModsSearchResults]);
-
-  const loadEnvironment = async () => {
-    try {
-      const env = await ApiService.getEnvironment(environmentId);
-      setEnvironment(env);
-    } catch (err) {
-      console.error('Failed to load environment:', err);
-    }
-  };
-
-  const loadMods = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await ApiService.getMods(environmentId);
-      const normalizedMods = result.mods.map(mod => ({
-        ...mod,
-        source: mod.source as ModInfo['source'],
-      }));
-      setMods(normalizedMods);
-      setModsDirectory(result.modsDirectory);
-
-      const library = await ApiService.getModLibrary();
-      setDownloadedMods(library.downloaded || []);
-
-      // Load update information
-      await checkModUpdates();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load mods');
-      setMods([]);
-      setDownloadedMods([]);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const checkModUpdates = async (showErrors: boolean = false) => {
     try {
@@ -264,21 +373,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setError(null);
     try {
       await checkModUpdates(true); // Show errors when manually triggered
-      // Reload mods to refresh the display (but don't check updates again to avoid double-checking)
-      setLoading(true);
-      try {
-        const result = await ApiService.getMods(environmentId);
-        const normalizedMods = result.mods.map(mod => ({
-          ...mod,
-          source: mod.source as ModInfo['source'],
-        }));
-        setMods(normalizedMods);
-        setModsDirectory(result.modsDirectory);
-      } catch (err) {
-        console.error('Failed to reload mods after update check:', err);
-      } finally {
-        setLoading(false);
-      }
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to check for mod updates');
     } finally {
@@ -291,7 +387,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     try {
       await ApiService.deleteMod(environmentId, mod.fileName);
       // Reload mods list after deletion
-      await loadMods();
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
       // Notify parent that mods changed (so it can refresh the count)
       if (onModsChanged) {
         onModsChanged();
@@ -312,7 +410,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         throw new Error(result.error || result.message || 'Failed to update mod');
       }
 
-      await loadMods();
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
       if (onModsChanged) {
         onModsChanged();
       }
@@ -354,7 +454,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setUpdatingMod(null);
     setUpdatingAllMods(false);
 
-    await loadMods();
+    await loadInstalledMods(false, true);
+    await loadDownloadedLibrary();
+    await loadCachedModUpdates();
     if (onModsChanged) {
       onModsChanged();
     }
@@ -435,7 +537,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setInstallingDownloaded(storageId);
     try {
       await ApiService.installDownloadedMod(storageId, [environmentId]);
-      await loadMods();
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
       if (onModsChanged) {
         onModsChanged();
       }
@@ -725,7 +829,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const handleUploadSuccess = async () => {
     // Reload mods list after successful upload
-    await loadMods();
+    await loadInstalledMods(false, true);
+    await loadDownloadedLibrary();
+    await loadCachedModUpdates();
     // Notify parent that mods changed
     if (onModsChanged) {
       onModsChanged();
@@ -894,7 +1000,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               console.log(`Successfully installed mod: ${pkg.name}`);
 
               // Reload mods after installation
-              await loadMods();
+              await loadInstalledMods(false, true);
+              await loadDownloadedLibrary();
+              await loadCachedModUpdates();
               if (onModsChanged) {
                 onModsChanged();
               }
@@ -910,7 +1018,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         console.log(`Successfully installed mod: ${pkg.name}`);
 
         // Reload mods after installation
-        await loadMods();
+        await loadInstalledMods(false, true);
+        await loadDownloadedLibrary();
+        await loadCachedModUpdates();
         if (onModsChanged) {
           onModsChanged();
         }
@@ -1053,7 +1163,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               console.log(`Successfully installed mod: ${modId}`);
 
               // Reload mods after installation
-              await loadMods();
+              await loadInstalledMods(false, true);
+              await loadDownloadedLibrary();
+              await loadCachedModUpdates();
               if (onModsChanged) {
                 onModsChanged();
               }
@@ -1069,7 +1181,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         console.log(`Successfully installed mod: ${modId}`);
 
         // Reload mods after installation
-        await loadMods();
+        await loadInstalledMods(false, true);
+        await loadDownloadedLibrary();
+        await loadCachedModUpdates();
         if (onModsChanged) {
           onModsChanged();
         }

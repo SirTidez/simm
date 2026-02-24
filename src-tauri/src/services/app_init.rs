@@ -6,6 +6,7 @@ use crate::utils::directory_init;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::services::environment::EnvironmentService;
 use crate::services::mods::ModsService;
+use crate::services::mods_snapshot_cache;
 use tauri::{AppHandle, Manager};
 use sqlx::SqlitePool;
 
@@ -60,6 +61,30 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         Ok(environments) => {
             let env_count = environments.len();
             log::info!("Found {} existing environment(s) to watch", env_count);
+
+            let cache_seed_environments = environments.clone();
+            let cache_seed_pool = pool.clone();
+            tokio::spawn(async move {
+                let mods_service = ModsService::new(cache_seed_pool);
+                for env in cache_seed_environments {
+                    if env.output_dir.is_empty() {
+                        continue;
+                    }
+
+                    match mods_service.list_mods(&env.output_dir).await {
+                        Ok(snapshot) => {
+                            mods_snapshot_cache::set(env.id.clone(), snapshot).await;
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "Failed to seed mods snapshot cache for {}: {}",
+                                env.id,
+                                err
+                            );
+                        }
+                    }
+                }
+            });
 
             let watcher_guard = watcher_arc.lock().await;
             for env in &environments {
