@@ -392,6 +392,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     setLibrary(data);
   }, []);
 
+  /** Notify ModsOverlay (and other views) that the library was updated - e.g. after download */
+  const notifyLibraryUpdated = useCallback(() => {
+    sessionStorage.setItem('library-needs-refresh', '1');
+    window.dispatchEvent(new CustomEvent('library-updated'));
+  }, []);
+
   const notifyModUpdateStateChanged = useCallback(() => {
     window.dispatchEvent(new CustomEvent('mod-updates-checked'));
   }, []);
@@ -696,6 +702,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
       const nextLibrary = await ApiService.getModLibrary();
       setLibrary(nextLibrary);
+      notifyLibraryUpdated();
 
       const refreshedGroup = buildDownloadedGroups(nextLibrary.downloaded).find(item => item.key === group.key);
       const selectedEntry = refreshedGroup?.entries.find(entry => {
@@ -712,7 +719,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     } finally {
       setUpdatingGroup(null);
     }
-  }, [activateGroupEntry, findThunderstorePackageForRuntime, getEntryVersionLabel, pickNexusFileForVersionAndRuntime]);
+  }, [activateGroupEntry, findThunderstorePackageForRuntime, getEntryVersionLabel, notifyLibraryUpdated, pickNexusFileForVersionAndRuntime]);
 
   const handleSelectVersion = useCallback(async (group: DownloadedModGroup, storageId: string) => {
     setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: storageId }));
@@ -926,6 +933,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime);
         }
         await refreshLibrary();
+        notifyLibraryUpdated();
       } catch (err) {
         console.error('Failed to download Thunderstore mod:', err);
       } finally {
@@ -999,6 +1007,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           await ApiService.downloadNexusModToLibrary(modId, targetFile.file_id, runtime);
         }
         await refreshLibrary();
+        notifyLibraryUpdated();
       } catch (err) {
         console.error('Failed to download Nexus mod:', err);
       } finally {

@@ -25,7 +25,7 @@ pub async fn get_all_melon_loader_releases(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db).await?;
-    service.get_all_releases("LavaGang", "MelonLoader", false)
+    service.get_all_releases_with_latest("LavaGang", "MelonLoader", false)
         .await
         .map_err(|e| e.to_string())
 }
@@ -45,7 +45,7 @@ pub async fn get_all_s1api_releases(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db).await?;
-    service.get_all_releases("ifBars", "S1API", false)
+    service.get_all_releases_with_latest("ifBars", "S1API", false)
         .await
         .map_err(|e| e.to_string())
 }
@@ -65,7 +65,7 @@ pub async fn get_all_mlvscan_releases(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let service = github_service(db).await?;
-    service.get_all_releases("ifBars", "MLVScan", false)
+    service.get_all_releases_with_latest("ifBars", "MLVScan", false)
         .await
         .map_err(|e| e.to_string())
 }

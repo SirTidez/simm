@@ -45,6 +45,10 @@ impl FileSystemWatcherService {
             return Ok(());
         }
 
+        // Capture Tokio runtime handle for spawning from notify's callback thread.
+        // The notify callback runs in a separate OS thread (not in Tokio runtime), so we cannot
+        // use tokio::spawn() directly - it would panic "there is no reactor running".
+        let rt_handle = tokio::runtime::Handle::current();
         let app_handle_clone = self.app_handle.clone();
         let environment_id_clone = environment_id.to_string();
         let watch_type_clone = watch_type.to_string();
@@ -66,7 +70,8 @@ impl FileSystemWatcherService {
                         if watch_type_clone == "mods" {
                             let app_for_refresh = app_ref.clone();
                             let environment_id_for_refresh = environment_id_clone.clone();
-                            tokio::spawn(async move {
+                            // Spawn on Tokio runtime via handle - callback runs in notify's thread, not Tokio.
+                            let _ = rt_handle.spawn(async move {
                                 let Some(pool_state) = app_for_refresh.try_state::<Arc<SqlitePool>>() else {
                                     return;
                                 };

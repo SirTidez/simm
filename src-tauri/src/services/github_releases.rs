@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use octocrab::models::repos::Release;
 use octocrab::Octocrab;
 use std::env;
 use std::sync::Arc;
@@ -45,24 +46,81 @@ impl GitHubReleasesService {
         *self.client.write().await = build_client_from_token(&token);
     }
 
-    pub async fn get_latest_release(&self, owner: &str, repo: &str, include_prereleases: bool) -> Result<Option<serde_json::Value>> {
-        let client = self.client.read().await.clone()
-            .ok_or_else(|| anyhow::anyhow!("Failed to initialize GitHub client"))?;
+    fn release_to_json(release: &Release) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": release.tag_name,
+            "name": release.name.as_ref().unwrap_or(&release.tag_name),
+            "published_at": release.published_at,
+            "prerelease": release.prerelease,
+            "assets": release.assets.iter().map(|asset| serde_json::json!({
+                "name": asset.name,
+                "browser_download_url": asset.browser_download_url,
+                "size": asset.size,
+                "content_type": &asset.content_type
+            })).collect::<Vec<_>>(),
+            "body": release.body.as_ref().map(|s| s.as_str())
+        })
+    }
 
-        let releases = client
+    async fn fetch_all_releases(
+        &self,
+        client: &Octocrab,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<Release>> {
+        let mut page = client
             .repos(owner, repo)
             .releases()
             .list()
-            .per_page(10)
+            .per_page(100)
             .send()
             .await
             .context("Failed to fetch releases")?;
 
-        let mut filtered: Vec<_> = releases.items.into_iter().collect();
+        let mut all_items = Vec::new();
+        all_items.append(&mut page.items);
+
+        let mut next = page.next.clone();
+        while let Some(next_url) = next {
+            let next_page = client
+                .get_page::<Release>(&Some(next_url.clone()))
+                .await
+                .context("Failed to fetch paginated releases")?;
+
+            let Some(mut next_page) = next_page else {
+                break;
+            };
+
+            next = next_page.next.clone();
+            all_items.append(&mut next_page.items);
+        }
+
+        Ok(all_items)
+    }
+
+    pub async fn get_latest_release(&self, owner: &str, repo: &str, include_prereleases: bool) -> Result<Option<serde_json::Value>> {
+        let client = self.client.read().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("Failed to initialize GitHub client"))?;
+
+        // For stable releases, prefer GitHub's dedicated latest endpoint.
+        // This avoids stale/incorrect ordering from list() and excludes draft/prerelease by definition.
+        if !include_prereleases {
+            if let Ok(latest) = client.repos(owner, repo).releases().get_latest().await {
+                return Ok(Some(Self::release_to_json(&latest)));
+            }
+        }
+
+        let all_releases = self.fetch_all_releases(&client, owner, repo).await?;
+        let mut filtered: Vec<_> = all_releases.into_iter().collect();
+
+        // Draft releases should never be considered for update checks.
+        filtered.retain(|r| !r.draft);
 
         if !include_prereleases {
             filtered.retain(|r| !r.prerelease);
         }
+
+        filtered.sort_by(|a, b| b.published_at.cmp(&a.published_at));
 
         if filtered.is_empty() {
             return Ok(None);
@@ -88,36 +146,47 @@ impl GitHubReleasesService {
         let client = self.client.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("Failed to initialize GitHub client"))?;
 
-        let releases = client
-            .repos(owner, repo)
-            .releases()
-            .list()
-            .per_page(100)
-            .send()
-            .await
-            .context("Failed to fetch releases")?;
+        let all_releases = self.fetch_all_releases(&client, owner, repo).await?;
+        let mut filtered: Vec<_> = all_releases.into_iter().collect();
 
-        let mut filtered: Vec<_> = releases.items.into_iter().collect();
+        // Hide drafts from the UI/version selectors.
+        filtered.retain(|r| !r.draft);
 
         if !include_prereleases {
             filtered.retain(|r| !r.prerelease);
         }
 
+        filtered.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+
         Ok(filtered.into_iter().map(|release| {
-            serde_json::json!({
-                "tag_name": release.tag_name,
-                "name": release.name.as_ref().unwrap_or(&release.tag_name),
-                "published_at": release.published_at,
-                "prerelease": release.prerelease,
-                "assets": release.assets.iter().map(|asset| serde_json::json!({
-                    "name": asset.name,
-                    "browser_download_url": asset.browser_download_url,
-                    "size": asset.size,
-                    "content_type": &asset.content_type
-                })).collect::<Vec<_>>(),
-                "body": release.body.as_ref().map(|s| s.as_str())
-            })
+            Self::release_to_json(&release)
         }).collect())
+    }
+
+    pub async fn get_all_releases_with_latest(
+        &self,
+        owner: &str,
+        repo: &str,
+        include_prereleases: bool,
+    ) -> Result<Vec<serde_json::Value>> {
+        let client = self.client.read().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("Failed to initialize GitHub client"))?;
+
+        let all_releases = self.fetch_all_releases(&client, owner, repo).await?;
+        let mut filtered: Vec<_> = all_releases.into_iter().filter(|r| !r.draft).collect();
+
+        if !include_prereleases {
+            filtered.retain(|r| !r.prerelease);
+            if let Ok(latest) = client.repos(owner, repo).releases().get_latest().await {
+                let has_latest = filtered.iter().any(|r| r.tag_name == latest.tag_name);
+                if !has_latest {
+                    filtered.push(latest);
+                }
+            }
+        }
+
+        filtered.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+        Ok(filtered.into_iter().map(|r| Self::release_to_json(&r)).collect())
     }
 
     pub async fn download_release_asset(&self, url: &str) -> Result<Vec<u8>> {

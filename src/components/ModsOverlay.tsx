@@ -237,7 +237,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const loadModsPanelData = async () => {
     await loadInstalledMods(true, false);
-    void loadDownloadedLibrary();
+    await loadDownloadedLibrary();
     void loadCachedModUpdates();
   };
 
@@ -331,6 +331,20 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setConfirmDialog(null);
     setPendingRuntimeSelection(null);
     setPendingUpload(null);
+    setDownloadedMods([]);
+  }, [isOpen, environmentId]);
+
+  // Refresh library when notified (e.g. after download in another view) or when opening
+  useEffect(() => {
+    if (!isOpen || !environmentId) return;
+    const handler = () => void loadDownloadedLibrary();
+    window.addEventListener('library-updated', handler);
+    // Check if library was updated while we were away (e.g. user downloaded in Library then switched here)
+    if (sessionStorage.getItem('library-needs-refresh') === '1') {
+      sessionStorage.removeItem('library-needs-refresh');
+      void loadDownloadedLibrary();
+    }
+    return () => window.removeEventListener('library-updated', handler);
   }, [isOpen, environmentId]);
 
   // Auto-load files for NexusMods search results
@@ -1245,9 +1259,20 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const envRuntime = environment?.runtime;
   const downloadedNotInstalled = downloadedMods.filter(entry => {
     const installedIn = envRuntime ? entry.installedInByRuntime?.[envRuntime] || entry.installedIn : entry.installedIn;
-    if (installedIn.includes(environmentId)) return false;
+    if (installedIn?.includes(environmentId)) return false;
     // Exclude mods that have declared runtimes but none match the current environment runtime
-    if (envRuntime && entry.availableRuntimes.length > 0 && !entry.availableRuntimes.includes(envRuntime)) return false;
+    if (envRuntime) {
+      const runtimeMatch = envRuntime.toUpperCase();
+      const hasMatchingRuntime = (entry.availableRuntimes?.length ?? 0) > 0
+        ? entry.availableRuntimes.some(r => (r ?? '').toUpperCase() === runtimeMatch)
+        : false;
+      // Fallback: if we have storage for this runtime, include (handles backend inconsistency / key casing)
+      const hasStorageForRuntime = !!entry.storageIdsByRuntime?.[envRuntime]
+        || Object.entries(entry.storageIdsByRuntime || {}).some(([k]) => k.toUpperCase() === runtimeMatch);
+      if (!hasMatchingRuntime && !hasStorageForRuntime && (entry.availableRuntimes?.length ?? 0) > 0) {
+        return false;
+      }
+    }
     return true;
   });
   const totalUpdatesAvailable = mods.filter((mod) => {
@@ -2032,7 +2057,19 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               <div style={{ display: 'grid', gap: '1rem' }}>
                 {/* Regular Mods List */}
                 <div style={{ marginBottom: '1.5rem' }}>
-                  <h3 style={{ margin: '0 0 0.75rem 0', fontSize: '1rem' }}>Library Downloads</h3>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <h3 style={{ margin: 0, fontSize: '1rem' }}>Library Downloads</h3>
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      onClick={() => void loadDownloadedLibrary()}
+                      title="Refresh library list (e.g. after downloading in Library view)"
+                      style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+                    >
+                      <i className="fas fa-sync-alt" style={{ marginRight: '0.25rem' }}></i>
+                      Refresh
+                    </button>
+                  </div>
                   {downloadedNotInstalled.length === 0 ? (
                     <div style={{ padding: '1rem', textAlign: 'center', color: '#888' }}>
                       <p>No downloaded mods waiting to be installed in this environment.</p>

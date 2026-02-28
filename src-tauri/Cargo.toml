@@ -2,8 +2,8 @@
 name = "simmrust"
 version = "0.6.1"
 description = "Schedule I Developer Environment Manager"
-authors = ["Tyler"]
-license = ""
+authors = ["LockWire Labs"]
+license = "AGPL-3.0"
 repository = ""
 edition = "2021"
 

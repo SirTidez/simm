@@ -77,7 +77,7 @@ pub struct Environment {
     pub environment_type: Option<EnvironmentType>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Runtime {
     Il2cpp,

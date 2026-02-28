@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::time::{sleep, Duration};
 
-use crate::types::{Environment, schedule_i_config};
+use crate::types::{Environment, Runtime, schedule_i_config};
 
 pub struct EnvironmentService {
     pool: Arc<SqlitePool>,
@@ -15,6 +15,36 @@ pub struct EnvironmentService {
 impl EnvironmentService {
     pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
         Ok(Self { pool })
+    }
+
+    pub fn infer_runtime_from_installation_path(path: &Path) -> Runtime {
+        if path.join("GameAssembly.dll").exists() {
+            Runtime::Il2cpp
+        } else if path
+            .join("Schedule I_Data")
+            .join("Managed")
+            .join("Assembly-CSharp.dll")
+            .exists()
+        {
+            Runtime::Mono
+        } else {
+            Runtime::Il2cpp
+        }
+    }
+
+    pub fn branch_for_runtime(runtime: &Runtime) -> String {
+        match runtime {
+            Runtime::Il2cpp => "main".to_string(),
+            Runtime::Mono => "alternate".to_string(),
+        }
+    }
+
+    pub fn runtime_for_branch(branch: &str) -> Option<Runtime> {
+        schedule_i_config()
+            .branches
+            .into_iter()
+            .find(|b| b.name.eq_ignore_ascii_case(branch))
+            .map(|b| b.runtime)
     }
 
     async fn fetch_environments(&self) -> Result<Vec<Environment>> {
@@ -269,11 +299,15 @@ impl EnvironmentService {
         let game_version_service = crate::services::game_version::GameVersionService::new();
         let current_game_version = game_version_service.extract_game_version(&steam_path).await?;
 
-        let runtime = if steam_path.to_lowercase().contains("mono") {
-            crate::types::Runtime::Mono
-        } else {
-            crate::types::Runtime::Il2cpp
-        };
+        let steam_service = crate::services::steam::SteamService::new();
+        let runtime_from_files = Self::infer_runtime_from_installation_path(path);
+        let detected_branch = steam_service
+            .detect_installed_branch(path)
+            .await
+            .ok()
+            .flatten();
+        let branch = detected_branch.unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
+        let runtime = Self::runtime_for_branch(&branch).unwrap_or(runtime_from_files);
 
         let id = format!("steam-{}", chrono::Utc::now().timestamp_millis());
 
@@ -282,7 +316,7 @@ impl EnvironmentService {
             name: name.unwrap_or_else(|| "Steam Installation".to_string()),
             description,
             app_id: crate::services::steam::SteamService::get_steam_app_id(),
-            branch: "main".to_string(),
+            branch,
             output_dir: steam_path,
             runtime,
             status: crate::types::EnvironmentStatus::Completed,
@@ -328,21 +362,8 @@ impl EnvironmentService {
             return Err(anyhow::anyhow!("Invalid installation path: Schedule I.exe not found in {}", local_path));
         }
 
-        // Detect runtime by checking for IL2CPP vs Mono indicators
-        let runtime = if path.join("GameAssembly.dll").exists() {
-            crate::types::Runtime::Il2cpp
-        } else if path.join("Schedule I_Data").join("Managed").join("Assembly-CSharp.dll").exists() {
-            crate::types::Runtime::Mono
-        } else {
-            // Default to IL2CPP if we can't determine
-            crate::types::Runtime::Il2cpp
-        };
-
-        // Infer branch from runtime
-        let branch = match runtime {
-            crate::types::Runtime::Il2cpp => "main".to_string(),
-            crate::types::Runtime::Mono => "alternate".to_string(),
-        };
+        let runtime = Self::infer_runtime_from_installation_path(path);
+        let branch = Self::branch_for_runtime(&runtime);
 
         // Extract game version
         let game_version_service = crate::services::game_version::GameVersionService::new();

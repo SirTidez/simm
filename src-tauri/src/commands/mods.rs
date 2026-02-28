@@ -510,7 +510,7 @@ pub async fn install_s1api(
     };
     
     eprintln!("[install_s1api] Fetching S1API releases from GitHub...");
-    let releases = match github_service.get_all_releases("ifBars", "S1API", false).await {
+    let releases = match github_service.get_all_releases_with_latest("ifBars", "S1API", false).await {
         Ok(releases) => {
             eprintln!("[install_s1api] Found {} releases", releases.len());
             releases
@@ -613,7 +613,7 @@ pub async fn download_s1api_to_library(
         GitHubReleasesService::with_token(token)
     };
 
-    let releases = github_service.get_all_releases("ifBars", "S1API", false)
+    let releases = github_service.get_all_releases_with_latest("ifBars", "S1API", false)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -677,7 +677,7 @@ pub async fn download_mlvscan_to_library(
         GitHubReleasesService::with_token(token)
     };
 
-    let releases = github_service.get_all_releases("ifBars", "MLVScan", false)
+    let releases = github_service.get_all_releases_with_latest("ifBars", "MLVScan", false)
         .await
         .map_err(|e| e.to_string())?;
 

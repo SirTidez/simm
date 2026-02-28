@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use regex::Regex;
 use tokio::fs;
 
 /// Steam detection and management service
@@ -152,6 +153,55 @@ impl SteamService {
     pub fn validate_steam_installation(path: &Path) -> Result<bool> {
         let executable = path.join("Schedule I.exe");
         Ok(executable.exists())
+    }
+
+    fn find_steamapps_dir(game_path: &Path) -> Option<PathBuf> {
+        let mut current = Some(game_path);
+        while let Some(path) = current {
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("steamapps"))
+            {
+                return Some(path.to_path_buf());
+            }
+            current = path.parent();
+        }
+        None
+    }
+
+    /// Detect currently selected Steam branch from appmanifest (betakey).
+    /// Returns "main" when no betakey is set.
+    pub async fn detect_installed_branch(&self, game_path: &Path) -> Result<Option<String>> {
+        let Some(steamapps_dir) = Self::find_steamapps_dir(game_path) else {
+            return Ok(None);
+        };
+
+        let manifest_path = steamapps_dir.join(format!("appmanifest_{}.acf", Self::get_steam_app_id()));
+        if !manifest_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&manifest_path)
+            .await
+            .with_context(|| format!("Failed to read appmanifest: {}", manifest_path.display()))?;
+
+        let betakey_re = Regex::new(r#"(?i)"betakey"\s+"([^"]*)""#)
+            .context("Failed to compile betakey regex")?;
+
+        if let Some(caps) = betakey_re.captures(&content) {
+            let key = caps
+                .get(1)
+                .map(|m| m.as_str().trim().to_ascii_lowercase())
+                .unwrap_or_default();
+
+            if key.is_empty() {
+                return Ok(Some("main".to_string()));
+            }
+
+            return Ok(Some(key));
+        }
+
+        Ok(Some("main".to_string()))
     }
 }
 
