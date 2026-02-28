@@ -517,6 +517,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
           onClose={() => setShowAuthModal(false)}
           onAuthenticated={handleAuthenticated}
           required={false}
+          isNested={true}
         />
       )}
     </>

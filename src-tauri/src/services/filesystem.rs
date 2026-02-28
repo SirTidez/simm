@@ -39,19 +39,24 @@ impl FileSystemService {
         Ok(())
     }
 
-    pub async fn launch_game(&self, game_dir: &str, launch_method: Option<&str>) -> Result<String> {
+    pub async fn launch_game(&self, game_dir: Option<&str>, launch_method: Option<&str>) -> Result<String> {
         let method = launch_method.unwrap_or("steam");
 
-        eprintln!("[Launch] launch_game called with method: {:?}, game_dir: {}", method, game_dir);
+        eprintln!(
+            "[Launch] launch_game called with method: {:?}, game_dir: {:?}",
+            method,
+            game_dir
+        );
 
         match method {
             "steam" => {
                 eprintln!("[Launch] Using Steam launch method");
-                self.launch_via_steam(Some(game_dir)).await
+                self.launch_via_steam(game_dir).await
             },
             "direct" => {
                 eprintln!("[Launch] Using direct launch method");
-                self.launch_directly(game_dir).await
+                let dir = game_dir.ok_or_else(|| anyhow::anyhow!("Game directory is required for direct launch"))?;
+                self.launch_directly(dir).await
             },
             _ => Err(anyhow::anyhow!("Unknown launch method: {}", method)),
         }
@@ -348,7 +353,7 @@ mod tests {
     async fn launch_game_rejects_unknown_method() {
         let service = FileSystemService::new();
         let err = service
-            .launch_game("C:\\fake", Some("mystery"))
+            .launch_game(Some("C:\\fake"), Some("mystery"))
             .await
             .expect_err("expected unknown launch method error");
         assert!(err.to_string().contains("Unknown launch method"));
@@ -359,9 +364,19 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let service = FileSystemService::new();
         let err = service
-            .launch_game(temp.path().to_string_lossy().as_ref(), Some("direct"))
+            .launch_game(Some(temp.path().to_string_lossy().as_ref()), Some("direct"))
             .await
             .expect_err("expected missing executable error");
         assert!(err.to_string().contains("Game executable not found"));
+    }
+
+    #[tokio::test]
+    async fn launch_game_direct_requires_directory() {
+        let service = FileSystemService::new();
+        let err = service
+            .launch_game(None, Some("direct"))
+            .await
+            .expect_err("expected missing directory error");
+        assert!(err.to_string().contains("Game directory is required for direct launch"));
     }
 }

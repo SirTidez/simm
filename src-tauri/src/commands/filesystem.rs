@@ -77,7 +77,15 @@ pub async fn launch_game(
     
     eprintln!("[Launch] Final method_str: {}, environment_type: {:?}", method_str, env.environment_type);
     
-    let result = fs_service.launch_game(&env.output_dir, Some(method_str))
+    let is_steam_environment = env.environment_type == Some(crate::types::EnvironmentType::Steam);
+    let game_dir_for_launch = if method_str == "steam" && is_steam_environment {
+        eprintln!("[Launch] Steam environment + steam method: launching via Steam client");
+        None
+    } else {
+        Some(env.output_dir.as_str())
+    };
+
+    let result = fs_service.launch_game(game_dir_for_launch, Some(method_str))
         .await
         .map_err(|e| e.to_string())?;
 

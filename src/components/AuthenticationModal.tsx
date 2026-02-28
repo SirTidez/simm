@@ -9,9 +9,18 @@ interface Props {
   required: boolean;
   waitingForAuth?: boolean;
   authMessage?: string;
+  isNested?: boolean;
 }
 
-export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required, waitingForAuth = false, authMessage }: Props) {
+export function AuthenticationModal({
+  isOpen,
+  onClose,
+  onAuthenticated,
+  required,
+  waitingForAuth = false,
+  authMessage,
+  isNested = false,
+}: Props) {
   const { updateSettings } = useSettingsStore();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -63,8 +72,14 @@ export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={required ? undefined : onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+    <div
+      className={`modal-overlay${isNested ? ' modal-overlay-nested' : ''}`}
+      onClick={required ? undefined : onClose}
+    >
+      <div
+        className={`modal-content${isNested ? ' modal-content-nested' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <h2>Steam Authentication Required</h2>
           {!required && (
@@ -155,4 +170,3 @@ export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required
     </div>
   );
 }
-
