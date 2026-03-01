@@ -1566,7 +1566,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             </div>
 
             {(showSearchResults || showNexusModsResults) && (
-              <div style={{ padding: '0 1.25rem 1rem' }}>
+              <div style={{ padding: '1rem 1.25rem 1rem' }}>
                 {showSearchResults && searchResults.length > 0 && (
                   <div style={{ display: 'grid', gap: '1rem' }}>
                     {searchResults.filter(pkg => {

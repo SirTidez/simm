@@ -23,6 +23,7 @@ interface Props {
   environmentId: string;
   onModsChanged?: () => void;
   onModUpdatesChecked?: (count: number) => void;
+  onOpenAccounts?: () => void;
 }
 
 interface ConfirmDialog {
@@ -109,7 +110,7 @@ function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] 
   return merged;
 }
 
-export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked }: Props) {
+export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked, onOpenAccounts }: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
 
   const [mods, setMods] = useState<ModInfo[]>([]);
@@ -142,6 +143,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [installingNexusMod, setInstallingNexusMod] = useState<{ modId: number; fileId: number } | null>(null);
   const [showNexusModsResults, setShowNexusModsResults] = useState(false);
   const [nexusModsFiles, setNexusModsFiles] = useState<Map<number, NexusModFile[]>>(new Map());
+  const [showNexusKeyRequiredModal, setShowNexusKeyRequiredModal] = useState(false);
+  const [hasNexusDownloadAccess, setHasNexusDownloadAccess] = useState<boolean>(false);
 
   // Mod updates state
   const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
@@ -169,6 +172,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       setEnvironment(env);
     } catch (err) {
       console.error('Failed to load environment:', err);
+    }
+  };
+
+  const refreshNexusDownloadAccess = async () => {
+    try {
+      const hasKey = await ApiService.hasNexusModsApiKey();
+      setHasNexusDownloadAccess(hasKey);
+    } catch {
+      setHasNexusDownloadAccess(false);
     }
   };
 
@@ -245,6 +257,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     if (isOpen && environmentId) {
       void loadEnvironment();
       void loadModsPanelData();
+      void refreshNexusDownloadAccess();
 
       // Listen for filesystem changes
       let unlistenModsChanged: (() => void) | null = null;
@@ -679,36 +692,31 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     // Only search if we have a reasonable mod name (at least 3 characters)
     if (cleanModName.length >= 3) {
       try {
-        // Check if Nexus Mods API key is available
-        const hasApiKey = await ApiService.hasNexusModsApiKey();
+        // Search Nexus Mods for this mod name (search works without login)
+        const searchResults = await ApiService.searchNexusMods('schedule1', cleanModName);
 
-        if (hasApiKey) {
-          // Search Nexus Mods for this mod name
-          const searchResults = await ApiService.searchNexusMods('schedule1', cleanModName);
+        if (searchResults.mods && searchResults.mods.length > 0) {
+          // Find the best matching mod using fuzzy matching
+          let bestMatch: NexusMod | null = null;
+          let bestScore = 0;
 
-          if (searchResults.mods && searchResults.mods.length > 0) {
-            // Find the best matching mod using fuzzy matching
-            let bestMatch: NexusMod | null = null;
-            let bestScore = 0;
-
-            for (const mod of searchResults.mods) {
-              const score = fuzzyMatchModName(cleanModName, mod.name);
-              if (score > bestScore && score >= 0.6) { // Require at least 60% match
-                bestScore = score;
-                bestMatch = mod;
-              }
+          for (const mod of searchResults.mods) {
+            const score = fuzzyMatchModName(cleanModName, mod.name);
+            if (score > bestScore && score >= 0.6) { // Require at least 60% match
+              bestScore = score;
+              bestMatch = mod;
             }
+          }
 
-            if (bestMatch) {
-              return {
-                source: 'nexusmods',
-                sourceId: bestMatch.mod_id.toString(),
-                sourceUrl: `https://www.nexusmods.com/schedule1/mods/${bestMatch.mod_id}`,
-                modName: bestMatch.name,
-                author: bestMatch.author,
-                sourceVersion: bestMatch.version,
-              };
-            }
+          if (bestMatch) {
+            return {
+              source: 'nexusmods',
+              sourceId: bestMatch.mod_id.toString(),
+              sourceUrl: `https://www.nexusmods.com/schedule1/mods/${bestMatch.mod_id}`,
+              modName: bestMatch.name,
+              author: bestMatch.author,
+              sourceVersion: bestMatch.version,
+            };
           }
         }
       } catch (err) {
@@ -1071,14 +1079,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       return;
     }
 
-    // Check if API key is set
-    const hasKey = await ApiService.hasNexusModsApiKey();
-    if (!hasKey) {
-      setError('NexusMods API key is not set. Please set it in the Accounts portal.');
-      return;
-    }
-
     const gameId = 'schedule1';
+    await refreshNexusDownloadAccess();
 
     setSearchingNexusMods(true);
     setError(null);
@@ -1117,6 +1119,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const handleInstallNexusModsMod = async (modId: number, fileId?: number) => {
     if (!environment) return;
+
+    const hasKey = await ApiService.hasNexusModsApiKey();
+    setHasNexusDownloadAccess(hasKey);
+    if (!hasKey) {
+      setShowNexusKeyRequiredModal(true);
+      return;
+    }
 
     // Load files if not already loaded
     if (!nexusModsFiles.has(modId)) {
@@ -1297,6 +1306,23 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   return (
     <>
+      <ConfirmOverlay
+        isOpen={showNexusKeyRequiredModal}
+        onClose={() => setShowNexusKeyRequiredModal(false)}
+        onConfirm={() => {
+          setShowNexusKeyRequiredModal(false);
+          if (onOpenAccounts) {
+            onOpenAccounts();
+          } else {
+            setError('Nexus Login is required to download files. Open Accounts to continue.');
+          }
+        }}
+        title="Nexus Login Required"
+        message="Downloading from NexusMods requires Nexus Login. Open Accounts to add your Nexus credentials and continue."
+        confirmText="Open Accounts"
+        cancelText="Not Now"
+        isNested
+      />
       <ConfirmOverlay
         isOpen={!!pendingUpload}
         onClose={handleRuntimeMismatchCancel}
@@ -1761,6 +1787,20 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                 <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
                   Search Results ({compatibleMods.length})
                 </h3>
+                {!hasNexusDownloadAccess && (
+                  <div style={{
+                    marginBottom: '0.75rem',
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: '6px',
+                    backgroundColor: '#3a2a1a',
+                    border: '1px solid #6a4a2a',
+                    color: '#ffd7a3',
+                    fontSize: '0.85rem'
+                  }}>
+                    <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
+                    Browsing is available without login. Downloading requires Nexus Login.
+                  </div>
+                )}
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
                   {compatibleMods.map((mod) => {
                     const files = nexusModsFiles.get(mod.mod_id) || [];
@@ -1848,8 +1888,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                           <button
                             onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
                             className={isAlreadyInstalled ? "btn btn-secondary btn-small" : "btn btn-primary btn-small"}
-                            disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled}
-                            title={isAlreadyInstalled ? 'This mod is already installed' : bestFile ? `Install ${bestFile.file_name || bestFile.name || 'mod'}` : 'Loading files...'}
+                            disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled || !hasNexusDownloadAccess}
+                            title={isAlreadyInstalled
+                              ? 'This mod is already installed'
+                              : !hasNexusDownloadAccess
+                                ? 'Requires Nexus Login to download'
+                                : bestFile
+                                  ? `Install ${bestFile.file_name || bestFile.name || 'mod'}`
+                                  : 'Loading files...'}
                           >
                             {installingNexusMod?.modId === mod.mod_id ? (
                               <>
@@ -1922,7 +1968,8 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                     <button
                                       onClick={() => handleInstallNexusModsMod(mod.mod_id, file.file_id)}
                                       className="btn btn-secondary btn-small"
-                                      disabled={installingNexusMod?.modId === mod.mod_id}
+                                      disabled={installingNexusMod?.modId === mod.mod_id || !hasNexusDownloadAccess}
+                                      title={!hasNexusDownloadAccess ? 'Requires Nexus Login to download' : 'Install file'}
                                       style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
                                     >
                                       Install
