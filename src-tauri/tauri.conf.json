@@ -1,6 +1,6 @@
 {
   "productName": "Schedule I Mod Manager",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "identifier": "com.s1devenvmanager.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -24,9 +24,10 @@
       "csp": null
     }
   },
-  "bundle": {
+"bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "LockWire Labs",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -4,6 +4,7 @@ use std::io::Read;
 use std::sync::Arc;
 use std::fs::File;
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use tokio::fs;
 #[cfg(target_os = "windows")]
 use tokio::process::Command;
@@ -19,6 +20,14 @@ use sqlx::SqlitePool;
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
+
+static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    vec![
+        Regex::new(r"(?i)\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$").expect("runtime suffix regex"),
+        Regex::new(r"(?i)\s*[-_]\s*(mono|il2cpp)\s*$").expect("runtime suffix regex"),
+        Regex::new(r"(?i)\s+(mono|il2cpp)\s*$").expect("runtime suffix regex"),
+    ]
+});
 
 #[derive(Clone)]
 pub struct ModsService {
@@ -108,6 +117,36 @@ impl ModsService {
             crate::types::Runtime::Il2cpp => RUNTIME_IL2CPP,
             crate::types::Runtime::Mono => RUNTIME_MONO,
         }
+    }
+
+    fn normalize_runtime_suffix_token(value: &str) -> String {
+        let mut normalized = value.trim().to_string();
+        loop {
+            let mut changed = false;
+            for pattern in RUNTIME_SUFFIX_PATTERNS.iter() {
+                let next = pattern.replace(&normalized, "").trim().to_string();
+                if next != normalized {
+                    normalized = next;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        normalized
+    }
+
+    fn normalize_thunderstore_source_id(source_id: &str) -> String {
+        if let Some((owner, name)) = source_id.split_once('/') {
+            return format!(
+                "{}/{}",
+                owner.trim(),
+                Self::normalize_runtime_suffix_token(name)
+            );
+        }
+
+        Self::normalize_runtime_suffix_token(source_id)
     }
 
     fn storage_metadata_path(&self, storage_path: &Path) -> PathBuf {
@@ -1162,7 +1201,7 @@ impl ModsService {
                 template_meta = Self::merge_metadata(storage_meta_file, template_meta);
             }
 
-            let display_name = template_meta.mod_name.clone().unwrap_or_else(|| {
+            let mut display_name = template_meta.mod_name.clone().unwrap_or_else(|| {
                 files
                     .get(0)
                     .cloned()
@@ -1171,6 +1210,14 @@ impl ModsService {
                     .replace(".DLL", "")
                     .replace(".disabled", "")
             });
+
+            let is_thunderstore = template_meta
+                .source
+                .as_ref()
+                .is_some_and(|source| matches!(source, ModSource::Thunderstore));
+            if is_thunderstore {
+                display_name = Self::normalize_runtime_suffix_token(&display_name);
+            }
 
             let available_runtimes = self.detect_available_runtimes(&files, template_meta.detected_runtime.clone());
             let files_by_runtime = self.build_files_by_runtime(&files, &available_runtimes);
@@ -1190,16 +1237,24 @@ impl ModsService {
 
             let installed_version = template_meta.source_version.clone().or(template_meta.installed_version.clone());
             let managed = template_meta.mod_storage_id.is_some();
-            let key_name = template_meta.mod_name.clone().unwrap_or_else(|| display_name.clone());
-            let version_key = template_meta
+            let mut key_name = template_meta.mod_name.clone().unwrap_or_else(|| display_name.clone());
+            let mut source_id_key = template_meta.source_id.clone().unwrap_or_default();
+            let mut version_key = template_meta
                 .source_version
                 .clone()
                 .or(template_meta.installed_version.clone())
                 .unwrap_or_default();
+
+            if is_thunderstore {
+                key_name = Self::normalize_runtime_suffix_token(&key_name);
+                source_id_key = Self::normalize_thunderstore_source_id(&source_id_key);
+                version_key = Self::normalize_runtime_suffix_token(&version_key);
+            }
+
             let key = format!(
                 "{}::{}::{}",
                 key_name,
-                template_meta.source_id.clone().unwrap_or_default(),
+                source_id_key,
                 version_key
             );
 
@@ -4167,6 +4222,103 @@ mod tests {
             .collect();
 
         assert_eq!(matching.len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_groups_thunderstore_runtime_split_variants() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let il2cpp_output_dir = temp.path().join("envs").join("env-thunderstore-il2cpp");
+        let il2cpp_env = env_service
+            .create_environment(
+                schedule_i_config().app_id.clone(),
+                "main".to_string(),
+                il2cpp_output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mono_output_dir = temp.path().join("envs").join("env-thunderstore-mono");
+        let mono_env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate".to_string(),
+                mono_output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let il2cpp_mods_dir = il2cpp_output_dir.join("Mods");
+        let mono_mods_dir = mono_output_dir.join("Mods");
+        fs::create_dir_all(&il2cpp_mods_dir).await?;
+        fs::create_dir_all(&mono_mods_dir).await?;
+        fs::write(il2cpp_mods_dir.join("S1FuelMod.IL2CPP.dll"), b"il2cpp").await?;
+        fs::write(mono_mods_dir.join("S1FuelMod.Mono.dll"), b"mono").await?;
+
+        let mut il2cpp_meta = sample_metadata(Some("storage-s1fuel-il2cpp"), Some("S1FuelModTeam/S1FuelMod-IL2CPP"), Some("1.3.1-IL2CPP"));
+        il2cpp_meta.source = Some(ModSource::Thunderstore);
+        il2cpp_meta.mod_name = Some("S1FuelMod-IL2CPP".to_string());
+        il2cpp_meta.author = Some("S1FuelModTeam".to_string());
+
+        let mut mono_meta = sample_metadata(Some("storage-s1fuel-mono"), Some("S1FuelModTeam/S1FuelMod-Mono"), Some("1.3.1-Mono"));
+        mono_meta.source = Some(ModSource::Thunderstore);
+        mono_meta.mod_name = Some("S1FuelMod-Mono".to_string());
+        mono_meta.author = Some("S1FuelModTeam".to_string());
+
+        let mut il2cpp_metadata = HashMap::new();
+        il2cpp_metadata.insert("S1FuelMod.IL2CPP.dll".to_string(), il2cpp_meta);
+        service.save_mod_metadata(&il2cpp_mods_dir, &il2cpp_metadata).await?;
+
+        let mut mono_metadata = HashMap::new();
+        mono_metadata.insert("S1FuelMod.Mono.dll".to_string(), mono_meta);
+        service.save_mod_metadata(&mono_mods_dir, &mono_metadata).await?;
+
+        let storage_il2cpp = download_dir.join("Mods").join("storage-s1fuel-il2cpp").join("Mods");
+        let storage_mono = download_dir.join("Mods").join("storage-s1fuel-mono").join("Mods");
+        fs::create_dir_all(&storage_il2cpp).await?;
+        fs::create_dir_all(&storage_mono).await?;
+        fs::write(storage_il2cpp.join("S1FuelMod.IL2CPP.dll"), b"il2cpp").await?;
+        fs::write(storage_mono.join("S1FuelMod.Mono.dll"), b"mono").await?;
+
+        let library = service.get_mod_library().await?;
+        let matching: Vec<_> = library
+            .downloaded
+            .iter()
+            .filter(|entry| entry.display_name == "S1FuelMod")
+            .collect();
+
+        assert_eq!(matching.len(), 1);
+        let entry = matching[0];
+        assert!(entry.available_runtimes.iter().any(|runtime| runtime == "IL2CPP"));
+        assert!(entry.available_runtimes.iter().any(|runtime| runtime == "Mono"));
+        assert_eq!(entry.storage_ids_by_runtime.get("IL2CPP").map(|value| value.as_str()), Some("storage-s1fuel-il2cpp"));
+        assert_eq!(entry.storage_ids_by_runtime.get("Mono").map(|value| value.as_str()), Some("storage-s1fuel-mono"));
+        assert!(entry
+            .installed_in_by_runtime
+            .get("IL2CPP")
+            .is_some_and(|items| items.contains(&il2cpp_env.id)));
+        assert!(entry
+            .installed_in_by_runtime
+            .get("Mono")
+            .is_some_and(|items| items.contains(&mono_env.id)));
 
         Ok(())
     }

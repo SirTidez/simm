@@ -81,6 +81,7 @@ async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsServ
 }
 
 async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
+    let _ = db;
     let github_service = {
         let mut service = GITHUB_SERVICE.lock().await;
         if service.is_none() {
@@ -88,15 +89,6 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
         }
         service.as_ref().unwrap().clone()
     };
-    // Fetch token on every call so settings changes take effect without app restart
-    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-    match settings_service.get_github_token().await {
-        Ok(Some(token)) => github_service.set_token(Some(token)).await,
-        Ok(None) => github_service.set_token(None).await,
-        Err(e) => {
-            log::warn!("Failed to get GitHub token: {:?}", e);
-        }
-    }
     Ok(github_service)
 }
 
@@ -323,8 +315,8 @@ pub async fn get_update_status(
 mod tests {
     use super::{build_mod_updates_payload, extract_mod_name_for_event, get_github_service};
     use crate::db::initialize_pool;
-    use crate::services::settings::SettingsService;
     use serial_test::serial;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     struct EnvVarGuard {
@@ -336,12 +328,6 @@ mod tests {
         fn set(key: &'static str, value: &str) -> Self {
             let original = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, original }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let original = std::env::var(key).ok();
-            std::env::remove_var(key);
             Self { key, original }
         }
     }
@@ -358,47 +344,16 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn get_github_service_refreshes_token_changes_without_restart() {
+    async fn get_github_service_returns_singleton_instance() {
         let temp = tempdir().expect("temp dir");
         let data_dir = temp.path().join("simmrust");
         let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let _token_guard = EnvVarGuard::unset("GITHUB_TOKEN");
 
         let pool = initialize_pool().await.expect("pool");
-        let settings = SettingsService::new(pool.clone()).expect("settings service");
+        let first = get_github_service(pool.clone()).await.expect("first service");
+        let second = get_github_service(pool.clone()).await.expect("second service");
 
-        let service = get_github_service(pool.clone()).await.expect("github service");
-        assert_eq!(service.current_token_for_testing().await, None);
-
-        settings
-            .save_github_token("token-two".to_string())
-            .await
-            .expect("save token");
-        let service = get_github_service(pool.clone()).await.expect("github service after save");
-        assert_eq!(
-            service.current_token_for_testing().await.as_deref(),
-            Some("token-two")
-        );
-
-        settings.clear_github_token().await.expect("clear token");
-        let service = get_github_service(pool.clone()).await.expect("github service after clear");
-        assert_eq!(service.current_token_for_testing().await, None);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_github_service_none_setting_disables_env_token_fallback() {
-        let temp = tempdir().expect("temp dir");
-        let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
-
-        let pool = initialize_pool().await.expect("pool");
-        let settings = SettingsService::new(pool.clone()).expect("settings service");
-        settings.clear_github_token().await.expect("clear token");
-
-        let service = get_github_service(pool.clone()).await.expect("github service");
-        assert_eq!(service.current_token_for_testing().await, None);
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]

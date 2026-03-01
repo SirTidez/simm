@@ -87,7 +87,7 @@ describe('ModLibraryOverlay', () => {
 
     expect(await screen.findByText('Installed: v1.0.0')).toBeTruthy();
     expect(await screen.findByText('Latest: v1.1.0')).toBeTruthy();
-    expect(await screen.findByRole('button', { name: 'Update' })).toBeTruthy();
+    expect((await screen.findAllByRole('button', { name: 'Update' })).length).toBeGreaterThan(0);
 
     await waitFor(() => {
       expect(screen.getAllByText('Update Available').length).toBeGreaterThan(0);

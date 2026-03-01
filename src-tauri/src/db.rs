@@ -267,7 +267,6 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
     let mut secrets_written = false;
     for dir in &legacy_dirs {
         secrets_written |= migrate_secret_file(pool, dir, "credentials.enc", "steam_credentials").await?;
-        secrets_written |= migrate_secret_file(pool, dir, "github_token.enc", "github_token").await?;
         secrets_written |= migrate_secret_file(pool, dir, "nexus_mods_api_key.enc", "nexus_mods_api_key").await?;
     }
 
@@ -616,7 +615,6 @@ mod tests {
         fs::write(plugins_dir.join(".plugins-metadata.json"), &plugins_json).await?;
 
         fs::write(legacy_dir.join("credentials.enc"), " secret ").await?;
-        fs::write(legacy_dir.join("github_token.enc"), " token ").await?;
         fs::write(legacy_dir.join("nexus_mods_api_key.enc"), " key ").await?;
 
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());

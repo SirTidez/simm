@@ -77,7 +77,7 @@ pub struct Environment {
     pub environment_type: Option<EnvironmentType>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Runtime {
     Il2cpp,
@@ -142,7 +142,6 @@ pub struct Settings {
     pub mod_update_check_interval: Option<u32>, // minutes
     pub custom_theme: Option<CustomTheme>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
-                                         // Note: github_token is NOT stored here - it's stored encrypted separately
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

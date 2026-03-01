@@ -210,7 +210,7 @@ This is what allows one storage model to serve multiple environments safely.
 
 ## Security and Secrets
 
-- Sensitive values (Steam credentials, GitHub token, Nexus API key) are stored encrypted in the `secrets` table.
+- Sensitive values (Steam credentials, Nexus API key) are stored encrypted in the `secrets` table.
 - Command surface is capability-scoped via Tauri plugin permissions.
 - Frontend only handles intent; credential storage logic stays in backend services.
 

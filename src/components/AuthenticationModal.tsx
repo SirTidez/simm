@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ApiService } from '../services/api';
 import { useSettingsStore } from '../stores/settingsStore';
 
@@ -9,9 +10,10 @@ interface Props {
   required: boolean;
   waitingForAuth?: boolean;
   authMessage?: string;
+  nested?: boolean;
 }
 
-export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required, waitingForAuth = false, authMessage }: Props) {
+export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required, waitingForAuth = false, authMessage, nested = false }: Props) {
   const { updateSettings } = useSettingsStore();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -62,9 +64,12 @@ export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required
 
   if (!isOpen) return null;
 
-  return (
-    <div className="modal-overlay" onClick={required ? undefined : onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+  const overlayClass = nested ? 'modal-overlay modal-overlay-nested' : 'modal-overlay';
+  const contentClass = nested ? 'modal-content modal-content-nested' : 'modal-content';
+
+  const modalElement = (
+    <div className={overlayClass} onClick={required ? undefined : onClose}>
+      <div className={contentClass} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>Steam Authentication Required</h2>
           {!required && (
@@ -154,5 +159,11 @@ export function AuthenticationModal({ isOpen, onClose, onAuthenticated, required
       </div>
     </div>
   );
+
+  if (typeof document === 'undefined' || !document.body) {
+    return modalElement;
+  }
+
+  return createPortal(modalElement, document.body);
 }
 

@@ -18,7 +18,6 @@ pub struct SettingsService {
 
 const SETTINGS_ID: i64 = 1;
 const STEAM_CREDENTIALS_KEY: &str = "steam_credentials";
-const GITHUB_TOKEN_KEY: &str = "github_token";
 const NEXUS_MODS_API_KEY: &str = "nexus_mods_api_key";
 
 impl SettingsService {
@@ -237,29 +236,6 @@ impl SettingsService {
         self.clear_secret(STEAM_CREDENTIALS_KEY).await
     }
 
-    pub async fn get_github_token(&self) -> Result<Option<String>> {
-        let encrypted = match self.get_secret(GITHUB_TOKEN_KEY).await? {
-            Some(value) => value,
-            None => return Ok(None),
-        };
-
-        if encrypted.is_empty() {
-            return Ok(None);
-        }
-
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
-        Ok(Some(decrypted))
-    }
-
-    pub async fn save_github_token(&self, token: String) -> Result<()> {
-        let encrypted = Self::encrypt_credentials(&token).await?;
-        self.set_secret(GITHUB_TOKEN_KEY, &encrypted).await
-    }
-
-    pub async fn clear_github_token(&self) -> Result<()> {
-        self.clear_secret(GITHUB_TOKEN_KEY).await
-    }
-
     pub async fn get_nexus_mods_api_key(&self) -> Result<Option<String>> {
         let encrypted = match self.get_secret(NEXUS_MODS_API_KEY).await? {
             Some(value) => value,
@@ -358,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn credentials_and_tokens_round_trip() -> Result<()> {
+    async fn credentials_and_nexus_round_trip() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _data_guard = EnvVarGuard::set(
@@ -376,20 +352,14 @@ mod tests {
         let creds = service.get_credentials().await?;
         assert_eq!(creds, Some(("user".to_string(), "pass".to_string())));
 
-        service.save_github_token("token".to_string()).await?;
-        let token = service.get_github_token().await?;
-        assert_eq!(token.as_deref(), Some("token"));
-
         service.save_nexus_mods_api_key("nexus".to_string()).await?;
         let nexus = service.get_nexus_mods_api_key().await?;
         assert_eq!(nexus.as_deref(), Some("nexus"));
 
         service.clear_credentials().await?;
-        service.clear_github_token().await?;
         service.clear_nexus_mods_api_key().await?;
 
         assert!(service.get_credentials().await?.is_none());
-        assert!(service.get_github_token().await?.is_none());
         assert!(service.get_nexus_mods_api_key().await?.is_none());
 
         Ok(())
@@ -410,7 +380,6 @@ mod tests {
         let service = SettingsService::new(pool.clone())?;
 
         service.save_credentials("user".to_string(), "pass".to_string()).await?;
-        service.save_github_token("token".to_string()).await?;
         service.save_nexus_mods_api_key("nexus".to_string()).await?;
 
         let rows = sqlx::query("SELECT key, encrypted FROM secrets")
@@ -430,12 +399,6 @@ mod tests {
         assert!(credentials.contains(':'));
         assert_ne!(credentials, "user");
         assert_ne!(credentials, "pass");
-
-        let github = secrets
-            .get(GITHUB_TOKEN_KEY)
-            .expect("github_token stored");
-        assert!(github.contains(':'));
-        assert_ne!(github, "token");
 
         let nexus = secrets
             .get(NEXUS_MODS_API_KEY)

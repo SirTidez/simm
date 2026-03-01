@@ -184,10 +184,45 @@ pub async fn get_environments(
         .unwrap_or(false);
 
         if is_current_path_valid {
+            let runtime_from_files = crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
+                std::path::Path::new(&env.output_dir),
+            );
+            let detected_branch = steam_service
+                .detect_installed_branch(std::path::Path::new(&env.output_dir))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    crate::services::environment::EnvironmentService::branch_for_runtime(&runtime_from_files)
+                });
+            let detected_runtime = crate::services::environment::EnvironmentService::runtime_for_branch(&detected_branch)
+                .unwrap_or(runtime_from_files);
+
+            let mut changed = false;
+            if env.runtime != detected_runtime {
+                env.runtime = detected_runtime;
+                changed = true;
+            }
+
+            if env.branch != detected_branch {
+                env.branch = detected_branch;
+                changed = true;
+            }
+
             if !matches!(env.status, crate::types::EnvironmentStatus::Completed) {
                 env.status = crate::types::EnvironmentStatus::Completed;
                 env.last_updated = Some(chrono::Utc::now());
-                service.upsert_environment(env).await.map_err(|e| e.to_string())?;
+                changed = true;
+            }
+
+            if changed {
+                if let Err(err) = service.upsert_environment(env).await {
+                    log::warn!(
+                        "Failed to persist Steam environment reconciliation for {}: {}",
+                        env.id,
+                        err
+                    );
+                }
             }
             continue;
         }
@@ -197,14 +232,40 @@ pub async fn get_environments(
                 || !matches!(env.status, crate::types::EnvironmentStatus::Completed)
             {
                 env.output_dir = path.clone();
+                let runtime_from_files = crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
+                    std::path::Path::new(path),
+                );
+                let detected_branch = steam_service
+                    .detect_installed_branch(std::path::Path::new(path))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        crate::services::environment::EnvironmentService::branch_for_runtime(&runtime_from_files)
+                    });
+                env.runtime = crate::services::environment::EnvironmentService::runtime_for_branch(&detected_branch)
+                    .unwrap_or(runtime_from_files);
+                env.branch = detected_branch;
                 env.status = crate::types::EnvironmentStatus::Completed;
                 env.last_updated = Some(chrono::Utc::now());
-                service.upsert_environment(env).await.map_err(|e| e.to_string())?;
+                if let Err(err) = service.upsert_environment(env).await {
+                    log::warn!(
+                        "Failed to persist Steam environment path reconciliation for {}: {}",
+                        env.id,
+                        err
+                    );
+                }
             }
         } else if !matches!(env.status, crate::types::EnvironmentStatus::Unavailable) {
             env.status = crate::types::EnvironmentStatus::Unavailable;
             env.last_updated = Some(chrono::Utc::now());
-            service.upsert_environment(env).await.map_err(|e| e.to_string())?;
+            if let Err(err) = service.upsert_environment(env).await {
+                log::warn!(
+                    "Failed to persist Steam environment unavailable status for {}: {}",
+                    env.id,
+                    err
+                );
+            }
         }
     }
 

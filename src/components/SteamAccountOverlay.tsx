@@ -6,16 +6,15 @@ import { ApiService } from '../services/api';
 export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const { settings, refreshSettings } = useSettingsStore();
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [githubTokenSet, setGithubTokenSet] = useState(false);
-  const [githubToken, setGithubToken] = useState('');
-  const [validatingGithub, setValidatingGithub] = useState(false);
-  const [githubError, setGithubError] = useState<string | null>(null);
   const [nexusModsApiKeySet, setNexusModsApiKeySet] = useState(false);
   const [nexusModsUser, setNexusModsUser] = useState<{ name: string; isPremium: boolean; isSupporter: boolean } | null>(null);
   const [nexusModsRateLimits, setNexusModsRateLimits] = useState<{ daily: number; hourly: number } | null>(null);
   const [nexusModsApiKey, setNexusModsApiKey] = useState('');
   const [validatingNexusMods, setValidatingNexusMods] = useState(false);
   const [nexusModsError, setNexusModsError] = useState<string | null>(null);
+  const [releaseApiHealth, setReleaseApiHealth] = useState<Record<string, unknown> | null>(null);
+  const [releaseApiError, setReleaseApiError] = useState<string | null>(null);
+  const [checkingReleaseApi, setCheckingReleaseApi] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -29,21 +28,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
   }, [isOpen, onClose, showAuthModal]);
-
-  // Check if GitHub token is set on mount
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const checkGithubToken = async () => {
-      try {
-        const hasToken = await ApiService.hasGitHubToken();
-        setGithubTokenSet(hasToken);
-      } catch (err) {
-        console.error('Failed to check GitHub token:', err);
-      }
-    };
-    checkGithubToken();
-  }, [isOpen]);
 
   // Check NexusMods API key status on mount
   useEffect(() => {
@@ -70,6 +54,56 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     checkNexusModsStatus();
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const loadReleaseApiHealth = async () => {
+      setCheckingReleaseApi(true);
+      setReleaseApiError(null);
+      try {
+        const health = await ApiService.getReleaseApiHealth();
+        setReleaseApiHealth(health);
+      } catch (err) {
+        setReleaseApiHealth(null);
+        setReleaseApiError(err instanceof Error ? err.message : 'Release API is unavailable');
+      } finally {
+        setCheckingReleaseApi(false);
+      }
+    };
+
+    loadReleaseApiHealth();
+  }, [isOpen]);
+
+  const extractReleaseApiLastUpdated = (health: Record<string, unknown> | null): string | null => {
+    if (!health) return null;
+
+    const candidates = [
+      health.lastUpdated,
+      health.last_updated,
+      health.updatedAt,
+      health.updated_at,
+      health.timestamp,
+      (health as any).data?.lastUpdated,
+      (health as any).data?.last_updated,
+      (health as any).data?.updatedAt,
+      (health as any).data?.updated_at,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim().length > 0) {
+        const parsed = new Date(candidate);
+        if (!Number.isNaN(parsed.getTime())) {
+          return parsed.toLocaleString();
+        }
+        return candidate;
+      }
+    }
+
+    return null;
+  };
+
+  const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
+
   const handleValidateNexusModsApiKey = async () => {
     if (!nexusModsApiKey.trim()) {
       setNexusModsError('Please enter an API key');
@@ -95,41 +129,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       setNexusModsError(err instanceof Error ? err.message : 'Failed to validate API key');
     } finally {
       setValidatingNexusMods(false);
-    }
-  };
-
-  const handleValidateGithubToken = async () => {
-    if (!githubToken.trim()) {
-      setGithubError('Please enter a GitHub token');
-      return;
-    }
-
-    setValidatingGithub(true);
-    setGithubError(null);
-
-    try {
-      await ApiService.setGitHubToken(githubToken.trim());
-      setGithubTokenSet(true);
-      setGithubToken(''); // Clear input
-      await refreshSettings();
-    } catch (err) {
-      setGithubError(err instanceof Error ? err.message : 'Failed to set GitHub token');
-    } finally {
-      setValidatingGithub(false);
-    }
-  };
-
-  const handleRemoveGithubToken = async () => {
-    if (!confirm('Are you sure you want to remove your GitHub token?')) {
-      return;
-    }
-
-    try {
-      await ApiService.removeGitHubToken();
-      setGithubTokenSet(false);
-      await refreshSettings();
-    } catch (err) {
-      console.error('Failed to remove GitHub token:', err);
     }
   };
 
@@ -231,7 +230,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
               </p>
             </div>
 
-            {/* GitHub Authentication Status */}
             <div style={{
               marginTop: '1.5rem',
               paddingTop: '1.5rem',
@@ -245,118 +243,49 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 alignItems: 'center',
                 gap: '0.5rem'
               }}>
-                <i className="fab fa-github"></i>
-                GitHub Access
+                <i className="fas fa-server"></i>
+                LockWire Release API
               </h3>
-              {githubTokenSet ? (
+
+              {checkingReleaseApi ? (
+                <div style={{
+                  padding: '0.75rem',
+                  backgroundColor: '#1f2d46',
+                  borderRadius: '4px',
+                  border: '1px solid #2a4d7d'
+                }}>
+                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                  Checking API health...
+                </div>
+              ) : releaseApiError ? (
+                <div style={{
+                  padding: '0.75rem',
+                  backgroundColor: '#3a1a1a',
+                  borderRadius: '4px',
+                  border: '1px solid #5a2a2a',
+                  color: '#ff9b9b'
+                }}>
+                  <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem' }}></i>
+                  Release API unavailable: {releaseApiError}
+                </div>
+              ) : (
                 <div style={{
                   padding: '0.75rem',
                   backgroundColor: '#1a3a1a',
                   borderRadius: '4px',
-                  border: '1px solid #2a5a2a',
-                  marginBottom: '1rem'
+                  border: '1px solid #2a5a2a'
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <i className="fas fa-check-circle" style={{ color: '#4caf50' }}></i>
-                      <span>GitHub token is saved (encrypted)</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <i className="fas fa-check-circle" style={{ color: '#4caf50' }}></i>
+                    <span>Release API online</span>
+                  </div>
+                  {releaseApiLastUpdated && (
+                    <div style={{ marginTop: '0.5rem', color: '#b8c4d9', fontSize: '0.85rem' }}>
+                      Last updated: {releaseApiLastUpdated}
                     </div>
-                    <button
-                      onClick={handleRemoveGithubToken}
-                      className="btn btn-secondary btn-small"
-                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
-                    >
-                      <i className="fas fa-trash" style={{ marginRight: '0.25rem' }}></i>
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <div style={{
-                    padding: '0.75rem',
-                    backgroundColor: '#3a2a1a',
-                    borderRadius: '4px',
-                    border: '1px solid #5a3a2a',
-                    color: '#888',
-                    marginBottom: '1rem'
-                  }}>
-                    <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem', color: '#ffaa00' }}></i>
-                    GitHub API token not set
-                  </div>
-                  <div style={{ marginBottom: '1rem' }}>
-                    <input
-                      type="password"
-                      placeholder="Enter your GitHub Personal Access Token"
-                      value={githubToken}
-                      onChange={(e) => setGithubToken(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          handleValidateGithubToken();
-                        }
-                      }}
-                      style={{
-                        width: '100%',
-                        padding: '0.5rem',
-                        backgroundColor: '#1a1a1a',
-                        border: '1px solid #3a3a3a',
-                        borderRadius: '4px',
-                        color: '#fff',
-                        fontSize: '0.875rem',
-                        marginBottom: '0.5rem'
-                      }}
-                      disabled={validatingGithub}
-                    />
-                    {githubError && (
-                      <div style={{
-                        color: '#ff6b6b',
-                        fontSize: '0.75rem',
-                        marginBottom: '0.5rem',
-                        padding: '0.25rem 0.5rem',
-                        backgroundColor: '#3a1a1a',
-                        borderRadius: '4px'
-                      }}>
-                        {githubError}
-                      </div>
-                    )}
-                    <button
-                      onClick={handleValidateGithubToken}
-                      className="btn btn-primary"
-                      disabled={validatingGithub || !githubToken.trim()}
-                      style={{ width: '100%' }}
-                    >
-                      {validatingGithub ? (
-                        <>
-                          <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                           Saving...
-                        </>
-                      ) : (
-                        <>
-                          <i className="fas fa-key" style={{ marginRight: '0.5rem' }}></i>
-                           Save Token
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  )}
                 </div>
               )}
-              <p style={{
-                color: '#888',
-                fontSize: '0.85rem',
-                marginTop: '0.5rem',
-                lineHeight: '1.4'
-              }}>
-                Used for authenticated GitHub API requests for MelonLoader releases. Generate a token in{' '}
-                <a
-                  href="https://github.com/settings/tokens"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{ color: '#4a90e2', textDecoration: 'underline' }}
-                >
-                  GitHub Settings
-                </a>
-                . Token is encrypted and never displayed or logged.
-              </p>
             </div>
 
             {/* NexusMods Authentication Status */}
@@ -517,6 +446,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
           onClose={() => setShowAuthModal(false)}
           onAuthenticated={handleAuthenticated}
           required={false}
+          nested={true}
         />
       )}
     </>

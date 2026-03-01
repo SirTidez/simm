@@ -156,9 +156,7 @@ describe('ApiService', () => {
   });
 
   it.each([
-    ['setGitHubToken', () => ApiService.setGitHubToken('abc123'), 'set_github_token', { token: 'abc123' }],
-    ['hasGitHubToken', () => ApiService.hasGitHubToken(), 'has_github_token', undefined],
-    ['removeGitHubToken', () => ApiService.removeGitHubToken(), 'clear_github_token', undefined],
+    ['getReleaseApiHealth', () => ApiService.getReleaseApiHealth(), 'get_release_api_health', undefined],
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],

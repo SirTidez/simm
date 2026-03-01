@@ -163,23 +163,8 @@ export class ApiService {
     return { success: true };
   }
 
-  // GitHub Token (encrypted storage)
-  static async setGitHubToken(token: string): Promise<{ success: boolean }> {
-    await invoke('set_github_token', { token });
-    return { success: true };
-  }
-
-  static async hasGitHubToken(): Promise<boolean> {
-    return invoke('has_github_token');
-  }
-
-  static async clearGitHubToken(): Promise<{ success: boolean }> {
-    await invoke('clear_github_token');
-    return { success: true };
-  }
-
-  static async removeGitHubToken(): Promise<{ success: boolean }> {
-    return this.clearGitHubToken();
+  static async getReleaseApiHealth(): Promise<Record<string, unknown>> {
+    return invoke('get_release_api_health');
   }
 
   // Directory browser
