@@ -17,6 +17,10 @@ export class ApiService {
     return invoke('detect_depot_downloader');
   }
 
+  static async installDepotDownloader(): Promise<DepotDownloaderInfo> {
+    return invoke('install_depot_downloader');
+  }
+
   // App Init
   static async getHomeDirectory(): Promise<string> {
     return invoke('get_home_directory');

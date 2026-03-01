@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::utils::http_identity;
 use reqwest::Client;
 use serde_json::Value;
 
@@ -13,9 +14,9 @@ impl ThunderStoreService {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .user_agent("Schedule-I-DevEnvManager/1.0.0")
+                .user_agent(http_identity::user_agent())
                 .build()
-                .unwrap_or_else(|_| Client::new()),
+                .expect("Failed to build Thunderstore HTTP client"),
         }
     }
 

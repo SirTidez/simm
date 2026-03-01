@@ -4,14 +4,14 @@
 )]
 
 mod commands;
-mod services;
-mod types;
-mod utils;
-mod events;
 mod db;
+mod discord_rpc;
+mod events;
+mod services;
 #[cfg(test)]
 mod test_helpers;
-mod discord_rpc;
+mod types;
+mod utils;
 
 use tauri::Manager;
 
@@ -28,13 +28,16 @@ fn main() {
             log::info!("Tauri app starting - running setup");
 
             // Initialize SIMM directory (synchronous)
-            let simm_was_created = crate::services::app_init::initialize_simm_directory()
-                .unwrap_or(false);
+            let simm_was_created =
+                crate::services::app_init::initialize_simm_directory().unwrap_or(false);
 
-            log::info!("SIMM directory initialized (was_created: {})", simm_was_created);
+            log::info!(
+                "SIMM directory initialized (was_created: {})",
+                simm_was_created
+            );
 
-            let db_pool = tauri::async_runtime::block_on(crate::db::initialize_pool())
-                .map_err(|e| {
+            let db_pool =
+                tauri::async_runtime::block_on(crate::db::initialize_pool()).map_err(|e| {
                     log::error!("Failed to initialize database: {}", e);
                     e
                 })?;
@@ -82,6 +85,7 @@ fn main() {
             commands::app_init::get_home_directory,
             // DepotDownloader
             commands::depotdownloader::detect_depot_downloader,
+            commands::depotdownloader::install_depot_downloader,
             // Settings
             commands::settings::get_settings,
             commands::settings::save_settings,

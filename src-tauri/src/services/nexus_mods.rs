@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::utils::http_identity;
 use reqwest::Client;
 use serde_json::Value;
 use std::sync::Arc;
@@ -18,9 +19,9 @@ impl NexusModsService {
     pub fn new() -> Self {
         Self {
             client: Arc::new(Client::builder()
-                .user_agent("Schedule-I-DevEnvManager/1.0.0")
+                .user_agent(http_identity::user_agent())
                 .build()
-                .unwrap_or_else(|_| Client::new())),
+                .expect("Failed to build NexusMods HTTP client")),
             api_key: Arc::new(RwLock::new(None)),
             validation_result: Arc::new(RwLock::new(None)),
         }
@@ -49,8 +50,8 @@ impl NexusModsService {
         let response = self.client
             .get("https://api.nexusmods.com/v1/users/validate.json")
             .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
             .header("Protocol-Version", "1")
             .send()
             .await
@@ -77,8 +78,8 @@ impl NexusModsService {
         let response = self.client
             .get("https://api.nexusmods.com/v1/users/validate.json")
             .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
             .header("Protocol-Version", "1")
             .send()
             .await
@@ -140,8 +141,8 @@ impl NexusModsService {
 
         let mut request = self.client
             .post(NEXUS_MODS_GRAPHQL_API)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
             .header("Content-Type", "application/json");
 
         if let Some(api_key) = self.get_api_key_optional().await {
@@ -660,8 +661,8 @@ impl NexusModsService {
         let response = self.client
             .get(&url)
             .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
             .header("Protocol-Version", "1")
             .send()
             .await
@@ -689,8 +690,8 @@ impl NexusModsService {
         let file_response = self.client
             .get(download_url)
             .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
             .header("Protocol-Version", "1")
             .send()
             .await

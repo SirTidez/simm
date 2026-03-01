@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import type { Environment } from '../types';
@@ -76,9 +76,9 @@ export function EnvironmentList({
 }: EnvironmentListProps) {
   const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
   const { settings } = useSettingsStore();
-  const autoCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const autoCheckIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
-  const [authCredentials, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
+  const [, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
   const [descriptionValue, setDescriptionValue] = useState<string>('');
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -98,9 +98,9 @@ export function EnvironmentList({
   const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
 
   // Debounce timers for filesystem change events
-  const modsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  const pluginsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  const userLibsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const modsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const pluginsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const userLibsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Use refs to access latest environments without causing effect re-runs
   const environmentsRef = useRef(environments);
@@ -108,13 +108,6 @@ export function EnvironmentList({
     environmentsRef.current = environments;
   }, [environments]);
   const initialUpdateCheckDoneRef = useRef(false);
-  const [melonLoaderLatestRelease, setMelonLoaderLatestRelease] = useState<Map<string, {
-    tag_name: string;
-    name: string;
-    published_at: string;
-    prerelease: boolean;
-    download_url: string | null;
-  }>>(new Map());
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;

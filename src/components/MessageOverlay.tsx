@@ -1,5 +1,3 @@
-import React from 'react';
-
 interface MessageOverlayProps {
   isOpen: boolean;
   onClose: () => void;

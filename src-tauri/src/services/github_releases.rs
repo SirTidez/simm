@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::utils::http_identity;
 
 const DEFAULT_RELEASE_API_BASE_URL: &str = "https://api.lockwirelabs.dev";
 
@@ -16,9 +17,9 @@ impl GitHubReleasesService {
             .to_string();
 
         let client = reqwest::Client::builder()
-            .user_agent("SIMM/1.0.0")
+            .user_agent(http_identity::user_agent())
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("Failed to build releases HTTP client");
 
         Self { client, base_url }
     }

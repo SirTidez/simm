@@ -440,6 +440,7 @@ mod tests {
             auto_check_updates: Some(true),
             log_level: Some(LogLevel::Info),
             nexus_mods_api_key: None,
+            nexus_mods_rate_limits: None,
             nexus_mods_game_id: Some("123".to_string()),
             nexus_mods_app_slug: Some("schedule-i".to_string()),
             thunderstore_game_id: Some("schedule-i".to_string()),

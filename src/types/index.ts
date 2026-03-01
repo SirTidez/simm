@@ -134,6 +134,32 @@ export interface CustomTheme {
   primaryBtnHover: string;
 }
 
+export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';
+
+export interface ConfigEntry {
+  key: string;
+  value: string;
+  comment?: string;
+}
+
+export interface ConfigSection {
+  name: string;
+  entries: ConfigEntry[];
+}
+
+export interface ConfigFile {
+  name: string;
+  path: string;
+  fileType: ConfigFileType;
+  sections: ConfigSection[];
+}
+
+export interface ConfigUpdate {
+  section: string;
+  key: string;
+  value: string;
+}
+
 export interface NexusMod {
   mod_id: number;
   name: string;
