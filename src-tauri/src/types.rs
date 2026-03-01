@@ -135,6 +135,7 @@ pub struct Settings {
     pub auto_check_updates: Option<bool>,
     pub log_level: Option<LogLevel>,
     pub nexus_mods_api_key: Option<String>,
+    pub nexus_mods_rate_limits: Option<NexusRateLimits>,
     pub nexus_mods_game_id: Option<String>,
     pub nexus_mods_app_slug: Option<String>,
     pub thunderstore_game_id: Option<String>,
@@ -142,6 +143,17 @@ pub struct Settings {
     pub mod_update_check_interval: Option<u32>, // minutes
     pub custom_theme: Option<CustomTheme>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusRateLimits {
+    pub daily: u32,
+    pub hourly: u32,
+    pub daily_remaining: Option<u32>,
+    pub hourly_remaining: Option<u32>,
+    pub daily_used: Option<u32>,
+    pub hourly_used: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

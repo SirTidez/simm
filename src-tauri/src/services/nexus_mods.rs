@@ -96,9 +96,28 @@ impl NexusModsService {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
 
+        let daily_remaining = response.headers()
+            .get("x-rl-daily-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        let hourly_remaining = response.headers()
+            .get("x-rl-hourly-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        let daily_used = daily.saturating_sub(daily_remaining);
+        let hourly_used = hourly.saturating_sub(hourly_remaining);
+
         Ok(serde_json::json!({
             "daily": daily,
-            "hourly": hourly
+            "hourly": hourly,
+            "dailyRemaining": daily_remaining,
+            "hourlyRemaining": hourly_remaining,
+            "dailyUsed": daily_used,
+            "hourlyUsed": hourly_used
         }))
     }
 

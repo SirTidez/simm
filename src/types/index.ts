@@ -80,10 +80,20 @@ export interface Settings {
   autoCheckUpdates?: boolean;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   nexusModsApiKey?: string;
+  nexusModsRateLimits?: NexusRateLimits | null;
   nexusModsGameId?: string;
   thunderstoreGameId?: string;
   autoUpdateMods?: boolean;
   modUpdateCheckInterval?: number;
+}
+
+export interface NexusRateLimits {
+  daily: number;
+  hourly: number;
+  dailyRemaining?: number;
+  hourlyRemaining?: number;
+  dailyUsed?: number;
+  hourlyUsed?: number;
 }
 
 export interface CustomTheme {

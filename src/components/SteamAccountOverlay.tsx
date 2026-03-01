@@ -4,11 +4,18 @@ import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
 
 export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
-  const { settings, refreshSettings } = useSettingsStore();
+  const { settings, refreshSettings, updateSettings } = useSettingsStore();
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [nexusModsApiKeySet, setNexusModsApiKeySet] = useState(false);
   const [nexusModsUser, setNexusModsUser] = useState<{ name: string; isPremium: boolean; isSupporter: boolean } | null>(null);
-  const [nexusModsRateLimits, setNexusModsRateLimits] = useState<{ daily: number; hourly: number } | null>(null);
+  const [nexusModsRateLimits, setNexusModsRateLimits] = useState<{
+    daily: number;
+    hourly: number;
+    dailyRemaining?: number;
+    hourlyRemaining?: number;
+    dailyUsed?: number;
+    hourlyUsed?: number;
+  } | null>(null);
   const [nexusModsApiKey, setNexusModsApiKey] = useState('');
   const [validatingNexusMods, setValidatingNexusMods] = useState(false);
   const [nexusModsError, setNexusModsError] = useState<string | null>(null);
@@ -33,6 +40,10 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   useEffect(() => {
     if (!isOpen) return;
 
+    if (settings?.nexusModsRateLimits) {
+      setNexusModsRateLimits(settings.nexusModsRateLimits);
+    }
+
     const checkNexusModsStatus = async () => {
       try {
         const hasKey = await ApiService.hasNexusModsApiKey();
@@ -43,16 +54,19 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
           try {
             const rateLimits = await ApiService.getNexusModsRateLimits();
             setNexusModsRateLimits(rateLimits);
+            await updateSettings({ nexusModsRateLimits: rateLimits });
           } catch (err) {
             console.error('Failed to get NexusMods rate limits:', err);
           }
+        } else {
+          setNexusModsRateLimits(null);
         }
       } catch (err) {
         console.error('Failed to check NexusMods API key:', err);
       }
     };
     checkNexusModsStatus();
-  }, [isOpen]);
+  }, [isOpen, settings?.nexusModsRateLimits, updateSettings]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -104,6 +118,12 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
   const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
 
+  const nexusTierTag = !nexusModsApiKeySet
+    ? { label: 'Unauthenticated', icon: 'fas fa-user-slash', border: '#5a3a2a', bg: '#3a2a1a', color: '#ffd7a3' }
+    : nexusModsUser?.isPremium
+      ? { label: 'Premium', icon: 'fas fa-crown', border: '#66511f', bg: '#3e351c', color: '#ffe38c' }
+      : { label: 'Regular', icon: 'fas fa-user-check', border: '#2a5a2a', bg: '#1a3a1a', color: '#9be2a6' };
+
   const handleValidateNexusModsApiKey = async () => {
     if (!nexusModsApiKey.trim()) {
       setNexusModsError('Please enter an API key');
@@ -120,6 +140,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
         setNexusModsApiKeySet(true);
         setNexusModsUser(result.user || null);
         setNexusModsRateLimits(result.rateLimits || null);
+        await updateSettings({ nexusModsRateLimits: result.rateLimits || null });
         setNexusModsApiKey(''); // Clear input
         await refreshSettings();
       } else {
@@ -142,6 +163,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       setNexusModsApiKeySet(false);
       setNexusModsUser(null);
       setNexusModsRateLimits(null);
+      await updateSettings({ nexusModsRateLimits: null });
       await refreshSettings();
     } catch (err) {
       console.error('Failed to remove NexusMods API key:', err);
@@ -243,49 +265,48 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 alignItems: 'center',
                 gap: '0.5rem'
               }}>
-                <i className="fas fa-server"></i>
-                LockWire Release API
+                <i className="fab fa-github"></i>
+                GitHub API Status
               </h3>
 
-              {checkingReleaseApi ? (
-                <div style={{
-                  padding: '0.75rem',
-                  backgroundColor: '#1f2d46',
-                  borderRadius: '4px',
-                  border: '1px solid #2a4d7d'
-                }}>
-                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                  Checking API health...
-                </div>
-              ) : releaseApiError ? (
-                <div style={{
-                  padding: '0.75rem',
-                  backgroundColor: '#3a1a1a',
-                  borderRadius: '4px',
-                  border: '1px solid #5a2a2a',
-                  color: '#ff9b9b'
-                }}>
-                  <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem' }}></i>
-                  Release API unavailable: {releaseApiError}
-                </div>
-              ) : (
-                <div style={{
-                  padding: '0.75rem',
-                  backgroundColor: '#1a3a1a',
-                  borderRadius: '4px',
-                  border: '1px solid #2a5a2a'
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <i className="fas fa-check-circle" style={{ color: '#4caf50' }}></i>
-                    <span>Release API online</span>
-                  </div>
-                  {releaseApiLastUpdated && (
-                    <div style={{ marginTop: '0.5rem', color: '#b8c4d9', fontSize: '0.85rem' }}>
-                      Last updated: {releaseApiLastUpdated}
-                    </div>
-                  )}
-                </div>
-              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    padding: '0.28rem 0.6rem',
+                    borderRadius: '999px',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    border: checkingReleaseApi
+                      ? '1px solid #2a4d7d'
+                      : releaseApiError
+                        ? '1px solid #5a2a2a'
+                        : '1px solid #2a5a2a',
+                    backgroundColor: checkingReleaseApi
+                      ? '#1f2d46'
+                      : releaseApiError
+                        ? '#3a1a1a'
+                        : '#1a3a1a',
+                    color: checkingReleaseApi
+                      ? '#9cc4ff'
+                      : releaseApiError
+                        ? '#ff9b9b'
+                        : '#9be2a6'
+                  }}
+                  title={releaseApiError || undefined}
+                >
+                  <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
+                  {checkingReleaseApi ? 'Checking' : releaseApiError ? 'Offline' : 'Online'}
+                </span>
+
+                {releaseApiLastUpdated && !checkingReleaseApi && (
+                  <span style={{ color: '#9aa4b2', fontSize: '0.82rem' }}>
+                    Last updated: {releaseApiLastUpdated}
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* NexusMods Authentication Status */}
@@ -305,6 +326,25 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 <i className="fas fa-download"></i>
                 NexusMods Access
               </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    padding: '0.28rem 0.6rem',
+                    borderRadius: '999px',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    border: `1px solid ${nexusTierTag.border}`,
+                    backgroundColor: nexusTierTag.bg,
+                    color: nexusTierTag.color
+                  }}
+                >
+                  <i className={nexusTierTag.icon}></i>
+                  {nexusTierTag.label}
+                </span>
+              </div>
               {nexusModsApiKeySet ? (
                 <div style={{
                   padding: '0.75rem',
@@ -313,11 +353,11 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                   border: '1px solid #2a5a2a',
                   marginBottom: '1rem'
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <i className="fas fa-check-circle" style={{ color: '#4caf50' }}></i>
-                      <span>NexusMods API key is saved (encrypted)</span>
-                    </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+                    <span style={{ color: '#9be2a6', fontSize: '0.85rem', fontWeight: 600 }}>
+                      <i className="fas fa-check-circle" style={{ marginRight: '0.35rem' }}></i>
+                      Authenticated
+                    </span>
                     <button
                       onClick={handleRemoveNexusModsApiKey}
                       className="btn btn-secondary btn-small"
@@ -345,8 +385,34 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                     </div>
                   )}
                   {nexusModsRateLimits && (
-                    <div style={{ fontSize: '0.85rem', color: '#888', marginTop: '0.5rem' }}>
-                      <div><strong>Rate Limits:</strong> Daily: {nexusModsRateLimits.daily}, Hourly: {nexusModsRateLimits.hourly}</div>
+                    <div style={{ marginTop: '0.65rem' }}>
+                      <div style={{ fontSize: '0.78rem', color: '#9aa4b2', marginBottom: '0.4rem' }}>Current rate limits</div>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            fontSize: '0.78rem',
+                            padding: '0.2rem 0.5rem',
+                            borderRadius: '999px',
+                            border: '1px solid #3a3a3a',
+                            backgroundColor: '#1f232c',
+                            color: '#cbd5e1'
+                          }}
+                        >
+                          Daily: {nexusModsRateLimits.dailyUsed ?? Math.max(0, (nexusModsRateLimits.daily || 0) - (nexusModsRateLimits.dailyRemaining ?? 0))} / {nexusModsRateLimits.daily}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: '0.78rem',
+                            padding: '0.2rem 0.5rem',
+                            borderRadius: '999px',
+                            border: '1px solid #3a3a3a',
+                            backgroundColor: '#1f232c',
+                            color: '#cbd5e1'
+                          }}
+                        >
+                          Hourly: {nexusModsRateLimits.hourlyUsed ?? Math.max(0, (nexusModsRateLimits.hourly || 0) - (nexusModsRateLimits.hourlyRemaining ?? 0))} / {nexusModsRateLimits.hourly}
+                        </span>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -425,7 +491,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 marginTop: '0.5rem',
                 lineHeight: '1.4'
               }}>
-                Used for searching and downloading mods from NexusMods. Get your key from{' '}
+                Browsing/searching works without login. Nexus Login is required for downloading mods. Get your key from{' '}
                 <a
                   href="https://www.nexusmods.com/users/myaccount?tab=api"
                   target="_blank"

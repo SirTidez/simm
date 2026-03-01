@@ -109,6 +109,7 @@ impl SettingsService {
             auto_check_updates: Some(true),
             log_level: Some(crate::types::LogLevel::Info),
             nexus_mods_api_key: None,
+            nexus_mods_rate_limits: None,
             nexus_mods_game_id: Some("schedule1".to_string()),
             nexus_mods_app_slug: None,
             thunderstore_game_id: Some("schedule-i".to_string()),
