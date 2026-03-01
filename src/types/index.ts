@@ -84,7 +84,6 @@ export interface Settings {
   thunderstoreGameId?: string;
   autoUpdateMods?: boolean;
   modUpdateCheckInterval?: number;
-  // Note: githubToken is NOT stored here - it's stored encrypted separately
 }
 
 export interface CustomTheme {

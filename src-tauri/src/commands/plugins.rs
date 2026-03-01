@@ -2,7 +2,6 @@ use crate::services::plugins::PluginsService;
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
-use crate::services::settings::SettingsService;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
@@ -274,22 +273,11 @@ pub async fn install_mlvscan(
         return error_json("Output directory not set".to_string());
     }
 
-    // Get GitHub service and fetch MLVScan releases
-    eprintln!("[install_mlvscan] Getting GitHub service...");
-    let github_service = {
-        let settings_service = match SettingsService::new(db.inner().clone()) {
-            Ok(service) => service,
-            Err(e) => return error_json(format!("Failed to get settings service: {}", e)),
-        };
-        let token = match settings_service.get_github_token().await {
-            Ok(token) => token,
-            Err(e) => return error_json(format!("Failed to load GitHub token: {}", e)),
-        };
-        eprintln!("[install_mlvscan] GitHub service obtained");
-        GitHubReleasesService::with_token(token)
-    };
+    // Get release service and fetch MLVScan releases
+    eprintln!("[install_mlvscan] Initializing release service...");
+    let github_service = GitHubReleasesService::new();
     
-    eprintln!("[install_mlvscan] Fetching MLVScan releases from GitHub...");
+    eprintln!("[install_mlvscan] Fetching MLVScan releases from release API...");
     let releases = match github_service.get_all_releases("ifBars", "MLVScan", false).await {
         Ok(releases) => {
             eprintln!("[install_mlvscan] Found {} releases", releases.len());
@@ -387,7 +375,7 @@ pub async fn install_mlvscan(
     };
     
     // Download the asset
-    eprintln!("[install_mlvscan] Downloading asset from GitHub...");
+    eprintln!("[install_mlvscan] Downloading asset...");
     let asset_bytes = match github_service.download_release_asset(&asset_url).await {
         Ok(bytes) => {
             eprintln!("[install_mlvscan] Downloaded {} bytes", bytes.len());

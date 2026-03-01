@@ -1,7 +1,6 @@
 use crate::services::melon_loader::MelonLoaderService;
 use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
-use crate::services::settings::SettingsService;
 use crate::events;
 use tauri::{AppHandle, State};
 use sqlx::SqlitePool;
@@ -92,21 +91,10 @@ pub async fn install_melon_loader(
     }
 
     // Get all MelonLoader releases to find the one matching the version tag
-    eprintln!("[install_melon_loader] Getting GitHub service...");
-    let github_service = {
-        let settings_service = match SettingsService::new(db.inner().clone()) {
-            Ok(service) => service,
-            Err(e) => return error_json(format!("Failed to get settings service: {}", e)),
-        };
-        let token = match settings_service.get_github_token().await {
-            Ok(token) => token,
-            Err(e) => return error_json(format!("Failed to load GitHub token: {}", e)),
-        };
-        eprintln!("[install_melon_loader] GitHub service obtained");
-        GitHubReleasesService::with_token(token)
-    };
+    eprintln!("[install_melon_loader] Initializing release service...");
+    let github_service = GitHubReleasesService::new();
 
-    eprintln!("[install_melon_loader] Fetching MelonLoader releases from GitHub...");
+    eprintln!("[install_melon_loader] Fetching MelonLoader releases from release API...");
     let releases = match github_service.get_all_releases("LavaGang", "MelonLoader", false).await {
         Ok(releases) => {
             eprintln!("[install_melon_loader] Found {} releases", releases.len());
@@ -151,7 +139,7 @@ pub async fn install_melon_loader(
     };
 
     // Download the ZIP file
-    eprintln!("[install_melon_loader] Downloading ZIP file from GitHub...");
+    eprintln!("[install_melon_loader] Downloading ZIP asset...");
     let zip_bytes = match github_service.download_release_asset(&zip_url).await {
         Ok(bytes) => {
             eprintln!("[install_melon_loader] Downloaded {} bytes", bytes.len());
@@ -229,9 +217,8 @@ pub async fn install_melon_loader(
 pub async fn get_available_melonloader_versions(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
-    let github_service = GitHubReleasesService::with_token(token);
+    let _ = db;
+    let github_service = GitHubReleasesService::new();
 
     let releases = github_service.get_all_releases("LavaGang", "MelonLoader", false)
         .await

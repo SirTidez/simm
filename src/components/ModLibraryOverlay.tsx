@@ -88,7 +88,21 @@ const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: st
 };
 
 const normalizeVersionToken = (value?: string): string => {
-  return (value || '').trim().replace(/^v/i, '').toLowerCase();
+  let normalized = (value || '').trim();
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of runtimeSuffixPatterns) {
+      const next = normalized.replace(pattern, '').trim();
+      if (next !== normalized) {
+        normalized = next;
+        changed = true;
+      }
+    }
+  }
+
+  return normalized.replace(/^v/i, '').toLowerCase();
 };
 
 const formatVersionTag = (value?: string): string => {
@@ -108,6 +122,29 @@ const compareVersionTokensDesc = (a?: string, b?: string): number => {
     }
   }
   return 0;
+};
+
+const compareVersions = (a: string, b: string): number => {
+  const normalize = (v: string) => normalizeVersionToken(v).split('.').map(n => parseInt(n, 10) || 0);
+  const aParts = normalize(a);
+  const bParts = normalize(b);
+  const maxLen = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < maxLen; i++) {
+    const aVal = aParts[i] ?? 0;
+    const bVal = bParts[i] ?? 0;
+    if (aVal < bVal) return -1;
+    if (aVal > bVal) return 1;
+  }
+  return 0;
+};
+
+const areVersionsEquivalent = (a?: string, b?: string): boolean => {
+  const normalizedA = normalizeVersionToken(a);
+  const normalizedB = normalizeVersionToken(b);
+  if (!normalizedA || !normalizedB) {
+    return false;
+  }
+  return compareVersionTokensDesc(normalizedA, normalizedB) === 0;
 };
 
 const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGroup[] => {
@@ -184,10 +221,12 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
     .map(group => {
       const remoteVersions = Array.from(group.remoteVersions).sort((a, b) => compareVersionTokensDesc(a, b));
       const remoteVersion = remoteVersions[0];
-      const hasRemoteDownloaded = !!remoteVersion && group.entries.some(entry => {
-        const localVersion = normalizeVersionToken(entry.sourceVersion || entry.installedVersion);
-        return localVersion.length > 0 && localVersion === normalizeVersionToken(remoteVersion);
+      const hasRemoteVersion = normalizeVersionToken(remoteVersion).length > 0;
+      const hasRemoteDownloaded = hasRemoteVersion && group.entries.some(entry => {
+        return areVersionsEquivalent(entry.sourceVersion || entry.installedVersion, remoteVersion);
       });
+      const hasFlaggedUpdate = group.updateAvailable;
+      const updateAvailable = hasRemoteVersion ? !hasRemoteDownloaded : hasFlaggedUpdate;
 
       return {
         key: group.key,
@@ -203,7 +242,7 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
         availableRuntimes: Array.from(group.availableRuntimes),
         author: group.authors.size === 1 ? Array.from(group.authors)[0] : undefined,
         sourceVersion: group.sourceVersions.size === 1 ? Array.from(group.sourceVersions)[0] : undefined,
-        updateAvailable: group.updateAvailable && !hasRemoteDownloaded,
+        updateAvailable,
         remoteVersion,
       };
     })
@@ -300,18 +339,82 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     [library]
   );
 
+  const getLatestDownloadedVersionForGroup = useCallback((group: DownloadedModGroup | undefined): string | undefined => {
+    if (!group) {
+      return undefined;
+    }
+
+    const sortedByVersion = [...group.entries].sort((a, b) =>
+      compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion)
+    );
+
+    const latestEntry = sortedByVersion[0];
+    return latestEntry?.sourceVersion || latestEntry?.installedVersion || undefined;
+  }, []);
+
+  const s1apiGroup = downloadedGroups.find(group => {
+    const sourceIds = group.entries
+      .map(entry => (entry.sourceId || '').toLowerCase())
+      .filter(Boolean);
+    return sourceIds.includes('ifbars/s1api') || normalizeThunderstoreName(group.displayName).toLowerCase() === 's1api';
+  });
+
+  const mlvscanGroup = downloadedGroups.find(group => {
+    const sourceIds = group.entries
+      .map(entry => (entry.sourceId || '').toLowerCase())
+      .filter(Boolean);
+    return sourceIds.includes('ifbars/mlvscan') || normalizeThunderstoreName(group.displayName).toLowerCase() === 'mlvscan';
+  });
+
+  const s1apiInLibrary = !!s1apiGroup;
+  const mlvscanInLibrary = !!mlvscanGroup;
+  const s1apiInstalledVersion = getLatestDownloadedVersionForGroup(s1apiGroup);
+  const s1apiLatestVersion = s1apiLatestRelease?.tag_name;
+  const s1apiNeedsUpdate = s1apiInLibrary && s1apiInstalledVersion && s1apiLatestVersion && compareVersions(s1apiInstalledVersion, s1apiLatestVersion) < 0;
+
+  const mlvscanInstalledVersion = getLatestDownloadedVersionForGroup(mlvscanGroup);
+  const mlvscanLatestVersion = mlvscanLatestRelease?.tag_name;
+  const mlvscanNeedsUpdate = mlvscanInLibrary && mlvscanInstalledVersion && mlvscanLatestVersion && compareVersions(mlvscanInstalledVersion, mlvscanLatestVersion) < 0;
+
+  const isGroupUpdateAvailable = useCallback((group: DownloadedModGroup): boolean => {
+    const sourceIds = group.entries
+      .map(entry => (entry.sourceId || '').toLowerCase())
+      .filter(Boolean);
+    const normalizedName = normalizeThunderstoreName(group.displayName).toLowerCase();
+
+    const isS1apiGroup = sourceIds.includes('ifbars/s1api') || normalizedName === 's1api';
+    if (isS1apiGroup && !!s1apiInstalledVersion && !!s1apiLatestVersion) {
+      return !!s1apiNeedsUpdate;
+    }
+
+    const isMlvscanGroup = sourceIds.includes('ifbars/mlvscan') || normalizedName === 'mlvscan';
+    if (isMlvscanGroup && !!mlvscanInstalledVersion && !!mlvscanLatestVersion) {
+      return !!mlvscanNeedsUpdate;
+    }
+
+    return !!group.updateAvailable;
+  }, [
+    mlvscanInstalledVersion,
+    mlvscanLatestVersion,
+    mlvscanNeedsUpdate,
+    s1apiInstalledVersion,
+    s1apiLatestVersion,
+    s1apiNeedsUpdate,
+    getLatestDownloadedVersionForGroup,
+  ]);
+
   const downloadedSummary = useMemo(() => {
     const total = downloadedGroups.length;
-    const updates = downloadedGroups.filter(group => !!group.updateAvailable).length;
+    const updates = downloadedGroups.filter(group => isGroupUpdateAvailable(group)).length;
     const installed = downloadedGroups.filter(group => group.installedIn.length > 0).length;
     const managed = downloadedGroups.filter(group => group.managed).length;
     return { total, updates, installed, managed };
-  }, [downloadedGroups]);
+  }, [downloadedGroups, isGroupUpdateAvailable]);
 
   const filteredDownloadedGroups = useMemo(() => {
     const query = downloadedSearch.trim().toLowerCase();
     return downloadedGroups.filter(group => {
-      if (downloadedFilter === 'updates' && !group.updateAvailable) return false;
+      if (downloadedFilter === 'updates' && !isGroupUpdateAvailable(group)) return false;
       if (downloadedFilter === 'managed' && !group.managed) return false;
       if (downloadedFilter === 'external' && group.managed) return false;
       if (downloadedFilter === 'installed' && group.installedIn.length === 0) return false;
@@ -325,7 +428,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         || version.includes(query)
       );
     });
-  }, [downloadedGroups, downloadedFilter, downloadedSearch]);
+  }, [downloadedGroups, downloadedFilter, downloadedSearch, isGroupUpdateAvailable]);
 
   useEffect(() => {
     setSelectedStorageByGroup(prev => {
@@ -706,7 +809,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
       const refreshedGroup = buildDownloadedGroups(nextLibrary.downloaded).find(item => item.key === group.key);
       const selectedEntry = refreshedGroup?.entries.find(entry => {
-        return (group.remoteVersion && normalizeVersionToken(getEntryVersionLabel(entry)) === normalizeVersionToken(group.remoteVersion))
+        return (group.remoteVersion && areVersionsEquivalent(getEntryVersionLabel(entry), group.remoteVersion))
           || Object.values(entry.storageIdsByRuntime || {}).some(id => Object.values(downloadedStorageByRuntime).includes(id));
       })
         || refreshedGroup?.entries[0];
@@ -1031,40 +1134,6 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
     runDownload(hasIl2cpp ? 'IL2CPP' : 'Mono');
   };
-
-  const s1apiEntry = library?.downloaded.find(entry =>
-    (entry.sourceId && entry.sourceId.toLowerCase() === 'ifbars/s1api') ||
-    entry.displayName.toLowerCase() === 's1api'
-  );
-  const mlvscanEntry = library?.downloaded.find(entry =>
-    (entry.sourceId && entry.sourceId.toLowerCase() === 'ifbars/mlvscan') ||
-    entry.displayName.toLowerCase() === 'mlvscan'
-  );
-
-  const s1apiInLibrary = !!s1apiEntry;
-  const mlvscanInLibrary = !!mlvscanEntry;
-
-  const compareVersions = (a: string, b: string): number => {
-    const normalize = (v: string) => v.replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
-    const aParts = normalize(a);
-    const bParts = normalize(b);
-    const maxLen = Math.max(aParts.length, bParts.length);
-    for (let i = 0; i < maxLen; i++) {
-      const aVal = aParts[i] ?? 0;
-      const bVal = bParts[i] ?? 0;
-      if (aVal < bVal) return -1;
-      if (aVal > bVal) return 1;
-    }
-    return 0;
-  };
-
-  const s1apiInstalledVersion = s1apiEntry?.sourceVersion;
-  const s1apiLatestVersion = s1apiLatestRelease?.tag_name;
-  const s1apiNeedsUpdate = s1apiInLibrary && s1apiInstalledVersion && s1apiLatestVersion && compareVersions(s1apiInstalledVersion, s1apiLatestVersion) < 0;
-
-  const mlvscanInstalledVersion = mlvscanEntry?.sourceVersion;
-  const mlvscanLatestVersion = mlvscanLatestRelease?.tag_name;
-  const mlvscanNeedsUpdate = mlvscanInLibrary && mlvscanInstalledVersion && mlvscanLatestVersion && compareVersions(mlvscanInstalledVersion, mlvscanLatestVersion) < 0;
 
   const s1apiActionLabel = s1apiInLibrary ? (s1apiNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
   const mlvscanActionLabel = mlvscanInLibrary ? (mlvscanNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
@@ -1691,6 +1760,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   {filteredDownloadedGroups.map(group => {
                     const sortedEntries = getSortedGroupEntries(group);
                     const activeEntry = getActiveEntryForGroup(group);
+                    const groupHasUpdate = isGroupUpdateAvailable(group);
                     const activeVersionLabel = activeEntry ? getEntryVersionLabel(activeEntry) : 'unknown';
                     const activeRuntimeLabel = activeEntry?.availableRuntimes?.length
                       ? activeEntry.availableRuntimes.join('/')
@@ -1733,7 +1803,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                               }}>
                                 {sortedEntries.length} version{sortedEntries.length === 1 ? '' : 's'}
                               </span>
-                              {group.updateAvailable && (
+                              {groupHasUpdate && (
                                 <span style={{
                                   fontSize: '0.64rem',
                                   padding: '0.1rem 0.35rem',
@@ -1750,7 +1820,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           </div>
                         </label>
                          <div style={{ display: 'flex', gap: '0.32rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
-                          {group.updateAvailable && (
+                          {groupHasUpdate && (
                             <span style={{
                               fontSize: '0.64rem',
                               alignSelf: 'center',
@@ -1877,7 +1947,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                               </div>
                             )}
                            </div>
-                          {group.updateAvailable && (
+                          {groupHasUpdate && (
                             <button
                               className="btn btn-warning btn-small"
                               onClick={() => handleUpdateAndActivateGroup(group)}

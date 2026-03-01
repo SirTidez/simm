@@ -87,9 +87,6 @@ fn main() {
             commands::settings::save_settings,
             commands::settings::save_credentials,
             commands::settings::clear_credentials,
-            commands::settings::set_github_token,
-            commands::settings::has_github_token,
-            commands::settings::clear_github_token,
             commands::settings::save_nexus_mods_api_key,
             commands::settings::get_nexus_mods_api_key,
             commands::settings::has_nexus_mods_api_key,
@@ -163,6 +160,7 @@ fn main() {
             commands::github_releases::get_all_s1api_releases,
             commands::github_releases::get_latest_mlvscan_release,
             commands::github_releases::get_all_mlvscan_releases,
+            commands::github_releases::get_release_api_health,
             // NexusMods
             commands::nexus_mods::validate_nexus_mods_api_key,
             commands::nexus_mods::get_nexus_mods_rate_limits,

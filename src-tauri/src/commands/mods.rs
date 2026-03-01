@@ -3,7 +3,6 @@ use crate::services::mods_snapshot_cache;
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
-use crate::services::settings::SettingsService;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
@@ -494,22 +493,11 @@ pub async fn install_s1api(
         }));
     }
 
-    // Get GitHub service and fetch S1API releases
-    eprintln!("[install_s1api] Getting GitHub service...");
-    let github_service = {
-        let settings_service = match SettingsService::new(db.inner().clone()) {
-            Ok(service) => service,
-            Err(e) => return error_json(format!("Failed to get settings service: {}", e)),
-        };
-        let token = match settings_service.get_github_token().await {
-            Ok(token) => token,
-            Err(e) => return error_json(format!("Failed to load GitHub token: {}", e)),
-        };
-        eprintln!("[install_s1api] GitHub service obtained");
-        GitHubReleasesService::with_token(token)
-    };
+    // Get release service and fetch S1API releases
+    eprintln!("[install_s1api] Initializing release service...");
+    let github_service = GitHubReleasesService::new();
     
-    eprintln!("[install_s1api] Fetching S1API releases from GitHub...");
+    eprintln!("[install_s1api] Fetching S1API releases from release API...");
     let releases = match github_service.get_all_releases_with_latest("ifBars", "S1API", false).await {
         Ok(releases) => {
             eprintln!("[install_s1api] Found {} releases", releases.len());
@@ -554,7 +542,7 @@ pub async fn install_s1api(
     };
     
     // Download the ZIP file
-    eprintln!("[install_s1api] Downloading ZIP file from GitHub...");
+    eprintln!("[install_s1api] Downloading ZIP asset...");
     let zip_bytes = match github_service.download_release_asset(&zip_url).await {
         Ok(bytes) => {
             eprintln!("[install_s1api] Downloaded {} bytes", bytes.len());
@@ -607,11 +595,7 @@ pub async fn download_s1api_to_library(
         }))
     };
 
-    let github_service = {
-        let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
-        GitHubReleasesService::with_token(token)
-    };
+    let github_service = GitHubReleasesService::new();
 
     let releases = github_service.get_all_releases_with_latest("ifBars", "S1API", false)
         .await
@@ -671,11 +655,7 @@ pub async fn download_mlvscan_to_library(
         }))
     };
 
-    let github_service = {
-        let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-        let token = settings_service.get_github_token().await.map_err(|e| e.to_string())?;
-        GitHubReleasesService::with_token(token)
-    };
+    let github_service = GitHubReleasesService::new();
 
     let releases = github_service.get_all_releases_with_latest("ifBars", "MLVScan", false)
         .await
