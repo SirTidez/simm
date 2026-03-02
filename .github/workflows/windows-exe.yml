@@ -32,10 +32,18 @@ jobs:
       - name: Build Windows installer
         run: npm run tauri build -- --bundles nsis
 
+      - name: Upload standalone executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-exe
+          path: src-tauri/target/release/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-setup-exe
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 14
