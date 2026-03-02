@@ -19,7 +19,7 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Type check frontend
         run: npx tsc --noEmit
@@ -42,7 +42,7 @@ jobs:
           node-version: "20"
 
       - name: Install frontend dependencies (required by build.rs)
-        run: npm ci
+        run: npm install
 
       - name: Install Linux system dependencies (Tauri)
         run: |
@@ -77,7 +77,7 @@ jobs:
           node-version: "20"
 
       - name: Install frontend dependencies (required by build.rs)
-        run: npm ci
+        run: npm install
 
       - name: Install Linux system dependencies (Tauri)
         run: |
