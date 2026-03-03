@@ -15,8 +15,10 @@ async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsServ
     }
     let nexus_service = service.as_ref().unwrap().clone();
     let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-    if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
-        nexus_service.set_api_key(api_key).await;
+    match settings_service.get_nexus_mods_api_key().await {
+        Ok(Some(api_key)) => nexus_service.set_api_key(api_key).await,
+        Ok(None) => nexus_service.clear_api_key().await,
+        Err(_) => nexus_service.clear_api_key().await,
     }
     Ok(nexus_service)
 }

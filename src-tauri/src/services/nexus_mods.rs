@@ -1,16 +1,10 @@
-use anyhow::{Context, Result};
-use crate::utils::http_identity;
-use reqwest::Client;
+use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-const NEXUS_MODS_API_BASE: &str = "https://api.nexusmods.com/v1";
-const NEXUS_MODS_GRAPHQL_API: &str = "https://api.nexusmods.com/v2/graphql";
-
 #[derive(Clone)]
 pub struct NexusModsService {
-    client: Arc<Client>,
     api_key: Arc<RwLock<Option<String>>>,
     validation_result: Arc<RwLock<Option<Value>>>,
 }
@@ -18,10 +12,6 @@ pub struct NexusModsService {
 impl NexusModsService {
     pub fn new() -> Self {
         Self {
-            client: Arc::new(Client::builder()
-                .user_agent(http_identity::user_agent())
-                .build()
-                .expect("Failed to build NexusMods HTTP client")),
             api_key: Arc::new(RwLock::new(None)),
             validation_result: Arc::new(RwLock::new(None)),
         }
@@ -46,23 +36,16 @@ impl NexusModsService {
         let api_key = self.api_key.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
-        // Use NexusMods REST API to validate
-        let response = self.client
-            .get("https://api.nexusmods.com/v1/users/validate.json")
-            .header("apikey", &api_key)
-            .header("Application-Name", http_identity::APP_NAME)
-            .header("Application-Version", http_identity::APP_VERSION)
-            .header("Protocol-Version", "1")
-            .send()
+        let detailed = nexus_api::validate_api_key_detailed(&api_key)
             .await
-            .context("Failed to validate API key")?;
+            .map_err(|e| anyhow::anyhow!("Failed to validate API key via nexus-api crate: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Invalid API key: {}", response.status()));
-        }
-
-        let validation: Value = response.json().await
-            .context("Failed to parse validation response")?;
+        let validation = serde_json::json!({
+            "name": detailed.name,
+            "member_id": detailed.member_id,
+            "is_premium": detailed.is_premium,
+            "is_supporter": detailed.is_supporter,
+        });
 
         // Store validation result
         *self.validation_result.write().await = Some(validation.clone());
@@ -74,52 +57,11 @@ impl NexusModsService {
         let api_key = self.api_key.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
-        // Get rate limit info from headers
-        let response = self.client
-            .get("https://api.nexusmods.com/v1/users/validate.json")
-            .header("apikey", &api_key)
-            .header("Application-Name", http_identity::APP_NAME)
-            .header("Application-Version", http_identity::APP_VERSION)
-            .header("Protocol-Version", "1")
-            .send()
+        let detailed = nexus_api::validate_api_key_detailed(&api_key)
             .await
-            .context("Failed to get rate limits")?;
+            .map_err(|e| anyhow::anyhow!("Failed to fetch Nexus rate limits via crate: {}", e))?;
 
-        let daily = response.headers()
-            .get("x-rl-daily-limit")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        let hourly = response.headers()
-            .get("x-rl-hourly-limit")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        let daily_remaining = response.headers()
-            .get("x-rl-daily-remaining")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        let hourly_remaining = response.headers()
-            .get("x-rl-hourly-remaining")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        let daily_used = daily.saturating_sub(daily_remaining);
-        let hourly_used = hourly.saturating_sub(hourly_remaining);
-
-        Ok(serde_json::json!({
-            "daily": daily,
-            "hourly": hourly,
-            "dailyRemaining": daily_remaining,
-            "hourlyRemaining": hourly_remaining,
-            "dailyUsed": daily_used,
-            "hourlyUsed": hourly_used
-        }))
+        Ok(Self::map_rate_limits_to_legacy(detailed.rate_limits))
     }
 
     #[allow(dead_code)]
@@ -127,48 +69,31 @@ impl NexusModsService {
         self.validation_result.read().await.clone()
     }
 
-    /// Get API key from internal storage or return error
-    async fn get_api_key(&self) -> Result<String> {
-        self.api_key.read().await.clone()
-            .ok_or_else(|| anyhow::anyhow!("API key not set"))
+    async fn graphql_request(&self, query: &str, variables: Value) -> Result<Value> {
+        let api_key = self.get_api_key_optional().await;
+        let response = nexus_api::execute_graphql(api_key.as_deref(), query, Some(&variables))
+            .await
+            .map_err(|e| anyhow::anyhow!("Nexus GraphQL crate request failed: {}", e))?;
+
+        Ok(response.data.unwrap_or_else(|| serde_json::json!({})))
     }
 
-    async fn graphql_request(&self, query: &str, variables: Value) -> Result<Value> {
-        let payload = serde_json::json!({
-            "query": query,
-            "variables": variables,
-        });
+    fn map_rate_limits_to_legacy(rate_limits: Option<nexus_api::RateLimits>) -> Value {
+        let daily = rate_limits.as_ref().and_then(|r| r.daily_limit).unwrap_or(0);
+        let hourly = rate_limits.as_ref().and_then(|r| r.hourly_limit).unwrap_or(0);
+        let daily_remaining = rate_limits.as_ref().and_then(|r| r.daily_remaining).unwrap_or(0);
+        let hourly_remaining = rate_limits.as_ref().and_then(|r| r.hourly_remaining).unwrap_or(0);
+        let daily_used = daily.saturating_sub(daily_remaining);
+        let hourly_used = hourly.saturating_sub(hourly_remaining);
 
-        let mut request = self.client
-            .post(NEXUS_MODS_GRAPHQL_API)
-            .header("Application-Name", http_identity::APP_NAME)
-            .header("Application-Version", http_identity::APP_VERSION)
-            .header("Content-Type", "application/json");
-
-        if let Some(api_key) = self.get_api_key_optional().await {
-            request = request.header("apikey", api_key);
-        }
-
-        let response = request
-            .json(&payload)
-            .send()
-            .await
-            .context("Failed to send GraphQL request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
-            return Err(anyhow::anyhow!("NexusMods GraphQL API returned {}. Error: {}", status, error_body));
-        }
-
-        let response_data: Value = response.json().await
-            .context("Failed to parse GraphQL response")?;
-
-        if let Some(errors) = response_data.get("errors") {
-            return Err(anyhow::anyhow!("GraphQL query returned errors: {}", errors));
-        }
-
-        Ok(response_data.get("data").cloned().unwrap_or_else(|| serde_json::json!({})))
+        serde_json::json!({
+            "daily": daily,
+            "hourly": hourly,
+            "dailyRemaining": daily_remaining,
+            "hourlyRemaining": hourly_remaining,
+            "dailyUsed": daily_used,
+            "hourlyUsed": hourly_used
+        })
     }
 
     async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
@@ -652,59 +577,33 @@ impl NexusModsService {
         mod_id: u32,
         file_id: u32,
     ) -> Result<Vec<u8>> {
-        let api_key = self.get_api_key().await?;
+        let api_key = self.api_key.read().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
+        let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
+        let game_id_i64 = resolved_game_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e))?;
 
-        // First get download link
-        let url = format!("{}/games/{}/mods/{}/files/{}/download_link.json",
-            NEXUS_MODS_API_BASE, game_id, mod_id, file_id);
+        let links = nexus_api::get_download_links(
+            &api_key,
+            game_id_i64,
+            mod_id as i64,
+            file_id as i64,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get Nexus download links via crate: {}", e))?;
 
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", http_identity::APP_NAME)
-            .header("Application-Version", http_identity::APP_VERSION)
-            .header("Protocol-Version", "1")
-            .send()
+        let first_url = links
+            .links
+            .first()
+            .map(|link| link.uri.clone())
+            .ok_or_else(|| anyhow::anyhow!("No Nexus download links returned for file {}", file_id))?;
+
+        let downloaded = nexus_api::download_from_url(&first_url, Some(&api_key))
             .await
-            .context("Failed to get download link")?;
+            .map_err(|e| anyhow::anyhow!("Failed to download Nexus file via crate: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get download link: {}", response.status()));
-        }
-
-        let download_data: Value = response.json().await
-            .context("Failed to parse download link response")?;
-
-        // Log the response for debugging
-        eprintln!("[NexusMods] Download link response: {}", serde_json::to_string_pretty(&download_data).unwrap_or_default());
-
-        // The response is an array of download link objects
-        let download_url = download_data
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|obj| obj.get("URI"))
-            .and_then(|u| u.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Download URL not found in response. Response was: {}", download_data))?;
-
-        // Download the file
-        let file_response = self.client
-            .get(download_url)
-            .header("apikey", &api_key)
-            .header("Application-Name", http_identity::APP_NAME)
-            .header("Application-Version", http_identity::APP_VERSION)
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to download mod file")?;
-
-        if !file_response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to download file: {}", file_response.status()));
-        }
-
-        let bytes = file_response.bytes().await
-            .context("Failed to read response body")?;
-
-        Ok(bytes.to_vec())
+        Ok(downloaded.bytes)
     }
 }
 
@@ -717,6 +616,7 @@ impl Default for NexusModsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use crate::db::get_database_path;
     use crate::services::settings::SettingsService;
     use serial_test::serial;
@@ -724,6 +624,25 @@ mod tests {
     use sqlx::SqlitePool;
     use std::str::FromStr;
     use std::sync::Arc;
+
+    #[test]
+    fn map_rate_limits_to_legacy_maps_expected_fields() {
+        let mapped = NexusModsService::map_rate_limits_to_legacy(Some(nexus_api::RateLimits {
+            hourly_limit: Some(120),
+            hourly_remaining: Some(100),
+            hourly_reset: Some(1700000000),
+            daily_limit: Some(1000),
+            daily_remaining: Some(950),
+            daily_reset: Some(1700000001),
+        }));
+
+        assert_eq!(mapped.get("daily").and_then(|v| v.as_u64()), Some(1000));
+        assert_eq!(mapped.get("hourly").and_then(|v| v.as_u64()), Some(120));
+        assert_eq!(mapped.get("dailyRemaining").and_then(|v| v.as_u64()), Some(950));
+        assert_eq!(mapped.get("hourlyRemaining").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(mapped.get("dailyUsed").and_then(|v| v.as_u64()), Some(50));
+        assert_eq!(mapped.get("hourlyUsed").and_then(|v| v.as_u64()), Some(20));
+    }
 
     async fn resolve_api_key() -> Result<Option<String>> {
         if let Ok(key) = std::env::var("NEXUSMODS_API_KEY") {
@@ -758,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn live_validate_api_key_and_rate_limits() -> Result<()> {
+    async fn live_validate_api_key_via_crate() -> Result<()> {
         let api_key = match resolve_api_key().await? {
             Some(key) => key,
             None => return Ok(()),
@@ -768,11 +687,8 @@ mod tests {
         service.set_api_key(api_key).await;
 
         let validation = service.validate_api_key().await?;
-        assert!(validation.is_object());
-
-        let limits = service.get_rate_limits().await?;
-        assert!(limits.get("daily").is_some());
-        assert!(limits.get("hourly").is_some());
+        assert!(validation.get("name").and_then(|v| v.as_str()).is_some());
+        assert!(validation.get("member_id").is_some());
 
         Ok(())
     }

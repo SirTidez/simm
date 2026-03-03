@@ -57,7 +57,8 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
 }
 
 
-async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> {
+async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
+    let _ = db;
     let mut service = THUNDERSTORE_SERVICE.lock().await;
     if service.is_none() {
         *service = Some(Arc::new(ThunderStoreService::new()));
@@ -66,18 +67,22 @@ async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> 
 }
 
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
-    let mut service = NEXUS_MODS_SERVICE.lock().await;
-    if service.is_none() {
-        let nexus_service = Arc::new(NexusModsService::new());
-
-        let settings_service = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
-        if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
-            nexus_service.set_api_key(api_key).await;
+    let nexus_service = {
+        let mut service = NEXUS_MODS_SERVICE.lock().await;
+        if service.is_none() {
+            *service = Some(Arc::new(NexusModsService::new()));
         }
+        service.as_ref().unwrap().clone()
+    };
 
-        *service = Some(nexus_service);
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    match settings_service.get_nexus_mods_api_key().await {
+        Ok(Some(api_key)) => nexus_service.set_api_key(api_key).await,
+        Ok(None) => nexus_service.clear_api_key().await,
+        Err(_) => nexus_service.clear_api_key().await,
     }
-    Ok(service.as_ref().unwrap().clone())
+
+    Ok(nexus_service)
 }
 
 async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
@@ -183,7 +188,7 @@ pub async fn check_all_updates(
     // Also check mod updates for completed environments (in parallel)
     let mod_update_service = get_mod_update_service().await?;
     let mods_service = Arc::new(ModsService::new(db.inner().clone()));
-    let thunderstore_service = get_thunderstore_service().await?;
+    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 
