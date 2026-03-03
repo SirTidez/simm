@@ -32,11 +32,21 @@ jobs:
       - name: Build Windows installer
         run: npm run tauri build -- --bundles nsis
 
+      - name: Inspect build outputs
+        shell: pwsh
+        run: |
+          Write-Host "Listing target/release contents"
+          if (Test-Path "target/release") {
+            Get-ChildItem -Path "target/release" -Recurse | Select-Object FullName
+          } else {
+            Write-Host "target/release does not exist"
+          }
+
       - name: Upload standalone executable artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-portable-exe
-          path: src-tauri/target/release/*.exe
+          path: target/release/*.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -44,6 +54,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-setup-exe
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 14
