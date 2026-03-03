@@ -36,7 +36,8 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> {
+async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
+    let _ = db;
     let mut service = THUNDERSTORE_SERVICE.lock().await;
     if service.is_none() {
         *service = Some(Arc::new(ThunderStoreService::new()));
@@ -57,9 +58,12 @@ async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsServ
         Ok(Some(api_key)) => {
             nexus_service.set_api_key(api_key).await;
         }
-        Ok(None) => {}
+        Ok(None) => {
+            nexus_service.clear_api_key().await;
+        }
         Err(e) => {
             log::warn!("Failed to get Nexus Mods API key: {:?}", e);
+            nexus_service.clear_api_key().await;
         }
     }
     Ok(nexus_service)
@@ -85,7 +89,7 @@ pub async fn check_mod_updates(
     let mod_update_service = get_mod_update_service().await?;
     let mods_service = ModsService::new(db.inner().clone());
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let thunderstore_service = get_thunderstore_service().await?;
+    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 
@@ -110,7 +114,7 @@ pub async fn update_mod(
     let mod_update_service = get_mod_update_service().await?;
     let mods_service = ModsService::new(db.inner().clone());
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let thunderstore_service = get_thunderstore_service().await?;
+    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 

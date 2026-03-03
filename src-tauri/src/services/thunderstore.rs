@@ -1,23 +1,36 @@
 use anyhow::{Context, Result};
-use crate::utils::http_identity;
-use reqwest::Client;
 use serde_json::Value;
 
-const THUNDERSTORE_API_BASE: &str = "https://thunderstore.io/api/v1";
-
 #[derive(Clone)]
-pub struct ThunderStoreService {
-    client: Client,
-}
+pub struct ThunderStoreService;
 
 impl ThunderStoreService {
     pub fn new() -> Self {
-        Self {
-            client: Client::builder()
-                .user_agent(http_identity::user_agent())
-                .build()
-                .expect("Failed to build Thunderstore HTTP client"),
+        Self
+    }
+
+    fn crate_download_path_from_url(download_url: &str) -> Result<String> {
+        let parsed = reqwest::Url::parse(download_url)
+            .with_context(|| format!("Failed to parse Thunderstore download URL: {}", download_url))?;
+        let host = parsed.host_str().unwrap_or_default().to_lowercase();
+
+        if host != "thunderstore.io" && host != "www.thunderstore.io" {
+            // TODO: Migrate to thunderstore-api-crate: allow absolute URL requests (or configurable hosts) for download URLs.
+            // Why: crate mode currently only supports thunderstore.io path-based requests and must fail fast for unsupported hosts.
+            // Reference: C:\Users\SirTidez\WebstormProjects\nexusapitests\crates\thunderstore-api\src\lib.rs (request)
+            return Err(anyhow::anyhow!(
+                "Thunderstore crate mode does not support non-thunderstore.io download hosts: {}",
+                host
+            ));
         }
+
+        let mut path_and_query = parsed.path().to_string();
+        if let Some(query) = parsed.query() {
+            path_and_query.push('?');
+            path_and_query.push_str(query);
+        }
+
+        Ok(path_and_query)
     }
 
     pub async fn search_packages_filtered_by_runtime(
@@ -26,30 +39,35 @@ impl ThunderStoreService {
         runtime: &str,
         query: Option<&str>,
     ) -> Result<Vec<serde_json::Value>> {
-        // Use community-specific endpoint for Schedule I
-        let base_url = if game_id == "schedule-i" {
-            format!("https://thunderstore.io/c/{}/api/v1/package/", game_id)
+        let path = if game_id == "schedule-i" {
+            format!("/c/{}/api/v1/package/", game_id)
         } else {
-            format!("{}/package/", THUNDERSTORE_API_BASE)
+            "/api/v1/package/".to_string()
         };
 
-        let mut url = base_url;
-        if let Some(q) = query {
-            url = format!("{}?q={}", url, urlencoding::encode(q));
-        }
+        let query_pairs = query
+            .map(|q| vec![("q".to_string(), q.to_string())])
+            .unwrap_or_default();
+        let query_ref = if query_pairs.is_empty() {
+            None
+        } else {
+            Some(query_pairs.as_slice())
+        };
 
-        let response = self.client
-            .get(&url)
-            .send()
+        let response = thunderstore_api::request("GET", &path, query_ref, None)
             .await
-            .context("Failed to search Thunderstore packages")?;
+            .map_err(|e| anyhow::anyhow!("Thunderstore crate request failed: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Thunderstore API returned {}", response.status()));
+        if !(200..300).contains(&response.status) {
+            return Err(anyhow::anyhow!(
+                "Thunderstore API returned {} for path {}",
+                response.status,
+                path
+            ));
         }
 
-        let mut packages: Vec<Value> = response.json().await
-            .context("Failed to parse Thunderstore response")?;
+        let mut packages: Vec<Value> = serde_json::from_slice::<Vec<Value>>(&response.body)
+            .context("Failed to parse Thunderstore crate response body")?;
 
         // Apply local query filtering (community endpoints may ignore `q`)
         if let Some(q) = query {
@@ -165,33 +183,34 @@ impl ThunderStoreService {
     }
 
     pub async fn get_package(&self, package_uuid: &str, game_id: Option<&str>) -> Result<Option<serde_json::Value>> {
-        // Use community-specific endpoint for Schedule I, otherwise use base API
-        let url = if let Some(gid) = game_id {
+        let path = if let Some(gid) = game_id {
             if gid == "schedule-i" {
-                format!("https://thunderstore.io/c/{}/api/v1/package/{}/", gid, package_uuid)
+                format!("/c/{}/api/v1/package/{}/", gid, package_uuid)
             } else {
-                format!("{}/package/{}/", THUNDERSTORE_API_BASE, package_uuid)
+                format!("/api/v1/package/{}/", package_uuid)
             }
         } else {
-            format!("{}/package/{}/", THUNDERSTORE_API_BASE, package_uuid)
+            format!("/api/v1/package/{}/", package_uuid)
         };
 
-        let response = self.client
-            .get(&url)
-            .send()
+        let response = thunderstore_api::request("GET", &path, None, None)
             .await
-            .context("Failed to fetch Thunderstore package")?;
+            .map_err(|e| anyhow::anyhow!("Thunderstore crate request failed: {}", e))?;
 
-        if response.status() == 404 {
+        if response.status == 404 {
             return Ok(None);
         }
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Thunderstore API returned {}", response.status()));
+        if !(200..300).contains(&response.status) {
+            return Err(anyhow::anyhow!(
+                "Thunderstore API returned {} for path {}",
+                response.status,
+                path
+            ));
         }
 
-        let package: Value = response.json().await
-            .context("Failed to parse Thunderstore package")?;
+        let package: Value = serde_json::from_slice(&response.body)
+            .context("Failed to parse Thunderstore package from crate response")?;
 
         Ok(Some(package))
     }
@@ -210,20 +229,20 @@ impl ThunderStoreService {
             .and_then(|u| u.as_str())
             .ok_or_else(|| anyhow::anyhow!("Download URL not found in package versions"))?;
 
-        let response = self.client
-            .get(download_url)
-            .send()
-            .await
-            .context("Failed to download package")?;
+        let path_and_query = Self::crate_download_path_from_url(download_url)?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to download package: {}", response.status()));
+        let response = thunderstore_api::request("GET", &path_and_query, None, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Thunderstore crate download request failed: {}", e))?;
+
+        if !(200..300).contains(&response.status) {
+            return Err(anyhow::anyhow!(
+                "Failed to download package via crate: status {}",
+                response.status
+            ));
         }
 
-        let bytes = response.bytes().await
-            .context("Failed to read response body")?;
-
-        Ok(bytes.to_vec())
+        Ok(response.body)
     }
 }
 
@@ -236,6 +255,28 @@ impl Default for ThunderStoreService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crate_download_path_supports_thunderstore_url() {
+        let url = "https://thunderstore.io/package/download/SirTidez/PackRat/1.0.3/";
+        let path = ThunderStoreService::crate_download_path_from_url(url).expect("path conversion");
+        assert_eq!(path, "/package/download/SirTidez/PackRat/1.0.3/");
+    }
+
+    #[test]
+    fn crate_download_path_keeps_query_params() {
+        let url = "https://www.thunderstore.io/package/download/SirTidez/PackRat/1.0.3/?token=abc";
+        let path = ThunderStoreService::crate_download_path_from_url(url).expect("path conversion");
+        assert_eq!(path, "/package/download/SirTidez/PackRat/1.0.3/?token=abc");
+    }
+
+    #[test]
+    fn crate_download_path_rejects_non_thunderstore_host() {
+        let url = "https://cdn.example.com/package/download/SirTidez/PackRat/1.0.3/";
+        let err = ThunderStoreService::crate_download_path_from_url(url)
+            .expect_err("expected unsupported host error");
+        assert!(err.to_string().contains("non-thunderstore.io"));
+    }
 
     fn extract_package_id(package: &serde_json::Value) -> Option<String> {
         for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
