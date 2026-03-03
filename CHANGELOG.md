@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.1]
+
+- Migrated NexusMods and Thunderstore handlers to crate-only integrations in the Tauri backend service layer.
+- Removed the temporary API handler feature flag and deleted legacy direct HTTP fallback paths from app services.
+- Integrated new crate capabilities for Nexus detailed API key validation (premium/supporter flags), rate-limit extraction, and file download flows.
+- Integrated new Thunderstore absolute URL download support through crate APIs.
+- Switched crate dependencies from local path references to pinned git revisions:
+  - `https://github.com/SirTidez/nexusmods-api-handler`
+  - `https://github.com/SirTidez/thunderstore-api-handler`
+- Updated integration docs and smoke matrix to reflect full crate coverage and crate-only runtime behavior.
+
 ## [0.6.1]
 
 - Integrated cumulative workspace redesign scope from T01-T05 (five sequential LARGE bumps) and finalized release integration in T06 (SMALL).

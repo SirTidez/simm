@@ -2722,10 +2722,13 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 [[package]]
 name = "nexus-api"
 version = "0.1.0"
+source = "git+https://github.com/SirTidez/nexusmods-api-handler.git?rev=494f754de30b4890be1d42dfadb6168905b41aa4#494f754de30b4890be1d42dfadb6168905b41aa4"
 dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "url",
+ "zip",
 ]
 
 [[package]]
@@ -4767,7 +4770,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "simmrust"
-version = "0.6.2"
+version = "0.7.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5716,11 +5719,13 @@ dependencies = [
 [[package]]
 name = "thunderstore-api"
 version = "0.1.0"
+source = "git+https://github.com/SirTidez/thunderstore-api-handler.git?rev=31787b410c5335b17837b7121e1645db7ecb3aa1#31787b410c5335b17837b7121e1645db7ecb3aa1"
 dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
  "url",
+ "zip",
 ]
 
 [[package]]

@@ -9,30 +9,6 @@ impl ThunderStoreService {
         Self
     }
 
-    fn crate_download_path_from_url(download_url: &str) -> Result<String> {
-        let parsed = reqwest::Url::parse(download_url)
-            .with_context(|| format!("Failed to parse Thunderstore download URL: {}", download_url))?;
-        let host = parsed.host_str().unwrap_or_default().to_lowercase();
-
-        if host != "thunderstore.io" && host != "www.thunderstore.io" {
-            // TODO: Migrate to thunderstore-api-crate: allow absolute URL requests (or configurable hosts) for download URLs.
-            // Why: crate mode currently only supports thunderstore.io path-based requests and must fail fast for unsupported hosts.
-            // Reference: C:\Users\SirTidez\WebstormProjects\nexusapitests\crates\thunderstore-api\src\lib.rs (request)
-            return Err(anyhow::anyhow!(
-                "Thunderstore crate mode does not support non-thunderstore.io download hosts: {}",
-                host
-            ));
-        }
-
-        let mut path_and_query = parsed.path().to_string();
-        if let Some(query) = parsed.query() {
-            path_and_query.push('?');
-            path_and_query.push_str(query);
-        }
-
-        Ok(path_and_query)
-    }
-
     pub async fn search_packages_filtered_by_runtime(
         &self,
         game_id: &str,
@@ -229,11 +205,9 @@ impl ThunderStoreService {
             .and_then(|u| u.as_str())
             .ok_or_else(|| anyhow::anyhow!("Download URL not found in package versions"))?;
 
-        let path_and_query = Self::crate_download_path_from_url(download_url)?;
-
-        let response = thunderstore_api::request("GET", &path_and_query, None, None)
+        let response = thunderstore_api::request_url("GET", download_url, None, None)
             .await
-            .map_err(|e| anyhow::anyhow!("Thunderstore crate download request failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Thunderstore crate absolute download request failed: {}", e))?;
 
         if !(200..300).contains(&response.status) {
             return Err(anyhow::anyhow!(
@@ -255,28 +229,6 @@ impl Default for ThunderStoreService {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn crate_download_path_supports_thunderstore_url() {
-        let url = "https://thunderstore.io/package/download/SirTidez/PackRat/1.0.3/";
-        let path = ThunderStoreService::crate_download_path_from_url(url).expect("path conversion");
-        assert_eq!(path, "/package/download/SirTidez/PackRat/1.0.3/");
-    }
-
-    #[test]
-    fn crate_download_path_keeps_query_params() {
-        let url = "https://www.thunderstore.io/package/download/SirTidez/PackRat/1.0.3/?token=abc";
-        let path = ThunderStoreService::crate_download_path_from_url(url).expect("path conversion");
-        assert_eq!(path, "/package/download/SirTidez/PackRat/1.0.3/?token=abc");
-    }
-
-    #[test]
-    fn crate_download_path_rejects_non_thunderstore_host() {
-        let url = "https://cdn.example.com/package/download/SirTidez/PackRat/1.0.3/";
-        let err = ThunderStoreService::crate_download_path_from_url(url)
-            .expect_err("expected unsupported host error");
-        assert!(err.to_string().contains("non-thunderstore.io"));
-    }
 
     fn extract_package_id(package: &serde_json::Value) -> Option<String> {
         for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {

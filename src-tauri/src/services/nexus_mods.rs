@@ -36,18 +36,15 @@ impl NexusModsService {
         let api_key = self.api_key.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
-        let user = nexus_api::validate_api_key(&api_key)
+        let detailed = nexus_api::validate_api_key_detailed(&api_key)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to validate API key via nexus-api crate: {}", e))?;
 
         let validation = serde_json::json!({
-            "name": user.name,
-            "member_id": user.member_id,
-            // TODO: Migrate to nexus-api-crate: expose premium/supporter flags from API validation data.
-            // Why: UI currently expects these booleans for badge state in account overlay.
-            // Reference: C:\Users\SirTidez\WebstormProjects\nexusapitests\crates\nexus-api\src\lib.rs:98
-            "is_premium": false,
-            "is_supporter": false,
+            "name": detailed.name,
+            "member_id": detailed.member_id,
+            "is_premium": detailed.is_premium,
+            "is_supporter": detailed.is_supporter,
         });
 
         // Store validation result
@@ -57,12 +54,14 @@ impl NexusModsService {
     }
 
     pub async fn get_rate_limits(&self) -> Result<Value> {
-        // TODO: Migrate to nexus-api-crate: add a crate-level API to surface Nexus rate-limit headers.
-        // Why: this app displays daily/hourly usage and remaining values in the account UI.
-        // Reference: C:\Users\SirTidez\WebstormProjects\nexusapitests\crates\nexus-api\src\lib.rs:13 and C:\Users\SirTidez\WebstormProjects\nexusapitests\crates\nexus-api\src\lib.rs:98
-        Err(anyhow::anyhow!(
-            "Nexus rate limits are not supported by the crate yet"
-        ))
+        let api_key = self.api_key.read().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
+
+        let detailed = nexus_api::validate_api_key_detailed(&api_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch Nexus rate limits via crate: {}", e))?;
+
+        Ok(Self::map_rate_limits_to_legacy(detailed.rate_limits))
     }
 
     #[allow(dead_code)]
@@ -77,6 +76,24 @@ impl NexusModsService {
             .map_err(|e| anyhow::anyhow!("Nexus GraphQL crate request failed: {}", e))?;
 
         Ok(response.data.unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    fn map_rate_limits_to_legacy(rate_limits: Option<nexus_api::RateLimits>) -> Value {
+        let daily = rate_limits.as_ref().and_then(|r| r.daily_limit).unwrap_or(0);
+        let hourly = rate_limits.as_ref().and_then(|r| r.hourly_limit).unwrap_or(0);
+        let daily_remaining = rate_limits.as_ref().and_then(|r| r.daily_remaining).unwrap_or(0);
+        let hourly_remaining = rate_limits.as_ref().and_then(|r| r.hourly_remaining).unwrap_or(0);
+        let daily_used = daily.saturating_sub(daily_remaining);
+        let hourly_used = hourly.saturating_sub(hourly_remaining);
+
+        serde_json::json!({
+            "daily": daily,
+            "hourly": hourly,
+            "dailyRemaining": daily_remaining,
+            "hourlyRemaining": hourly_remaining,
+            "dailyUsed": daily_used,
+            "hourlyUsed": hourly_used
+        })
     }
 
     async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
@@ -560,13 +577,33 @@ impl NexusModsService {
         mod_id: u32,
         file_id: u32,
     ) -> Result<Vec<u8>> {
-        let _ = (game_id, mod_id, file_id);
-        // TODO: Migrate to nexus-api-crate: add REST v1 file download support (download_link + binary fetch).
-        // Why: install/update workflows require file bytes for a specific game/mod/file id.
-        // Reference: C:\Users\SirTidez\WebstormProjects\nexusapitests\crates\nexus-api\src\lib.rs:13
-        Err(anyhow::anyhow!(
-            "Nexus mod file download is not supported by the crate yet"
-        ))
+        let api_key = self.api_key.read().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
+        let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
+        let game_id_i64 = resolved_game_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e))?;
+
+        let links = nexus_api::get_download_links(
+            &api_key,
+            game_id_i64,
+            mod_id as i64,
+            file_id as i64,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get Nexus download links via crate: {}", e))?;
+
+        let first_url = links
+            .links
+            .first()
+            .map(|link| link.uri.clone())
+            .ok_or_else(|| anyhow::anyhow!("No Nexus download links returned for file {}", file_id))?;
+
+        let downloaded = nexus_api::download_from_url(&first_url, Some(&api_key))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to download Nexus file via crate: {}", e))?;
+
+        Ok(downloaded.bytes)
     }
 }
 
@@ -588,32 +625,23 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn crate_mode_rate_limits_returns_explicit_uncovered_error() {
-        let service = NexusModsService::new();
+    #[test]
+    fn map_rate_limits_to_legacy_maps_expected_fields() {
+        let mapped = NexusModsService::map_rate_limits_to_legacy(Some(nexus_api::RateLimits {
+            hourly_limit: Some(120),
+            hourly_remaining: Some(100),
+            hourly_reset: Some(1700000000),
+            daily_limit: Some(1000),
+            daily_remaining: Some(950),
+            daily_reset: Some(1700000001),
+        }));
 
-        let err = service
-            .get_rate_limits()
-            .await
-            .expect_err("crate mode should hard error for uncovered rate-limit endpoint");
-
-        assert!(err
-            .to_string()
-            .contains("not supported by the crate"));
-    }
-
-    #[tokio::test]
-    async fn crate_mode_download_returns_explicit_uncovered_error() {
-        let service = NexusModsService::new();
-
-        let err = service
-            .download_mod_file("schedule1", 1, 1)
-            .await
-            .expect_err("crate mode should hard error for uncovered download endpoint");
-
-        assert!(err
-            .to_string()
-            .contains("not supported by the crate"));
+        assert_eq!(mapped.get("daily").and_then(|v| v.as_u64()), Some(1000));
+        assert_eq!(mapped.get("hourly").and_then(|v| v.as_u64()), Some(120));
+        assert_eq!(mapped.get("dailyRemaining").and_then(|v| v.as_u64()), Some(950));
+        assert_eq!(mapped.get("hourlyRemaining").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(mapped.get("dailyUsed").and_then(|v| v.as_u64()), Some(50));
+        assert_eq!(mapped.get("hourlyUsed").and_then(|v| v.as_u64()), Some(20));
     }
 
     async fn resolve_api_key() -> Result<Option<String>> {
