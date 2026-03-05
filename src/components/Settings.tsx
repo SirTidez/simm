@@ -131,7 +131,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         const normalizedFormData = {
           ...formData,
           modIconCacheLimitMb: normalizeModIconCacheLimitMb(formData.modIconCacheLimitMb),
-          platform: 'windows',
+          platform: 'windows' as const,
           language: 'english',
         };
         await updateSettings(normalizedFormData);
@@ -543,3 +543,4 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     </>
   );
 }
+
