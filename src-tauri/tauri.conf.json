@@ -1,6 +1,6 @@
 {
   "productName": "Schedule I Mod Manager",
-  "version": "0.6.1",
+  "version": "0.7.2",
   "identifier": "com.s1devenvmanager.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -21,12 +21,25 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' asset: data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/SIMM/cache/mod-icons/**/*.png",
+          "$HOME/SIMM/cache/mod-icons/**/*.jpg",
+          "$HOME/SIMM/cache/mod-icons/**/*.jpeg",
+          "$HOME/SIMM/cache/mod-icons/**/*.webp",
+          "$HOME/SIMM/cache/mod-icons/**/*.gif",
+          "$HOME/SIMM/cache/mod-icons/**/*.ico",
+          "$HOME/SIMM/cache/mod-icons/**/*.svg"
+        ]
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "LockWire Labs",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

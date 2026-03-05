@@ -10,7 +10,7 @@ interface Props {
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
   const { createEnvironment, refreshEnvironments, environments } = useEnvironmentStore();
-  const { settings } = useSettingsStore();
+  const { settings, refreshDepotDownloader } = useSettingsStore();
   const [step, setStep] = useState(1);
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<BranchConfig | null>(null);
@@ -31,6 +31,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [showImportLocal, setShowImportLocal] = useState(false);
   const [importPath, setImportPath] = useState('');
   const [importingLocal, setImportingLocal] = useState(false);
+  const [depotDownloaderInstalled, setDepotDownloaderInstalled] = useState<boolean | null>(null);
+  const [showDepotDownloaderPrompt, setShowDepotDownloaderPrompt] = useState(false);
+  const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
+  const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -53,6 +57,23 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     // Don't auto-set outputDir here - wait for branch selection
   }, [settings]);
 
+  useEffect(() => {
+    const checkDepotDownloader = async () => {
+      try {
+        const info = await ApiService.detectDepotDownloader();
+        setDepotDownloaderInstalled(!!info.installed);
+        if (!info.installed) {
+          setShowDepotDownloaderPrompt(true);
+        }
+      } catch {
+        setDepotDownloaderInstalled(false);
+        setShowDepotDownloaderPrompt(true);
+      }
+    };
+
+    void checkDepotDownloader();
+  }, []);
+
   const loadSchedule1Config = async () => {
     try {
       const config = await ApiService.getSchedule1Config();
@@ -63,6 +84,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   };
 
   const handleBranchSelect = (branch: BranchConfig) => {
+    if (depotDownloaderInstalled === false) {
+      setShowDepotDownloaderPrompt(true);
+      return;
+    }
+
     setSelectedBranch(branch);
     if (!name) {
       // Use just the branch name, removing runtime info
@@ -237,6 +263,25 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   );
   const isSteamAuthenticated = Boolean(settings?.steamUsername);
 
+  const handleAutoInstallDepotDownloader = async () => {
+    setInstallingDepotDownloader(true);
+    setDepotDownloaderPromptError(null);
+    try {
+      await ApiService.installDepotDownloader();
+      await refreshDepotDownloader();
+      setDepotDownloaderInstalled(true);
+      setShowDepotDownloaderPrompt(false);
+    } catch (err) {
+      setDepotDownloaderPromptError(err instanceof Error ? err.message : 'Failed to install DepotDownloader automatically.');
+    } finally {
+      setInstallingDepotDownloader(false);
+    }
+  };
+
+  const handleOpenDepotDownloaderInstructions = () => {
+    window.open('https://github.com/SteamRE/DepotDownloader#installation', '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <section
       className="modal-content"
@@ -317,29 +362,48 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <span>or</span>
             </div>
             <h3>Download New Branch (DepotDownloader)</h3>
+            {depotDownloaderInstalled === false && (
+              <div style={{
+                marginBottom: '1rem',
+                padding: '0.75rem',
+                borderRadius: '6px',
+                border: '1px solid #6a4a2a',
+                backgroundColor: '#3a2a1a',
+                color: '#ffd7a3',
+                fontSize: '0.85rem'
+              }}>
+                <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
+                DepotDownloader is required to download and update non-Steam game versions.
+              </div>
+            )}
             {appConfig ? (
               <div className="branch-list">
                 {appConfig.branches.map(branch => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
+                  const depotRequired = depotDownloaderInstalled === false;
                   return (
                     <div
                       key={branch.name}
-                      className={`branch-card ${authRequired ? 'branch-card--disabled' : ''}`}
+                      className={`branch-card ${authRequired || depotRequired ? 'branch-card--disabled' : ''}`}
                       onClick={() => {
-                        if (authRequired) return;
+                        if (authRequired || depotRequired) return;
                         handleBranchSelect(branch);
                       }}
                       role="button"
-                      tabIndex={authRequired ? -1 : 0}
+                      tabIndex={authRequired || depotRequired ? -1 : 0}
                       onKeyDown={(e) => {
-                        if (authRequired) return;
+                        if (authRequired || depotRequired) return;
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
                           handleBranchSelect(branch);
                         }
                       }}
-                      aria-disabled={authRequired}
-                      title={authRequired ? 'Steam authentication required to select this branch' : undefined}
+                      aria-disabled={authRequired || depotRequired}
+                      title={authRequired
+                        ? 'Steam authentication required to select this branch'
+                        : depotRequired
+                          ? 'DepotDownloader is required to download additional game versions'
+                          : undefined}
                     >
                       <h4>{branch.displayName}</h4>
                       <p>Runtime: {branch.runtime}</p>
@@ -830,6 +894,54 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               >
                 Cancel
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDepotDownloaderPrompt && (
+        <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDepotDownloaderPrompt(false)}>
+          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '620px' }}>
+            <div className="modal-header">
+              <h2>Install DepotDownloader?</h2>
+              <button className="modal-close" onClick={() => setShowDepotDownloaderPrompt(false)}>×</button>
+            </div>
+
+            <div style={{ padding: '1rem 1.25rem 1.25rem' }}>
+              <p style={{ marginTop: 0, color: '#cbd5e1', lineHeight: 1.5 }}>
+                SIMM uses <strong>DepotDownloader</strong> for <strong>game version checks and game updates</strong> on non-Steam environments.
+              </p>
+              <p style={{ color: '#9aa4b2', lineHeight: 1.5 }}>
+                If you only plan to use your linked Steam install, you can skip this for now. You only need DepotDownloader to install or update additional game versions/branches outside Steam.
+              </p>
+
+              {depotDownloaderPromptError && (
+                <div className="error-message" style={{ marginBottom: '0.75rem' }}>{depotDownloaderPromptError}</div>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleAutoInstallDepotDownloader}
+                  disabled={installingDepotDownloader}
+                >
+                  {installingDepotDownloader ? (
+                    <><i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>Installing...</>
+                  ) : (
+                    <><i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>Install Automatically</>
+                  )}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={handleOpenDepotDownloaderInstructions}
+                >
+                  <i className="fas fa-external-link-alt" style={{ marginRight: '0.5rem' }}></i>
+                  Manual Instructions
+                </button>
+                <button className="btn btn-secondary" onClick={() => setShowDepotDownloaderPrompt(false)}>
+                  Skip for now
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { logger } from '../services/logger';
 import { ApiService } from '../services/api';
-import { onModUpdatesChecked } from '../services/events';
+import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/events';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 
 interface ModUpdatesEntry {
@@ -19,6 +19,9 @@ export function Footer() {
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [modUpdatesByEnv, setModUpdatesByEnv] = useState<Map<string, ModUpdatesEntry>>(new Map());
+  const [metadataRefreshCount, setMetadataRefreshCount] = useState(0);
+  const [metadataRefreshRunning, setMetadataRefreshRunning] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
 
   const totalModsNeedingUpdate = Array.from(modUpdatesByEnv.values()).reduce((sum, e) => sum + e.count, 0);
 
@@ -63,6 +66,26 @@ export function Footer() {
       });
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    onModMetadataRefreshStatus((data) => {
+      setMetadataRefreshCount(data.activeCount || 0);
+      setMetadataRefreshRunning(Boolean(data.running) || (data.activeCount || 0) > 0);
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
   // Also refresh when ModsOverlay runs check (custom event from EnvironmentList)
@@ -231,6 +254,16 @@ export function Footer() {
           >
             <i className={`fas ${checkingAll ? 'fa-sync-alt fa-spin' : 'fa-sync-alt'}`}></i>
           </button>
+        )}
+        <span className={`statusbar-stat ${isOnline ? 'statusbar-stat-ok' : 'statusbar-stat-warn'}`}>
+          &bull; {isOnline ? 'Online' : 'Offline'}
+        </span>
+        {(metadataRefreshRunning || metadataRefreshCount > 0) && (
+          <span className="statusbar-stat statusbar-check">
+            &bull; {metadataRefreshCount > 0
+              ? `Updating metadata: ${metadataRefreshCount} mod${metadataRefreshCount === 1 ? '' : 's'}`
+              : 'Refreshing mod metadata'}
+          </span>
         )}
       </div>
       <div className="statusbar-right">

@@ -173,6 +173,7 @@ function AppContent() {
             isOpen={true}
             onClose={goHome}
             environmentId={selectedEnvironmentId}
+            onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
             onModUpdatesChecked={(count) => {
               window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: selectedEnvironmentId, count } }));
             }}

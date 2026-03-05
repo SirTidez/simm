@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import type { Environment } from '../types';
@@ -76,9 +76,9 @@ export function EnvironmentList({
 }: EnvironmentListProps) {
   const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
   const { settings } = useSettingsStore();
-  const autoCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const autoCheckIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
-  const [authCredentials, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
+  const [, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
   const [descriptionValue, setDescriptionValue] = useState<string>('');
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -98,9 +98,9 @@ export function EnvironmentList({
   const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
 
   // Debounce timers for filesystem change events
-  const modsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  const pluginsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
-  const userLibsRefreshTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const modsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const pluginsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const userLibsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Use refs to access latest environments without causing effect re-runs
   const environmentsRef = useRef(environments);
@@ -108,13 +108,6 @@ export function EnvironmentList({
     environmentsRef.current = environments;
   }, [environments]);
   const initialUpdateCheckDoneRef = useRef(false);
-  const [melonLoaderLatestRelease, setMelonLoaderLatestRelease] = useState<Map<string, {
-    tag_name: string;
-    name: string;
-    published_at: string;
-    prerelease: boolean;
-    download_url: string | null;
-  }>>(new Map());
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;
@@ -132,6 +125,25 @@ export function EnvironmentList({
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
   const [launchDropdownOpen, setLaunchDropdownOpen] = useState<string | null>(null);
+  const [preferredLaunchMethod, setPreferredLaunchMethod] = useState<Map<string, 'steam' | 'direct'>>(() => {
+    // Load from localStorage on init
+    try {
+      const saved = localStorage.getItem('simm-preferred-launch-method');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return new Map(Object.entries(parsed));
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return new Map();
+  });
+
+  // Save preferred launch method to localStorage when it changes
+  useEffect(() => {
+    const obj = Object.fromEntries(preferredLaunchMethod);
+    localStorage.setItem('simm-preferred-launch-method', JSON.stringify(obj));
+  }, [preferredLaunchMethod]);
   const initialDetectionNotifiedRef = useRef(false);
 
   const notifyInitialDetectionComplete = useCallback(() => {
@@ -1224,7 +1236,17 @@ export function EnvironmentList({
 
   return (
     <div className="environment-list">
-      <h2>Game Installs</h2>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', marginBottom: '1rem' }}>
+        <h2 style={{ margin: 0 }}>Game Installs</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.8rem', color: 'var(--app-text-color-secondary, #9aa4b2)' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <span className="badge badge-orange-red" style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}>Mono</span>
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <span className="badge badge-blue" style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}>IL2CPP</span>
+          </span>
+        </div>
+      </div>
 
       <AuthenticationModal
         isOpen={authModal.isOpen}
@@ -1921,165 +1943,133 @@ export function EnvironmentList({
                 {env.status === 'completed' && (
                   <>
                     <div className="environment-actions-grid">
-                      <button
-                        onClick={() => handleOpenFolder(env)}
-                        className="btn btn-secondary"
-                        title="Open folder in file explorer"
-                      >
-                        <i className="fas fa-folder-open"></i>
-                        <span>Open Folder</span>
-                      </button>
-                      <div className="launch-game-cell" data-launch-dropdown>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setLaunchDropdownOpen(launchDropdownOpen === env.id ? null : env.id);
-                          }}
-                          className="btn btn-primary"
-                          title="Launch the game"
-                        >
-                          <i className="fas fa-play"></i>
-                          <span>Launch Game</span>
-                          <i className={`fas fa-chevron-${launchDropdownOpen === env.id ? 'up' : 'down'}`} style={{ fontSize: '0.7rem' }}></i>
-                        </button>
-                        {launchDropdownOpen === env.id && (
-                          <div style={{
-                            position: 'absolute',
-                            top: '100%',
-                            left: 0,
-                            marginTop: '0.25rem',
-                            backgroundColor: 'var(--card-bg-color, #2a2a2a)',
-                            border: '1px solid var(--border-color, #3a3a3a)',
-                            borderRadius: '4px',
-                            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
-                            zIndex: 1000,
-                            minWidth: '100%',
-                            overflow: 'hidden'
-                          }}>
-                            {(env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) ? (
-                              <>
-                                <button
-                                  onClick={() => {
-                                    handleLaunchGame(env, 'steam');
-                                    setLaunchDropdownOpen(null);
-                                  }}
-                                  className="btn"
-                                  style={{
-                                    width: '100%',
-                                    textAlign: 'left',
-                                    padding: '0.5rem 1rem',
-                                    background: 'none',
-                                    border: 'none',
-                                    color: 'var(--app-text-color, #ffffff)',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem'
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'transparent';
-                                  }}
-                                >
-                                  <i className="fab fa-steam"></i>
-                                  <span>Launch via Steam</span>
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    handleLaunchGame(env, 'direct');
-                                    setLaunchDropdownOpen(null);
-                                  }}
-                                  className="btn"
-                                  style={{
-                                    width: '100%',
-                                    textAlign: 'left',
-                                    padding: '0.5rem 1rem',
-                                    background: 'none',
-                                    border: 'none',
-                                    color: 'var(--app-text-color, #ffffff)',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem',
-                                    borderTop: '1px solid var(--border-color, #3a3a3a)'
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'transparent';
-                                  }}
-                                >
-                                  <i className="fas fa-play"></i>
-                                  <span>Launch Directly</span>
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  onClick={() => {
-                                    handleLaunchGame(env, 'direct');
-                                    setLaunchDropdownOpen(null);
-                                  }}
-                                  className="btn"
-                                  style={{
-                                    width: '100%',
-                                    textAlign: 'left',
-                                    padding: '0.5rem 1rem',
-                                    background: 'none',
-                                    border: 'none',
-                                    color: 'var(--app-text-color, #ffffff)',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem'
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'transparent';
-                                  }}
-                                >
-                                  <i className="fas fa-play"></i>
-                                  <span>Launch Directly</span>
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    handleLaunchGame(env, 'steam');
-                                    setLaunchDropdownOpen(null);
-                                  }}
-                                  className="btn"
-                                  style={{
-                                    width: '100%',
-                                    textAlign: 'left',
-                                    padding: '0.5rem 1rem',
-                                    background: 'none',
-                                    border: 'none',
-                                    color: 'var(--app-text-color, #ffffff)',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem',
-                                    borderTop: '1px solid var(--border-color, #3a3a3a)'
-                                  }}
-                                  onMouseEnter={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
-                                  }}
-                                  onMouseLeave={(e) => {
-                                    e.currentTarget.style.backgroundColor = 'transparent';
-                                  }}
-                                >
-                                  <i className="fab fa-steam"></i>
-                                  <span>Launch via Steam</span>
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </div>
+                       <button
+                         onClick={() => handleOpenFolder(env)}
+                         className="btn btn-secondary"
+                         title="Open folder in file explorer"
+                       >
+                         <i className="fas fa-folder-open"></i>
+                         <span>Open Folder</span>
+                       </button>
+                       <div className="launch-game-cell" data-launch-dropdown>
+                         <button
+                           onClick={() => {
+                             const method = preferredLaunchMethod.get(env.id) || 'steam';
+                             handleLaunchGame(env, method);
+                           }}
+                           className="btn btn-primary"
+                           title={`Launch the game via ${preferredLaunchMethod.get(env.id) === 'direct' ? 'Local Install' : 'Steam'}`}
+                         >
+                           <i className="fas fa-play"></i>
+                           <span>Play</span>
+                         </button>
+                         <button
+                           onClick={(e) => {
+                             e.stopPropagation();
+                             setLaunchDropdownOpen(launchDropdownOpen === env.id ? null : env.id);
+                           }}
+                           className="btn btn-secondary"
+                           title="Choose launch method"
+                           style={{ flex: '0 0 auto', marginLeft: '0.25rem' }}
+                         >
+                           <i className={preferredLaunchMethod.get(env.id) === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'}></i>
+                           <i className={`fas fa-chevron-${launchDropdownOpen === env.id ? 'up' : 'down'}`} style={{ fontSize: '0.65rem', marginLeft: '0.15rem' }}></i>
+                         </button>
+                         {launchDropdownOpen === env.id && (
+                           <div style={{
+                             position: 'absolute',
+                             top: '100%',
+                             left: 0,
+                             marginTop: '0.25rem',
+                             backgroundColor: 'var(--card-bg-color, #2a2a2a)',
+                             border: '1px solid var(--border-color, #3a3a3a)',
+                             borderRadius: '4px',
+                             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
+                             zIndex: 1000,
+                             minWidth: '160px',
+                             overflow: 'hidden'
+                           }}>
+                             {(() => {
+                               const currentMethod = preferredLaunchMethod.get(env.id) || 'steam';
+                               return (
+                                 <>
+                                   <button
+                                      onClick={() => {
+                                        setPreferredLaunchMethod(prev => {
+                                          const next = new Map(prev);
+                                          next.set(env.id, 'steam');
+                                          return next;
+                                        });
+                                        setLaunchDropdownOpen(null);
+                                      }}
+                                      className="btn"
+                                      style={{
+                                        width: '100%',
+                                        textAlign: 'left',
+                                        padding: '0.5rem 1rem',
+                                        background: currentMethod === 'steam' ? 'var(--primary-color, #646cff)' : 'none',
+                                        border: 'none',
+                                        color: 'var(--app-text-color, #ffffff)',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.5rem'
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        if (currentMethod !== 'steam') e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        if (currentMethod !== 'steam') e.currentTarget.style.backgroundColor = 'transparent';
+                                      }}
+                                    >
+                                      <i className="fab fa-steam"></i>
+                                      <span>via Steam</span>
+                                      {currentMethod === 'steam' && (
+                                        <i className="fas fa-check" style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.8 }}></i>
+                                      )}
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setPreferredLaunchMethod(prev => {
+                                          const next = new Map(prev);
+                                          next.set(env.id, 'direct');
+                                          return next;
+                                        });
+                                        setLaunchDropdownOpen(null);
+                                      }}
+                                      className="btn"
+                                      style={{
+                                        width: '100%',
+                                        textAlign: 'left',
+                                        padding: '0.5rem 1rem',
+                                        background: currentMethod === 'direct' ? 'var(--primary-color, #646cff)' : 'none',
+                                        border: 'none',
+                                        borderTop: '1px solid var(--border-color, #3a3a3a)',
+                                        color: 'var(--app-text-color, #ffffff)',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.5rem'
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        if (currentMethod !== 'direct') e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        if (currentMethod !== 'direct') e.currentTarget.style.backgroundColor = 'transparent';
+                                      }}
+                                    >
+                                      <i className="fas fa-terminal"></i>
+                                      <span>via Local Install</span>
+                                      {currentMethod === 'direct' && (
+                                        <i className="fas fa-check" style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.8 }}></i>
+                                      )}
+                                    </button>
+                                 </>
+                               );
+                             })()}
+                           </div>
+                         )}
+                       </div>
                       <button
                         onClick={() => handleManualUpdateCheck(env)}
                         className="btn btn-secondary"

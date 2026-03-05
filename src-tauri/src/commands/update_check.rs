@@ -6,11 +6,13 @@ use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
-use crate::types::UpdateCheckResult;
+use crate::types::{ModMetadata, ModSource, UpdateCheckResult};
 use crate::events;
 use tauri::{AppHandle, State};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
@@ -46,6 +48,66 @@ fn build_mod_updates_payload(results: &[serde_json::Value]) -> Vec<serde_json::V
         .collect()
 }
 
+fn extract_package_uuid(package: &serde_json::Value) -> Option<String> {
+    for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
+        if let Some(value) = package.get(key).and_then(|v| v.as_str()) {
+            return Some(value.to_string());
+        }
+    }
+
+    package
+        .get("latest")
+        .and_then(|v| v.get("uuid4"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
+    package
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("icon"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            package
+                .get("latest")
+                .and_then(|v| v.get("icon"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| package.get("icon").and_then(|v| v.as_str()))
+        .or_else(|| package.get("icon_url").and_then(|v| v.as_str()))
+        .map(|v| v.to_string())
+}
+
+async fn resolve_thunderstore_package_by_source_id(
+    thunderstore_service: &ThunderStoreService,
+    source_id: &str,
+) -> Option<serde_json::Value> {
+    if let Ok(Some(package)) = thunderstore_service.get_package(source_id, Some("schedule-i")).await {
+        return Some(package);
+    }
+
+    let (owner, name) = source_id.split_once('/')?;
+
+    let candidates = thunderstore_service
+        .search_packages_filtered_by_runtime("schedule-i", "unknown", Some(name))
+        .await
+        .ok()?;
+
+    let matching = candidates.into_iter().find(|pkg| {
+        let pkg_owner = pkg.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+        let pkg_name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        pkg_owner.eq_ignore_ascii_case(owner) && pkg_name.eq_ignore_ascii_case(name)
+    })?;
+
+    let package_uuid = extract_package_uuid(&matching)?;
+    thunderstore_service
+        .get_package(&package_uuid, Some("schedule-i"))
+        .await
+        .ok()?
+}
+
 
 
 async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
@@ -57,7 +119,8 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
 }
 
 
-async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> {
+async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
+    let _ = db;
     let mut service = THUNDERSTORE_SERVICE.lock().await;
     if service.is_none() {
         *service = Some(Arc::new(ThunderStoreService::new()));
@@ -66,21 +129,26 @@ async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> 
 }
 
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
-    let mut service = NEXUS_MODS_SERVICE.lock().await;
-    if service.is_none() {
-        let nexus_service = Arc::new(NexusModsService::new());
-
-        let settings_service = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
-        if let Ok(Some(api_key)) = settings_service.get_nexus_mods_api_key().await {
-            nexus_service.set_api_key(api_key).await;
+    let nexus_service = {
+        let mut service = NEXUS_MODS_SERVICE.lock().await;
+        if service.is_none() {
+            *service = Some(Arc::new(NexusModsService::new()));
         }
+        service.as_ref().unwrap().clone()
+    };
 
-        *service = Some(nexus_service);
+    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
+    match settings_service.get_nexus_mods_api_key().await {
+        Ok(Some(api_key)) => nexus_service.set_api_key(api_key).await,
+        Ok(None) => nexus_service.clear_api_key().await,
+        Err(_) => nexus_service.clear_api_key().await,
     }
-    Ok(service.as_ref().unwrap().clone())
+
+    Ok(nexus_service)
 }
 
 async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
+    let _ = db;
     let github_service = {
         let mut service = GITHUB_SERVICE.lock().await;
         if service.is_none() {
@@ -88,15 +156,6 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
         }
         service.as_ref().unwrap().clone()
     };
-    // Fetch token on every call so settings changes take effect without app restart
-    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-    match settings_service.get_github_token().await {
-        Ok(Some(token)) => github_service.set_token(Some(token)).await,
-        Ok(None) => github_service.set_token(None).await,
-        Err(e) => {
-            log::warn!("Failed to get GitHub token: {:?}", e);
-        }
-    }
     Ok(github_service)
 }
 
@@ -191,7 +250,7 @@ pub async fn check_all_updates(
     // Also check mod updates for completed environments (in parallel)
     let mod_update_service = get_mod_update_service().await?;
     let mods_service = Arc::new(ModsService::new(db.inner().clone()));
-    let thunderstore_service = get_thunderstore_service().await?;
+    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 
@@ -200,10 +259,53 @@ pub async fn check_all_updates(
         .filter(|env| matches!(env.status, crate::types::EnvironmentStatus::Completed))
         .collect();
 
+    let mut env_mod_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_mods_refreshing = 0usize;
+    for env in &completed_envs {
+        let count = match mods_service.list_mods(&env.output_dir).await {
+            Ok(value) => value
+                .get("mods")
+                .and_then(|m| m.as_array())
+                .map(|m| m.len())
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+        env_mod_counts.insert(env.id.clone(), count);
+        total_mods_refreshing = total_mods_refreshing.saturating_add(count);
+    }
+
+    let mut seen_storage_ids = HashSet::new();
+    let mut library_thunderstore_targets: Vec<(String, String)> = Vec::new();
+    if let Ok(library) = mods_service.get_mod_library().await {
+        for entry in library.downloaded {
+            if !matches!(entry.source, Some(ModSource::Thunderstore)) {
+                continue;
+            }
+
+            if entry.icon_url.is_some() && entry.icon_cache_path.is_some() {
+                continue;
+            }
+
+            let Some(source_id) = entry.source_id.clone().filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+
+            if seen_storage_ids.insert(entry.storage_id.clone()) {
+                library_thunderstore_targets.push((entry.storage_id, source_id));
+            }
+        }
+    }
+
+    total_mods_refreshing = total_mods_refreshing.saturating_add(library_thunderstore_targets.len());
+
+    let refresh_counter = Arc::new(AtomicUsize::new(total_mods_refreshing));
+    let _ = events::emit_mod_metadata_refresh_status(&app, total_mods_refreshing);
+
     // Check mod updates for all completed environments in parallel
     let app_handle = app.clone();
     let mod_update_tasks: Vec<_> = completed_envs.iter().map(|env| {
         let env_id = env.id.clone();
+        let env_mod_count = env_mod_counts.get(&env.id).copied().unwrap_or(0);
         let app = app_handle.clone();
         let mod_update_service = mod_update_service.clone();
         let mods_service = mods_service.clone();
@@ -211,6 +313,7 @@ pub async fn check_all_updates(
         let thunderstore_service = thunderstore_service.clone();
         let nexus_mods_service = nexus_mods_service.clone();
         let github_service = github_service.clone();
+        let refresh_counter = refresh_counter.clone();
 
         tokio::spawn(async move {
             match mod_update_service.check_mod_updates(
@@ -234,12 +337,127 @@ pub async fn check_all_updates(
                     eprintln!("[UpdateCheck] Failed to check mod updates for environment {}: {}", env_id, e);
                 }
             }
+
+            let remaining = loop {
+                let current = refresh_counter.load(Ordering::SeqCst);
+                let next = current.saturating_sub(env_mod_count);
+                if refresh_counter
+                    .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break next;
+                }
+            };
+            let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
         })
     }).collect();
 
     // Wait for all mod update checks to complete (but don't fail if they error)
     for task in mod_update_tasks {
         let _ = task.await;
+    }
+
+    // Backfill missing Thunderstore metadata/icons for downloaded library entries
+    for (storage_id, source_id) in library_thunderstore_targets {
+        if let Some(package) = resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await {
+            let now = chrono::Utc::now();
+            let icon_url = extract_thunderstore_icon(&package);
+            let icon_cache_path = mods_service
+                .cache_icon_for_metadata(icon_url.as_deref())
+                .await;
+
+            let metadata_update = ModMetadata {
+                source: Some(ModSource::Thunderstore),
+                source_id: Some(source_id.clone()),
+                source_version: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("version_number"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                author: package
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                mod_name: package
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                source_url: package
+                    .get("package_url")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                summary: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                icon_url,
+                icon_cache_path,
+                downloads: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .map(|versions| {
+                        versions
+                            .iter()
+                            .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                            .sum::<u64>()
+                    }),
+                likes_or_endorsements: package
+                    .get("rating_score")
+                    .and_then(|v| v.as_i64()),
+                updated_at: package
+                    .get("date_updated")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                tags: package
+                    .get("categories")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .filter(|tags| !tags.is_empty()),
+                installed_version: None,
+                library_added_at: None,
+                installed_at: None,
+                last_update_check: Some(now),
+                metadata_last_refreshed: Some(now),
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: Some(storage_id.clone()),
+                symlink_paths: None,
+            };
+
+            if let Err(error) = mods_service
+                .upsert_storage_metadata_by_id(&storage_id, metadata_update)
+                .await
+            {
+                eprintln!(
+                    "[UpdateCheck] Failed to backfill library metadata for {}: {}",
+                    storage_id,
+                    error
+                );
+            }
+        }
+
+        let remaining = loop {
+            let current = refresh_counter.load(Ordering::SeqCst);
+            let next = current.saturating_sub(1);
+            if refresh_counter
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break next;
+            }
+        };
+        let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
     }
 
     // Update environments with the results and emit events
@@ -323,8 +541,8 @@ pub async fn get_update_status(
 mod tests {
     use super::{build_mod_updates_payload, extract_mod_name_for_event, get_github_service};
     use crate::db::initialize_pool;
-    use crate::services::settings::SettingsService;
     use serial_test::serial;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     struct EnvVarGuard {
@@ -336,12 +554,6 @@ mod tests {
         fn set(key: &'static str, value: &str) -> Self {
             let original = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, original }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let original = std::env::var(key).ok();
-            std::env::remove_var(key);
             Self { key, original }
         }
     }
@@ -358,47 +570,16 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn get_github_service_refreshes_token_changes_without_restart() {
+    async fn get_github_service_returns_singleton_instance() {
         let temp = tempdir().expect("temp dir");
         let data_dir = temp.path().join("simmrust");
         let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let _token_guard = EnvVarGuard::unset("GITHUB_TOKEN");
 
         let pool = initialize_pool().await.expect("pool");
-        let settings = SettingsService::new(pool.clone()).expect("settings service");
+        let first = get_github_service(pool.clone()).await.expect("first service");
+        let second = get_github_service(pool.clone()).await.expect("second service");
 
-        let service = get_github_service(pool.clone()).await.expect("github service");
-        assert_eq!(service.current_token_for_testing().await, None);
-
-        settings
-            .save_github_token("token-two".to_string())
-            .await
-            .expect("save token");
-        let service = get_github_service(pool.clone()).await.expect("github service after save");
-        assert_eq!(
-            service.current_token_for_testing().await.as_deref(),
-            Some("token-two")
-        );
-
-        settings.clear_github_token().await.expect("clear token");
-        let service = get_github_service(pool.clone()).await.expect("github service after clear");
-        assert_eq!(service.current_token_for_testing().await, None);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_github_service_none_setting_disables_env_token_fallback() {
-        let temp = tempdir().expect("temp dir");
-        let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
-
-        let pool = initialize_pool().await.expect("pool");
-        let settings = SettingsService::new(pool.clone()).expect("settings service");
-        settings.clear_github_token().await.expect("clear token");
-
-        let service = get_github_service(pool.clone()).await.expect("github service");
-        assert_eq!(service.current_token_for_testing().await, None);
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]

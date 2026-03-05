@@ -80,11 +80,21 @@ export interface Settings {
   autoCheckUpdates?: boolean;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   nexusModsApiKey?: string;
+  nexusModsRateLimits?: NexusRateLimits | null;
   nexusModsGameId?: string;
   thunderstoreGameId?: string;
   autoUpdateMods?: boolean;
   modUpdateCheckInterval?: number;
-  // Note: githubToken is NOT stored here - it's stored encrypted separately
+  modIconCacheLimitMb?: number;
+}
+
+export interface NexusRateLimits {
+  daily: number;
+  hourly: number;
+  dailyRemaining?: number;
+  hourlyRemaining?: number;
+  dailyUsed?: number;
+  hourlyUsed?: number;
 }
 
 export interface CustomTheme {
@@ -123,6 +133,32 @@ export interface CustomTheme {
   updateVersionBg: string;
   primaryBtnColor: string;
   primaryBtnHover: string;
+}
+
+export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';
+
+export interface ConfigEntry {
+  key: string;
+  value: string;
+  comment?: string;
+}
+
+export interface ConfigSection {
+  name: string;
+  entries: ConfigEntry[];
+}
+
+export interface ConfigFile {
+  name: string;
+  path: string;
+  fileType: ConfigFileType;
+  sections: ConfigSection[];
+}
+
+export interface ConfigUpdate {
+  section: string;
+  key: string;
+  value: string;
 }
 
 export interface NexusMod {
@@ -164,7 +200,16 @@ export interface ModLibraryEntry {
   sourceId?: string;
   sourceVersion?: string;
   sourceUrl?: string;
+  summary?: string;
+  iconUrl?: string;
+  iconCachePath?: string;
+  downloads?: number;
+  likesOrEndorsements?: number;
+  updatedAt?: string;
+  tags?: string[];
   installedVersion?: string;
+  libraryAddedAt?: number;
+  installedAt?: number;
   author?: string;
   updateAvailable?: boolean;
   remoteVersion?: string;

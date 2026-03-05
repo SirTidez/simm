@@ -7,6 +7,7 @@ class Logger {
    * Logs a debug message
    */
   debug(message: string, data?: any): void {
+    if (!this.enabled) return;
     console.debug(`[Frontend] ${message}`, data || '');
   }
 
@@ -14,6 +15,7 @@ class Logger {
    * Logs an info message
    */
   info(message: string, data?: any): void {
+    if (!this.enabled) return;
     console.info(`[Frontend] ${message}`, data || '');
   }
 
@@ -21,6 +23,7 @@ class Logger {
    * Logs a warning message
    */
   warn(message: string, data?: any): void {
+    if (!this.enabled) return;
     console.warn(`[Frontend] ${message}`, data || '');
   }
 
@@ -28,6 +31,7 @@ class Logger {
    * Logs an error message
    */
   error(message: string, data?: any): void {
+    if (!this.enabled) return;
     console.error(`[Frontend] ${message}`, data || '');
   }
 

@@ -36,28 +36,6 @@ pub async fn clear_credentials(db: State<'_, Arc<SqlitePool>>) -> Result<(), Str
 }
 
 #[tauri::command]
-pub async fn set_github_token(
-    db: State<'_, Arc<SqlitePool>>,
-    token: String,
-) -> Result<(), String> {
-    let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service.save_github_token(token).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn has_github_token(db: State<'_, Arc<SqlitePool>>) -> Result<bool, String> {
-    let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let token = service.get_github_token().await.map_err(|e| e.to_string())?;
-    Ok(token.is_some())
-}
-
-#[tauri::command]
-pub async fn clear_github_token(db: State<'_, Arc<SqlitePool>>) -> Result<(), String> {
-    let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service.clear_github_token().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub async fn save_nexus_mods_api_key(
     db: State<'_, Arc<SqlitePool>>,
     api_key: String,

@@ -267,7 +267,6 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
     let mut secrets_written = false;
     for dir in &legacy_dirs {
         secrets_written |= migrate_secret_file(pool, dir, "credentials.enc", "steam_credentials").await?;
-        secrets_written |= migrate_secret_file(pool, dir, "github_token.enc", "github_token").await?;
         secrets_written |= migrate_secret_file(pool, dir, "nexus_mods_api_key.enc", "nexus_mods_api_key").await?;
     }
 
@@ -441,11 +440,13 @@ mod tests {
             auto_check_updates: Some(true),
             log_level: Some(LogLevel::Info),
             nexus_mods_api_key: None,
+            nexus_mods_rate_limits: None,
             nexus_mods_game_id: Some("123".to_string()),
             nexus_mods_app_slug: Some("schedule-i".to_string()),
             thunderstore_game_id: Some("schedule-i".to_string()),
             auto_update_mods: Some(false),
             mod_update_check_interval: Some(60),
+            mod_icon_cache_limit_mb: Some(500),
             custom_theme: None,
             log_retention_days: Some(7),
         }
@@ -483,9 +484,18 @@ mod tests {
             author: Some("Tester".to_string()),
             mod_name: Some("Sample Mod".to_string()),
             source_url: Some("https://example.com/mod".to_string()),
+            summary: Some("Sample metadata summary".to_string()),
+            icon_url: Some("https://example.com/icon.png".to_string()),
+            icon_cache_path: Some("C:/Users/test/SIMM/cache/mod-icons/icon.png".to_string()),
+            downloads: Some(100),
+            likes_or_endorsements: Some(50),
+            updated_at: Some("2026-03-05T00:00:00Z".to_string()),
+            tags: Some(vec!["utility".to_string()]),
             installed_version: Some("1.0.0".to_string()),
+            library_added_at: None,
             installed_at: None,
             last_update_check: None,
+            metadata_last_refreshed: None,
             update_available: Some(false),
             remote_version: None,
             detected_runtime: Some(Runtime::Il2cpp),
@@ -616,7 +626,6 @@ mod tests {
         fs::write(plugins_dir.join(".plugins-metadata.json"), &plugins_json).await?;
 
         fs::write(legacy_dir.join("credentials.enc"), " secret ").await?;
-        fs::write(legacy_dir.join("github_token.enc"), " token ").await?;
         fs::write(legacy_dir.join("nexus_mods_api_key.enc"), " key ").await?;
 
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());

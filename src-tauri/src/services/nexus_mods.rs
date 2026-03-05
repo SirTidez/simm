@@ -1,14 +1,10 @@
-use anyhow::{Context, Result};
-use reqwest::Client;
+use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-const NEXUS_MODS_API_BASE: &str = "https://api.nexusmods.com/v1";
-
 #[derive(Clone)]
 pub struct NexusModsService {
-    client: Arc<Client>,
     api_key: Arc<RwLock<Option<String>>>,
     validation_result: Arc<RwLock<Option<Value>>>,
 }
@@ -16,10 +12,6 @@ pub struct NexusModsService {
 impl NexusModsService {
     pub fn new() -> Self {
         Self {
-            client: Arc::new(Client::builder()
-                .user_agent("Schedule-I-DevEnvManager/1.0.0")
-                .build()
-                .unwrap_or_else(|_| Client::new())),
             api_key: Arc::new(RwLock::new(None)),
             validation_result: Arc::new(RwLock::new(None)),
         }
@@ -44,23 +36,16 @@ impl NexusModsService {
         let api_key = self.api_key.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
-        // Use NexusMods REST API to validate
-        let response = self.client
-            .get("https://api.nexusmods.com/v1/users/validate.json")
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
+        let detailed = nexus_api::validate_api_key_detailed(&api_key)
             .await
-            .context("Failed to validate API key")?;
+            .map_err(|e| anyhow::anyhow!("Failed to validate API key via nexus-api crate: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Invalid API key: {}", response.status()));
-        }
-
-        let validation: Value = response.json().await
-            .context("Failed to parse validation response")?;
+        let validation = serde_json::json!({
+            "name": detailed.name,
+            "member_id": detailed.member_id,
+            "is_premium": detailed.is_premium,
+            "is_supporter": detailed.is_supporter,
+        });
 
         // Store validation result
         *self.validation_result.write().await = Some(validation.clone());
@@ -72,33 +57,11 @@ impl NexusModsService {
         let api_key = self.api_key.read().await.clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
-        // Get rate limit info from headers
-        let response = self.client
-            .get("https://api.nexusmods.com/v1/users/validate.json")
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
+        let detailed = nexus_api::validate_api_key_detailed(&api_key)
             .await
-            .context("Failed to get rate limits")?;
+            .map_err(|e| anyhow::anyhow!("Failed to fetch Nexus rate limits via crate: {}", e))?;
 
-        let daily = response.headers()
-            .get("x-rl-daily-limit")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        let hourly = response.headers()
-            .get("x-rl-hourly-limit")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        Ok(serde_json::json!({
-            "daily": daily,
-            "hourly": hourly
-        }))
+        Ok(Self::map_rate_limits_to_legacy(detailed.rate_limits))
     }
 
     #[allow(dead_code)]
@@ -106,36 +69,196 @@ impl NexusModsService {
         self.validation_result.read().await.clone()
     }
 
-    /// Get API key from internal storage or return error
-    async fn get_api_key(&self) -> Result<String> {
-        self.api_key.read().await.clone()
-            .ok_or_else(|| anyhow::anyhow!("API key not set"))
+    async fn graphql_request(&self, query: &str, variables: Value) -> Result<Value> {
+        let api_key = self.get_api_key_optional().await;
+        let response = nexus_api::execute_graphql(api_key.as_deref(), query, Some(&variables))
+            .await
+            .map_err(|e| anyhow::anyhow!("Nexus GraphQL crate request failed: {}", e))?;
+
+        Ok(response.data.unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    fn map_rate_limits_to_legacy(rate_limits: Option<nexus_api::RateLimits>) -> Value {
+        let daily = rate_limits.as_ref().and_then(|r| r.daily_limit).unwrap_or(0);
+        let hourly = rate_limits.as_ref().and_then(|r| r.hourly_limit).unwrap_or(0);
+        let daily_remaining = rate_limits.as_ref().and_then(|r| r.daily_remaining).unwrap_or(0);
+        let hourly_remaining = rate_limits.as_ref().and_then(|r| r.hourly_remaining).unwrap_or(0);
+        let daily_used = daily.saturating_sub(daily_remaining);
+        let hourly_used = hourly.saturating_sub(hourly_remaining);
+
+        serde_json::json!({
+            "daily": daily,
+            "hourly": hourly,
+            "dailyRemaining": daily_remaining,
+            "hourlyRemaining": hourly_remaining,
+            "dailyUsed": daily_used,
+            "hourlyUsed": hourly_used
+        })
+    }
+
+    async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
+        if let Ok(id) = game_input.parse::<u32>() {
+            let data = self.graphql_request(
+                r#"
+                    query ResolveGameById($id: ID!) {
+                        game(id: $id) {
+                            id
+                            domainName
+                        }
+                    }
+                "#,
+                serde_json::json!({ "id": id.to_string() }),
+            ).await?;
+
+            let game = data.get("game").ok_or_else(|| anyhow::anyhow!("Game not found for id {}", id))?;
+            let resolved_id = game.get("id").and_then(|v| v.as_i64()).map(|v| v.to_string())
+                .or_else(|| game.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .ok_or_else(|| anyhow::anyhow!("Missing game id in GraphQL response"))?;
+            let domain = game.get("domainName").and_then(|v| v.as_str()).unwrap_or(game_input).to_string();
+            return Ok((resolved_id, domain));
+        }
+
+        let data = self.graphql_request(
+            r#"
+                query ResolveGameByDomain($domainName: String!) {
+                    game(domainName: $domainName) {
+                        id
+                        domainName
+                    }
+                }
+            "#,
+            serde_json::json!({ "domainName": game_input }),
+        ).await?;
+
+        let game = data.get("game").ok_or_else(|| anyhow::anyhow!("Game not found for domain {}", game_input))?;
+        let resolved_id = game.get("id").and_then(|v| v.as_i64()).map(|v| v.to_string())
+            .or_else(|| game.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("Missing game id in GraphQL response"))?;
+        let domain = game.get("domainName").and_then(|v| v.as_str()).unwrap_or(game_input).to_string();
+        Ok((resolved_id, domain))
+    }
+
+    fn map_mod_node_to_legacy_shape(mod_node: &Value) -> Value {
+        let author = mod_node
+            .get("author")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| mod_node.get("uploader").and_then(|u| u.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+        serde_json::json!({
+            "mod_id": mod_node.get("modId"),
+            "name": mod_node.get("name"),
+            "summary": mod_node.get("summary"),
+            "picture_url": mod_node.get("pictureUrl"),
+            "thumbnail_url": mod_node.get("thumbnailUrl"),
+            "endorsement_count": mod_node.get("endorsements"),
+            "mod_downloads": mod_node.get("downloads"),
+            "version": mod_node.get("version"),
+            "author": author,
+            "updated_at": mod_node.get("updatedAt"),
+            "created_at": mod_node.get("createdAt")
+        })
+    }
+
+    fn map_file_node_to_legacy_shape(file_node: &Value) -> Value {
+        serde_json::json!({
+            "file_id": file_node.get("fileId"),
+            "file_name": file_node.get("name"),
+            "name": file_node.get("name"),
+            "version": file_node.get("version"),
+            "category_id": file_node.get("categoryId"),
+            "size": file_node.get("sizeInBytes").or_else(|| file_node.get("size")),
+            "is_primary": file_node.get("primary").and_then(|v| v.as_bool()).unwrap_or(false)
+                || file_node.get("primary").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+            "uri": file_node.get("uri")
+        })
+    }
+
+    fn normalize_search_query_variants(query: &str) -> Vec<String> {
+        let original = query.trim();
+        if original.is_empty() {
+            return Vec::new();
+        }
+
+        let mut variants: Vec<String> = vec![original.to_string()];
+
+        let mut camel_spaced = String::with_capacity(original.len() + 8);
+        let mut prev_is_lower_or_digit = false;
+        for ch in original.chars() {
+            let is_upper = ch.is_ascii_uppercase();
+            let is_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+
+            if is_upper && prev_is_lower_or_digit {
+                camel_spaced.push(' ');
+            }
+            camel_spaced.push(ch);
+            prev_is_lower_or_digit = is_lower_or_digit;
+        }
+
+        let normalized_separators = original
+            .replace('_', " ")
+            .replace('-', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let camel_collapsed = camel_spaced
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if !camel_collapsed.is_empty() && !variants.iter().any(|v| v.eq_ignore_ascii_case(&camel_collapsed)) {
+            variants.push(camel_collapsed);
+        }
+
+        if !normalized_separators.is_empty()
+            && !variants
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(&normalized_separators))
+        {
+            variants.push(normalized_separators);
+        }
+
+        variants
     }
 
     /// Get list of all games supported by NexusMods
     pub async fn get_games(&self) -> Result<Vec<Value>> {
-        let api_key = self.get_api_key().await?;
+        let data = self.graphql_request(
+            r#"
+                query ListGames($count: Int) {
+                    games(count: $count) {
+                        nodes {
+                            id
+                            domainName
+                            name
+                            genre
+                            modCount
+                            collectionCount
+                        }
+                    }
+                }
+            "#,
+            serde_json::json!({ "count": 500 }),
+        ).await?;
 
-        let url = format!("{}/games.json", NEXUS_MODS_API_BASE);
+        let games = data
+            .get("games")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to fetch games list")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("NexusMods API returned {}", response.status()));
-        }
-
-        let games: Vec<Value> = response.json().await
-            .context("Failed to parse games list response")?;
-
-        Ok(games)
+        Ok(games.into_iter().map(|game| {
+            serde_json::json!({
+                "id": game.get("id"),
+                "domain_name": game.get("domainName"),
+                "name": game.get("name"),
+                "genre": game.get("genre"),
+                "mods": game.get("modCount"),
+                "collections": game.get("collectionCount")
+            })
+        }).collect())
     }
 
     /// Search for mods on NexusMods using GraphQL API v2
@@ -146,16 +269,74 @@ impl NexusModsService {
         game_domain: &str,
         query: &str,
     ) -> Result<Vec<Value>> {
-        let api_key = self.get_api_key().await?;
+        let gql = r#"
+            query SearchMods($filter: ModsFilter, $offset: Int, $count: Int) {
+                mods(filter: $filter, offset: $offset, count: $count) {
+                    nodes {
+                        modId
+                        name
+                        summary
+                        pictureUrl
+                        thumbnailUrl
+                        endorsements
+                        downloads
+                        version
+                        author
+                        updatedAt
+                        createdAt
+                        game {
+                            domainName
+                            name
+                        }
+                        uploader {
+                            name
+                            memberId
+                        }
+                    }
+                    totalCount
+                    nodesCount
+                }
+            }
+        "#;
 
-        // Use GraphQL API v2 for searching
-        let graphql_url = "https://api.nexusmods.com/v2/graphql";
+        let search_variants = Self::normalize_search_query_variants(query);
+        for variant in search_variants {
+            let data = self
+                .graphql_request(
+                    gql,
+                    serde_json::json!({
+                        "filter": {
+                            "gameDomainName": [{"value": game_domain, "op": "EQUALS"}],
+                            "nameStemmed": [{"value": variant, "op": "MATCHES"}]
+                        },
+                        "offset": 0,
+                        "count": 100
+                    }),
+                )
+                .await?;
 
-        // Build proper GraphQL query for mod search using ModsFilter
-        let graphql_query = serde_json::json!({
-            "query": r#"
-                query SearchMods($filter: ModsFilter, $offset: Int, $count: Int) {
-                    mods(filter: $filter, offset: $offset, count: $count) {
+            let mods = data
+                .get("mods")
+                .and_then(|m| m.get("nodes"))
+                .and_then(|n| n.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if !mods.is_empty() {
+                return Ok(mods);
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    /// Get latest added mods using GraphQL API v2
+    pub async fn get_latest_added_mods(&self, game_id: &str) -> Result<Vec<Value>> {
+        let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let data = self.graphql_request(
+            r#"
+                query LatestAddedMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int) {
+                    mods(filter: $filter, sort: $sort, count: $count) {
                         nodes {
                             modId
                             name
@@ -168,211 +349,168 @@ impl NexusModsService {
                             author
                             updatedAt
                             createdAt
-                            game {
-                                domainName
-                                name
-                            }
-                            uploader {
-                                name
-                                memberId
-                            }
                         }
-                        totalCount
-                        nodesCount
                     }
                 }
             "#,
-            "variables": {
-                "filter": {
-                    "gameDomainName": [{"value": game_domain, "op": "EQUALS"}],
-                    "nameStemmed": [{"value": query, "op": "MATCHES"}]
-                },
-                "offset": 0,
+            serde_json::json!({
+                "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
+                "sort": [{"createdAt": {"direction": "DESC"}}],
                 "count": 100
-            }
-        });
+            }),
+        ).await?;
 
-        let response = self.client
-            .post(graphql_url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Content-Type", "application/json")
-            .json(&graphql_query)
-            .send()
-            .await
-            .context("Failed to send GraphQL search request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
-
-            return Err(anyhow::anyhow!(
-                "NexusMods GraphQL API returned {} for game domain '{}'. Error: {}",
-                status,
-                game_domain,
-                error_body
-            ));
-        }
-
-        let response_data: Value = response.json().await
-            .context("Failed to parse GraphQL response")?;
-
-        // Check for GraphQL errors
-        if let Some(errors) = response_data.get("errors") {
-            return Err(anyhow::anyhow!(
-                "GraphQL query returned errors: {}",
-                errors
-            ));
-        }
-
-        // Extract mods from GraphQL response
-        let mods = response_data
-            .get("data")
-            .and_then(|d| d.get("mods"))
-            .and_then(|m| m.get("nodes"))
-            .and_then(|n| n.as_array())
-            .map(|arr| arr.clone())
+        let nodes = data
+            .get("mods")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+            .cloned()
             .unwrap_or_default();
-
-        Ok(mods)
+        Ok(nodes.into_iter().map(|n| Self::map_mod_node_to_legacy_shape(&n)).collect())
     }
 
-    /// Get latest added mods using REST API v1
-    pub async fn get_latest_added_mods(&self, game_id: &str) -> Result<Vec<Value>> {
-        let api_key = self.get_api_key().await?;
-
-        let url = format!("{}/games/{}/mods/latest_added.json", NEXUS_MODS_API_BASE, game_id);
-
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to fetch latest added mods")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("NexusMods API returned {}", response.status()));
-        }
-
-        let mods: Vec<Value> = response.json().await
-            .context("Failed to parse latest added mods response")?;
-
-        Ok(mods)
-    }
-
-    /// Get latest updated mods using REST API v1
+    /// Get latest updated mods using GraphQL API v2
     pub async fn get_latest_updated_mods(&self, game_id: &str) -> Result<Vec<Value>> {
-        let api_key = self.get_api_key().await?;
+        let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let data = self.graphql_request(
+            r#"
+                query LatestUpdatedMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int) {
+                    mods(filter: $filter, sort: $sort, count: $count) {
+                        nodes {
+                            modId
+                            name
+                            summary
+                            pictureUrl
+                            thumbnailUrl
+                            endorsements
+                            downloads
+                            version
+                            author
+                            updatedAt
+                            createdAt
+                        }
+                    }
+                }
+            "#,
+            serde_json::json!({
+                "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
+                "sort": [{"updatedAt": {"direction": "DESC"}}],
+                "count": 100
+            }),
+        ).await?;
 
-        let url = format!("{}/games/{}/mods/latest_updated.json", NEXUS_MODS_API_BASE, game_id);
-
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to fetch latest updated mods")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("NexusMods API returned {}", response.status()));
-        }
-
-        let mods: Vec<Value> = response.json().await
-            .context("Failed to parse latest updated mods response")?;
-
-        Ok(mods)
+        let nodes = data
+            .get("mods")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(nodes.into_iter().map(|n| Self::map_mod_node_to_legacy_shape(&n)).collect())
     }
 
-    /// Get trending mods using REST API v1
+    /// Get trending mods using GraphQL API v2
     pub async fn get_trending_mods(&self, game_id: &str) -> Result<Vec<Value>> {
-        let api_key = self.get_api_key().await?;
+        let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let data = self.graphql_request(
+            r#"
+                query TrendingMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int) {
+                    mods(filter: $filter, sort: $sort, count: $count) {
+                        nodes {
+                            modId
+                            name
+                            summary
+                            pictureUrl
+                            thumbnailUrl
+                            endorsements
+                            downloads
+                            version
+                            author
+                            updatedAt
+                            createdAt
+                        }
+                    }
+                }
+            "#,
+            serde_json::json!({
+                "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
+                "sort": [{"endorsements": {"direction": "DESC"}}],
+                "count": 100
+            }),
+        ).await?;
 
-        let url = format!("{}/games/{}/mods/trending.json", NEXUS_MODS_API_BASE, game_id);
-
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to fetch trending mods")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("NexusMods API returned {}", response.status()));
-        }
-
-        let mods: Vec<Value> = response.json().await
-            .context("Failed to parse trending mods response")?;
-
-        Ok(mods)
+        let nodes = data
+            .get("mods")
+            .and_then(|v| v.get("nodes"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(nodes.into_iter().map(|n| Self::map_mod_node_to_legacy_shape(&n)).collect())
     }
 
     /// Get mod details by ID
     pub async fn get_mod(&self, game_id: &str, mod_id: u32) -> Result<Value> {
-        let api_key = self.get_api_key().await?;
+        let (resolved_game_id, _domain_name) = self.resolve_game_by_input(game_id).await?;
+        let data = self.graphql_request(
+            r#"
+                query GetMod($gameId: ID!, $modId: ID!) {
+                    mod(gameId: $gameId, modId: $modId) {
+                        modId
+                        name
+                        summary
+                        version
+                        author
+                        uploader {
+                            name
+                        }
+                        updatedAt
+                        createdAt
+                        endorsements
+                        downloads
+                        pictureUrl
+                        thumbnailUrl
+                    }
+                }
+            "#,
+            serde_json::json!({
+                "gameId": resolved_game_id,
+                "modId": mod_id.to_string()
+            }),
+        ).await?;
 
-        let url = format!("{}/games/{}/mods/{}.json", NEXUS_MODS_API_BASE, game_id, mod_id);
-
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to fetch NexusMods mod")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("NexusMods API returned {}", response.status()));
-        }
-
-        let mod_data: Value = response.json().await
-            .context("Failed to parse NexusMods mod response")?;
-
-        Ok(mod_data)
+        let mod_node = data.get("mod").cloned().unwrap_or_else(|| serde_json::json!({}));
+        Ok(Self::map_mod_node_to_legacy_shape(&mod_node))
     }
 
     /// Get mod files by mod ID
     pub async fn get_mod_files(&self, game_id: &str, mod_id: u32) -> Result<Vec<Value>> {
-        let api_key = self.get_api_key().await?;
+        let (resolved_game_id, _domain_name) = self.resolve_game_by_input(game_id).await?;
+        let data = self.graphql_request(
+            r#"
+                query GetModFiles($gameId: ID!, $modId: ID!) {
+                    modFiles(gameId: $gameId, modId: $modId) {
+                        fileId
+                        name
+                        version
+                        categoryId
+                        sizeInBytes
+                        size
+                        primary
+                        uri
+                    }
+                }
+            "#,
+            serde_json::json!({
+                "gameId": resolved_game_id,
+                "modId": mod_id.to_string()
+            }),
+        ).await?;
 
-        let url = format!("{}/games/{}/mods/{}/files.json", NEXUS_MODS_API_BASE, game_id, mod_id);
-
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to fetch NexusMods mod files")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("NexusMods API returned {}", response.status()));
-        }
-
-        let response_data: Value = response.json().await
-            .context("Failed to parse NexusMods mod files response")?;
-
-        // The API returns an object with a "files" array, not a direct array
-        let files = response_data
-            .get("files")
-            .and_then(|f| f.as_array())
-            .map(|arr| arr.clone())
+        let files = data
+            .get("modFiles")
+            .and_then(|v| v.as_array())
+            .cloned()
             .unwrap_or_default();
-
-        Ok(files)
+        Ok(files.into_iter().map(|f| Self::map_file_node_to_legacy_shape(&f)).collect())
     }
 
     /// Check if a mod has an update available
@@ -439,59 +577,33 @@ impl NexusModsService {
         mod_id: u32,
         file_id: u32,
     ) -> Result<Vec<u8>> {
-        let api_key = self.get_api_key().await?;
+        let api_key = self.api_key.read().await.clone()
+            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
+        let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
+        let game_id_i64 = resolved_game_id
+            .parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e))?;
 
-        // First get download link
-        let url = format!("{}/games/{}/mods/{}/files/{}/download_link.json",
-            NEXUS_MODS_API_BASE, game_id, mod_id, file_id);
+        let links = nexus_api::get_download_links(
+            &api_key,
+            game_id_i64,
+            mod_id as i64,
+            file_id as i64,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get Nexus download links via crate: {}", e))?;
 
-        let response = self.client
-            .get(&url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
+        let first_url = links
+            .links
+            .first()
+            .map(|link| link.uri.clone())
+            .ok_or_else(|| anyhow::anyhow!("No Nexus download links returned for file {}", file_id))?;
+
+        let downloaded = nexus_api::download_from_url(&first_url, Some(&api_key))
             .await
-            .context("Failed to get download link")?;
+            .map_err(|e| anyhow::anyhow!("Failed to download Nexus file via crate: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to get download link: {}", response.status()));
-        }
-
-        let download_data: Value = response.json().await
-            .context("Failed to parse download link response")?;
-
-        // Log the response for debugging
-        eprintln!("[NexusMods] Download link response: {}", serde_json::to_string_pretty(&download_data).unwrap_or_default());
-
-        // The response is an array of download link objects
-        let download_url = download_data
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|obj| obj.get("URI"))
-            .and_then(|u| u.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Download URL not found in response. Response was: {}", download_data))?;
-
-        // Download the file
-        let file_response = self.client
-            .get(download_url)
-            .header("apikey", &api_key)
-            .header("Application-Name", "Schedule-I-DevEnvManager")
-            .header("Application-Version", "1.0.0")
-            .header("Protocol-Version", "1")
-            .send()
-            .await
-            .context("Failed to download mod file")?;
-
-        if !file_response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to download file: {}", file_response.status()));
-        }
-
-        let bytes = file_response.bytes().await
-            .context("Failed to read response body")?;
-
-        Ok(bytes.to_vec())
+        Ok(downloaded.bytes)
     }
 }
 
@@ -504,6 +616,7 @@ impl Default for NexusModsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use crate::db::get_database_path;
     use crate::services::settings::SettingsService;
     use serial_test::serial;
@@ -511,6 +624,25 @@ mod tests {
     use sqlx::SqlitePool;
     use std::str::FromStr;
     use std::sync::Arc;
+
+    #[test]
+    fn map_rate_limits_to_legacy_maps_expected_fields() {
+        let mapped = NexusModsService::map_rate_limits_to_legacy(Some(nexus_api::RateLimits {
+            hourly_limit: Some(120),
+            hourly_remaining: Some(100),
+            hourly_reset: Some(1700000000),
+            daily_limit: Some(1000),
+            daily_remaining: Some(950),
+            daily_reset: Some(1700000001),
+        }));
+
+        assert_eq!(mapped.get("daily").and_then(|v| v.as_u64()), Some(1000));
+        assert_eq!(mapped.get("hourly").and_then(|v| v.as_u64()), Some(120));
+        assert_eq!(mapped.get("dailyRemaining").and_then(|v| v.as_u64()), Some(950));
+        assert_eq!(mapped.get("hourlyRemaining").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(mapped.get("dailyUsed").and_then(|v| v.as_u64()), Some(50));
+        assert_eq!(mapped.get("hourlyUsed").and_then(|v| v.as_u64()), Some(20));
+    }
 
     async fn resolve_api_key() -> Result<Option<String>> {
         if let Ok(key) = std::env::var("NEXUSMODS_API_KEY") {
@@ -545,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn live_validate_api_key_and_rate_limits() -> Result<()> {
+    async fn live_validate_api_key_via_crate() -> Result<()> {
         let api_key = match resolve_api_key().await? {
             Some(key) => key,
             None => return Ok(()),
@@ -555,11 +687,8 @@ mod tests {
         service.set_api_key(api_key).await;
 
         let validation = service.validate_api_key().await?;
-        assert!(validation.is_object());
-
-        let limits = service.get_rate_limits().await?;
-        assert!(limits.get("daily").is_some());
-        assert!(limits.get("hourly").is_some());
+        assert!(validation.get("name").and_then(|v| v.as_str()).is_some());
+        assert!(validation.get("member_id").is_some());
 
         Ok(())
     }

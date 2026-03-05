@@ -1,9 +1,9 @@
 [package]
 name = "simmrust"
-version = "0.6.1"
+version = "0.7.2"
 description = "Schedule I Developer Environment Manager"
-authors = ["Tyler"]
-license = ""
+authors = ["LockWire Labs"]
+license = "AGPL-3.0"
 repository = ""
 edition = "2021"
 
@@ -11,7 +11,7 @@ edition = "2021"
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.0", features = ["test"] }
+tauri = { version = "2.0", features = ["test", "protocol-asset"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.6"
 tauri-plugin-fs = "2.0"
@@ -41,6 +41,8 @@ log = "0.4"
 env_logger = "0.11"
 discord-rich-presence = "1.0"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+nexus-api = { git = "https://github.com/SirTidez/nexusmods-api-handler.git", rev = "494f754de30b4890be1d42dfadb6168905b41aa4" }
+thunderstore-api = { git = "https://github.com/SirTidez/thunderstore-api-handler.git", rev = "31787b410c5335b17837b7121e1645db7ecb3aa1" }
 
 [dev-dependencies]
 serial_test = "3.0"

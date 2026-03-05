@@ -423,9 +423,7 @@ export function CustomThemeEditor({ isOpen, onClose }: Props) {
                           if (isGradient) {
                             setEditingGradient(key);
                             // Determine initial mode based on which has a non-default value
-                            const gradient = theme.bgGradient as string;
                             const pattern = theme.bgPattern as string;
-                            const defaultGradient = DEFAULT_CUSTOM_THEME.bgGradient;
                             const defaultPattern = DEFAULT_CUSTOM_THEME.bgPattern;
                             if (pattern && pattern !== defaultPattern) {
                               setGradientEditMode('pattern');

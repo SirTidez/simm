@@ -17,6 +17,10 @@ export class ApiService {
     return invoke('detect_depot_downloader');
   }
 
+  static async installDepotDownloader(): Promise<DepotDownloaderInfo> {
+    return invoke('install_depot_downloader');
+  }
+
   // App Init
   static async getHomeDirectory(): Promise<string> {
     return invoke('get_home_directory');
@@ -163,23 +167,8 @@ export class ApiService {
     return { success: true };
   }
 
-  // GitHub Token (encrypted storage)
-  static async setGitHubToken(token: string): Promise<{ success: boolean }> {
-    await invoke('set_github_token', { token });
-    return { success: true };
-  }
-
-  static async hasGitHubToken(): Promise<boolean> {
-    return invoke('has_github_token');
-  }
-
-  static async clearGitHubToken(): Promise<{ success: boolean }> {
-    await invoke('clear_github_token');
-    return { success: true };
-  }
-
-  static async removeGitHubToken(): Promise<{ success: boolean }> {
-    return this.clearGitHubToken();
+  static async getReleaseApiHealth(): Promise<Record<string, unknown>> {
+    return invoke('get_release_api_health');
   }
 
   // Directory browser
@@ -259,6 +248,14 @@ export class ApiService {
       disabled?: boolean;
       modStorageId?: string;
       managed?: boolean;
+      summary?: string;
+      iconUrl?: string;
+      iconCachePath?: string;
+      downloads?: number;
+      likesOrEndorsements?: number;
+      updatedAt?: string;
+      tags?: string[];
+      installedAt?: number;
     }>;
     modsDirectory: string;
     count: number;
@@ -301,6 +298,12 @@ export class ApiService {
       author?: string;
       sourceId?: string;
       sourceVersion?: string;
+      summary?: string;
+      iconUrl?: string;
+      downloads?: number;
+      likesOrEndorsements?: number;
+      updatedAt?: string;
+      tags?: string[];
     },
     target?: 'mods' | 'plugins',
     cleanup?: boolean
@@ -316,6 +319,12 @@ export class ApiService {
         author: metadata.author,
         sourceId: metadata.sourceId,
         sourceVersion: metadata.sourceVersion,
+        summary: metadata.summary,
+        iconUrl: metadata.iconUrl,
+        downloads: metadata.downloads,
+        likesOrEndorsements: metadata.likesOrEndorsements,
+        updatedAt: metadata.updatedAt,
+        tags: metadata.tags,
       } : null,
       target,
       cleanup,
@@ -368,6 +377,12 @@ export class ApiService {
       sourceId?: string;
       sourceVersion?: string;
       detectedRuntime?: 'IL2CPP' | 'Mono';
+      summary?: string;
+      iconUrl?: string;
+      downloads?: number;
+      likesOrEndorsements?: number;
+      updatedAt?: string;
+      tags?: string[];
     }
   ): Promise<{
     success: boolean;
@@ -396,6 +411,12 @@ export class ApiService {
         sourceId: metadata.sourceId,
         sourceVersion: metadata.sourceVersion,
         detectedRuntime: metadata.detectedRuntime,
+        summary: metadata.summary,
+        iconUrl: metadata.iconUrl,
+        downloads: metadata.downloads,
+        likesOrEndorsements: metadata.likesOrEndorsements,
+        updatedAt: metadata.updatedAt,
+        tags: metadata.tags,
       } : null,
     });
   }
@@ -1028,6 +1049,14 @@ export class ApiService {
     const modName = packageInfo.name || '';
     const owner = packageInfo.owner || '';
     const versionNumber = latestVersion?.version_number || '';
+    const description = latestVersion?.description || packageInfo.latest?.description || '';
+    const iconUrl = latestVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';
+    const downloads = Array.isArray(packageInfo.versions)
+      ? packageInfo.versions.reduce((sum: number, version: any) => sum + (version?.downloads || 0), 0)
+      : 0;
+    const likesOrEndorsements = Number(packageInfo.rating_score || 0);
+    const updatedAt = packageInfo.date_updated || latestVersion?.date_updated || '';
+    const tags = Array.isArray(packageInfo.categories) ? packageInfo.categories : [];
 
     const env = await this.getEnvironment(environmentId);
     const runtime = env.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
@@ -1078,11 +1107,17 @@ export class ApiService {
       branch: env.branch,
       metadata: {
         source: 'thunderstore',
-        sourceId: packageUuid,
+        sourceId,
         sourceVersion: versionNumber,
         sourceUrl: packageUrl,
         modName: modName,
         author: owner,
+        summary: description,
+        iconUrl,
+        downloads,
+        likesOrEndorsements,
+        updatedAt,
+        tags,
       },
     });
   }
@@ -1107,6 +1142,14 @@ export class ApiService {
     const owner = packageInfo.owner || '';
     const versionNumber = latestVersion?.version_number || '';
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
+    const description = latestVersion?.description || packageInfo.latest?.description || '';
+    const iconUrl = latestVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';
+    const downloads = Array.isArray(packageInfo.versions)
+      ? packageInfo.versions.reduce((sum: number, version: any) => sum + (version?.downloads || 0), 0)
+      : 0;
+    const likesOrEndorsements = Number(packageInfo.rating_score || 0);
+    const updatedAt = packageInfo.date_updated || latestVersion?.date_updated || '';
+    const tags = Array.isArray(packageInfo.categories) ? packageInfo.categories : [];
 
     const storageCheck = await invoke<any>('find_existing_mod_storage', {
       sourceId,
@@ -1133,6 +1176,12 @@ export class ApiService {
         sourceUrl: packageUrl,
         modName,
         author: owner,
+        summary: description,
+        iconUrl,
+        downloads,
+        likesOrEndorsements,
+        updatedAt,
+        tags,
       },
       undefined,
       true
@@ -1172,6 +1221,12 @@ export class ApiService {
         sourceUrl,
         modName: modInfo?.name || 'Unknown Mod',
         author: modInfo?.author || 'Unknown',
+        summary: modInfo?.summary || '',
+        iconUrl: modInfo?.picture_url || modInfo?.pictureUrl || '',
+        downloads: Number(modInfo?.mod_downloads || modInfo?.downloads || 0),
+        likesOrEndorsements: Number(modInfo?.endorsement_count || modInfo?.endorsements || 0),
+        updatedAt: modInfo?.updated_at || modInfo?.updatedAt || '',
+        tags: Array.isArray(modInfo?.tags) ? modInfo.tags : (Array.isArray(modInfo?.tag_list) ? modInfo.tag_list : []),
       },
       undefined,
       true

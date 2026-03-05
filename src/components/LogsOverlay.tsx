@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { type ReactNode, useState, useEffect, useRef, useMemo } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
@@ -37,7 +37,7 @@ interface ModCardData {
   errorCount: number;
 }
 
-function highlightText(text: string, query: string): React.ReactNode {
+function highlightText(text: string, query: string): ReactNode {
   const q = query.trim();
   if (!q) return text;
 
@@ -45,7 +45,7 @@ function highlightText(text: string, query: string): React.ReactNode {
   const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(escaped, 'gi');
 
-  const parts: React.ReactNode[] = [];
+  const parts: ReactNode[] = [];
   let lastIndex = 0;
 
   // matchAll requires a global or sticky regex; we use 'gi'
@@ -94,7 +94,6 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   const [selectedModTag, setSelectedModTag] = useState<string | null>(null);
   const [showModCard, setShowModCard] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
-  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Normalize mod tag for comparison (handles space variations)
   const normalizeModTag = (modTag: string): string => {

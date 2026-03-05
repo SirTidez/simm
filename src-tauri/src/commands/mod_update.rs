@@ -6,10 +6,11 @@ use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
 use crate::types::ModSource;
+use crate::events;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
@@ -36,7 +37,8 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-async fn get_thunderstore_service() -> Result<Arc<ThunderStoreService>, String> {
+async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
+    let _ = db;
     let mut service = THUNDERSTORE_SERVICE.lock().await;
     if service.is_none() {
         *service = Some(Arc::new(ThunderStoreService::new()));
@@ -57,15 +59,19 @@ async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsServ
         Ok(Some(api_key)) => {
             nexus_service.set_api_key(api_key).await;
         }
-        Ok(None) => {}
+        Ok(None) => {
+            nexus_service.clear_api_key().await;
+        }
         Err(e) => {
             log::warn!("Failed to get Nexus Mods API key: {:?}", e);
+            nexus_service.clear_api_key().await;
         }
     }
     Ok(nexus_service)
 }
 
 async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
+    let _ = db;
     let github_service = {
         let mut service = GITHUB_SERVICE.lock().await;
         if service.is_none() {
@@ -73,40 +79,57 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
         }
         service.as_ref().unwrap().clone()
     };
-    // Fetch token on every call so settings changes take effect without app restart
-    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-    match settings_service.get_github_token().await {
-        Ok(Some(token)) => github_service.set_token(Some(token)).await,
-        Ok(None) => github_service.set_token(None).await,
-        Err(e) => {
-            log::warn!("Failed to get GitHub token: {:?}", e);
-        }
-    }
     Ok(github_service)
 }
 
 #[tauri::command]
 pub async fn check_mod_updates(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     environment_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mod_update_service = get_mod_update_service().await?;
     let mods_service = ModsService::new(db.inner().clone());
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let thunderstore_service = get_thunderstore_service().await?;
+    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 
-    mod_update_service.check_mod_updates(
-        &environment_id,
-        &env_service,
-        &mods_service,
-        &thunderstore_service,
-        &nexus_mods_service,
-        &github_service,
-    )
+    let mut active_count = 0usize;
+    if let Ok(Some(env)) = env_service.get_environment(&environment_id).await {
+        if !env.output_dir.is_empty() {
+            active_count = mods_service
+                .list_mods(&env.output_dir)
+                .await
+                .ok()
+                .and_then(|value| value.get("mods").and_then(|mods| mods.as_array()).map(|mods| mods.len()))
+                .unwrap_or(0);
+        }
+    }
+
+    let _ = events::emit_mod_metadata_refresh_status(&app, active_count);
+
+    let result = mod_update_service
+        .check_mod_updates(
+            &environment_id,
+            &env_service,
+            &mods_service,
+            &thunderstore_service,
+            &nexus_mods_service,
+            &github_service,
+        )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+
+    if let Err(error) = mod_update_service
+        .backfill_missing_thunderstore_library_icons(&mods_service, &thunderstore_service)
+        .await
+    {
+        log::warn!("Failed to backfill Thunderstore library icons after mod update check: {}", error);
+    }
+
+    let _ = events::emit_mod_metadata_refresh_status(&app, 0);
+    result
 }
 
 #[tauri::command]
@@ -118,7 +141,7 @@ pub async fn update_mod(
     let mod_update_service = get_mod_update_service().await?;
     let mods_service = ModsService::new(db.inner().clone());
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let thunderstore_service = get_thunderstore_service().await?;
+    let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 
@@ -243,9 +266,9 @@ mod tests {
     use super::map_mod_source;
     use super::get_github_service;
     use crate::db::initialize_pool;
-    use crate::services::settings::SettingsService;
     use crate::types::ModSource;
     use serial_test::serial;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     struct EnvVarGuard {
@@ -257,12 +280,6 @@ mod tests {
         fn set(key: &'static str, value: &str) -> Self {
             let original = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, original }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let original = std::env::var(key).ok();
-            std::env::remove_var(key);
             Self { key, original }
         }
     }
@@ -289,46 +306,16 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn get_github_service_refreshes_token_changes_without_restart() {
+    async fn get_github_service_returns_singleton_instance() {
         let temp = tempdir().expect("temp dir");
         let data_dir = temp.path().join("simmrust");
         let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let _token_guard = EnvVarGuard::unset("GITHUB_TOKEN");
 
         let pool = initialize_pool().await.expect("pool");
-        let settings = SettingsService::new(pool.clone()).expect("settings service");
+        let first = get_github_service(pool.clone()).await.expect("first service");
+        let second = get_github_service(pool.clone()).await.expect("second service");
 
-        let service = get_github_service(pool.clone()).await.expect("github service");
-        assert_eq!(service.current_token_for_testing().await, None);
-
-        settings
-            .save_github_token("token-one".to_string())
-            .await
-            .expect("save token");
-        let service = get_github_service(pool.clone()).await.expect("github service after save");
-        assert_eq!(
-            service.current_token_for_testing().await.as_deref(),
-            Some("token-one")
-        );
-
-        settings.clear_github_token().await.expect("clear token");
-        let service = get_github_service(pool.clone()).await.expect("github service after clear");
-        assert_eq!(service.current_token_for_testing().await, None);
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_github_service_none_setting_disables_env_token_fallback() {
-        let temp = tempdir().expect("temp dir");
-        let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
-        let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", "env-token");
-
-        let pool = initialize_pool().await.expect("pool");
-        let settings = SettingsService::new(pool.clone()).expect("settings service");
-        settings.clear_github_token().await.expect("clear token");
-
-        let service = get_github_service(pool.clone()).await.expect("github service");
-        assert_eq!(service.current_token_for_testing().await, None);
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }
+
