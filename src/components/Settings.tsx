@@ -25,7 +25,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     autoInstallMelonLoader: false,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
-    logLevel: 'info' as 'debug' | 'info' | 'warn' | 'error'
+    logLevel: 'info' as 'debug' | 'info' | 'warn' | 'error',
+    modIconCacheLimitMb: 500,
   });
   const [error, setError] = useState<string | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
@@ -72,7 +73,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
-        logLevel: (settings.logLevel as 'debug' | 'info' | 'warn' | 'error') || 'info'
+        logLevel: (settings.logLevel as 'debug' | 'info' | 'warn' | 'error') || 'info',
+        modIconCacheLimitMb: settings.modIconCacheLimitMb || 500,
       });
     }
   }, [settings]);
@@ -343,6 +345,19 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   />
                   <small style={{ color: '#888', display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
                     Automatic check interval (1-1440 minutes).
+                  </small>
+                </div>
+                <div className="form-group">
+                  <label>Mod Icon Cache Limit (MB)</label>
+                  <input
+                    type="number"
+                    value={formData.modIconCacheLimitMb || 500}
+                    onChange={(e) => setFormData({ ...formData, modIconCacheLimitMb: parseInt(e.target.value) || 500 })}
+                    min="100"
+                    max="8192"
+                  />
+                  <small style={{ color: '#888', display: 'block', marginTop: '0.25rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
+                    Maximum disk budget for cached mod icons. Default is 500 MB.
                   </small>
                 </div>
                 <div className="form-group">

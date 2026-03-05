@@ -85,6 +85,7 @@ export interface Settings {
   thunderstoreGameId?: string;
   autoUpdateMods?: boolean;
   modUpdateCheckInterval?: number;
+  modIconCacheLimitMb?: number;
 }
 
 export interface NexusRateLimits {
@@ -199,7 +200,16 @@ export interface ModLibraryEntry {
   sourceId?: string;
   sourceVersion?: string;
   sourceUrl?: string;
+  summary?: string;
+  iconUrl?: string;
+  iconCachePath?: string;
+  downloads?: number;
+  likesOrEndorsements?: number;
+  updatedAt?: string;
+  tags?: string[];
   installedVersion?: string;
+  libraryAddedAt?: number;
+  installedAt?: number;
   author?: string;
   updateAvailable?: boolean;
   remoteVersion?: string;
