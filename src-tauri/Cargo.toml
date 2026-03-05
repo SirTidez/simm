@@ -11,7 +11,7 @@ edition = "2021"
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
-tauri = { version = "2.0", features = ["test"] }
+tauri = { version = "2.0", features = ["test", "protocol-asset"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.6"
 tauri-plugin-fs = "2.0"

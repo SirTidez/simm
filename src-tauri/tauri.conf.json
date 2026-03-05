@@ -21,7 +21,13 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/SIMM/cache/mod-icons/**"
+        ]
+      }
     }
   },
 "bundle": {

@@ -1050,7 +1050,7 @@ export class ApiService {
     const owner = packageInfo.owner || '';
     const versionNumber = latestVersion?.version_number || '';
     const description = latestVersion?.description || packageInfo.latest?.description || '';
-    const iconUrl = packageInfo.icon || '';
+    const iconUrl = latestVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';
     const downloads = Array.isArray(packageInfo.versions)
       ? packageInfo.versions.reduce((sum: number, version: any) => sum + (version?.downloads || 0), 0)
       : 0;
@@ -1143,7 +1143,7 @@ export class ApiService {
     const versionNumber = latestVersion?.version_number || '';
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
     const description = latestVersion?.description || packageInfo.latest?.description || '';
-    const iconUrl = packageInfo.icon || '';
+    const iconUrl = latestVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';
     const downloads = Array.isArray(packageInfo.versions)
       ? packageInfo.versions.reduce((sum: number, version: any) => sum + (version?.downloads || 0), 0)
       : 0;

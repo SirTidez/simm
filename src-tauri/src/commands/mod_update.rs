@@ -6,10 +6,11 @@ use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
 use crate::types::ModSource;
+use crate::events;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
@@ -84,6 +85,7 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
 #[tauri::command]
 pub async fn check_mod_updates(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     environment_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mod_update_service = get_mod_update_service().await?;
@@ -93,16 +95,38 @@ pub async fn check_mod_updates(
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
 
-    mod_update_service.check_mod_updates(
-        &environment_id,
-        &env_service,
-        &mods_service,
-        &thunderstore_service,
-        &nexus_mods_service,
-        &github_service,
-    )
+    let mut active_count = 0usize;
+    if let Ok(Some(env)) = env_service.get_environment(&environment_id).await {
+        if !env.output_dir.is_empty() {
+            active_count = mods_service
+                .list_mods(&env.output_dir)
+                .await
+                .ok()
+                .and_then(|value| value.get("mods").and_then(|mods| mods.as_array()).map(|mods| mods.len()))
+                .unwrap_or(0);
+        }
+    }
+
+    let _ = events::emit_mod_metadata_refresh_status(&app, active_count);
+
+    let result = mod_update_service
+        .check_mod_updates(
+            &environment_id,
+            &env_service,
+            &mods_service,
+            &thunderstore_service,
+            &nexus_mods_service,
+            &github_service,
+        )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+
+    let _ = mod_update_service
+        .backfill_missing_thunderstore_library_icons(&mods_service, &thunderstore_service)
+        .await;
+
+    let _ = events::emit_mod_metadata_refresh_status(&app, 0);
+    result
 }
 
 #[tauri::command]

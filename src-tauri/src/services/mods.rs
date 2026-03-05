@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 use unrar::Archive;
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 use crate::types::{ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, Environment};
 use crate::services::settings::SettingsService;
@@ -197,6 +197,425 @@ impl ModsService {
         }
     }
 
+    fn metadata_field<'a>(metadata: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
+        keys.iter().find_map(|key| metadata.get(*key))
+    }
+
+    fn metadata_string_value(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            serde_json::Value::Number(value) => Some(value.to_string()),
+            serde_json::Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn metadata_bool_value(value: &serde_json::Value) -> Option<bool> {
+        match value {
+            serde_json::Value::Bool(value) => Some(*value),
+            serde_json::Value::Number(value) => value.as_i64().map(|v| v != 0),
+            serde_json::Value::String(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "true" | "1" | "yes" | "y" => Some(true),
+                    "false" | "0" | "no" | "n" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn metadata_u64_value(value: &serde_json::Value) -> Option<u64> {
+        match value {
+            serde_json::Value::Number(value) => value.as_u64().or_else(|| value.as_i64().and_then(|v| if v >= 0 { Some(v as u64) } else { None })),
+            serde_json::Value::String(value) => value.trim().parse::<u64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn metadata_i64_value(value: &serde_json::Value) -> Option<i64> {
+        match value {
+            serde_json::Value::Number(value) => value.as_i64().or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok())),
+            serde_json::Value::String(value) => value.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn metadata_datetime_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+        match value {
+            serde_json::Value::Number(value) => value.as_i64().and_then(|seconds| Utc.timestamp_opt(seconds, 0).single()),
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+
+                if let Ok(seconds) = trimmed.parse::<i64>() {
+                    return Utc.timestamp_opt(seconds, 0).single();
+                }
+
+                DateTime::parse_from_rfc3339(trimmed)
+                    .ok()
+                    .map(|parsed| parsed.with_timezone(&Utc))
+            }
+            _ => None,
+        }
+    }
+
+    fn metadata_tags_value(value: &serde_json::Value) -> Option<Vec<String>> {
+        let tags = match value {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(Self::metadata_string_value)
+                .collect::<Vec<_>>(),
+            serde_json::Value::String(value) => value
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        }
+    }
+
+    fn metadata_string_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<String> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_string_value)
+    }
+
+    fn metadata_bool_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_bool_value)
+    }
+
+    fn metadata_u64_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_u64_value)
+    }
+
+    fn metadata_i64_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_i64_value)
+    }
+
+    fn metadata_datetime_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<DateTime<Utc>> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_datetime_value)
+    }
+
+    fn metadata_tags_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<Vec<String>> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_tags_value)
+    }
+
+    fn parse_mod_source_compat(raw: &str) -> Option<ModSource> {
+        let normalized = raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "");
+
+        match normalized.as_str() {
+            "local" => Some(ModSource::Local),
+            "thunderstore" => Some(ModSource::Thunderstore),
+            "nexusmods" | "nexus" => Some(ModSource::Nexusmods),
+            "github" => Some(ModSource::Github),
+            "unknown" => Some(ModSource::Unknown),
+            _ => None,
+        }
+    }
+
+    fn parse_runtime_compat(raw: &str) -> Option<crate::types::Runtime> {
+        let normalized = raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "");
+
+        match normalized.as_str() {
+            "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+            "mono" => Some(crate::types::Runtime::Mono),
+            _ => None,
+        }
+    }
+
+    fn parse_storage_metadata_compat(value: &serde_json::Value) -> Option<ModMetadata> {
+        if !value.is_object() {
+            return None;
+        }
+
+        let source = Self::metadata_string_from_keys(value, &["source"]).and_then(|raw| Self::parse_mod_source_compat(&raw));
+        let detected_runtime = Self::metadata_string_from_keys(value, &["detectedRuntime", "detected_runtime", "runtime"])
+            .and_then(|raw| Self::parse_runtime_compat(&raw));
+
+        Some(ModMetadata {
+            source,
+            source_id: Self::metadata_string_from_keys(value, &["sourceId", "source_id"]),
+            source_version: Self::metadata_string_from_keys(value, &["sourceVersion", "source_version"]),
+            author: Self::metadata_string_from_keys(value, &["author"]),
+            mod_name: Self::metadata_string_from_keys(value, &["modName", "mod_name", "name"]),
+            source_url: Self::metadata_string_from_keys(value, &["sourceUrl", "source_url"]),
+            summary: Self::metadata_string_from_keys(value, &["summary", "description"]),
+            icon_url: Self::metadata_string_from_keys(value, &["iconUrl", "icon_url", "pictureURL", "pictureUrl", "icon"]),
+            icon_cache_path: Self::metadata_string_from_keys(value, &["iconCachePath", "icon_cache_path"]),
+            downloads: Self::metadata_u64_from_keys(value, &["downloads", "modDownloads", "downloadCount"]),
+            likes_or_endorsements: Self::metadata_i64_from_keys(value, &["likesOrEndorsements", "likes_or_endorsements", "endorsementCount", "endorsements"]),
+            updated_at: Self::metadata_string_from_keys(value, &["updatedAt", "updated_at", "updatedTime", "dateUpdated"]),
+            tags: Self::metadata_tags_from_keys(value, &["tags", "categories"]),
+            installed_version: Self::metadata_string_from_keys(value, &["installedVersion", "installed_version", "version"]),
+            library_added_at: Self::metadata_datetime_from_keys(value, &["libraryAddedAt", "library_added_at"]),
+            installed_at: Self::metadata_datetime_from_keys(value, &["installedAt", "installed_at"]),
+            last_update_check: Self::metadata_datetime_from_keys(value, &["lastUpdateCheck", "last_update_check"]),
+            metadata_last_refreshed: Self::metadata_datetime_from_keys(value, &["metadataLastRefreshed", "metadata_last_refreshed"]),
+            update_available: Self::metadata_bool_from_keys(value, &["updateAvailable", "update_available"]),
+            remote_version: Self::metadata_string_from_keys(value, &["remoteVersion", "remote_version"]),
+            detected_runtime,
+            runtime_match: Self::metadata_bool_from_keys(value, &["runtimeMatch", "runtime_match"]),
+            mod_storage_id: Self::metadata_string_from_keys(value, &["modStorageId", "mod_storage_id", "storageId", "storage_id"]),
+            symlink_paths: Self::metadata_tags_from_keys(value, &["symlinkPaths", "symlink_paths"]),
+        })
+    }
+
+    fn mod_metadata_with_storage_id(storage_id: String) -> ModMetadata {
+        ModMetadata {
+            source: None,
+            source_id: None,
+            source_version: None,
+            author: None,
+            mod_name: None,
+            source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
+            installed_version: None,
+            library_added_at: None,
+            installed_at: None,
+            last_update_check: None,
+            metadata_last_refreshed: None,
+            update_available: None,
+            remote_version: None,
+            detected_runtime: None,
+            runtime_match: None,
+            mod_storage_id: Some(storage_id),
+            symlink_paths: None,
+        }
+    }
+
+    fn infer_storage_id_from_index(index: &HashMap<String, Vec<String>>, file_name: &str) -> Option<String> {
+        let mut matches = HashSet::new();
+        for variant in Self::tracked_name_variants(file_name) {
+            if let Some(ids) = index.get(&variant.to_lowercase()) {
+                for id in ids {
+                    matches.insert(id.clone());
+                }
+            }
+        }
+
+        if matches.len() == 1 {
+            matches.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    async fn build_storage_file_index(&self, storage_root: &Path) -> HashMap<String, Vec<String>> {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+
+        let mut entries = match fs::read_dir(storage_root).await {
+            Ok(entries) => entries,
+            Err(_) => return index,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let entry_path = entry.path();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let storage_id = entry_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if storage_id.is_empty() {
+                continue;
+            }
+
+            let files = match self.collect_storage_files(&entry_path).await {
+                Ok(files) => files,
+                Err(_) => continue,
+            };
+
+            for file_name in files {
+                index
+                    .entry(file_name.to_lowercase())
+                    .or_default()
+                    .push(storage_id.clone());
+            }
+        }
+
+        index
+    }
+
+    async fn infer_storage_id_from_symlink(
+        &self,
+        mod_file_path: &Path,
+        storage_root: &Path,
+    ) -> Option<String> {
+        let metadata = fs::symlink_metadata(mod_file_path).await.ok()?;
+        if !metadata.file_type().is_symlink() {
+            return None;
+        }
+
+        let link_target = fs::read_link(mod_file_path).await.ok()?;
+        let resolved_target = if link_target.is_absolute() {
+            link_target
+        } else {
+            mod_file_path.parent()?.join(link_target)
+        };
+
+        let canonical_target = match fs::canonicalize(&resolved_target).await {
+            Ok(path) => path,
+            Err(_) => resolved_target,
+        };
+
+        let canonical_storage_root = match fs::canonicalize(storage_root).await {
+            Ok(path) => path,
+            Err(_) => storage_root.to_path_buf(),
+        };
+
+        let relative = canonical_target.strip_prefix(&canonical_storage_root).ok()?;
+        match relative.components().next() {
+            Some(Component::Normal(value)) => {
+                let storage_id = value.to_string_lossy().trim().to_string();
+                if storage_id.is_empty() {
+                    None
+                } else {
+                    Some(storage_id)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    async fn recover_mod_metadata_from_storage(
+        &self,
+        mods_directory: &Path,
+        metadata: &mut HashMap<String, ModMetadata>,
+    ) -> Result<bool> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_file_index = self.build_storage_file_index(&storage_root).await;
+
+        let mut entries = match fs::read_dir(mods_directory).await {
+            Ok(entries) => entries,
+            Err(_) => return Ok(false),
+        };
+
+        let mut changed = false;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_string();
+            if file_name.is_empty() {
+                continue;
+            }
+
+            let lower_name = file_name.to_lowercase();
+            if !lower_name.ends_with(".dll") && !lower_name.ends_with(".dll.disabled") {
+                continue;
+            }
+
+            let canonical_name = if lower_name.ends_with(".dll.disabled") {
+                file_name.trim_end_matches(".disabled").to_string()
+            } else {
+                file_name.clone()
+            };
+
+            let existing = metadata
+                .get(&canonical_name)
+                .cloned()
+                .or_else(|| metadata.get(&file_name).cloned());
+
+            let mut effective = existing.clone();
+            let mut storage_id = effective
+                .as_ref()
+                .and_then(|meta| meta.mod_storage_id.clone());
+
+            if storage_id.is_none() {
+                storage_id = self
+                    .infer_storage_id_from_symlink(&path, &storage_root)
+                    .await
+                    .or_else(|| Self::infer_storage_id_from_index(&storage_file_index, &canonical_name));
+            }
+
+            let Some(storage_id) = storage_id else {
+                continue;
+            };
+
+            let mut should_mark_changed = existing.is_none();
+            let mut metadata_value = effective
+                .take()
+                .unwrap_or_else(|| Self::mod_metadata_with_storage_id(storage_id.clone()));
+
+            if metadata_value.mod_storage_id.is_none() {
+                metadata_value.mod_storage_id = Some(storage_id.clone());
+                should_mark_changed = true;
+            }
+
+            if let Ok(Some(storage_meta)) = self.load_storage_metadata(&storage_root.join(&storage_id)).await {
+                if metadata_value.source.is_none()
+                    || metadata_value.source_id.is_none()
+                    || metadata_value.source_version.is_none()
+                    || metadata_value.mod_name.is_none()
+                    || metadata_value.source_url.is_none()
+                    || metadata_value.summary.is_none()
+                    || metadata_value.icon_url.is_none()
+                    || metadata_value.icon_cache_path.is_none()
+                    || metadata_value.downloads.is_none()
+                    || metadata_value.likes_or_endorsements.is_none()
+                    || metadata_value.updated_at.is_none()
+                    || metadata_value.tags.is_none()
+                    || metadata_value.detected_runtime.is_none()
+                    || metadata_value.runtime_match.is_none()
+                {
+                    should_mark_changed = true;
+                }
+
+                metadata_value = Self::merge_metadata(metadata_value, storage_meta);
+            }
+
+            if should_mark_changed {
+                metadata.insert(canonical_name, metadata_value);
+                changed = true;
+            }
+        }
+
+        Ok(changed)
+    }
+
     async fn get_mod_icon_cache_dir(&self) -> Result<PathBuf> {
         let cache_dir = crate::db::get_data_dir()?
             .join("cache")
@@ -353,9 +772,33 @@ impl ModsService {
         let content = fs::read_to_string(&metadata_file)
             .await
             .context("Failed to read storage metadata file")?;
-        let metadata = serde_json::from_str::<ModMetadata>(&content)
-            .context("Failed to parse storage metadata file")?;
-        Ok(Some(metadata))
+        match serde_json::from_str::<ModMetadata>(&content) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(parse_error) => {
+                let migrated = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|value| Self::parse_storage_metadata_compat(&value));
+
+                if let Some(metadata) = migrated {
+                    if let Err(save_error) = self.save_storage_metadata(storage_path, &metadata).await {
+                        log::warn!(
+                            "Failed to persist migrated storage metadata for {}: {}",
+                            metadata_file.display(),
+                            save_error
+                        );
+                    }
+
+                    return Ok(Some(metadata));
+                }
+
+                log::warn!(
+                    "Skipping unreadable storage metadata file {}: {}",
+                    metadata_file.display(),
+                    parse_error
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn save_storage_metadata(&self, storage_path: &Path, metadata: &ModMetadata) -> Result<()> {
@@ -366,6 +809,28 @@ impl ModsService {
             .await
             .context("Failed to write storage metadata file")?;
         Ok(())
+    }
+
+    pub async fn upsert_storage_metadata_by_id(
+        &self,
+        storage_id: &str,
+        incoming: ModMetadata,
+    ) -> Result<()> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_path = storage_root.join(storage_id);
+
+        let existing = self.load_storage_metadata(&storage_path).await?;
+        let mut next = if let Some(existing) = existing {
+            Self::merge_metadata(existing, incoming)
+        } else {
+            incoming
+        };
+
+        if next.mod_storage_id.is_none() {
+            next.mod_storage_id = Some(storage_id.to_string());
+        }
+
+        self.save_storage_metadata(&storage_path, &next).await
     }
 
     fn merge_metadata(mut primary: ModMetadata, fallback: ModMetadata) -> ModMetadata {
@@ -1081,7 +1546,22 @@ impl ModsService {
             if let Ok(file_metadata) = self.load_mod_metadata_from_file(mods_directory).await {
                 if !file_metadata.is_empty() {
                     self.save_mod_metadata(mods_directory, &file_metadata).await?;
-                    return Ok(file_metadata);
+                    metadata = file_metadata;
+                }
+            }
+        }
+
+        if let Ok(repaired) = self
+            .recover_mod_metadata_from_storage(mods_directory, &mut metadata)
+            .await
+        {
+            if repaired {
+                if let Err(err) = self.save_mod_metadata(mods_directory, &metadata).await {
+                    log::warn!(
+                        "Failed to persist recovered mod metadata for {}: {}",
+                        mods_directory.display(),
+                        err
+                    );
                 }
             }
         }
@@ -3840,6 +4320,65 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn load_mod_metadata_recovers_storage_metadata_when_db_is_empty() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-storage-recovery");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let storage_id = "storage-recovery-1";
+        let storage_base = download_dir.join("Mods").join(storage_id);
+        let storage_mods = storage_base.join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let mut storage_meta = sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.mod_name = Some("Recovered Managed".to_string());
+        storage_meta.icon_url = Some("https://example.com/icon.png".to_string());
+        storage_meta.summary = Some("Recovered metadata from storage".to_string());
+        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let loaded = service.load_mod_metadata(&mods_dir).await?;
+        let recovered = loaded
+            .get("RecoveredManaged.dll")
+            .expect("recovered metadata entry");
+
+        assert_eq!(recovered.mod_storage_id.as_deref(), Some(storage_id));
+        assert_eq!(recovered.source_id.as_deref(), Some("owner/recovered"));
+        assert!(matches!(recovered.source, Some(ModSource::Thunderstore)));
+        assert_eq!(recovered.icon_url.as_deref(), Some("https://example.com/icon.png"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn list_mods_uses_metadata_values() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
@@ -3885,6 +4424,67 @@ mod tests {
         assert_eq!(entry.get("fileName").and_then(|v| v.as_str()), Some("Example.dll"));
         assert_eq!(entry.get("version").and_then(|v| v.as_str()), Some("1.2.3"));
         assert_eq!(entry.get("managed").and_then(|v| v.as_bool()), Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_mods_marks_recovered_storage_entries_as_managed() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-managed-recovery");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let storage_id = "storage-managed-recovery";
+        let storage_base = download_dir.join("Mods").join(storage_id);
+        let storage_mods = storage_base.join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let mut storage_meta = sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.mod_name = Some("Recovered Managed".to_string());
+        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let result = service.list_mods(output_dir.to_string_lossy().as_ref()).await?;
+        let mods = result
+            .get("mods")
+            .and_then(|value| value.as_array())
+            .expect("mods array");
+
+        let entry = mods
+            .iter()
+            .find(|item| item.get("fileName").and_then(|value| value.as_str()) == Some("RecoveredManaged.dll"))
+            .expect("recovered managed mod");
+
+        assert_eq!(entry.get("managed").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(entry.get("source").and_then(|value| value.as_str()), Some("thunderstore"));
 
         Ok(())
     }
@@ -4574,6 +5174,88 @@ mod tests {
         assert!(!entry.files_by_runtime.contains_key("IL2CPP"));
         assert_eq!(entry.storage_ids_by_runtime.get("Mono").map(|s| s.as_str()), Some(storage_id));
         assert!(!entry.storage_ids_by_runtime.contains_key("IL2CPP"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn load_storage_metadata_migrates_legacy_runtime_and_source_values() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool);
+
+        let storage_dir = temp.path().join("storage").join("legacy-entry");
+        fs::create_dir_all(&storage_dir).await?;
+        let metadata_path = storage_dir.join(STORAGE_METADATA_FILE);
+
+        fs::write(
+            &metadata_path,
+            serde_json::json!({
+                "source": "Nexus Mods",
+                "sourceId": "12345",
+                "modName": "Legacy Mod",
+                "detectedRuntime": "Mono",
+                "runtimeMatch": true,
+                "modStorageId": "legacy-entry",
+                "installedAt": "2026-03-05T10:00:00Z"
+            })
+            .to_string(),
+        )
+        .await?;
+
+        let parsed = service
+            .load_storage_metadata(&storage_dir)
+            .await?
+            .expect("storage metadata should parse");
+
+        assert!(matches!(parsed.source, Some(ModSource::Nexusmods)));
+        assert!(matches!(parsed.detected_runtime, Some(Runtime::Mono)));
+        assert_eq!(parsed.mod_name.as_deref(), Some("Legacy Mod"));
+        assert_eq!(parsed.mod_storage_id.as_deref(), Some("legacy-entry"));
+        assert!(parsed.installed_at.is_some());
+
+        let normalized_content = fs::read_to_string(&metadata_path).await?;
+        let normalized = serde_json::from_str::<ModMetadata>(&normalized_content)?;
+        assert!(matches!(normalized.detected_runtime, Some(Runtime::Mono)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_ignores_unreadable_storage_metadata_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let storage_id = "broken-storage";
+        let storage_mods = download_dir.join("Mods").join(storage_id).join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("BrokenExample.dll"), b"binary").await?;
+        fs::write(
+            download_dir
+                .join("Mods")
+                .join(storage_id)
+                .join(STORAGE_METADATA_FILE),
+            "{not valid json",
+        )
+        .await?;
+
+        let library = service.get_mod_library().await?;
+        assert!(library.downloaded.iter().any(|entry| entry.storage_id == storage_id));
 
         Ok(())
     }
