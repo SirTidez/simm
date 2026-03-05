@@ -10,6 +10,23 @@ type SettingsProps = {
   onClose: () => void;
 };
 
+const MIN_MOD_ICON_CACHE_LIMIT_MB = 100;
+const MAX_MOD_ICON_CACHE_LIMIT_MB = 8192;
+
+export function normalizeModIconCacheLimitMb(value: unknown): number {
+  const parsed =
+    typeof value === 'number'
+      ? value
+      : Number.parseInt(String(value ?? ''), 10);
+
+  if (!Number.isFinite(parsed)) {
+    return 500;
+  }
+
+  const rounded = Math.trunc(parsed as number);
+  return Math.min(MAX_MOD_ICON_CACHE_LIMIT_MB, Math.max(MIN_MOD_ICON_CACHE_LIMIT_MB, rounded));
+}
+
 export function Settings({ isOpen, onClose }: SettingsProps) {
   const { settings, depotDownloader, loading, updateSettings, refreshDepotDownloader } = useSettingsStore();
   const { checkAllUpdates } = useEnvironmentStore();
@@ -74,7 +91,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
         logLevel: (settings.logLevel as 'debug' | 'info' | 'warn' | 'error') || 'info',
-        modIconCacheLimitMb: settings.modIconCacheLimitMb || 500,
+        modIconCacheLimitMb: normalizeModIconCacheLimitMb(settings.modIconCacheLimitMb),
       });
     }
   }, [settings]);
@@ -111,7 +128,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       try {
         setError(null);
         // Always set platform to 'windows' and language to 'english' since they're not user-configurable
-        await updateSettings({ ...formData, platform: 'windows', language: 'english' });
+        const normalizedFormData = {
+          ...formData,
+          modIconCacheLimitMb: normalizeModIconCacheLimitMb(formData.modIconCacheLimitMb),
+          platform: 'windows',
+          language: 'english',
+        };
+        await updateSettings(normalizedFormData);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to save settings');
       }
@@ -351,8 +374,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   <label>Mod Icon Cache Limit (MB)</label>
                   <input
                     type="number"
-                    value={formData.modIconCacheLimitMb || 500}
-                    onChange={(e) => setFormData({ ...formData, modIconCacheLimitMb: parseInt(e.target.value) || 500 })}
+                    value={formData.modIconCacheLimitMb ?? 500}
+                    onChange={(e) => setFormData({
+                      ...formData,
+                      modIconCacheLimitMb: normalizeModIconCacheLimitMb(e.target.value),
+                    })}
                     min="100"
                     max="8192"
                   />

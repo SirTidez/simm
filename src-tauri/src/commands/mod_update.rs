@@ -121,9 +121,12 @@ pub async fn check_mod_updates(
         .await
         .map_err(|e| e.to_string());
 
-    let _ = mod_update_service
+    if let Err(error) = mod_update_service
         .backfill_missing_thunderstore_library_icons(&mods_service, &thunderstore_service)
-        .await;
+        .await
+    {
+        log::warn!("Failed to backfill Thunderstore library icons after mod update check: {}", error);
+    }
 
     let _ = events::emit_mod_metadata_refresh_status(&app, 0);
     result
@@ -315,3 +318,4 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 }
+

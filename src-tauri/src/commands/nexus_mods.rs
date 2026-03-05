@@ -323,35 +323,55 @@ pub async fn install_nexus_mods_mod(
 
     // Install using mods service
     let mods_service = ModsService::new(db_pool.clone());
-    let metadata = serde_json::json!({
-        "source": "nexusmods",
-        "sourceId": mod_id.to_string(),
-        "sourceVersion": version,
-        "sourceUrl": source_url,
-        "modName": mod_name,
-        "author": author,
-        "summary": mod_info.get("summary").and_then(|v| v.as_str()).unwrap_or_default(),
-        "iconUrl": mod_info
-            .get("picture_url")
-            .or_else(|| mod_info.get("pictureUrl"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default(),
-        "downloads": mod_info
-            .get("mod_downloads")
-            .or_else(|| mod_info.get("downloads"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        "likesOrEndorsements": mod_info
-            .get("endorsement_count")
-            .or_else(|| mod_info.get("endorsements"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        "updatedAt": mod_info
-            .get("updated_at")
-            .or_else(|| mod_info.get("updatedAt"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default(),
-    });
+    let mut metadata_obj = serde_json::Map::new();
+    metadata_obj.insert("source".to_string(), serde_json::json!("nexusmods"));
+    metadata_obj.insert("sourceId".to_string(), serde_json::json!(mod_id.to_string()));
+    metadata_obj.insert("sourceVersion".to_string(), serde_json::json!(version));
+    metadata_obj.insert("sourceUrl".to_string(), serde_json::json!(source_url));
+    metadata_obj.insert("modName".to_string(), serde_json::json!(mod_name));
+    metadata_obj.insert("author".to_string(), serde_json::json!(author));
+    metadata_obj.insert(
+        "summary".to_string(),
+        serde_json::json!(mod_info.get("summary").and_then(|v| v.as_str()).unwrap_or_default()),
+    );
+    metadata_obj.insert(
+        "iconUrl".to_string(),
+        serde_json::json!(
+            mod_info
+                .get("picture_url")
+                .or_else(|| mod_info.get("pictureUrl"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        ),
+    );
+    metadata_obj.insert(
+        "updatedAt".to_string(),
+        serde_json::json!(
+            mod_info
+                .get("updated_at")
+                .or_else(|| mod_info.get("updatedAt"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        ),
+    );
+
+    if let Some(downloads) = mod_info
+        .get("mod_downloads")
+        .or_else(|| mod_info.get("downloads"))
+        .and_then(|v| v.as_u64())
+    {
+        metadata_obj.insert("downloads".to_string(), serde_json::json!(downloads));
+    }
+
+    if let Some(endorsements) = mod_info
+        .get("endorsement_count")
+        .or_else(|| mod_info.get("endorsements"))
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok())))
+    {
+        metadata_obj.insert("likesOrEndorsements".to_string(), serde_json::json!(endorsements));
+    }
+
+    let metadata = serde_json::Value::Object(metadata_obj);
 
     eprintln!("[DEBUG] About to call install_zip_mod for mod {} file {}", mod_id, file_id);
     let result = mods_service.install_zip_mod(

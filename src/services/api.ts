@@ -1226,6 +1226,7 @@ export class ApiService {
         downloads: Number(modInfo?.mod_downloads || modInfo?.downloads || 0),
         likesOrEndorsements: Number(modInfo?.endorsement_count || modInfo?.endorsements || 0),
         updatedAt: modInfo?.updated_at || modInfo?.updatedAt || '',
+        tags: Array.isArray(modInfo?.tags) ? modInfo.tags : (Array.isArray(modInfo?.tag_list) ? modInfo.tag_list : []),
       },
       undefined,
       true

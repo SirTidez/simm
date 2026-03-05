@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
@@ -110,6 +111,29 @@ const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: st
   }
   const [owner, ...rest] = sourceId.split('/');
   return { owner: owner || '', name: rest.join('/') };
+};
+
+const safeExternalUrl = (raw?: string): string | undefined => {
+  if (!raw) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'https:' ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const handleCardActivationKeyDown = (
+  event: ReactKeyboardEvent<HTMLElement>,
+  onActivate: () => void
+) => {
+  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+    event.preventDefault();
+    onActivate();
+  }
 };
 
 const resolveImageSource = (pathOrUrl?: string): string | undefined => {
@@ -635,8 +659,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       return;
     }
 
+    let disposed = false;
     let unlisten: (() => void) | null = null;
-    onModMetadataRefreshStatus((data) => {
+    void onModMetadataRefreshStatus((data) => {
       const running = Boolean(data.running) || (data.activeCount || 0) > 0;
       const wasRunning = metadataRefreshRunningRef.current;
       metadataRefreshRunningRef.current = running;
@@ -645,10 +670,15 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         void refreshLibrary();
       }
     }).then((fn) => {
+      if (disposed) {
+        fn();
+        return;
+      }
       unlisten = fn;
     });
 
     return () => {
+      disposed = true;
       unlisten?.();
       metadataRefreshRunningRef.current = false;
     };
@@ -1791,7 +1821,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           key={pkg.key}
                           className="mod-card store-card"
                           style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open details for ${pkg.name}`}
                           onClick={() => openThunderstoreModView(pkg)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openThunderstoreModView(pkg))}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                             <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: '0.7rem' }}>
@@ -1870,7 +1904,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           key={mod.mod_id}
                           className="mod-card store-card"
                           style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open details for ${mod.name}`}
                           onClick={() => openNexusModView(mod)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openNexusModView(mod))}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                             <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: '0.7rem' }}>
@@ -2029,7 +2067,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       key={group.key}
                       className="mod-card compact-row library-row-card"
                       style={{ padding: '0.68rem 0.75rem', backgroundColor: '#2a2a2a', borderRadius: '7px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open details for ${group.displayName}`}
                       onClick={() => openDownloadedModView(group)}
+                      onKeyDown={(event) => handleCardActivationKeyDown(event, () => openDownloadedModView(group))}
                     >
                       <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '0.7rem' }}>
                         <div className="mod-card-main-shell" style={{ display: 'flex', alignItems: 'stretch', gap: '0.55rem', flex: 1, minWidth: 0 }}>
@@ -2367,8 +2409,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   </div>
                 )}
                 <div className="mod-view-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  {activeModView.sourceUrl && (
-                    <a href={activeModView.sourceUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-small" style={{ textDecoration: 'none' }}>
+                  {safeExternalUrl(activeModView.sourceUrl) && (
+                    <a
+                      href={safeExternalUrl(activeModView.sourceUrl)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn btn-secondary btn-small"
+                      style={{ textDecoration: 'none' }}
+                    >
                       <i className="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }}></i>
                       Open Source Page
                     </a>

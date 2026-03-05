@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ModLibraryOverlay } from './ModLibraryOverlay';
 import type { ModLibraryEntry } from '../types';
 
@@ -132,5 +132,59 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText(/Active\s+v1\.2\.3/i)).toBeTruthy();
     expect(await screen.findByText(/Latest:?\s+v1\.3\.0/i)).toBeTruthy();
     expect(await screen.findByText('Mono')).toBeTruthy();
+  });
+
+  it('opens downloaded mod details via keyboard activation', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Keyboard Mod',
+          sourceUrl: 'https://example.com/mod',
+          sourceVersion: '1.0.0',
+        }),
+      ],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    const card = await screen.findByRole('button', { name: 'Open details for Keyboard Mod' });
+    fireEvent.keyDown(card, { key: 'Enter', code: 'Enter' });
+
+    expect(await screen.findByText('Mod View')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open Source Page' })).toBeTruthy();
+  });
+
+  it('suppresses unsafe source links in mod view', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Unsafe Link Mod',
+          sourceUrl: 'javascript:alert(1)',
+          sourceVersion: '1.0.0',
+        }),
+      ],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    const card = await screen.findByRole('button', { name: 'Open details for Unsafe Link Mod' });
+    fireEvent.click(card);
+
+    expect(await screen.findByText('Mod View')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Open Source Page' })).toBeNull();
   });
 });

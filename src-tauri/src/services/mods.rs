@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::fs::File;
+use std::time::Duration;
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use tokio::fs;
@@ -16,11 +17,14 @@ use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 use crate::types::{ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, Environment};
 use crate::services::settings::SettingsService;
+use reqwest::header::CONTENT_LENGTH;
 use sqlx::SqlitePool;
 
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
+const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
+const ICON_FETCH_TIMEOUT_SECONDS: u64 = 15;
 
 static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
@@ -197,8 +201,20 @@ impl ModsService {
         }
     }
 
+    fn metadata_value_is_valid(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::String(text) => !text.trim().is_empty(),
+            _ => true,
+        }
+    }
+
     fn metadata_field<'a>(metadata: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
-        keys.iter().find_map(|key| metadata.get(*key))
+        keys.iter().find_map(|key| {
+            metadata
+                .get(*key)
+                .filter(|value| Self::metadata_value_is_valid(value))
+        })
     }
 
     fn metadata_string_value(value: &serde_json::Value) -> Option<String> {
@@ -703,12 +719,41 @@ impl ModsService {
             return Some(file_path.to_string_lossy().to_string());
         }
 
-        let response = reqwest::get(parsed).await.ok()?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(ICON_FETCH_TIMEOUT_SECONDS))
+            .build()
+            .ok()?;
+
+        let mut response = client.get(parsed).send().await.ok()?;
         if !response.status().is_success() {
             return None;
         }
 
-        let bytes = response.bytes().await.ok()?;
+        if let Some(content_length) = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            if content_length == 0 || content_length > MAX_ICON_BYTES as u64 {
+                return None;
+            }
+        }
+
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    bytes.extend_from_slice(&chunk);
+                    if bytes.len() > MAX_ICON_BYTES {
+                        return None;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return None,
+            }
+        }
+
         if bytes.is_empty() {
             return None;
         }
@@ -755,9 +800,57 @@ impl ModsService {
             return Ok(());
         }
 
-        let candidate_path = PathBuf::from(icon_path);
-        if candidate_path.exists() {
-            let _ = fs::remove_file(candidate_path).await;
+        let cache_dir = self.get_mod_icon_cache_dir().await?;
+        let cache_dir_canonical = match fs::canonicalize(&cache_dir).await {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!(
+                    "Failed to canonicalize icon cache directory {} while pruning orphan {}: {}",
+                    cache_dir.display(),
+                    icon_path,
+                    error
+                );
+                return Ok(());
+            }
+        };
+
+        let raw_candidate = Path::new(icon_path);
+        let candidate_path = if raw_candidate.is_absolute() {
+            raw_candidate.to_path_buf()
+        } else {
+            cache_dir.join(raw_candidate)
+        };
+
+        if !candidate_path.exists() {
+            return Ok(());
+        }
+
+        let canonical_candidate = match fs::canonicalize(&candidate_path).await {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!(
+                    "Failed to canonicalize orphan icon candidate {}: {}",
+                    candidate_path.display(),
+                    error
+                );
+                return Ok(());
+            }
+        };
+
+        if !canonical_candidate.starts_with(&cache_dir_canonical) {
+            log::warn!(
+                "Skipping orphan icon cleanup outside cache directory: {}",
+                canonical_candidate.display()
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = fs::remove_file(&canonical_candidate).await {
+            log::warn!(
+                "Failed to remove orphan icon cache file {}: {}",
+                canonical_candidate.display(),
+                error
+            );
         }
 
         Ok(())
@@ -4259,6 +4352,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_storage_metadata_compat_uses_alias_when_primary_is_invalid() {
+        let raw = serde_json::json!({
+            "iconUrl": null,
+            "pictureUrl": "https://example.com/alias.png",
+            "downloads": "",
+            "modDownloads": 42
+        });
+
+        let parsed = ModsService::parse_storage_metadata_compat(&raw)
+            .expect("metadata should parse with valid aliases");
+
+        assert_eq!(parsed.icon_url.as_deref(), Some("https://example.com/alias.png"));
+        assert_eq!(parsed.downloads, Some(42));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn remove_icon_cache_if_orphaned_skips_paths_outside_cache_dir() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool);
+
+        let outside_file = temp.path().join("outside-icon.png");
+        fs::write(&outside_file, b"icon-bytes").await?;
+
+        service
+            .remove_icon_cache_if_orphaned(
+                Some(outside_file.to_string_lossy().as_ref()),
+                "storage-1",
+            )
+            .await?;
+
+        assert!(outside_file.exists(), "outside file should not be deleted");
+        Ok(())
+    }
     fn sample_metadata(storage_id: Option<&str>, source_id: Option<&str>, source_version: Option<&str>) -> ModMetadata {
         ModMetadata {
             source: Some(ModSource::Local),
@@ -5628,3 +5759,4 @@ mod tests {
         Ok(())
     }
 }
+

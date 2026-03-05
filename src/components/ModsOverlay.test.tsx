@@ -318,4 +318,38 @@ describe('ModsOverlay', () => {
     });
     expect(screen.getByText('Clickable Mod')).toBeTruthy();
   });
+  it('opens installed mod details via keyboard activation', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Keyboard Installed Mod',
+          fileName: 'Keyboard.Installed.Mod.dll',
+          path: 'C:/env/Mods/Keyboard.Installed.Mod.dll',
+          source: 'thunderstore',
+          sourceUrl: 'https://thunderstore.io/c/schedule-i/p/author/keyboard-installed-mod',
+          version: '1.0.0',
+          latestVersion: '1.1.0',
+          managed: true,
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    const card = await screen.findByRole('button', { name: 'Open details for Keyboard Installed Mod' });
+    fireEvent.keyDown(card, { key: ' ', code: 'Space' });
+
+    expect(await screen.findByText('Mod View')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open Source Page' })).toBeTruthy();
+  });
 });
+

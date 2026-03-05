@@ -409,12 +409,22 @@ impl ModUpdateService {
                 symlink_paths: None,
             };
 
-            if mods_service
-                .upsert_storage_metadata_by_id(&entry.storage_id, metadata_update)
+            match mods_service
+                .upsert_storage_metadata_by_id(&entry.storage_id, metadata_update.clone())
                 .await
-                .is_ok()
             {
-                updated = updated.saturating_add(1);
+                Ok(_) => {
+                    updated = updated.saturating_add(1);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Failed to backfill Thunderstore metadata for storage {} (source {}, icon {:?}): {}",
+                        entry.storage_id,
+                        source_id,
+                        metadata_update.icon_url,
+                        error
+                    );
+                }
             }
         }
 
@@ -1140,3 +1150,5 @@ mod tests {
         Ok(())
     }
 }
+
+

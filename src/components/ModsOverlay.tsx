@@ -145,6 +145,16 @@ function normalizeModNameKey(name: string): string {
     .toLowerCase();
 }
 
+function handleCardActivationKeyDown(
+  event: React.KeyboardEvent<HTMLElement>,
+  onActivate: () => void
+) {
+  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+    event.preventDefault();
+    onActivate();
+  }
+}
+
 function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] {
   const nextByKey = new Map<string, ModInfo>();
   for (const mod of incoming) {
@@ -419,8 +429,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       return;
     }
 
+    let disposed = false;
     let unlisten: (() => void) | null = null;
-    onModMetadataRefreshStatus((data) => {
+    void onModMetadataRefreshStatus((data) => {
       const running = Boolean(data.running) || (data.activeCount || 0) > 0;
       const wasRunning = metadataRefreshRunningRef.current;
       metadataRefreshRunningRef.current = running;
@@ -430,10 +441,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         void loadInstalledMods(false, true);
       }
     }).then((fn) => {
+      if (disposed) {
+        fn();
+        return;
+      }
       unlisten = fn;
     });
 
     return () => {
+      disposed = true;
       unlisten?.();
       metadataRefreshRunningRef.current = false;
     };
@@ -1848,7 +1864,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       key={pkg.uuid4}
                       className="mod-card store-card"
                       style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open details for ${pkg.name || pkg.full_name || 'Unknown Mod'}`}
                       onClick={() => openThunderstoreModView(pkg)}
+                      onKeyDown={(event) => handleCardActivationKeyDown(event, () => openThunderstoreModView(pkg))}
                     >
                       <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '1rem' }}>
                         <div className="mod-card-main-shell" style={{ flex: 1, minWidth: 0, alignItems: 'stretch', gap: '1rem' }}>
@@ -2019,7 +2039,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         padding: '1rem',
                         cursor: 'pointer'
                       }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open details for ${mod.name || 'Unknown Mod'}`}
                       onClick={() => openNexusModView(mod)}
+                      onKeyDown={(event) => handleCardActivationKeyDown(event, () => openNexusModView(mod))}
                     >
                       <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '1rem' }}>
                         <div className="mod-card-main-shell" style={{ flex: 1, minWidth: 0, alignItems: 'stretch', gap: '1rem' }}>
@@ -2169,7 +2193,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             padding: '0.65rem 0.75rem',
                             cursor: 'pointer'
                           }}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open details for ${entry.displayName}`}
                           onClick={() => openLibraryModView(entry)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openLibraryModView(entry))}
                         >
                           <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '0.65rem' }}>
                             <div className="mod-card-main-shell" style={{ display: 'flex', alignItems: 'stretch', gap: '0.65rem', minWidth: 0, flex: 1 }}>
@@ -2304,7 +2332,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       alignItems: 'stretch',
                       cursor: 'pointer'
                     }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open details for ${mod.name}`}
                     onClick={() => openInstalledModView(mod)}
+                    onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
                   >
                     <div className="mod-card-row-shell mod-card-row-shell--no-checkbox" style={{ flex: 1, display: 'flex', gap: '0.75rem', minWidth: 0 }}>
                       <div className="mod-card-main-shell" style={{ flex: 1, minWidth: 0, alignItems: 'stretch', gap: '0.75rem' }}>
