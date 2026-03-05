@@ -15,6 +15,35 @@ interface ModInfo {
   disabled?: boolean;
   modStorageId?: string;
   managed?: boolean;
+  summary?: string;
+  iconUrl?: string;
+  iconCachePath?: string;
+  downloads?: number;
+  likesOrEndorsements?: number;
+  updatedAt?: string;
+  tags?: string[];
+  installedAt?: number;
+}
+
+type ModsLayoutMode = 'grid' | 'list';
+
+interface ModViewState {
+  id: string;
+  name: string;
+  source: string;
+  summary?: string;
+  iconUrl?: string;
+  iconCachePath?: string;
+  sourceUrl?: string;
+  author?: string;
+  downloads?: number;
+  likesOrEndorsements?: number;
+  updatedAt?: string;
+  tags?: string[];
+  installedVersion?: string;
+  latestVersion?: string;
+  installedAt?: number;
+  kind: 'installed' | 'library' | 'thunderstore' | 'nexusmods';
 }
 
 interface Props {
@@ -72,6 +101,21 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function resolveImageSource(pathOrUrl?: string): string | undefined {
+  if (!pathOrUrl) return undefined;
+  if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+    return pathOrUrl;
+  }
+  const normalized = pathOrUrl.replace(/\\/g, '/');
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return `file:///${normalized}`;
+  }
+  if (normalized.startsWith('/')) {
+    return `file://${normalized}`;
+  }
+  return normalized;
 }
 
 function normalizeModNameKey(name: string): string {
@@ -153,6 +197,12 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [updatingAllMods, setUpdatingAllMods] = useState(false);
   const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
+  const [gridFeatureEnabled, setGridFeatureEnabled] = useState<boolean>(() => localStorage.getItem('mods.grid.feature') !== 'false');
+  const [layoutMode, setLayoutMode] = useState<ModsLayoutMode>(() => {
+    const saved = localStorage.getItem('mods.layout.mode');
+    return saved === 'list' ? 'list' : 'grid';
+  });
+  const [activeModView, setActiveModView] = useState<ModViewState | null>(null);
   const suppressWatcherReloadUntilRef = useRef(0);
   const modsReloadTimerRef = useRef<number | null>(null);
   const activeLoadRequestRef = useRef(0);
@@ -165,6 +215,16 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
     return counts;
   }, [downloadedMods]);
+
+  const useGridLayout = gridFeatureEnabled && layoutMode === 'grid';
+
+  useEffect(() => {
+    localStorage.setItem('mods.grid.feature', String(gridFeatureEnabled));
+  }, [gridFeatureEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('mods.layout.mode', layoutMode);
+  }, [layoutMode]);
 
   const loadEnvironment = async () => {
     try {
@@ -1304,6 +1364,84 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
   });
 
+  const openInstalledModView = (mod: ModInfo) => {
+    const update = modUpdates.get(mod.fileName);
+    setActiveModView({
+      id: `${mod.fileName}-${mod.path}`,
+      name: mod.name,
+      source: mod.source || 'unknown',
+      summary: mod.summary,
+      iconUrl: mod.iconUrl,
+      iconCachePath: mod.iconCachePath,
+      sourceUrl: mod.sourceUrl,
+      downloads: mod.downloads,
+      likesOrEndorsements: mod.likesOrEndorsements,
+      updatedAt: mod.updatedAt,
+      tags: mod.tags,
+      installedVersion: mod.version,
+      latestVersion: update?.latestVersion,
+      installedAt: mod.installedAt,
+      kind: 'installed',
+    });
+  };
+
+  const openLibraryModView = (entry: ModLibraryEntry) => {
+    setActiveModView({
+      id: entry.storageId,
+      name: entry.displayName,
+      source: entry.source || 'unknown',
+      summary: entry.summary,
+      iconUrl: entry.iconUrl,
+      iconCachePath: entry.iconCachePath,
+      sourceUrl: entry.sourceUrl,
+      downloads: entry.downloads,
+      likesOrEndorsements: entry.likesOrEndorsements,
+      updatedAt: entry.updatedAt,
+      tags: entry.tags,
+      installedVersion: entry.installedVersion || entry.sourceVersion,
+      installedAt: entry.installedAt,
+      kind: 'library',
+    });
+  };
+
+  const openThunderstoreModView = (pkg: ThunderstorePackage) => {
+    const latestVersion = pkg.versions?.[0];
+    setActiveModView({
+      id: pkg.uuid4,
+      name: pkg.name || pkg.full_name,
+      source: 'thunderstore',
+      summary: latestVersion?.description,
+      iconUrl: (pkg as any).icon,
+      sourceUrl: pkg.package_url,
+      author: pkg.owner,
+      downloads: Array.isArray(pkg.versions)
+        ? pkg.versions.reduce((sum, version) => sum + (version.downloads || 0), 0)
+        : 0,
+      likesOrEndorsements: pkg.rating_score,
+      updatedAt: pkg.date_updated,
+      tags: pkg.categories,
+      installedVersion: latestVersion?.version_number,
+      kind: 'thunderstore',
+    });
+  };
+
+  const openNexusModView = (mod: NexusMod) => {
+    setActiveModView({
+      id: `nexus-${mod.mod_id}`,
+      name: mod.name,
+      source: 'nexusmods',
+      summary: mod.summary,
+      iconUrl: mod.picture_url,
+      sourceUrl: `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`,
+      author: mod.author,
+      downloads: mod.mod_downloads,
+      likesOrEndorsements: mod.endorsement_count,
+      updatedAt: mod.updated_time,
+      installedVersion: mod.version,
+      kind: 'nexusmods',
+    });
+  };
+
   return (
     <>
       <ConfirmOverlay
@@ -1378,7 +1516,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
           </div>
         </div>
       )}
-      <div className="mods-overlay" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <div className="mods-overlay" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
         <div className="modal-header">
           <h2>Mods</h2>
           <button className="btn btn-secondary btn-small" onClick={onClose}>
@@ -1538,7 +1676,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
                 Search Results ({searchResults.length})
               </h3>
-              <div style={{ display: 'grid', gap: '0.75rem' }}>
+              <div style={{ display: 'grid', gap: '0.75rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(340px, 1fr))' : '1fr' }}>
                 {searchResults.map((pkg) => (
                   <div
                     key={pkg.uuid4}
@@ -1550,8 +1688,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'flex-start',
-                      gap: '1rem'
+                      gap: '1rem',
+                      cursor: 'pointer'
                     }}
+                    onClick={() => openThunderstoreModView(pkg)}
                   >
                     <div style={{ flex: 1 }}>
                       <h4 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1rem', color: '#fff' }}>
@@ -1700,7 +1840,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                     </div>
                     <div style={{ display: 'flex', gap: '0.5rem', flexDirection: 'column' }}>
                       <button
-                        onClick={() => handleInstallThunderstoreMod(pkg)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleInstallThunderstoreMod(pkg);
+                        }}
                         className="btn btn-primary btn-small"
                         disabled={installingPackage === pkg.uuid4}
                         title={`Install ${pkg.full_name || pkg.name || 'mod'}`}
@@ -1725,6 +1868,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         style={{ textDecoration: 'none', textAlign: 'center' }}
                         title="View on Thunderstore"
                         onClick={(e) => {
+                          e.stopPropagation();
                           if (!safeExternalUrl(pkg.package_url)) {
                             e.preventDefault();
                           }
@@ -1801,7 +1945,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                     Browsing is available without login. Downloading requires Nexus Login.
                   </div>
                 )}
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                <div style={{ display: 'grid', gap: '0.75rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(340px, 1fr))' : '1fr' }}>
                   {compatibleMods.map((mod) => {
                     const files = nexusModsFiles.get(mod.mod_id) || [];
 
@@ -1845,8 +1989,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         padding: '1rem',
                         display: 'flex',
                         flexDirection: 'column',
-                        gap: '0.75rem'
+                        gap: '0.75rem',
+                        cursor: 'pointer'
                       }}
+                      onClick={() => openNexusModView(mod)}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                         <div style={{ flex: 1 }}>
@@ -1886,7 +2032,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         </div>
                         <div style={{ display: 'flex', gap: '0.5rem', flexDirection: 'column' }}>
                           <button
-                            onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id);
+                            }}
                             className={isAlreadyInstalled ? "btn btn-secondary btn-small" : "btn btn-primary btn-small"}
                             disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled || !hasNexusDownloadAccess}
                             title={isAlreadyInstalled
@@ -1921,6 +2070,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             className="btn btn-secondary btn-small"
                             style={{ textDecoration: 'none', textAlign: 'center' }}
                             title="View on NexusMods"
+                            onClick={(e) => e.stopPropagation()}
                           >
                             <i className="fas fa-external-link-alt"></i>
                             <span style={{ marginLeft: '0.5rem' }}>View</span>
@@ -1966,7 +2116,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                   </span>
                                   {file.file_id !== bestFile?.file_id && (
                                     <button
-                                      onClick={() => handleInstallNexusModsMod(mod.mod_id, file.file_id)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleInstallNexusModsMod(mod.mod_id, file.file_id);
+                                      }}
                                       className="btn btn-secondary btn-small"
                                       disabled={installingNexusMod?.modId === mod.mod_id || !hasNexusDownloadAccess}
                                       title={!hasNexusDownloadAccess ? 'Requires Nexus Login to download' : 'Install file'}
@@ -2014,6 +2167,30 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               </p>
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                onClick={() => setGridFeatureEnabled(prev => !prev)}
+                className="btn btn-secondary"
+                title="Toggle new grid UI"
+              >
+                <i className={`fas ${gridFeatureEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`} style={{ marginRight: '0.5rem' }}></i>
+                Grid UI {gridFeatureEnabled ? 'On' : 'Off'}
+              </button>
+              <div style={{ display: 'inline-flex', border: '1px solid #3a3a3a', borderRadius: '999px', overflow: 'hidden' }}>
+                <button
+                  className="btn btn-small"
+                  onClick={() => setLayoutMode('grid')}
+                  style={{ border: 'none', borderRadius: 0, backgroundColor: layoutMode === 'grid' ? '#4a90e2' : '#1f2735', color: layoutMode === 'grid' ? '#fff' : '#b5c1d3' }}
+                >
+                  Grid
+                </button>
+                <button
+                  className="btn btn-small"
+                  onClick={() => setLayoutMode('list')}
+                  style={{ border: 'none', borderRadius: 0, backgroundColor: layoutMode === 'list' ? '#4a90e2' : '#1f2735', color: layoutMode === 'list' ? '#fff' : '#b5c1d3' }}
+                >
+                  List
+                </button>
+              </div>
               <button
                 onClick={() => {
                   const next = !showSearchInOverlay;
@@ -2101,7 +2278,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
             </div>
           ) : !showSearchResults && (
             <div style={{ padding: '0 1.25rem 1.25rem', flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              <div style={{ display: 'grid', gap: '1rem' }}>
+              <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(360px, 1fr))' : '1fr' }}>
                 {/* Regular Mods List */}
                 <div style={{ marginBottom: '1.5rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
@@ -2122,9 +2299,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       <p>No downloaded mods waiting to be installed in this environment.</p>
                     </div>
                   ) : (
-                    downloadedNotInstalled.map(entry => {
-                      const storageId = envRuntime ? entry.storageIdsByRuntime?.[envRuntime] || entry.storageId : entry.storageId;
-                      return (
+                    <div style={{ display: 'grid', gap: '0.5rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(300px, 1fr))' : '1fr' }}>
+                      {downloadedNotInstalled.map(entry => {
+                        const storageId = envRuntime ? entry.storageIdsByRuntime?.[envRuntime] || entry.storageId : entry.storageId;
+                        return (
                         <div
                           key={entry.storageId}
                           className="mod-card compact-row"
@@ -2133,8 +2311,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             border: '1px solid #3a3a3a',
                             borderRadius: '7px',
                             padding: '0.65rem 0.75rem',
-                            marginBottom: '0.4rem'
+                            cursor: 'pointer'
                           }}
+                          onClick={() => openLibraryModView(entry)}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.6rem' }}>
                             <div>
@@ -2168,7 +2347,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                               <button
                                 className="btn btn-primary btn-small"
                                 disabled={!storageId || installingDownloaded === storageId}
-                                onClick={() => handleInstallDownloaded(entry)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleInstallDownloaded(entry);
+                                }}
                                 title={storageId ? `Install ${entry.displayName}` : 'No compatible runtime found'}
                               >
                                 {installingDownloaded === storageId ? 'Installing...' : 'Install'}
@@ -2176,8 +2358,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             </div>
                           </div>
                         </div>
-                      );
-                    })
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
 
@@ -2227,8 +2410,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                       padding: '0.72rem 0.8rem',
                       display: 'flex',
                       justifyContent: 'space-between',
-                      alignItems: 'flex-start'
+                      alignItems: 'flex-start',
+                      cursor: 'pointer'
                     }}
+                    onClick={() => openInstalledModView(mod)}
                   >
                     <div style={{ flex: 1 }}>
                       <h3 style={{ margin: 0, marginBottom: '0.32rem', fontSize: '0.98rem', color: mod.disabled ? '#93a0b2' : '#fff', display: 'flex', alignItems: 'center', gap: '0.42rem', flexWrap: 'wrap' }}>
@@ -2331,6 +2516,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                               }}
                               title={`View ${mod.name} on ${getSourceLabel(mod.source)}`}
                               onClick={(e) => {
+                                e.stopPropagation();
                                 if (!safeExternalUrl(mod.sourceUrl)) {
                                   e.preventDefault();
                                 }
@@ -2356,7 +2542,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         )}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '0.35rem', marginLeft: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                     <div style={{ display: 'flex', gap: '0.35rem', marginLeft: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }} onClick={(e) => e.stopPropagation()}>
                       {canAutoUpdate && updateAvailable && (
                         <button
                           onClick={() => handleUpdateMod(mod)}
@@ -2435,6 +2621,121 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
             </div>
           )}
         </div>
+
+        {activeModView && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              backgroundColor: 'rgba(9, 14, 24, 0.96)',
+              borderRadius: '0.75rem',
+              border: '1px solid #344259',
+              display: 'flex',
+              flexDirection: 'column',
+              zIndex: 45
+            }}
+          >
+            <div className="modal-header" style={{ borderBottom: '1px solid #2f3a4f' }}>
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <i className="fas fa-cube"></i>
+                Mod View
+              </h2>
+              <button className="btn btn-secondary btn-small" onClick={() => setActiveModView(null)}>
+                <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+                Back
+              </button>
+            </div>
+
+            <div style={{ padding: '1rem 1.25rem 1.25rem', overflowY: 'auto', display: 'grid', gap: '1rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '92px 1fr', gap: '1rem', alignItems: 'start' }}>
+                <div style={{ width: '92px', height: '92px', borderRadius: '14px', overflow: 'hidden', border: '1px solid #3a4a66', background: '#172131' }}>
+                  {(activeModView.iconCachePath || activeModView.iconUrl) ? (
+                    <img
+                      src={resolveImageSource(activeModView.iconCachePath) || resolveImageSource(activeModView.iconUrl)}
+                      alt={`${activeModView.name} icon`}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      onError={(e) => {
+                        const remote = resolveImageSource(activeModView.iconUrl);
+                        if (remote && e.currentTarget.src !== remote) {
+                          e.currentTarget.src = remote;
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: '#7d8fa9' }}>
+                      <i className="fas fa-puzzle-piece" style={{ fontSize: '1.6rem' }}></i>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <h3 style={{ margin: 0 }}>{activeModView.name}</h3>
+                  <div style={{ marginTop: '0.35rem', color: '#9ab0cb', fontSize: '0.85rem' }}>
+                    Source: {getSourceLabel(activeModView.source)} {activeModView.author ? `• ${activeModView.author}` : ''}
+                  </div>
+                  {activeModView.summary && (
+                    <p style={{ margin: '0.65rem 0 0', color: '#d5dfec', lineHeight: 1.55 }}>
+                      {activeModView.summary}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+                <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Downloads</div>
+                  <strong>{(activeModView.downloads || 0).toLocaleString()}</strong>
+                </div>
+                <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>
+                    {activeModView.source === 'nexusmods' ? 'Endorsements' : 'Likes'}
+                  </div>
+                  <strong>{(activeModView.likesOrEndorsements || 0).toLocaleString()}</strong>
+                </div>
+                <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Installed Version</div>
+                  <strong>{activeModView.installedVersion || 'unknown'}</strong>
+                </div>
+                <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Latest Version</div>
+                  <strong>{activeModView.latestVersion || 'unknown'}</strong>
+                </div>
+              </div>
+
+              {(activeModView.tags || []).length > 0 && (
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  {(activeModView.tags || []).map((tag) => (
+                    <span key={`${activeModView.id}-${tag}`} style={{ padding: '0.2rem 0.45rem', borderRadius: '999px', backgroundColor: '#38537a33', border: '1px solid #38537a66', color: '#a9c1e6', fontSize: '0.72rem' }}>
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                {activeModView.sourceUrl && (
+                  <a
+                    href={safeExternalUrl(activeModView.sourceUrl)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn btn-secondary btn-small"
+                    style={{ textDecoration: 'none' }}
+                    onClick={(e) => {
+                      if (!safeExternalUrl(activeModView.sourceUrl)) {
+                        e.preventDefault();
+                      }
+                    }}
+                  >
+                    <i className="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }}></i>
+                    Open Source Page
+                  </a>
+                )}
+                <button className="btn btn-secondary btn-small" onClick={() => setActiveModView(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
     </>

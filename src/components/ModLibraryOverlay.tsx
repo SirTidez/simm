@@ -57,6 +57,28 @@ interface DownloadedModGroup {
 
 type DownloadedFilter = 'all' | 'updates' | 'managed' | 'external' | 'installed';
 
+type LibraryLayoutMode = 'grid' | 'list';
+
+interface LibraryModViewState {
+  id: string;
+  name: string;
+  source: string;
+  author?: string;
+  summary?: string;
+  iconUrl?: string;
+  iconCachePath?: string;
+  sourceUrl?: string;
+  downloads?: number;
+  likesOrEndorsements?: number;
+  updatedAt?: string;
+  tags?: string[];
+  installedVersion?: string;
+  latestVersion?: string;
+  addedAt?: number;
+  installedAt?: number;
+  kind: 'downloaded' | 'thunderstore' | 'nexusmods';
+}
+
 const runtimeSuffixPatterns = [
   /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
@@ -85,6 +107,23 @@ const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: st
   }
   const [owner, ...rest] = sourceId.split('/');
   return { owner: owner || '', name: rest.join('/') };
+};
+
+const resolveImageSource = (pathOrUrl?: string): string | undefined => {
+  if (!pathOrUrl) {
+    return undefined;
+  }
+  if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+    return pathOrUrl;
+  }
+  const normalized = pathOrUrl.replace(/\\/g, '/');
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return `file:///${normalized}`;
+  }
+  if (normalized.startsWith('/')) {
+    return `file://${normalized}`;
+  }
+  return normalized;
 };
 
 const normalizeVersionToken = (value?: string): string => {
@@ -294,6 +333,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [runtimePrompt, setRuntimePrompt] = useState<RuntimePromptState | null>(null);
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
   const [downloadedSearch, setDownloadedSearch] = useState('');
+  const [gridFeatureEnabled, setGridFeatureEnabled] = useState<boolean>(() => {
+    return localStorage.getItem('mods.grid.feature') !== 'false';
+  });
+  const [layoutMode, setLayoutMode] = useState<LibraryLayoutMode>(() => {
+    const saved = localStorage.getItem('mods.layout.mode');
+    return saved === 'list' ? 'list' : 'grid';
+  });
+  const [activeModView, setActiveModView] = useState<LibraryModViewState | null>(null);
 
   const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
     tag_name: string;
@@ -338,6 +385,16 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     () => buildDownloadedGroups(library?.downloaded ?? []),
     [library]
   );
+
+  const useGridLayout = gridFeatureEnabled && layoutMode === 'grid';
+
+  useEffect(() => {
+    localStorage.setItem('mods.grid.feature', String(gridFeatureEnabled));
+  }, [gridFeatureEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('mods.layout.mode', layoutMode);
+  }, [layoutMode]);
 
   const getLatestDownloadedVersionForGroup = useCallback((group: DownloadedModGroup | undefined): string | undefined => {
     if (!group) {
@@ -1135,6 +1192,70 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     runDownload(hasIl2cpp ? 'IL2CPP' : 'Mono');
   };
 
+  const openDownloadedModView = useCallback((group: DownloadedModGroup) => {
+    const activeEntry = getActiveEntryForGroup(group) || group.entries[0];
+    setActiveModView({
+      id: group.key,
+      name: group.displayName,
+      source: activeEntry?.source || 'unknown',
+      author: group.author,
+      summary: activeEntry?.summary,
+      iconUrl: activeEntry?.iconUrl,
+      iconCachePath: activeEntry?.iconCachePath,
+      sourceUrl: activeEntry?.sourceUrl,
+      downloads: activeEntry?.downloads,
+      likesOrEndorsements: activeEntry?.likesOrEndorsements,
+      updatedAt: activeEntry?.updatedAt,
+      tags: activeEntry?.tags,
+      installedVersion: activeEntry?.installedVersion || activeEntry?.sourceVersion,
+      latestVersion: group.remoteVersion,
+      addedAt: activeEntry?.libraryAddedAt,
+      installedAt: activeEntry?.installedAt,
+      kind: 'downloaded',
+    });
+  }, [getActiveEntryForGroup]);
+
+  const openThunderstoreModView = useCallback((pkg: ThunderstorePackageGroup) => {
+    const il2cpp = pkg.packagesByRuntime.IL2CPP;
+    const mono = pkg.packagesByRuntime.Mono;
+    const representative = il2cpp || mono;
+    const version = representative?.versions?.[0];
+    const downloads = representative?.versions?.reduce((sum, item) => sum + (item.downloads || 0), 0) || 0;
+
+    setActiveModView({
+      id: pkg.key,
+      name: pkg.name,
+      source: 'thunderstore',
+      author: pkg.owner,
+      summary: version?.description,
+      iconUrl: (representative as any)?.icon,
+      sourceUrl: pkg.packageUrl,
+      downloads,
+      likesOrEndorsements: representative?.rating_score || 0,
+      updatedAt: representative?.date_updated,
+      tags: representative?.categories || [],
+      installedVersion: version?.version_number,
+      kind: 'thunderstore',
+    });
+  }, []);
+
+  const openNexusModView = useCallback((mod: NexusMod) => {
+    setActiveModView({
+      id: String(mod.mod_id),
+      name: mod.name,
+      source: 'nexusmods',
+      author: mod.author,
+      summary: mod.summary,
+      iconUrl: mod.picture_url,
+      sourceUrl: `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`,
+      downloads: mod.mod_downloads,
+      likesOrEndorsements: mod.endorsement_count,
+      updatedAt: mod.updated_time,
+      installedVersion: mod.version,
+      kind: 'nexusmods',
+    });
+  }, []);
+
   const s1apiActionLabel = s1apiInLibrary ? (s1apiNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
   const mlvscanActionLabel = mlvscanInLibrary ? (mlvscanNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
 
@@ -1201,7 +1322,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       )}
       <div
         className="mods-overlay"
-        style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}
+        style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}
       >
           <div className="modal-header">
             <h2>Mod Library</h2>
@@ -1217,6 +1338,40 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed, {downloadedSummary.managed} managed
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-secondary btn-small"
+                  onClick={() => setGridFeatureEnabled(prev => !prev)}
+                  title="Toggle new grid UI"
+                >
+                  <i className={`fas ${gridFeatureEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`} style={{ marginRight: '0.4rem' }}></i>
+                  New Grid UI {gridFeatureEnabled ? 'On' : 'Off'}
+                </button>
+                <div style={{ display: 'inline-flex', border: '1px solid #3a3a3a', borderRadius: '999px', overflow: 'hidden' }}>
+                  <button
+                    className="btn btn-small"
+                    onClick={() => setLayoutMode('grid')}
+                    style={{
+                      border: 'none',
+                      borderRadius: 0,
+                      backgroundColor: layoutMode === 'grid' ? '#4a90e2' : '#1f2735',
+                      color: layoutMode === 'grid' ? '#fff' : '#b5c1d3'
+                    }}
+                  >
+                    Grid
+                  </button>
+                  <button
+                    className="btn btn-small"
+                    onClick={() => setLayoutMode('list')}
+                    style={{
+                      border: 'none',
+                      borderRadius: 0,
+                      backgroundColor: layoutMode === 'list' ? '#4a90e2' : '#1f2735',
+                      color: layoutMode === 'list' ? '#fff' : '#b5c1d3'
+                    }}
+                  >
+                    List
+                  </button>
+                </div>
                 <button
                   className="btn btn-secondary btn-small"
                   onClick={() => setShowDiscovery(prev => !prev)}
@@ -1568,7 +1723,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             {(showSearchResults || showNexusModsResults) && (
               <div style={{ padding: '1rem 1.25rem 1rem' }}>
                 {showSearchResults && searchResults.length > 0 && (
-                  <div style={{ display: 'grid', gap: '1rem' }}>
+                  <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
                     {searchResults.filter(pkg => {
                       // Hide mods that are already in the downloaded library
                       const tsKey = `thunderstore::${pkg.key}`;
@@ -1578,7 +1733,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       if (pkg.packagesByRuntime.IL2CPP) runtimes.push('IL2CPP');
                       if (pkg.packagesByRuntime.Mono) runtimes.push('Mono');
                       return (
-                        <div key={pkg.key} className="mod-card" style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a' }}>
+                        <div
+                          key={pkg.key}
+                          className="mod-card"
+                          style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                          onClick={() => openThunderstoreModView(pkg)}
+                        >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <strong style={{ fontSize: '1rem' }}>{pkg.name}</strong>
@@ -1612,7 +1772,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                               <button
                                 className="btn btn-primary btn-small"
                                 disabled={downloading === pkg.key}
-                                onClick={() => handleDownloadThunderstore(pkg)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDownloadThunderstore(pkg);
+                                }}
                               >
                                 {downloading === pkg.key ? 'Downloading...' : 'Download'}
                               </button>
@@ -1625,7 +1788,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 )}
 
                 {showNexusModsResults && nexusModsSearchResults.length > 0 && (
-                  <div style={{ display: 'grid', gap: '1rem' }}>
+                  <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
                     {nexusModsSearchResults.map(mod => {
                       const files = nexusModsFiles.get(mod.mod_id) ?? null;
                       const loading = nexusModsLoading.has(mod.mod_id);
@@ -1633,7 +1796,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       const hasIl2cpp = fileNames.some(name => name.includes('il2cpp'));
                       const hasMono = fileNames.some(name => name.includes('mono'));
                       return (
-                        <div key={mod.mod_id} className="mod-card" style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a' }}>
+                        <div
+                          key={mod.mod_id}
+                          className="mod-card"
+                          style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                          onClick={() => openNexusModView(mod)}
+                        >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <strong style={{ fontSize: '1rem' }}>{mod.name}</strong>
@@ -1680,7 +1848,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                               <button
                                 className="btn btn-primary btn-small"
                                 disabled={downloading === `nexus-${mod.mod_id}` || loading}
-                                onClick={() => handleDownloadNexusMod(mod.mod_id)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDownloadNexusMod(mod.mod_id);
+                                }}
                               >
                                 {downloading === `nexus-${mod.mod_id}` ? 'Downloading...' : loading ? 'Loading...' : 'Download'}
                               </button>
@@ -1756,7 +1927,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <div style={{ color: '#888' }}>No downloaded mods match this filter.</div>
               )}
               {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
-                <div style={{ display: 'grid', gap: '0.55rem' }}>
+                <div style={{ display: 'grid', gap: '0.65rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(360px, 1fr))' : '1fr' }}>
                   {filteredDownloadedGroups.map(group => {
                     const sortedEntries = getSortedGroupEntries(group);
                     const activeEntry = getActiveEntryForGroup(group);
@@ -1772,9 +1943,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                     const hasNewerVersion = sortedEntries.length > 1 && activeIndex > 0;
 
                     return (
-                    <div key={group.key} className="mod-card compact-row" style={{ padding: '0.68rem 0.75rem', backgroundColor: '#2a2a2a', borderRadius: '7px', border: '1px solid #3a3a3a' }}>
+                    <div
+                      key={group.key}
+                      className="mod-card compact-row"
+                      style={{ padding: '0.68rem 0.75rem', backgroundColor: '#2a2a2a', borderRadius: '7px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
+                      onClick={() => openDownloadedModView(group)}
+                    >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.7rem' }}>
-                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', flex: 1 }}>
+                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', flex: 1 }} onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={group.storageIds.every(id => selectedModIds.has(id))}
@@ -1819,7 +1995,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                             </div>
                           </div>
                         </label>
-                         <div style={{ display: 'flex', gap: '0.32rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }}>
+                         <div style={{ display: 'flex', gap: '0.32rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
                           {groupHasUpdate && (
                             <span style={{
                               fontSize: '0.64rem',
@@ -2015,6 +2191,107 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               ) : null}
             </div>
           </div>
+
+          {activeModView && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                backgroundColor: 'rgba(9, 14, 24, 0.96)',
+                borderRadius: '0.75rem',
+                border: '1px solid #344259',
+                display: 'flex',
+                flexDirection: 'column',
+                zIndex: 40
+              }}
+            >
+              <div className="modal-header" style={{ borderBottom: '1px solid #2f3a4f' }}>
+                <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <i className="fas fa-cube"></i>
+                  Mod View
+                </h2>
+                <button className="btn btn-secondary btn-small" onClick={() => setActiveModView(null)}>
+                  <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+                  Back
+                </button>
+              </div>
+              <div style={{ padding: '1rem 1.25rem 1.25rem', overflowY: 'auto', display: 'grid', gap: '1rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '92px 1fr', gap: '1rem', alignItems: 'start' }}>
+                  <div style={{ width: '92px', height: '92px', borderRadius: '14px', overflow: 'hidden', border: '1px solid #3a4a66', background: '#172131' }}>
+                    {(activeModView.iconCachePath || activeModView.iconUrl) ? (
+                      <img
+                        src={resolveImageSource(activeModView.iconCachePath) || resolveImageSource(activeModView.iconUrl)}
+                        alt={`${activeModView.name} icon`}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        onError={(e) => {
+                          const target = e.currentTarget;
+                          const remoteSource = resolveImageSource(activeModView.iconUrl);
+                          if (remoteSource && target.src !== remoteSource) {
+                            target.src = remoteSource;
+                          }
+                        }}
+                      />
+                    ) : (
+                      <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: '#7d8fa9' }}>
+                        <i className="fas fa-puzzle-piece" style={{ fontSize: '1.6rem' }}></i>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <h3 style={{ margin: 0 }}>{activeModView.name}</h3>
+                    <div style={{ marginTop: '0.35rem', color: '#9ab0cb', fontSize: '0.85rem' }}>
+                      Source: {activeModView.source} {activeModView.author ? `• ${activeModView.author}` : ''}
+                    </div>
+                    {activeModView.summary && (
+                      <p style={{ margin: '0.65rem 0 0', color: '#d5dfec', lineHeight: 1.55 }}>
+                        {activeModView.summary}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                    <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Downloads</div>
+                    <strong>{(activeModView.downloads || 0).toLocaleString()}</strong>
+                  </div>
+                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                    <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>
+                      {activeModView.source === 'nexusmods' ? 'Endorsements' : 'Likes'}
+                    </div>
+                    <strong>{(activeModView.likesOrEndorsements || 0).toLocaleString()}</strong>
+                  </div>
+                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                    <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Installed Version</div>
+                    <strong>{activeModView.installedVersion || 'unknown'}</strong>
+                  </div>
+                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                    <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Latest Version</div>
+                    <strong>{activeModView.latestVersion || 'unknown'}</strong>
+                  </div>
+                </div>
+                {(activeModView.tags || []).length > 0 && (
+                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                    {(activeModView.tags || []).map((tag) => (
+                      <span key={`${activeModView.id}-${tag}`} style={{ padding: '0.2rem 0.45rem', borderRadius: '999px', backgroundColor: '#38537a33', border: '1px solid #38537a66', color: '#a9c1e6', fontSize: '0.72rem' }}>
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  {activeModView.sourceUrl && (
+                    <a href={activeModView.sourceUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-small" style={{ textDecoration: 'none' }}>
+                      <i className="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }}></i>
+                      Open Source Page
+                    </a>
+                  )}
+                  <button className="btn btn-secondary btn-small" onClick={() => setActiveModView(null)}>
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
       </div>
 
       {showS1APIVersionSelector && (
