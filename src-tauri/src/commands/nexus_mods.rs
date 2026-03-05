@@ -330,6 +330,27 @@ pub async fn install_nexus_mods_mod(
         "sourceUrl": source_url,
         "modName": mod_name,
         "author": author,
+        "summary": mod_info.get("summary").and_then(|v| v.as_str()).unwrap_or_default(),
+        "iconUrl": mod_info
+            .get("picture_url")
+            .or_else(|| mod_info.get("pictureUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        "downloads": mod_info
+            .get("mod_downloads")
+            .or_else(|| mod_info.get("downloads"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        "likesOrEndorsements": mod_info
+            .get("endorsement_count")
+            .or_else(|| mod_info.get("endorsements"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        "updatedAt": mod_info
+            .get("updated_at")
+            .or_else(|| mod_info.get("updatedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
     });
 
     eprintln!("[DEBUG] About to call install_zip_mod for mod {} file {}", mod_id, file_id);

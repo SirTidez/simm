@@ -11,6 +11,8 @@ use crate::events;
 use tauri::{AppHandle, State};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
@@ -197,10 +199,29 @@ pub async fn check_all_updates(
         .filter(|env| matches!(env.status, crate::types::EnvironmentStatus::Completed))
         .collect();
 
+    let mut env_mod_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_mods_refreshing = 0usize;
+    for env in &completed_envs {
+        let count = match mods_service.list_mods(&env.output_dir).await {
+            Ok(value) => value
+                .get("mods")
+                .and_then(|m| m.as_array())
+                .map(|m| m.len())
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+        env_mod_counts.insert(env.id.clone(), count);
+        total_mods_refreshing = total_mods_refreshing.saturating_add(count);
+    }
+
+    let refresh_counter = Arc::new(AtomicUsize::new(total_mods_refreshing));
+    let _ = events::emit_mod_metadata_refresh_status(&app, total_mods_refreshing);
+
     // Check mod updates for all completed environments in parallel
     let app_handle = app.clone();
     let mod_update_tasks: Vec<_> = completed_envs.iter().map(|env| {
         let env_id = env.id.clone();
+        let env_mod_count = env_mod_counts.get(&env.id).copied().unwrap_or(0);
         let app = app_handle.clone();
         let mod_update_service = mod_update_service.clone();
         let mods_service = mods_service.clone();
@@ -208,6 +229,7 @@ pub async fn check_all_updates(
         let thunderstore_service = thunderstore_service.clone();
         let nexus_mods_service = nexus_mods_service.clone();
         let github_service = github_service.clone();
+        let refresh_counter = refresh_counter.clone();
 
         tokio::spawn(async move {
             match mod_update_service.check_mod_updates(
@@ -231,6 +253,18 @@ pub async fn check_all_updates(
                     eprintln!("[UpdateCheck] Failed to check mod updates for environment {}: {}", env_id, e);
                 }
             }
+
+            let remaining = loop {
+                let current = refresh_counter.load(Ordering::SeqCst);
+                let next = current.saturating_sub(env_mod_count);
+                if refresh_counter
+                    .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break next;
+                }
+            };
+            let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
         })
     }).collect();
 

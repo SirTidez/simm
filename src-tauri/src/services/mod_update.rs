@@ -78,6 +78,54 @@ impl ModUpdateService {
                                     metadata.last_update_check = Some(now);
                                     metadata.update_available = Some(update_available);
                                     metadata.remote_version = Some(latest_version.clone());
+                                    metadata.summary = package
+                                        .get("versions")
+                                        .and_then(|v| v.as_array())
+                                        .and_then(|v| v.first())
+                                        .and_then(|v| v.get("description"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                        .or_else(|| {
+                                            package
+                                                .get("latest")
+                                                .and_then(|v| v.get("description"))
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                        });
+                                    metadata.icon_url = package
+                                        .get("icon")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    metadata.icon_cache_path = mods_service
+                                        .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                        .await
+                                        .or_else(|| metadata.icon_cache_path.clone());
+                                    metadata.downloads = package
+                                        .get("versions")
+                                        .and_then(|v| v.as_array())
+                                        .map(|versions| {
+                                            versions
+                                                .iter()
+                                                .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                                                .sum::<u64>()
+                                        });
+                                    metadata.likes_or_endorsements = package
+                                        .get("rating_score")
+                                        .and_then(|v| v.as_i64());
+                                    metadata.updated_at = package
+                                        .get("date_updated")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    metadata.tags = package
+                                        .get("categories")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                                .collect::<Vec<String>>()
+                                        })
+                                        .filter(|tags| !tags.is_empty());
+                                    metadata.metadata_last_refreshed = Some(now);
 
                                     results.push(serde_json::json!({
                                         "modFileName": file_name,
@@ -116,6 +164,33 @@ impl ModUpdateService {
                                         metadata.last_update_check = Some(now);
                                         metadata.update_available = Some(update_available);
                                         metadata.remote_version = Some(latest_version.clone());
+                                        metadata.summary = mod_info
+                                            .get("summary")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.icon_url = mod_info
+                                            .get("picture_url")
+                                            .or_else(|| mod_info.get("pictureUrl"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.icon_cache_path = mods_service
+                                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                            .await
+                                            .or_else(|| metadata.icon_cache_path.clone());
+                                        metadata.downloads = mod_info
+                                            .get("mod_downloads")
+                                            .or_else(|| mod_info.get("downloads"))
+                                            .and_then(|v| v.as_u64());
+                                        metadata.likes_or_endorsements = mod_info
+                                            .get("endorsement_count")
+                                            .or_else(|| mod_info.get("endorsements"))
+                                            .and_then(|v| v.as_i64());
+                                        metadata.updated_at = mod_info
+                                            .get("updated_at")
+                                            .or_else(|| mod_info.get("updatedAt"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.metadata_last_refreshed = Some(now);
 
                                         results.push(serde_json::json!({
                                             "modFileName": file_name,
@@ -160,6 +235,20 @@ impl ModUpdateService {
                                         metadata.last_update_check = Some(now);
                                         metadata.update_available = Some(update_available);
                                         metadata.remote_version = Some(latest_version.clone());
+                                        metadata.summary = latest_release
+                                            .get("body")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.icon_cache_path = mods_service
+                                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                            .await
+                                            .or_else(|| metadata.icon_cache_path.clone());
+                                        metadata.updated_at = latest_release
+                                            .get("published_at")
+                                            .or_else(|| latest_release.get("created_at"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.metadata_last_refreshed = Some(now);
 
                                         results.push(serde_json::json!({
                                             "modFileName": file_name,
@@ -801,9 +890,18 @@ mod tests {
                 author: None,
                 mod_name: Some("Example".to_string()),
                 source_url: None,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
                 installed_version: None,
+                library_added_at: None,
                 installed_at: None,
                 last_update_check: None,
+                metadata_last_refreshed: None,
                 update_available: None,
                 remote_version: None,
                 detected_runtime: None,

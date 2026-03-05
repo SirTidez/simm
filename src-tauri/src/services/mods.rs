@@ -9,6 +9,7 @@ use tokio::fs;
 #[cfg(target_os = "windows")]
 use tokio::process::Command;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 use unrar::Archive;
 use chrono::Utc;
@@ -46,6 +47,15 @@ struct ModInfo {
     disabled: Option<bool>,
     mod_storage_id: Option<String>,
     managed: bool,
+    summary: Option<String>,
+    icon_url: Option<String>,
+    icon_cache_path: Option<String>,
+    downloads: Option<u64>,
+    likes_or_endorsements: Option<i64>,
+    updated_at: Option<String>,
+    tags: Option<Vec<String>>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    installed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -153,6 +163,187 @@ impl ModsService {
         storage_path.join(STORAGE_METADATA_FILE)
     }
 
+    fn metadata_string(metadata: Option<&serde_json::Value>, key: &str) -> Option<String> {
+        metadata
+            .and_then(|m| m.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn metadata_u64(metadata: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+        metadata.and_then(|m| m.get(key)).and_then(|v| v.as_u64())
+    }
+
+    fn metadata_i64(metadata: Option<&serde_json::Value>, key: &str) -> Option<i64> {
+        metadata.and_then(|m| m.get(key)).and_then(|v| v.as_i64())
+    }
+
+    fn metadata_tags(metadata: Option<&serde_json::Value>) -> Option<Vec<String>> {
+        let raw = metadata
+            .and_then(|m| m.get("tags"))
+            .and_then(|v| v.as_array())?;
+
+        let tags: Vec<String> = raw
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        }
+    }
+
+    async fn get_mod_icon_cache_dir(&self) -> Result<PathBuf> {
+        let cache_dir = crate::db::get_data_dir()?
+            .join("cache")
+            .join("mod-icons");
+        fs::create_dir_all(&cache_dir)
+            .await
+            .context("Failed to create mod icon cache directory")?;
+        Ok(cache_dir)
+    }
+
+    async fn enforce_mod_icon_cache_limit(&self) -> Result<()> {
+        let cache_dir = self.get_mod_icon_cache_dir().await?;
+        let mut settings_service = SettingsService::new(self.pool.clone())
+            .context("Failed to create settings service for icon cache limit")?;
+        let settings = settings_service
+            .load_settings()
+            .await
+            .context("Failed to load settings for icon cache limit")?;
+
+        let max_mb = settings.mod_icon_cache_limit_mb.unwrap_or(500) as u64;
+        let max_bytes = max_mb.saturating_mul(1024).saturating_mul(1024);
+
+        let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        let mut total_size = 0u64;
+        let mut entries = fs::read_dir(&cache_dir)
+            .await
+            .context("Failed to read mod icon cache directory")?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let meta = entry.metadata().await?;
+            if !meta.is_file() {
+                continue;
+            }
+            let size = meta.len();
+            let modified = meta
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            total_size = total_size.saturating_add(size);
+            files.push((path, size, modified));
+        }
+
+        if total_size <= max_bytes {
+            return Ok(());
+        }
+
+        files.sort_by_key(|(_, _, modified)| *modified);
+        for (path, size, _) in files {
+            if total_size <= max_bytes {
+                break;
+            }
+            if fs::remove_file(&path).await.is_ok() {
+                total_size = total_size.saturating_sub(size);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn cache_icon_from_url(&self, icon_url: Option<&str>) -> Option<String> {
+        let icon_url = icon_url?.trim();
+        if icon_url.is_empty() {
+            return None;
+        }
+
+        let parsed = reqwest::Url::parse(icon_url).ok()?;
+        if parsed.scheme() != "https" {
+            return None;
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(icon_url.as_bytes());
+        let hash = hex::encode(hasher.finalize());
+
+        let ext = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .and_then(|segment| segment.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()))
+            .filter(|e| ["png", "jpg", "jpeg", "webp", "gif"].contains(&e.as_str()))
+            .unwrap_or_else(|| "img".to_string());
+
+        let cache_dir = self.get_mod_icon_cache_dir().await.ok()?;
+        let file_path = cache_dir.join(format!("{}.{}", hash, ext));
+        if file_path.exists() {
+            return Some(file_path.to_string_lossy().to_string());
+        }
+
+        let response = reqwest::get(parsed).await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let bytes = response.bytes().await.ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+
+        if fs::write(&file_path, &bytes).await.is_err() {
+            return None;
+        }
+
+        let _ = self.enforce_mod_icon_cache_limit().await;
+        Some(file_path.to_string_lossy().to_string())
+    }
+
+    pub async fn cache_icon_for_metadata(&self, icon_url: Option<&str>) -> Option<String> {
+        self.cache_icon_from_url(icon_url).await
+    }
+
+    async fn remove_icon_cache_if_orphaned(
+        &self,
+        icon_cache_path: Option<&str>,
+        excluding_storage_id: &str,
+    ) -> Result<()> {
+        let Some(icon_path) = icon_cache_path.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for icon cache pruning")?;
+
+        let still_referenced = rows.into_iter().any(|(_, data)| {
+            serde_json::from_str::<ModMetadata>(&data)
+                .ok()
+                .map(|meta| {
+                    meta.mod_storage_id.as_deref() != Some(excluding_storage_id)
+                        && meta.icon_cache_path.as_deref() == Some(icon_path)
+                })
+                .unwrap_or(false)
+        });
+
+        if still_referenced {
+            return Ok(());
+        }
+
+        let candidate_path = PathBuf::from(icon_path);
+        if candidate_path.exists() {
+            let _ = fs::remove_file(candidate_path).await;
+        }
+
+        Ok(())
+    }
+
     async fn load_storage_metadata(&self, storage_path: &Path) -> Result<Option<ModMetadata>> {
         let metadata_file = self.storage_metadata_path(storage_path);
         if !metadata_file.exists() {
@@ -196,14 +387,41 @@ impl ModsService {
         if primary.source_url.is_none() {
             primary.source_url = fallback.source_url;
         }
+        if primary.summary.is_none() {
+            primary.summary = fallback.summary;
+        }
+        if primary.icon_url.is_none() {
+            primary.icon_url = fallback.icon_url;
+        }
+        if primary.icon_cache_path.is_none() {
+            primary.icon_cache_path = fallback.icon_cache_path;
+        }
+        if primary.downloads.is_none() {
+            primary.downloads = fallback.downloads;
+        }
+        if primary.likes_or_endorsements.is_none() {
+            primary.likes_or_endorsements = fallback.likes_or_endorsements;
+        }
+        if primary.updated_at.is_none() {
+            primary.updated_at = fallback.updated_at;
+        }
+        if primary.tags.is_none() {
+            primary.tags = fallback.tags;
+        }
         if primary.installed_version.is_none() {
             primary.installed_version = fallback.installed_version;
+        }
+        if primary.library_added_at.is_none() {
+            primary.library_added_at = fallback.library_added_at;
         }
         if primary.installed_at.is_none() {
             primary.installed_at = fallback.installed_at;
         }
         if primary.last_update_check.is_none() {
             primary.last_update_check = fallback.last_update_check;
+        }
+        if primary.metadata_last_refreshed.is_none() {
+            primary.metadata_last_refreshed = fallback.metadata_last_refreshed;
         }
         if primary.update_available.is_none() {
             primary.update_available = fallback.update_available;
@@ -436,9 +654,18 @@ impl ModsService {
                 author: None,
                 mod_name: None,
                 source_url: None,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
                 installed_version: None,
+                library_added_at: None,
                 installed_at: None,
                 last_update_check: None,
+                metadata_last_refreshed: None,
                 update_available: None,
                 remote_version: None,
                 detected_runtime: None,
@@ -1072,6 +1299,14 @@ impl ModsService {
                 .and_then(|m| m.source_url.clone());
             let mod_storage_id = file_metadata.as_ref().and_then(|m| m.mod_storage_id.clone());
             let managed = mod_storage_id.is_some();
+            let summary = file_metadata.as_ref().and_then(|m| m.summary.clone());
+            let icon_url = file_metadata.as_ref().and_then(|m| m.icon_url.clone());
+            let icon_cache_path = file_metadata.as_ref().and_then(|m| m.icon_cache_path.clone());
+            let downloads = file_metadata.as_ref().and_then(|m| m.downloads);
+            let likes_or_endorsements = file_metadata.as_ref().and_then(|m| m.likes_or_endorsements);
+            let updated_at = file_metadata.as_ref().and_then(|m| m.updated_at.clone());
+            let tags = file_metadata.as_ref().and_then(|m| m.tags.clone());
+            let installed_at = file_metadata.as_ref().and_then(|m| m.installed_at);
 
             mods.push(ModInfo {
                 name: mod_name.clone(),
@@ -1083,6 +1318,14 @@ impl ModsService {
                 disabled: Some(is_disabled),
                 mod_storage_id,
                 managed,
+                summary,
+                icon_url,
+                icon_cache_path,
+                downloads,
+                likes_or_endorsements,
+                updated_at,
+                tags,
+                installed_at,
             });
         }
 
@@ -1182,9 +1425,18 @@ impl ModsService {
                             author: None,
                             mod_name: None,
                             source_url: None,
+                            summary: None,
+                            icon_url: None,
+                            icon_cache_path: None,
+                            downloads: None,
+                            likes_or_endorsements: None,
+                            updated_at: None,
+                            tags: None,
                             installed_version: None,
+                            library_added_at: None,
                             installed_at: None,
                             last_update_check: None,
+                            metadata_last_refreshed: None,
                             update_available: None,
                             remote_version: None,
                             detected_runtime: None,
@@ -1266,7 +1518,16 @@ impl ModsService {
                 source_id: template_meta.source_id.clone(),
                 source_version: template_meta.source_version.clone(),
                 source_url: template_meta.source_url.clone(),
+                summary: template_meta.summary.clone(),
+                icon_url: template_meta.icon_url.clone(),
+                icon_cache_path: template_meta.icon_cache_path.clone(),
+                downloads: template_meta.downloads,
+                likes_or_endorsements: template_meta.likes_or_endorsements,
+                updated_at: template_meta.updated_at.clone(),
+                tags: template_meta.tags.clone(),
                 installed_version: installed_version.clone(),
+                library_added_at: template_meta.library_added_at,
+                installed_at: template_meta.installed_at,
                 author: template_meta.author.clone(),
                 update_available: template_meta.update_available,
                 remote_version: template_meta.remote_version.clone(),
@@ -1277,6 +1538,34 @@ impl ModsService {
                 installed_in_by_runtime: installed_in_by_runtime.clone(),
                 files_by_runtime: files_by_runtime.clone(),
             });
+
+            if entry.summary.is_none() {
+                entry.summary = template_meta.summary.clone();
+            }
+            if entry.icon_url.is_none() {
+                entry.icon_url = template_meta.icon_url.clone();
+            }
+            if entry.icon_cache_path.is_none() {
+                entry.icon_cache_path = template_meta.icon_cache_path.clone();
+            }
+            if entry.downloads.is_none() {
+                entry.downloads = template_meta.downloads;
+            }
+            if entry.likes_or_endorsements.is_none() {
+                entry.likes_or_endorsements = template_meta.likes_or_endorsements;
+            }
+            if entry.updated_at.is_none() {
+                entry.updated_at = template_meta.updated_at.clone();
+            }
+            if entry.tags.is_none() {
+                entry.tags = template_meta.tags.clone();
+            }
+            if entry.library_added_at.is_none() {
+                entry.library_added_at = template_meta.library_added_at;
+            }
+            if entry.installed_at.is_none() {
+                entry.installed_at = template_meta.installed_at;
+            }
 
             let mut file_set: HashSet<String> = entry.files.iter().cloned().collect();
             for file in files {
@@ -1412,8 +1701,9 @@ impl ModsService {
             installed_files = result?;
         }
 
-        let source_str = metadata
-            .as_ref()
+        let metadata_ref = metadata.as_ref();
+
+        let source_str = metadata_ref
             .and_then(|m| m.get("source").and_then(|s| s.as_str()));
 
         let mod_source = match source_str {
@@ -1425,15 +1715,18 @@ impl ModsService {
             _ => None,
         };
 
-        let mod_name = metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_url = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let mod_name = Self::metadata_string(metadata_ref, "modName");
+        let author = Self::metadata_string(metadata_ref, "author");
+        let source_url = Self::metadata_string(metadata_ref, "sourceUrl");
+        let summary = Self::metadata_string(metadata_ref, "summary");
+        let icon_url = Self::metadata_string(metadata_ref, "iconUrl");
+        let icon_cache_path = self.cache_icon_from_url(icon_url.as_deref()).await;
+        let downloads = Self::metadata_u64(metadata_ref, "downloads");
+        let likes_or_endorsements = Self::metadata_i64(metadata_ref, "likesOrEndorsements")
+            .or_else(|| Self::metadata_i64(metadata_ref, "endorsementCount"))
+            .or_else(|| Self::metadata_i64(metadata_ref, "ratingScore"));
+        let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
+        let tags = Self::metadata_tags(metadata_ref);
 
         let storage_metadata = ModMetadata {
             source: mod_source,
@@ -1442,9 +1735,18 @@ impl ModsService {
             author,
             mod_name,
             source_url,
+            summary,
+            icon_url,
+            icon_cache_path,
+            downloads,
+            likes_or_endorsements,
+            updated_at,
+            tags,
             installed_version: source_version,
+            library_added_at: Some(Utc::now()),
             installed_at: None,
             last_update_check: None,
+            metadata_last_refreshed: None,
             update_available: None,
             remote_version: None,
             detected_runtime: runtime,
@@ -1541,9 +1843,18 @@ impl ModsService {
                     author: template_meta.as_ref().and_then(|t| t.author.clone()),
                     mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
                     source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                    summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
+                    icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
+                    icon_cache_path: template_meta.as_ref().and_then(|t| t.icon_cache_path.clone()),
+                    downloads: template_meta.as_ref().and_then(|t| t.downloads),
+                    likes_or_endorsements: template_meta.as_ref().and_then(|t| t.likes_or_endorsements),
+                    updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
+                    tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
                     installed_version: template_meta.as_ref().and_then(|t| t.installed_version.clone()),
+                    library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
                     installed_at: None,
                     last_update_check: None,
+                    metadata_last_refreshed: None,
                     update_available: None,
                     remote_version: None,
                     detected_runtime: None,
@@ -1559,6 +1870,15 @@ impl ModsService {
                 meta.author = template.author.clone();
                 meta.mod_name = template.mod_name.clone();
                 meta.source_url = template.source_url.clone();
+                meta.summary = template.summary.clone();
+                meta.icon_url = template.icon_url.clone();
+                meta.icon_cache_path = template.icon_cache_path.clone();
+                meta.downloads = template.downloads;
+                meta.likes_or_endorsements = template.likes_or_endorsements;
+                meta.updated_at = template.updated_at.clone();
+                meta.tags = template.tags.clone();
+                meta.library_added_at = template.library_added_at;
+                meta.metadata_last_refreshed = template.metadata_last_refreshed;
             }
             meta.installed_version = template_meta
                 .as_ref()
@@ -1776,11 +2096,23 @@ impl ModsService {
 
         let storage_dir = self.get_mods_storage_dir().await?;
         let storage_path = storage_dir.join(storage_id);
+        let storage_meta = if storage_path.exists() {
+            self.load_storage_metadata(&storage_path).await?
+        } else {
+            None
+        };
         if storage_path.exists() {
             tokio::fs::remove_dir_all(&storage_path)
                 .await
                 .context("Failed to remove downloaded mod files")?;
         }
+
+        self
+            .remove_icon_cache_if_orphaned(
+                storage_meta.as_ref().and_then(|m| m.icon_cache_path.as_deref()),
+                storage_id,
+            )
+            .await?;
 
         Ok(serde_json::json!({
             "deleted": true,
@@ -1924,8 +2256,12 @@ impl ModsService {
             eprintln!("[DEBUG] Found Thunderstore manifest.json");
             eprintln!("[DEBUG] Manifest contents: {}", serde_json::to_string_pretty(manifest).unwrap_or_default());
 
-            // Override metadata with Thunderstore data
-            let mut ts_metadata = serde_json::Map::new();
+            // Override metadata with Thunderstore data while preserving upstream card fields.
+            let mut ts_metadata = effective_metadata
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
             ts_metadata.insert("source".to_string(), serde_json::Value::String("thunderstore".to_string()));
 
             if let Some(name) = manifest.get("name").and_then(|v| v.as_str()) {
@@ -1942,6 +2278,10 @@ impl ModsService {
 
             if let Some(website) = manifest.get("website_url").and_then(|v| v.as_str()) {
                 ts_metadata.insert("sourceUrl".to_string(), serde_json::Value::String(website.to_string()));
+            }
+
+            if let Some(description) = manifest.get("description").and_then(|v| v.as_str()) {
+                ts_metadata.insert("summary".to_string(), serde_json::Value::String(description.to_string()));
             }
 
             // Create source ID from author/name
@@ -2075,9 +2415,18 @@ impl ModsService {
                                 author: template_meta.as_ref().and_then(|t| t.author.clone()),
                                 mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
                                 source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                                summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
+                                icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
+                                icon_cache_path: template_meta.as_ref().and_then(|t| t.icon_cache_path.clone()),
+                                downloads: template_meta.as_ref().and_then(|t| t.downloads),
+                                likes_or_endorsements: template_meta.as_ref().and_then(|t| t.likes_or_endorsements),
+                                updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
+                                tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
                                 installed_version: template_meta.as_ref().and_then(|t| t.installed_version.clone()),
+                                library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
                                 installed_at: None,
                                 last_update_check: None,
+                                metadata_last_refreshed: None,
                                 update_available: None,
                                 remote_version: None,
                                 detected_runtime: template_meta.as_ref().and_then(|t| t.detected_runtime.clone()),
@@ -2093,6 +2442,15 @@ impl ModsService {
                             meta.author = template.author.clone();
                             meta.mod_name = template.mod_name.clone();
                             meta.source_url = template.source_url.clone();
+                            meta.summary = template.summary.clone();
+                            meta.icon_url = template.icon_url.clone();
+                            meta.icon_cache_path = template.icon_cache_path.clone();
+                            meta.downloads = template.downloads;
+                            meta.likes_or_endorsements = template.likes_or_endorsements;
+                            meta.updated_at = template.updated_at.clone();
+                            meta.tags = template.tags.clone();
+                            meta.library_added_at = template.library_added_at;
+                            meta.metadata_last_refreshed = template.metadata_last_refreshed;
                             meta.detected_runtime = template.detected_runtime.clone();
                             meta.runtime_match = template.runtime_match;
                         }
@@ -2352,15 +2710,19 @@ impl ModsService {
 
         eprintln!("[DEBUG] install_zip_mod: mod_source = {:?}", mod_source);
         // source_id and source_version are already extracted above for duplicate detection
-        let source_url = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let mod_name = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let metadata_ref = effective_metadata.as_ref();
+        let source_url = Self::metadata_string(metadata_ref, "sourceUrl");
+        let mod_name = Self::metadata_string(metadata_ref, "modName");
+        let author = Self::metadata_string(metadata_ref, "author");
+        let summary = Self::metadata_string(metadata_ref, "summary");
+        let icon_url = Self::metadata_string(metadata_ref, "iconUrl");
+        let icon_cache_path = self.cache_icon_from_url(icon_url.as_deref()).await;
+        let downloads = Self::metadata_u64(metadata_ref, "downloads");
+        let likes_or_endorsements = Self::metadata_i64(metadata_ref, "likesOrEndorsements")
+            .or_else(|| Self::metadata_i64(metadata_ref, "endorsementCount"))
+            .or_else(|| Self::metadata_i64(metadata_ref, "ratingScore"));
+        let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
+        let tags = Self::metadata_tags(metadata_ref);
 
         // Detect runtime from environment
         let env_runtime = match runtime {
@@ -2419,12 +2781,37 @@ impl ModsService {
                 if author.is_some() {
                     meta.author = author.clone();
                 }
+                if summary.is_some() {
+                    meta.summary = summary.clone();
+                }
+                if icon_url.is_some() {
+                    meta.icon_url = icon_url.clone();
+                }
+                if icon_cache_path.is_some() {
+                    meta.icon_cache_path = icon_cache_path.clone();
+                }
+                if downloads.is_some() {
+                    meta.downloads = downloads;
+                }
+                if likes_or_endorsements.is_some() {
+                    meta.likes_or_endorsements = likes_or_endorsements;
+                }
+                if updated_at.is_some() {
+                    meta.updated_at = updated_at.clone();
+                }
+                if tags.is_some() {
+                    meta.tags = tags.clone();
+                }
                 // Update runtime detection
                 meta.detected_runtime = detected_runtime.clone();
                 meta.runtime_match = runtime_match;
                 // Update storage info
                 meta.mod_storage_id = Some(mod_id.clone());
                 meta.symlink_paths = Some(symlink_paths.clone());
+                if meta.library_added_at.is_none() {
+                    meta.library_added_at = Some(Utc::now());
+                }
+                meta.metadata_last_refreshed = Some(Utc::now());
             } else {
                 // Create new metadata entry
                 // Extract version from storage file
@@ -2437,9 +2824,18 @@ impl ModsService {
                     author: author.clone(),
                     mod_name: mod_name.clone(),
                     source_url: source_url.clone(),
+                    summary: summary.clone(),
+                    icon_url: icon_url.clone(),
+                    icon_cache_path: icon_cache_path.clone(),
+                    downloads,
+                    likes_or_endorsements,
+                    updated_at: updated_at.clone(),
+                    tags: tags.clone(),
                     installed_version: installed_version,
+                    library_added_at: Some(Utc::now()),
                     installed_at: Some(Utc::now()),
                     last_update_check: None,
+                    metadata_last_refreshed: Some(Utc::now()),
                     update_available: None,
                     remote_version: None,
                     detected_runtime: detected_runtime.clone(),
@@ -3018,15 +3414,19 @@ impl ModsService {
         };
 
         // source_id and source_version are already extracted above for duplicate detection
-        let source_url = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let mod_name = metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let metadata_ref = metadata.as_ref();
+        let source_url = Self::metadata_string(metadata_ref, "sourceUrl");
+        let mod_name = Self::metadata_string(metadata_ref, "modName");
+        let author = Self::metadata_string(metadata_ref, "author");
+        let summary = Self::metadata_string(metadata_ref, "summary");
+        let icon_url = Self::metadata_string(metadata_ref, "iconUrl");
+        let icon_cache_path = self.cache_icon_from_url(icon_url.as_deref()).await;
+        let downloads = Self::metadata_u64(metadata_ref, "downloads");
+        let likes_or_endorsements = Self::metadata_i64(metadata_ref, "likesOrEndorsements")
+            .or_else(|| Self::metadata_i64(metadata_ref, "endorsementCount"))
+            .or_else(|| Self::metadata_i64(metadata_ref, "ratingScore"));
+        let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
+        let tags = Self::metadata_tags(metadata_ref);
 
         // Update metadata
         let mut mod_metadata = self.load_mod_metadata(&mods_directory).await
@@ -3039,9 +3439,18 @@ impl ModsService {
             author,
             mod_name,
             source_url,
+            summary,
+            icon_url,
+            icon_cache_path,
+            downloads,
+            likes_or_endorsements,
+            updated_at,
+            tags,
             installed_version: version,
+            library_added_at: Some(Utc::now()),
             installed_at: Some(Utc::now()),
             last_update_check: None,
+            metadata_last_refreshed: Some(Utc::now()),
             update_available: None,
             remote_version: None,
             detected_runtime,
@@ -3378,9 +3787,18 @@ mod tests {
             author: None,
             mod_name: Some("Example".to_string()),
             source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
             installed_version: None,
+            library_added_at: None,
             installed_at: None,
             last_update_check: None,
+            metadata_last_refreshed: None,
             update_available: None,
             remote_version: None,
             detected_runtime: None,

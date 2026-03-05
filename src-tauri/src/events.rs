@@ -197,3 +197,16 @@ pub fn emit_mod_updates_checked<R: Runtime>(
         }),
     )
 }
+
+pub fn emit_mod_metadata_refresh_status<R: Runtime>(
+    app: &AppHandle<R>,
+    active_count: usize,
+) -> Result<(), tauri::Error> {
+    app.emit(
+        "mod_metadata_refresh_status",
+        serde_json::json!({
+            "activeCount": active_count,
+            "running": active_count > 0
+        }),
+    )
+}

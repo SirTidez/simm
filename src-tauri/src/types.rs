@@ -141,6 +141,7 @@ pub struct Settings {
     pub thunderstore_game_id: Option<String>,
     pub auto_update_mods: Option<bool>,
     pub mod_update_check_interval: Option<u32>, // minutes
+    pub mod_icon_cache_limit_mb: Option<u32>,
     pub custom_theme: Option<CustomTheme>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
 }
@@ -250,11 +251,22 @@ pub struct ModMetadata {
     pub author: Option<String>,
     pub mod_name: Option<String>,
     pub source_url: Option<String>,
+    pub summary: Option<String>,
+    pub icon_url: Option<String>,
+    pub icon_cache_path: Option<String>,
+    pub downloads: Option<u64>,
+    pub likes_or_endorsements: Option<i64>,
+    pub updated_at: Option<String>,
+    pub tags: Option<Vec<String>>,
     pub installed_version: Option<String>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub library_added_at: Option<DateTime<Utc>>,
     #[serde(with = "chrono::serde::ts_seconds_option")]
     pub installed_at: Option<DateTime<Utc>>,
     #[serde(with = "chrono::serde::ts_seconds_option")]
     pub last_update_check: Option<DateTime<Utc>>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub metadata_last_refreshed: Option<DateTime<Utc>>,
     pub update_available: Option<bool>,
     pub remote_version: Option<String>,
     pub detected_runtime: Option<Runtime>,
@@ -273,7 +285,18 @@ pub struct ModLibraryEntry {
     pub source_id: Option<String>,
     pub source_version: Option<String>,
     pub source_url: Option<String>,
+    pub summary: Option<String>,
+    pub icon_url: Option<String>,
+    pub icon_cache_path: Option<String>,
+    pub downloads: Option<u64>,
+    pub likes_or_endorsements: Option<i64>,
+    pub updated_at: Option<String>,
+    pub tags: Option<Vec<String>>,
     pub installed_version: Option<String>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub library_added_at: Option<DateTime<Utc>>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub installed_at: Option<DateTime<Utc>>,
     pub author: Option<String>,
     pub update_available: Option<bool>,
     pub remote_version: Option<String>,
@@ -385,7 +408,16 @@ mod tests {
             source_id: Some("owner/repo".to_string()),
             source_version: Some("v1.0.0".to_string()),
             source_url: Some("https://example.com".to_string()),
+            summary: Some("Example summary".to_string()),
+            icon_url: Some("https://example.com/icon.png".to_string()),
+            icon_cache_path: Some("C:/Users/test/SIMM/cache/mod-icons/icon.png".to_string()),
+            downloads: Some(42),
+            likes_or_endorsements: Some(10),
+            updated_at: Some("2026-03-05T00:00:00Z".to_string()),
+            tags: Some(vec!["utility".to_string()]),
             installed_version: Some("v1.0.0".to_string()),
+            library_added_at: None,
+            installed_at: None,
             author: Some("Author".to_string()),
             update_available: Some(true),
             remote_version: Some("v1.1.0".to_string()),
