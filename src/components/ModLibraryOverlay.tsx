@@ -29,7 +29,10 @@ interface ThunderstorePackage {
     downloads: number;
     file_size: number;
     description?: string;
+    icon?: string;
   }>;
+  icon?: string;
+  icon_url?: string;
 }
 
 type ThunderstoreRuntime = 'IL2CPP' | 'Mono';
@@ -1276,7 +1279,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       source: 'thunderstore',
       author: pkg.owner,
       summary: version?.description,
-      iconUrl: (representative as any)?.icon,
+      iconUrl: version?.icon || (representative as any)?.icon || (representative as any)?.icon_url,
       sourceUrl: pkg.packageUrl,
       downloads,
       likesOrEndorsements: representative?.rating_score || 0,
@@ -1778,6 +1781,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       const runtimes: ThunderstoreRuntime[] = [];
                       if (pkg.packagesByRuntime.IL2CPP) runtimes.push('IL2CPP');
                       if (pkg.packagesByRuntime.Mono) runtimes.push('Mono');
+                      const representative = pkg.packagesByRuntime.IL2CPP || pkg.packagesByRuntime.Mono;
+                      const latestVersion = representative?.versions?.[0];
+                      const iconUrl = latestVersion?.icon || representative?.icon || representative?.icon_url;
+                      const summary = latestVersion?.description;
+                      const totalDownloads = representative?.versions?.reduce((sum, item) => sum + (item.downloads || 0), 0) || 0;
                       return (
                         <div
                           key={pkg.key}
@@ -1786,7 +1794,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           onClick={() => openThunderstoreModView(pkg)}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: '0.7rem' }}>
+                              {renderCardIcon(pkg.name, undefined, iconUrl, 'rail')}
+                              <div style={{ flex: 1, minWidth: 0 }}>
                               <strong style={{ fontSize: '1rem' }}>{pkg.name}</strong>
                               <div style={{ fontSize: '0.85rem', color: '#9aa4b2' }}>{pkg.owner}</div>
                               <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
@@ -1812,6 +1822,19 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                                     Runtime Unknown
                                   </span>
                                 )}
+                              </div>
+                              {summary && (
+                                <p className="mod-card-summary" title={summary} style={{ marginTop: '0.45rem' }}>
+                                  {summary}
+                                </p>
+                              )}
+                              <div className="mod-card-meta-row" style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                <span><i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>{totalDownloads.toLocaleString()}</span>
+                                <span><i className="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }}></i>{(representative?.rating_score || 0).toLocaleString()}</span>
+                                {latestVersion?.version_number && (
+                                  <span><i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>v{latestVersion.version_number}</span>
+                                )}
+                              </div>
                               </div>
                             </div>
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
@@ -1841,6 +1864,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       const fileNames = files ? files.map(file => (file.file_name || file.name || '').toLowerCase()) : [];
                       const hasIl2cpp = fileNames.some(name => name.includes('il2cpp'));
                       const hasMono = fileNames.some(name => name.includes('mono'));
+                      const summary = mod.summary || mod.description;
                       return (
                         <div
                           key={mod.mod_id}
@@ -1849,7 +1873,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           onClick={() => openNexusModView(mod)}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: '0.7rem' }}>
+                              {renderCardIcon(mod.name, undefined, mod.picture_url, 'rail')}
+                              <div style={{ flex: 1, minWidth: 0 }}>
                               <strong style={{ fontSize: '1rem' }}>{mod.name}</strong>
                               <div style={{ fontSize: '0.85rem', color: '#9aa4b2' }}>{mod.author}</div>
                               <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
@@ -1888,6 +1914,19 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                                     Runtime Unknown
                                   </span>
                                 )}
+                              </div>
+                              {summary && (
+                                <p className="mod-card-summary" title={summary} style={{ marginTop: '0.45rem' }}>
+                                  {summary}
+                                </p>
+                              )}
+                              <div className="mod-card-meta-row" style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                <span><i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>{(mod.mod_downloads || 0).toLocaleString()}</span>
+                                <span><i className="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }}></i>{(mod.endorsement_count || 0).toLocaleString()}</span>
+                                {mod.version && (
+                                  <span><i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>v{mod.version}</span>
+                                )}
+                              </div>
                               </div>
                             </div>
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
