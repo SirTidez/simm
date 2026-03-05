@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import type { Environment, ModLibraryEntry, NexusMod, NexusModFile } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -93,57 +93,6 @@ interface ThunderstorePackage {
   icon_url?: string;
 }
 
-function safeExternalUrl(raw: string | null | undefined): string | undefined {
-  if (!raw) return undefined;
-  try {
-    const u = new URL(raw);
-    // Prevent javascript:, data:, file:, etc.
-    if (u.protocol !== 'https:') return undefined;
-    return u.toString();
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveImageSource(pathOrUrl?: string): string | undefined {
-  const safeDecode = (value: string): string => {
-    try {
-      return decodeURIComponent(value);
-    } catch {
-      return value;
-    }
-  };
-
-  if (!pathOrUrl) return undefined;
-  if (pathOrUrl.startsWith('asset:')) {
-    return pathOrUrl;
-  }
-  if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
-    return pathOrUrl;
-  }
-  if (pathOrUrl.startsWith('file://')) {
-    try {
-      const url = new URL(pathOrUrl);
-      let filePath = safeDecode(url.pathname || '');
-      if (/^\/[A-Za-z]:\//.test(filePath)) {
-        filePath = filePath.slice(1);
-      }
-      return convertFileSrc(filePath);
-    } catch {
-      const fallback = pathOrUrl.replace(/^file:\/\/+/, '');
-      return convertFileSrc(safeDecode(fallback));
-    }
-  }
-  const normalized = pathOrUrl.replace(/\\/g, '/');
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return convertFileSrc(pathOrUrl);
-  }
-  if (normalized.startsWith('/')) {
-    return convertFileSrc(pathOrUrl);
-  }
-  return normalized;
-}
-
 function normalizeModNameKey(name: string): string {
   return name
     .replace(/\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i, '')
@@ -151,19 +100,6 @@ function normalizeModNameKey(name: string): string {
     .replace(/\s+(mono|il2cpp)\s*$/i, '')
     .trim()
     .toLowerCase();
-}
-
-function handleCardActivationKeyDown(
-  event: React.KeyboardEvent<HTMLElement>,
-  onActivate: () => void
-) {
-  if (event.target !== event.currentTarget) {
-    return;
-  }
-  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
-    event.preventDefault();
-    onActivate();
-  }
 }
 
 function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] {
@@ -452,13 +388,17 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         void loadDownloadedLibrary();
         void loadInstalledMods(false, true);
       }
-    }).then((fn) => {
-      if (disposed) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch((error) => {
+        console.warn('Failed to register mod metadata refresh listener:', error);
+      });
 
     return () => {
       disposed = true;
@@ -2652,3 +2592,4 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     </>
   );
 }
+

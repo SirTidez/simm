@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus } from '../services/events';
 import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
 
@@ -111,73 +110,6 @@ const parseThunderstoreSourceId = (sourceId?: string): { owner: string; name: st
   }
   const [owner, ...rest] = sourceId.split('/');
   return { owner: owner || '', name: rest.join('/') };
-};
-
-const safeExternalUrl = (raw?: string): string | undefined => {
-  if (!raw) {
-    return undefined;
-  }
-
-  try {
-    const parsed = new URL(raw);
-    return parsed.protocol === 'https:' ? parsed.toString() : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-const handleCardActivationKeyDown = (
-  event: ReactKeyboardEvent<HTMLElement>,
-  onActivate: () => void
-) => {
-  if (event.target !== event.currentTarget) {
-    return;
-  }
-  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
-    event.preventDefault();
-    onActivate();
-  }
-};
-
-const resolveImageSource = (pathOrUrl?: string): string | undefined => {
-  const safeDecode = (value: string): string => {
-    try {
-      return decodeURIComponent(value);
-    } catch {
-      return value;
-    }
-  };
-
-  if (!pathOrUrl) {
-    return undefined;
-  }
-  if (pathOrUrl.startsWith('asset:')) {
-    return pathOrUrl;
-  }
-  if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
-    return pathOrUrl;
-  }
-  if (pathOrUrl.startsWith('file://')) {
-    try {
-      const url = new URL(pathOrUrl);
-      let filePath = safeDecode(url.pathname || '');
-      if (/^\/[A-Za-z]:\//.test(filePath)) {
-        filePath = filePath.slice(1);
-      }
-      return convertFileSrc(filePath);
-    } catch {
-      const fallback = pathOrUrl.replace(/^file:\/\/+/, '');
-      return convertFileSrc(safeDecode(fallback));
-    }
-  }
-  const normalized = pathOrUrl.replace(/\\/g, '/');
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return convertFileSrc(pathOrUrl);
-  }
-  if (normalized.startsWith('/')) {
-    return convertFileSrc(pathOrUrl);
-  }
-  return normalized;
 };
 
 const normalizeVersionToken = (value?: string): string => {
@@ -680,13 +612,17 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       if (wasRunning && !running) {
         void refreshLibrary();
       }
-    }).then((fn) => {
-      if (disposed) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch((error) => {
+        console.warn('Failed to register mod metadata refresh listener:', error);
+      });
 
     return () => {
       disposed = true;
@@ -2621,3 +2557,4 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     </>
   );
 }
+

@@ -488,6 +488,16 @@ impl ModsService {
         index
     }
 
+    async fn build_storage_file_index_if_needed(
+        &self,
+        storage_root: &Path,
+        index: &mut Option<HashMap<String, Vec<String>>>,
+    ) {
+        if index.is_none() {
+            *index = Some(self.build_storage_file_index(storage_root).await);
+        }
+    }
+
     async fn infer_storage_id_from_symlink(
         &self,
         mod_file_path: &Path,
@@ -535,7 +545,7 @@ impl ModsService {
         metadata: &mut HashMap<String, ModMetadata>,
     ) -> Result<bool> {
         let storage_root = self.get_mods_storage_dir().await?;
-        let storage_file_index = self.build_storage_file_index(&storage_root).await;
+        let mut storage_file_index: Option<HashMap<String, Vec<String>>> = None;
 
         let mut entries = match fs::read_dir(mods_directory).await {
             Ok(entries) => entries,
@@ -583,8 +593,17 @@ impl ModsService {
             if storage_id.is_none() {
                 storage_id = self
                     .infer_storage_id_from_symlink(&path, &storage_root)
-                    .await
-                    .or_else(|| Self::infer_storage_id_from_index(&storage_file_index, &canonical_name));
+                    .await;
+
+                if storage_id.is_none() {
+                    self
+                        .build_storage_file_index_if_needed(&storage_root, &mut storage_file_index)
+                        .await;
+
+                    if let Some(index) = storage_file_index.as_ref() {
+                        storage_id = Self::infer_storage_id_from_index(index, &canonical_name);
+                    }
+                }
             }
 
             let Some(storage_id) = storage_id else {
@@ -770,6 +789,34 @@ impl ModsService {
         self.cache_icon_from_url(icon_url).await
     }
 
+    async fn normalize_icon_reference_for_compare(
+        &self,
+        icon_ref: &str,
+        cache_dir: &Path,
+    ) -> String {
+        let trimmed = icon_ref.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        let raw_path = Path::new(trimmed);
+        let candidate = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            cache_dir.join(raw_path)
+        };
+
+        let normalized = match fs::canonicalize(&candidate).await {
+            Ok(path) => path,
+            Err(_) => candidate,
+        };
+
+        normalized
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    }
+
     async fn remove_icon_cache_if_orphaned(
         &self,
         icon_cache_path: Option<&str>,
@@ -779,6 +826,11 @@ impl ModsService {
             return Ok(());
         };
 
+        let cache_dir = self.get_mod_icon_cache_dir().await?;
+        let normalized_icon_path = self
+            .normalize_icon_reference_for_compare(icon_path, &cache_dir)
+            .await;
+
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
         )
@@ -786,18 +838,25 @@ impl ModsService {
         .await
         .context("Failed to load mod metadata for icon cache pruning")?;
 
-        let still_referenced = rows.into_iter().any(|(_, data)| {
-            serde_json::from_str::<ModMetadata>(&data)
-                .ok()
-                .map(|meta| {
-                    meta.mod_storage_id.as_deref() != Some(excluding_storage_id)
-                        && meta.icon_cache_path.as_deref() == Some(icon_path)
-                })
-                .unwrap_or(false)
-        });
+        for (_, data) in rows {
+            let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) else {
+                continue;
+            };
 
-        if still_referenced {
-            return Ok(());
+            if meta.mod_storage_id.as_deref() == Some(excluding_storage_id) {
+                continue;
+            }
+
+            let Some(candidate) = meta.icon_cache_path.as_deref() else {
+                continue;
+            };
+
+            let normalized_candidate = self
+                .normalize_icon_reference_for_compare(candidate, &cache_dir)
+                .await;
+            if normalized_candidate == normalized_icon_path {
+                return Ok(());
+            }
         }
 
         let storage_root = self.get_mods_storage_dir().await?;
@@ -809,14 +868,20 @@ impl ModsService {
                 }
 
                 if let Ok(Some(meta)) = self.load_storage_metadata(&entry.path()).await {
-                    if meta.icon_cache_path.as_deref() == Some(icon_path) {
+                    let Some(candidate) = meta.icon_cache_path.as_deref() else {
+                        continue;
+                    };
+
+                    let normalized_candidate = self
+                        .normalize_icon_reference_for_compare(candidate, &cache_dir)
+                        .await;
+                    if normalized_candidate == normalized_icon_path {
                         return Ok(());
                     }
                 }
             }
         }
 
-        let cache_dir = self.get_mod_icon_cache_dir().await?;
         let cache_dir_canonical = match fs::canonicalize(&cache_dir).await {
             Ok(path) => path,
             Err(error) => {
@@ -935,9 +1000,8 @@ impl ModsService {
             incoming
         };
 
-        if next.mod_storage_id.is_none() {
-            next.mod_storage_id = Some(storage_id.to_string());
-        }
+        next.mod_storage_id = Some(storage_id.to_string());
+        fs::create_dir_all(&storage_path).await?;
 
         self.save_storage_metadata(&storage_path, &next).await
     }
@@ -5775,3 +5839,4 @@ mod tests {
         Ok(())
     }
 }
+
