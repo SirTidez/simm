@@ -2304,10 +2304,6 @@ body {
   align-items: start;
 }
 
-.mods-overlay .mods-env-layout--list {
-  grid-template-columns: 1fr;
-}
-
 .mods-overlay .mods-env-panel {
   min-width: 0;
   display: flex;

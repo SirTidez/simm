@@ -59,8 +59,6 @@ interface DownloadedModGroup {
 
 type DownloadedFilter = 'all' | 'updates' | 'managed' | 'external' | 'installed';
 
-type LibraryLayoutMode = 'grid' | 'list';
-
 interface LibraryModViewState {
   id: string;
   name: string;
@@ -351,13 +349,6 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [runtimePrompt, setRuntimePrompt] = useState<RuntimePromptState | null>(null);
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
   const [downloadedSearch, setDownloadedSearch] = useState('');
-  const [gridFeatureEnabled, setGridFeatureEnabled] = useState<boolean>(() => {
-    return localStorage.getItem('mods.grid.feature') !== 'false';
-  });
-  const [layoutMode, setLayoutMode] = useState<LibraryLayoutMode>(() => {
-    const saved = localStorage.getItem('mods.layout.mode');
-    return saved === 'list' ? 'list' : 'grid';
-  });
   const [activeModView, setActiveModView] = useState<LibraryModViewState | null>(null);
   const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const libraryScrollTopRef = useRef(0);
@@ -406,16 +397,6 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     () => buildDownloadedGroups(library?.downloaded ?? []),
     [library]
   );
-
-  const useGridLayout = gridFeatureEnabled && layoutMode === 'grid';
-
-  useEffect(() => {
-    localStorage.setItem('mods.grid.feature', String(gridFeatureEnabled));
-  }, [gridFeatureEnabled]);
-
-  useEffect(() => {
-    localStorage.setItem('mods.layout.mode', layoutMode);
-  }, [layoutMode]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -1439,40 +1420,6 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button
                   className="btn btn-secondary btn-small"
-                  onClick={() => setGridFeatureEnabled(prev => !prev)}
-                  title="Toggle new grid UI"
-                >
-                  <i className={`fas ${gridFeatureEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`} style={{ marginRight: '0.4rem' }}></i>
-                  New Grid UI {gridFeatureEnabled ? 'On' : 'Off'}
-                </button>
-                <div style={{ display: 'inline-flex', border: '1px solid #3a3a3a', borderRadius: '999px', overflow: 'hidden' }}>
-                  <button
-                    className="btn btn-small"
-                    onClick={() => setLayoutMode('grid')}
-                    style={{
-                      border: 'none',
-                      borderRadius: 0,
-                      backgroundColor: layoutMode === 'grid' ? '#4a90e2' : '#1f2735',
-                      color: layoutMode === 'grid' ? '#fff' : '#b5c1d3'
-                    }}
-                  >
-                    Grid
-                  </button>
-                  <button
-                    className="btn btn-small"
-                    onClick={() => setLayoutMode('list')}
-                    style={{
-                      border: 'none',
-                      borderRadius: 0,
-                      backgroundColor: layoutMode === 'list' ? '#4a90e2' : '#1f2735',
-                      color: layoutMode === 'list' ? '#fff' : '#b5c1d3'
-                    }}
-                  >
-                    List
-                  </button>
-                </div>
-                <button
-                  className="btn btn-secondary btn-small"
                   onClick={() => setShowDiscovery(prev => !prev)}
                   title="Show or hide discovery results"
                 >
@@ -1822,7 +1769,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             {(showSearchResults || showNexusModsResults) && (
               <div className="mods-section" style={{ padding: '1rem 1.25rem 1rem' }}>
                 {showSearchResults && searchResults.length > 0 && (
-                  <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
+                  <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
                     {searchResults.filter(pkg => {
                       // Hide mods that are already in the downloaded library
                       const tsKey = `thunderstore::${pkg.key}`;
@@ -1887,7 +1834,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 )}
 
                 {showNexusModsResults && nexusModsSearchResults.length > 0 && (
-                  <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
+                  <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
                     {nexusModsSearchResults.map(mod => {
                       const files = nexusModsFiles.get(mod.mod_id) ?? null;
                       const loading = nexusModsLoading.has(mod.mod_id);
@@ -2026,7 +1973,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <div style={{ color: '#888' }}>No downloaded mods match this filter.</div>
               )}
               {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
-                <div className="mods-grid" style={{ display: 'grid', gap: '0.65rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(360px, 1fr))' : '1fr' }}>
+                <div className="mods-grid" style={{ display: 'grid', gap: '0.65rem', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))' }}>
                   {filteredDownloadedGroups.map(group => {
                     const sortedEntries = getSortedGroupEntries(group);
                     const activeEntry = getActiveEntryForGroup(group);

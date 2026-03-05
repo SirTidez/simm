@@ -26,8 +26,6 @@ interface ModInfo {
   installedAt?: number;
 }
 
-type ModsLayoutMode = 'grid' | 'list';
-
 interface ModViewState {
   id: string;
   name: string;
@@ -214,11 +212,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [updatingAllMods, setUpdatingAllMods] = useState(false);
   const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
-  const [gridFeatureEnabled, setGridFeatureEnabled] = useState<boolean>(() => localStorage.getItem('mods.grid.feature') !== 'false');
-  const [layoutMode, setLayoutMode] = useState<ModsLayoutMode>(() => {
-    const saved = localStorage.getItem('mods.layout.mode');
-    return saved === 'list' ? 'list' : 'grid';
-  });
   const [activeModView, setActiveModView] = useState<ModViewState | null>(null);
   const suppressWatcherReloadUntilRef = useRef(0);
   const modsReloadTimerRef = useRef<number | null>(null);
@@ -235,16 +228,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
     return counts;
   }, [downloadedMods]);
-
-  const useGridLayout = gridFeatureEnabled && layoutMode === 'grid';
-
-  useEffect(() => {
-    localStorage.setItem('mods.grid.feature', String(gridFeatureEnabled));
-  }, [gridFeatureEnabled]);
-
-  useEffect(() => {
-    localStorage.setItem('mods.layout.mode', layoutMode);
-  }, [layoutMode]);
 
   const loadEnvironment = async () => {
     try {
@@ -1770,7 +1753,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
                 Search Results ({searchResults.length})
               </h3>
-              <div style={{ display: 'grid', gap: '0.75rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(340px, 1fr))' : '1fr' }}>
+              <div style={{ display: 'grid', gap: '0.75rem', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
                 {searchResults.map((pkg) => (
                   <div
                     key={pkg.uuid4}
@@ -2040,7 +2023,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                     Browsing is available without login. Downloading requires Nexus Login.
                   </div>
                 )}
-                <div style={{ display: 'grid', gap: '0.75rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(340px, 1fr))' : '1fr' }}>
+                <div style={{ display: 'grid', gap: '0.75rem', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))' }}>
                   {compatibleMods.map((mod) => {
                     const files = nexusModsFiles.get(mod.mod_id) || [];
 
@@ -2264,30 +2247,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
             </div>
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               <button
-                onClick={() => setGridFeatureEnabled(prev => !prev)}
-                className="btn btn-secondary"
-                title="Toggle new grid UI"
-              >
-                <i className={`fas ${gridFeatureEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`} style={{ marginRight: '0.5rem' }}></i>
-                Grid UI {gridFeatureEnabled ? 'On' : 'Off'}
-              </button>
-              <div style={{ display: 'inline-flex', border: '1px solid #3a3a3a', borderRadius: '999px', overflow: 'hidden' }}>
-                <button
-                  className="btn btn-small"
-                  onClick={() => setLayoutMode('grid')}
-                  style={{ border: 'none', borderRadius: 0, backgroundColor: layoutMode === 'grid' ? '#4a90e2' : '#1f2735', color: layoutMode === 'grid' ? '#fff' : '#b5c1d3' }}
-                >
-                  Grid
-                </button>
-                <button
-                  className="btn btn-small"
-                  onClick={() => setLayoutMode('list')}
-                  style={{ border: 'none', borderRadius: 0, backgroundColor: layoutMode === 'list' ? '#4a90e2' : '#1f2735', color: layoutMode === 'list' ? '#fff' : '#b5c1d3' }}
-                >
-                  List
-                </button>
-              </div>
-              <button
                 onClick={() => {
                   const next = !showSearchInOverlay;
                   setShowSearchInOverlay(next);
@@ -2374,7 +2333,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
             </div>
           ) : !showSearchResults && (
             <div className="mods-section" style={{ padding: '0 1.25rem 1.25rem', flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              <div className={`mods-env-layout ${useGridLayout ? 'mods-env-layout--grid' : 'mods-env-layout--list'}`}>
+              <div className="mods-env-layout mods-env-layout--grid">
                 <section className="mods-env-panel mods-env-panel--library">
                   <div className="mods-env-panel-header">
                     <h3 style={{ margin: 0, fontSize: '1rem' }}>Library Downloads</h3>
