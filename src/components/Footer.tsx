@@ -20,6 +20,7 @@ export function Footer() {
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [modUpdatesByEnv, setModUpdatesByEnv] = useState<Map<string, ModUpdatesEntry>>(new Map());
   const [metadataRefreshCount, setMetadataRefreshCount] = useState(0);
+  const [metadataRefreshRunning, setMetadataRefreshRunning] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
 
   const totalModsNeedingUpdate = Array.from(modUpdatesByEnv.values()).reduce((sum, e) => sum + e.count, 0);
@@ -71,6 +72,7 @@ export function Footer() {
     let unlisten: (() => void) | null = null;
     onModMetadataRefreshStatus((data) => {
       setMetadataRefreshCount(data.activeCount || 0);
+      setMetadataRefreshRunning(Boolean(data.running) || (data.activeCount || 0) > 0);
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
@@ -256,9 +258,11 @@ export function Footer() {
         <span className={`statusbar-stat ${isOnline ? 'statusbar-stat-ok' : 'statusbar-stat-warn'}`}>
           &bull; {isOnline ? 'Online' : 'Offline'}
         </span>
-        {metadataRefreshCount > 0 && (
+        {(metadataRefreshRunning || metadataRefreshCount > 0) && (
           <span className="statusbar-stat statusbar-check">
-            &bull; Updating metadata: {metadataRefreshCount} mod{metadataRefreshCount === 1 ? '' : 's'}
+            &bull; {metadataRefreshCount > 0
+              ? `Updating metadata: ${metadataRefreshCount} mod${metadataRefreshCount === 1 ? '' : 's'}`
+              : 'Refreshing mod metadata'}
           </span>
         )}
       </div>

@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { onModMetadataRefreshStatus } from '../services/events';
 import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
 
 interface ThunderstorePackage {
@@ -113,15 +115,31 @@ const resolveImageSource = (pathOrUrl?: string): string | undefined => {
   if (!pathOrUrl) {
     return undefined;
   }
+  if (pathOrUrl.startsWith('asset:')) {
+    return pathOrUrl;
+  }
   if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
     return pathOrUrl;
   }
+  if (pathOrUrl.startsWith('file://')) {
+    try {
+      const url = new URL(pathOrUrl);
+      let filePath = decodeURIComponent(url.pathname || '');
+      if (/^\/[A-Za-z]:\//.test(filePath)) {
+        filePath = filePath.slice(1);
+      }
+      return convertFileSrc(filePath);
+    } catch {
+      const fallback = pathOrUrl.replace(/^file:\/\/+/, '');
+      return convertFileSrc(decodeURIComponent(fallback));
+    }
+  }
   const normalized = pathOrUrl.replace(/\\/g, '/');
   if (/^[A-Za-z]:\//.test(normalized)) {
-    return `file:///${normalized}`;
+    return convertFileSrc(pathOrUrl);
   }
   if (normalized.startsWith('/')) {
-    return `file://${normalized}`;
+    return convertFileSrc(pathOrUrl);
   }
   return normalized;
 };
@@ -341,6 +359,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     return saved === 'list' ? 'list' : 'grid';
   });
   const [activeModView, setActiveModView] = useState<LibraryModViewState | null>(null);
+  const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const libraryScrollTopRef = useRef(0);
+  const metadataRefreshRunningRef = useRef(false);
 
   const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
     tag_name: string;
@@ -395,6 +416,28 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   useEffect(() => {
     localStorage.setItem('mods.layout.mode', layoutMode);
   }, [layoutMode]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setActiveModView(null);
+    }
+  }, [isOpen]);
+
+  const closeModView = useCallback(() => {
+    setActiveModView(null);
+    window.requestAnimationFrame(() => {
+      if (libraryScrollContainerRef.current) {
+        libraryScrollContainerRef.current.scrollTop = libraryScrollTopRef.current;
+      }
+    });
+  }, []);
+
+  const openModView = useCallback((nextView: LibraryModViewState) => {
+    if (libraryScrollContainerRef.current) {
+      libraryScrollTopRef.current = libraryScrollContainerRef.current.scrollTop;
+    }
+    setActiveModView(nextView);
+  }, []);
 
   const getLatestDownloadedVersionForGroup = useCallback((group: DownloadedModGroup | undefined): string | undefined => {
     if (!group) {
@@ -602,6 +645,30 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     );
     toLoad.forEach(modItem => handleLoadNexusModFiles(modItem.mod_id));
   }, [showNexusModsResults, nexusModsSearchResults, nexusModsFiles, nexusModsLoading, handleLoadNexusModFiles]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    let unlisten: (() => void) | null = null;
+    onModMetadataRefreshStatus((data) => {
+      const running = Boolean(data.running) || (data.activeCount || 0) > 0;
+      const wasRunning = metadataRefreshRunningRef.current;
+      metadataRefreshRunningRef.current = running;
+
+      if (wasRunning && !running) {
+        void refreshLibrary();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+      metadataRefreshRunningRef.current = false;
+    };
+  }, [isOpen, refreshLibrary]);
 
   const toggleGroupSelection = (storageIds: string[]) => {
     setSelectedModIds(prev => {
@@ -1194,7 +1261,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
   const openDownloadedModView = useCallback((group: DownloadedModGroup) => {
     const activeEntry = getActiveEntryForGroup(group) || group.entries[0];
-    setActiveModView({
+    openModView({
       id: group.key,
       name: group.displayName,
       source: activeEntry?.source || 'unknown',
@@ -1213,7 +1280,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       installedAt: activeEntry?.installedAt,
       kind: 'downloaded',
     });
-  }, [getActiveEntryForGroup]);
+  }, [getActiveEntryForGroup, openModView]);
 
   const openThunderstoreModView = useCallback((pkg: ThunderstorePackageGroup) => {
     const il2cpp = pkg.packagesByRuntime.IL2CPP;
@@ -1222,7 +1289,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     const version = representative?.versions?.[0];
     const downloads = representative?.versions?.reduce((sum, item) => sum + (item.downloads || 0), 0) || 0;
 
-    setActiveModView({
+    openModView({
       id: pkg.key,
       name: pkg.name,
       source: 'thunderstore',
@@ -1237,10 +1304,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       installedVersion: version?.version_number,
       kind: 'thunderstore',
     });
-  }, []);
+  }, [openModView]);
 
   const openNexusModView = useCallback((mod: NexusMod) => {
-    setActiveModView({
+    openModView({
       id: String(mod.mod_id),
       name: mod.name,
       source: 'nexusmods',
@@ -1254,6 +1321,38 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       installedVersion: mod.version,
       kind: 'nexusmods',
     });
+  }, [openModView]);
+
+  const renderCardIcon = useCallback((name: string, iconCachePath?: string, iconUrl?: string, variant: 'inline' | 'rail' = 'inline') => {
+    const local = resolveImageSource(iconCachePath);
+    const remote = resolveImageSource(iconUrl);
+    const source = local || remote;
+    const className = variant === 'rail' ? 'mod-card-icon-rail' : 'mod-card-icon-inline';
+
+    if (!source) {
+      return (
+        <div className={`${className} mod-card-icon-fallback`}>
+          <i className="fas fa-puzzle-piece"></i>
+        </div>
+      );
+    }
+
+    return (
+      <div className={className}>
+        <img
+          src={source}
+          alt={`${name} icon`}
+          className="mod-card-icon-image"
+          onError={(e) => {
+            if (remote && e.currentTarget.src !== remote) {
+              e.currentTarget.src = remote;
+              return;
+            }
+            e.currentTarget.style.display = 'none';
+          }}
+        />
+      </div>
+    );
   }, []);
 
   const s1apiActionLabel = s1apiInLibrary ? (s1apiNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
@@ -1321,7 +1420,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         </div>
       )}
       <div
-        className="mods-overlay"
+        className="mods-overlay mods-overlay--library"
         style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}
       >
           <div className="modal-header">
@@ -1332,8 +1431,8 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             </button>
           </div>
 
-          <div className="mods-content">
-            <div style={{ padding: '0.9rem 1.25rem 0.75rem', borderBottom: '1px solid #3a3a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <div className="mods-content" ref={libraryScrollContainerRef}>
+            <div className="mods-toolbar" style={{ padding: '0.9rem 1.25rem 0.75rem', borderBottom: '1px solid #3a3a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
               <div style={{ color: '#9aa4b2', fontSize: '0.85rem' }}>
                 {downloadedSummary.total} downloaded, {downloadedSummary.updates} updates, {downloadedSummary.installed} installed, {downloadedSummary.managed} managed
               </div>
@@ -1506,13 +1605,13 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
               </div>
             </div>
 
-            <div style={{ padding: '0 1.25rem 1rem', borderBottom: '1px solid #3a3a3a' }}>
+            <div className="mods-section" style={{ padding: '0 1.25rem 1rem', borderBottom: '1px solid #3a3a3a' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                 <h3 style={{ margin: 0 }}>Featured</h3>
               </div>
               <div style={{ display: 'grid', gap: '1rem' }}>
                 <div
-                  className="mod-card"
+                  className="mod-card featured-mod-card"
                   style={{
                     padding: '1rem',
                     backgroundColor: '#2a2a2a',
@@ -1614,7 +1713,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 </div>
 
                 <div
-                  className="mod-card"
+                  className="mod-card featured-mod-card"
                   style={{
                     padding: '1rem',
                     backgroundColor: '#2a2a2a',
@@ -1721,9 +1820,9 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             </div>
 
             {(showSearchResults || showNexusModsResults) && (
-              <div style={{ padding: '1rem 1.25rem 1rem' }}>
+              <div className="mods-section" style={{ padding: '1rem 1.25rem 1rem' }}>
                 {showSearchResults && searchResults.length > 0 && (
-                  <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
+                  <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
                     {searchResults.filter(pkg => {
                       // Hide mods that are already in the downloaded library
                       const tsKey = `thunderstore::${pkg.key}`;
@@ -1735,7 +1834,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       return (
                         <div
                           key={pkg.key}
-                          className="mod-card"
+                          className="mod-card store-card"
                           style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
                           onClick={() => openThunderstoreModView(pkg)}
                         >
@@ -1788,7 +1887,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 )}
 
                 {showNexusModsResults && nexusModsSearchResults.length > 0 && (
-                  <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
+                  <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(320px, 1fr))' : '1fr' }}>
                     {nexusModsSearchResults.map(mod => {
                       const files = nexusModsFiles.get(mod.mod_id) ?? null;
                       const loading = nexusModsLoading.has(mod.mod_id);
@@ -1798,7 +1897,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                       return (
                         <div
                           key={mod.mod_id}
-                          className="mod-card"
+                          className="mod-card store-card"
                           style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
                           onClick={() => openNexusModView(mod)}
                         >
@@ -1867,7 +1966,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
             </>
             )}
 
-            <div style={{ padding: '0.9rem 1.25rem 1rem', borderTop: '1px solid #3a3a3a' }}>
+            <div className="mods-section" style={{ padding: '0.9rem 1.25rem 1rem', borderTop: '1px solid #3a3a3a' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
                 <h3 style={{ margin: 0 }}>Downloaded Mods</h3>
                 <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -1927,15 +2026,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <div style={{ color: '#888' }}>No downloaded mods match this filter.</div>
               )}
               {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
-                <div style={{ display: 'grid', gap: '0.65rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(360px, 1fr))' : '1fr' }}>
+                <div className="mods-grid" style={{ display: 'grid', gap: '0.65rem', gridTemplateColumns: useGridLayout ? 'repeat(auto-fill, minmax(360px, 1fr))' : '1fr' }}>
                   {filteredDownloadedGroups.map(group => {
                     const sortedEntries = getSortedGroupEntries(group);
                     const activeEntry = getActiveEntryForGroup(group);
                     const groupHasUpdate = isGroupUpdateAvailable(group);
                     const activeVersionLabel = activeEntry ? getEntryVersionLabel(activeEntry) : 'unknown';
-                    const activeRuntimeLabel = activeEntry?.availableRuntimes?.length
-                      ? activeEntry.availableRuntimes.join('/')
-                      : 'Runtime?';
                     const activeIndex = activeEntry
                       ? sortedEntries.findIndex(entry => entry.storageId === activeEntry.storageId)
                       : -1;
@@ -1945,21 +2041,29 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                     return (
                     <div
                       key={group.key}
-                      className="mod-card compact-row"
+                      className="mod-card compact-row library-row-card"
                       style={{ padding: '0.68rem 0.75rem', backgroundColor: '#2a2a2a', borderRadius: '7px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
                       onClick={() => openDownloadedModView(group)}
                     >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.7rem' }}>
-                        <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', flex: 1 }} onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            checked={group.storageIds.every(id => selectedModIds.has(id))}
-                            onChange={() => toggleGroupSelection(group.storageIds)}
-                            style={{ marginTop: '0.2rem' }}
-                          />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                              <strong style={{ fontSize: '0.94rem' }}>{group.displayName}</strong>
+                      <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '0.7rem' }}>
+                        <div className="mod-card-main-shell" style={{ display: 'flex', alignItems: 'stretch', gap: '0.55rem', flex: 1, minWidth: 0 }}>
+                          <div className="mod-card-checkbox-zone" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={group.storageIds.every(id => selectedModIds.has(id))}
+                              onChange={() => toggleGroupSelection(group.storageIds)}
+                              style={{ margin: 0 }}
+                            />
+                          </div>
+                          {renderCardIcon(
+                            group.displayName,
+                            activeEntry?.iconCachePath,
+                            activeEntry?.iconUrl,
+                            'rail',
+                          )}
+                          <div className="mod-card-main-column" style={{ flex: 1, minWidth: 0, display: 'grid', gap: '0.3rem', alignContent: 'start' }}>
+                            <div className="mod-card-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                              <strong className="mod-card-title-text" style={{ fontSize: '0.94rem' }}>{group.displayName}</strong>
                               <span style={{
                                 fontSize: '0.64rem',
                                 padding: '0.1rem 0.35rem',
@@ -1979,108 +2083,127 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                               }}>
                                 {sortedEntries.length} version{sortedEntries.length === 1 ? '' : 's'}
                               </span>
-                              {groupHasUpdate && (
-                                <span style={{
-                                  fontSize: '0.64rem',
-                                  padding: '0.1rem 0.35rem',
-                                  borderRadius: '999px',
-                                  backgroundColor: 'rgba(255, 170, 0, 0.15)',
-                                  color: '#ffaa00',
-                                  border: '1px solid rgba(255, 170, 0, 0.3)'
-                                }}>
-                                  <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem' }}></i>
-                                  Update Available
-                                </span>
-                              )}
                             </div>
+                            {activeEntry?.summary && (
+                              <p className="mod-card-summary" title={activeEntry.summary}>
+                                {activeEntry.summary}
+                              </p>
+                            )}
                           </div>
-                        </label>
-                         <div style={{ display: 'flex', gap: '0.32rem', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
-                          {groupHasUpdate && (
-                            <span style={{
-                              fontSize: '0.64rem',
-                              alignSelf: 'center',
-                              color: '#ffd480'
-                            }}>
-                              {group.remoteVersion ? `Latest ${formatVersionTag(group.remoteVersion)}` : 'Update available'}
-                            </span>
-                          )}
-                           <div style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }}>
-                              <div
-                                data-version-switcher
-                                style={{
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  border: '1px solid #3a3a3a',
-                                  borderRadius: '999px',
-                                  overflow: 'hidden',
-                                  backgroundColor: '#131a25'
+                        </div>
+                        <div className="mod-card-actions mod-card-actions--stacked">
+                          <div className="mod-card-actions-buttons" onClick={(e) => e.stopPropagation()}>
+                            {groupHasUpdate && (
+                              <button
+                                className="btn btn-warning btn-small mod-card-action-button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleUpdateAndActivateGroup(group);
                                 }}
-                                title="Cycle active version"
+                                disabled={updatingGroup === group.key || activatingGroup === group.key}
+                                title="Download latest update and make it active"
                               >
-                                {hasOlderVersion && (
-                                  <button
-                                    className="btn btn-secondary btn-small"
-                                    onClick={() => void handleStepGroupVersion(group, 'older')}
-                                    disabled={activatingGroup === group.key || updatingGroup === group.key}
-                                    style={{
-                                      borderRadius: 0,
-                                      border: 'none',
-                                      borderRight: '1px solid #2d3b52',
-                                      padding: '0.1rem 0.35rem',
-                                      minHeight: '1.4rem'
-                                    }}
-                                    title="Older version"
-                                  >
-                                    <i className="fas fa-chevron-left" style={{ fontSize: '0.62rem' }}></i>
-                                  </button>
+                                {updatingGroup === group.key ? (
+                                  <>
+                                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.35rem' }}></i>
+                                    Updating...
+                                  </>
+                                ) : (
+                                  <>
+                                    <i className="fas fa-arrow-up" style={{ marginRight: '0.35rem' }}></i>
+                                    Update
+                                  </>
                                 )}
+                              </button>
+                            )}
+                            <button
+                              className="btn btn-danger btn-small mod-card-action-button"
+                              disabled={deleting === group.key || activatingGroup === group.key || updatingGroup === group.key}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteDownloadedGroup(group);
+                              }}
+                              title="Delete downloaded files from library"
+                            >
+                              {deleting === group.key ? 'Deleting...' : 'Delete Files'}
+                            </button>
+                          </div>
+                          <div className="mod-card-version-row" style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }} onClick={(e) => e.stopPropagation()}>
+                            <div
+                              data-version-switcher
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                border: '1px solid #3a3a3a',
+                                borderRadius: '999px',
+                                overflow: 'hidden',
+                                backgroundColor: '#131a25'
+                              }}
+                              title="Cycle active version"
+                            >
+                              {hasOlderVersion && (
                                 <button
                                   className="btn btn-secondary btn-small"
-                                  onClick={() => {
-                                    if (sortedEntries.length > 1) {
-                                      setOpenVersionMenuGroup(prev => prev === group.key ? null : group.key);
-                                    }
-                                  }}
+                                  onClick={() => void handleStepGroupVersion(group, 'older')}
                                   disabled={activatingGroup === group.key || updatingGroup === group.key}
                                   style={{
                                     borderRadius: 0,
                                     border: 'none',
-                                    padding: '0.12rem 0.42rem',
-                                    minHeight: '1.4rem',
-                                    backgroundColor: '#131a25',
-                                    color: '#d9e6fb'
+                                    borderRight: '1px solid #2d3b52',
+                                    padding: '0.08rem 0.32rem',
+                                    minHeight: '1.22rem'
                                   }}
-                                  title={sortedEntries.length > 1 ? 'Choose version' : 'Active version'}
+                                  title="Older version"
                                 >
-                                  <span style={{ fontSize: '0.67rem', minWidth: '106px', textAlign: 'center' }}>
-                                    {`${formatVersionTag(activeVersionLabel)} · ${activeRuntimeLabel}`}
-                                    {sortedEntries.length > 1 ? ' ▾' : ''}
-                                  </span>
+                                  <i className="fas fa-chevron-left" style={{ fontSize: '0.62rem' }}></i>
                                 </button>
-                                {hasNewerVersion && (
-                                  <button
-                                    className="btn btn-secondary btn-small"
-                                    onClick={() => void handleStepGroupVersion(group, 'newer')}
-                                    disabled={activatingGroup === group.key || updatingGroup === group.key}
-                                    style={{
-                                      borderRadius: 0,
-                                      border: 'none',
-                                      borderLeft: '1px solid #2d3b52',
-                                      padding: '0.1rem 0.35rem',
-                                      minHeight: '1.4rem'
-                                    }}
-                                    title="Newer version"
-                                  >
-                                    <i className="fas fa-chevron-right" style={{ fontSize: '0.62rem' }}></i>
-                                  </button>
-                                )}
-                              </div>
+                              )}
+                              <button
+                                className="btn btn-secondary btn-small"
+                                onClick={() => {
+                                  if (sortedEntries.length > 1) {
+                                    setOpenVersionMenuGroup(prev => prev === group.key ? null : group.key);
+                                  }
+                                }}
+                                disabled={activatingGroup === group.key || updatingGroup === group.key}
+                                style={{
+                                  borderRadius: 0,
+                                  border: 'none',
+                                  padding: '0.08rem 0.36rem',
+                                  minHeight: '1.22rem',
+                                  backgroundColor: '#131a25',
+                                  color: '#d9e6fb'
+                                }}
+                                title={sortedEntries.length > 1 ? 'Choose version' : 'Active version'}
+                              >
+                                <span className="mod-card-version-pill" style={{ fontSize: '0.67rem', minWidth: '94px', textAlign: 'center' }}>
+                                  {formatVersionTag(activeVersionLabel)}
+                                  {sortedEntries.length > 1 ? ' ▾' : ''}
+                                </span>
+                              </button>
+                              {hasNewerVersion && (
+                                <button
+                                  className="btn btn-secondary btn-small"
+                                  onClick={() => void handleStepGroupVersion(group, 'newer')}
+                                  disabled={activatingGroup === group.key || updatingGroup === group.key}
+                                  style={{
+                                    borderRadius: 0,
+                                    border: 'none',
+                                    borderLeft: '1px solid #2d3b52',
+                                    padding: '0.08rem 0.32rem',
+                                    minHeight: '1.22rem'
+                                  }}
+                                  title="Newer version"
+                                >
+                                  <i className="fas fa-chevron-right" style={{ fontSize: '0.62rem' }}></i>
+                                </button>
+                              )}
+                            </div>
                             {openVersionMenuGroup === group.key && sortedEntries.length > 1 && (
                               <div style={{
                                 position: 'absolute',
                                 top: 0,
-                                left: 0,
+                                right: 0,
                                 minWidth: '180px',
                                 backgroundColor: '#172131',
                                 border: '1px solid #31445f',
@@ -2122,38 +2245,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                                 })}
                               </div>
                             )}
-                           </div>
-                          {groupHasUpdate && (
-                            <button
-                              className="btn btn-warning btn-small"
-                              onClick={() => handleUpdateAndActivateGroup(group)}
-                              disabled={updatingGroup === group.key || activatingGroup === group.key}
-                              title="Download latest update and make it active"
-                            >
-                              {updatingGroup === group.key ? (
-                                <>
-                                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.35rem' }}></i>
-                                  Updating...
-                                </>
-                              ) : (
-                                <>
-                                  <i className="fas fa-arrow-up" style={{ marginRight: '0.35rem' }}></i>
-                                  Update
-                                </>
-                              )}
-                            </button>
-                          )}
-                            <button
-                              className="btn btn-danger btn-small"
-                            disabled={deleting === group.key || activatingGroup === group.key || updatingGroup === group.key}
-                            onClick={() => handleDeleteDownloadedGroup(group)}
-                            title="Delete downloaded files from library"
-                          >
-                            {deleting === group.key ? 'Deleting...' : 'Delete Files'}
-                            </button>
+                          </div>
                         </div>
                       </div>
-                      <div style={{ fontSize: '0.74rem', color: '#94a4bb', marginTop: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap', lineHeight: 1.35 }}>
+                      <div className="mod-card-meta-row" style={{ fontSize: '0.74rem', color: '#94a4bb', marginTop: '0.4rem', display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap', lineHeight: 1.35 }}>
                         {group.author && (
                           <span>
                             <i className="fas fa-user" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
@@ -2164,6 +2259,12 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                           <i className="fas fa-tag" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
                           Active {formatVersionTag(activeVersionLabel)}
                         </span>
+                        {groupHasUpdate && group.remoteVersion && (
+                          <span className="mod-card-update-hint-inline">
+                            <i className="fas fa-arrow-up" style={{ marginRight: '0.25rem', opacity: 0.8 }}></i>
+                            Latest {formatVersionTag(group.remoteVersion)}
+                          </span>
+                        )}
                         <span>
                           <i className="fas fa-folder" style={{ marginRight: '0.25rem', opacity: 0.7 }}></i>
                           {group.installedIn.length ? group.installedIn.length : '0'} envs
@@ -2194,6 +2295,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
 
           {activeModView && (
             <div
+              className="mod-view-overlay"
               style={{
                 position: 'absolute',
                 inset: 0,
@@ -2210,14 +2312,14 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                   <i className="fas fa-cube"></i>
                   Mod View
                 </h2>
-                <button className="btn btn-secondary btn-small" onClick={() => setActiveModView(null)}>
+                <button className="btn btn-secondary btn-small" onClick={closeModView}>
                   <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
                   Back
                 </button>
               </div>
-              <div style={{ padding: '1rem 1.25rem 1.25rem', overflowY: 'auto', display: 'grid', gap: '1rem' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '92px 1fr', gap: '1rem', alignItems: 'start' }}>
-                  <div style={{ width: '92px', height: '92px', borderRadius: '14px', overflow: 'hidden', border: '1px solid #3a4a66', background: '#172131' }}>
+              <div className="mod-view-content" style={{ padding: '1rem 1.25rem 1.25rem', overflowY: 'auto', display: 'grid', gap: '1rem' }}>
+                <div className="mod-view-header-grid" style={{ display: 'grid', gridTemplateColumns: '92px 1fr', gap: '1rem', alignItems: 'start' }}>
+                  <div className="mod-view-icon" style={{ width: '92px', height: '92px', borderRadius: '14px', overflow: 'hidden', border: '1px solid #3a4a66', background: '#172131' }}>
                     {(activeModView.iconCachePath || activeModView.iconUrl) ? (
                       <img
                         src={resolveImageSource(activeModView.iconCachePath) || resolveImageSource(activeModView.iconUrl)}
@@ -2249,43 +2351,43 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                     )}
                   </div>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
-                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                <div className="mod-view-metrics" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+                  <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
                     <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Downloads</div>
                     <strong>{(activeModView.downloads || 0).toLocaleString()}</strong>
                   </div>
-                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
                     <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>
                       {activeModView.source === 'nexusmods' ? 'Endorsements' : 'Likes'}
                     </div>
                     <strong>{(activeModView.likesOrEndorsements || 0).toLocaleString()}</strong>
                   </div>
-                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
                     <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Installed Version</div>
                     <strong>{activeModView.installedVersion || 'unknown'}</strong>
                   </div>
-                  <div className="mod-card" style={{ padding: '0.7rem 0.8rem' }}>
+                  <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
                     <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Latest Version</div>
                     <strong>{activeModView.latestVersion || 'unknown'}</strong>
                   </div>
                 </div>
                 {(activeModView.tags || []).length > 0 && (
-                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  <div className="mod-view-tags" style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                     {(activeModView.tags || []).map((tag) => (
-                      <span key={`${activeModView.id}-${tag}`} style={{ padding: '0.2rem 0.45rem', borderRadius: '999px', backgroundColor: '#38537a33', border: '1px solid #38537a66', color: '#a9c1e6', fontSize: '0.72rem' }}>
+                      <span className="mod-view-tag" key={`${activeModView.id}-${tag}`} style={{ padding: '0.2rem 0.45rem', borderRadius: '999px', backgroundColor: '#38537a33', border: '1px solid #38537a66', color: '#a9c1e6', fontSize: '0.72rem' }}>
                         {tag}
                       </span>
                     ))}
                   </div>
                 )}
-                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <div className="mod-view-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   {activeModView.sourceUrl && (
                     <a href={activeModView.sourceUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary btn-small" style={{ textDecoration: 'none' }}>
                       <i className="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }}></i>
                       Open Source Page
                     </a>
                   )}
-                  <button className="btn btn-secondary btn-small" onClick={() => setActiveModView(null)}>
+                  <button className="btn btn-secondary btn-small" onClick={closeModView}>
                     Close
                   </button>
                 </div>
