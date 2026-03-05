@@ -800,6 +800,22 @@ impl ModsService {
             return Ok(());
         }
 
+        let storage_root = self.get_mods_storage_dir().await?;
+        if let Ok(mut entries) = fs::read_dir(&storage_root).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let candidate_storage_id = entry.file_name().to_string_lossy().to_string();
+                if candidate_storage_id == excluding_storage_id {
+                    continue;
+                }
+
+                if let Ok(Some(meta)) = self.load_storage_metadata(&entry.path()).await {
+                    if meta.icon_cache_path.as_deref() == Some(icon_path) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         let cache_dir = self.get_mod_icon_cache_dir().await?;
         let cache_dir_canonical = match fs::canonicalize(&cache_dir).await {
             Ok(path) => path,
@@ -914,7 +930,7 @@ impl ModsService {
 
         let existing = self.load_storage_metadata(&storage_path).await?;
         let mut next = if let Some(existing) = existing {
-            Self::merge_metadata(existing, incoming)
+            Self::merge_metadata(incoming, existing)
         } else {
             incoming
         };
@@ -5759,4 +5775,3 @@ mod tests {
         Ok(())
     }
 }
-

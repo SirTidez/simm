@@ -106,6 +106,14 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
 }
 
 function resolveImageSource(pathOrUrl?: string): string | undefined {
+  const safeDecode = (value: string): string => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+
   if (!pathOrUrl) return undefined;
   if (pathOrUrl.startsWith('asset:')) {
     return pathOrUrl;
@@ -116,14 +124,14 @@ function resolveImageSource(pathOrUrl?: string): string | undefined {
   if (pathOrUrl.startsWith('file://')) {
     try {
       const url = new URL(pathOrUrl);
-      let filePath = decodeURIComponent(url.pathname || '');
+      let filePath = safeDecode(url.pathname || '');
       if (/^\/[A-Za-z]:\//.test(filePath)) {
         filePath = filePath.slice(1);
       }
       return convertFileSrc(filePath);
     } catch {
       const fallback = pathOrUrl.replace(/^file:\/\/+/, '');
-      return convertFileSrc(decodeURIComponent(fallback));
+      return convertFileSrc(safeDecode(fallback));
     }
   }
   const normalized = pathOrUrl.replace(/\\/g, '/');
@@ -149,6 +157,9 @@ function handleCardActivationKeyDown(
   event: React.KeyboardEvent<HTMLElement>,
   onActivate: () => void
 ) {
+  if (event.target !== event.currentTarget) {
+    return;
+  }
   if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
     event.preventDefault();
     onActivate();
@@ -232,6 +243,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const modsScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const modsScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
+  const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
 
   const libraryVersionCountByName = useMemo(() => {
     const counts = new Map<string, number>();
@@ -2616,18 +2628,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               )}
 
               <div className="mod-view-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                {activeModView.sourceUrl && (
+                {activeModViewSourceUrl && (
                   <a
-                    href={safeExternalUrl(activeModView.sourceUrl)}
+                    href={activeModViewSourceUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="btn btn-secondary btn-small"
                     style={{ textDecoration: 'none' }}
-                    onClick={(e) => {
-                      if (!safeExternalUrl(activeModView.sourceUrl)) {
-                        e.preventDefault();
-                      }
-                    }}
                   >
                     <i className="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }}></i>
                     Open Source Page

@@ -351,5 +351,36 @@ describe('ModsOverlay', () => {
     expect(await screen.findByText('Mod View')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Source Page' })).toBeTruthy();
   });
-});
+  it('does not open mod view when keyboard events come from nested action buttons', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Nested Action Installed Mod',
+          fileName: 'Nested.Action.Installed.Mod.dll',
+          path: 'C:/env/Mods/Nested.Action.Installed.Mod.dll',
+          source: 'thunderstore',
+          sourceUrl: 'https://thunderstore.io/c/schedule-i/p/author/nested-action-installed-mod',
+          version: '1.0.0',
+          latestVersion: '1.1.0',
+          managed: true,
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
 
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    const disableButton = await screen.findByRole('button', { name: 'Disable' });
+    fireEvent.keyDown(disableButton, { key: 'Enter', code: 'Enter' });
+
+    expect(screen.queryByText('Mod View')).toBeNull();
+  });
+});

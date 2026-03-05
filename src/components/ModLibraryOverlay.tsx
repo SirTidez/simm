@@ -130,6 +130,9 @@ const handleCardActivationKeyDown = (
   event: ReactKeyboardEvent<HTMLElement>,
   onActivate: () => void
 ) => {
+  if (event.target !== event.currentTarget) {
+    return;
+  }
   if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
     event.preventDefault();
     onActivate();
@@ -137,6 +140,14 @@ const handleCardActivationKeyDown = (
 };
 
 const resolveImageSource = (pathOrUrl?: string): string | undefined => {
+  const safeDecode = (value: string): string => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+
   if (!pathOrUrl) {
     return undefined;
   }
@@ -149,14 +160,14 @@ const resolveImageSource = (pathOrUrl?: string): string | undefined => {
   if (pathOrUrl.startsWith('file://')) {
     try {
       const url = new URL(pathOrUrl);
-      let filePath = decodeURIComponent(url.pathname || '');
+      let filePath = safeDecode(url.pathname || '');
       if (/^\/[A-Za-z]:\//.test(filePath)) {
         filePath = filePath.slice(1);
       }
       return convertFileSrc(filePath);
     } catch {
       const fallback = pathOrUrl.replace(/^file:\/\/+/, '');
-      return convertFileSrc(decodeURIComponent(fallback));
+      return convertFileSrc(safeDecode(fallback));
     }
   }
   const normalized = pathOrUrl.replace(/\\/g, '/');
