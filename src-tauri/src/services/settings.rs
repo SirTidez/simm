@@ -115,6 +115,7 @@ impl SettingsService {
             thunderstore_game_id: Some("schedule-i".to_string()),
             auto_update_mods: None,
             mod_update_check_interval: None,
+            mod_icon_cache_limit_mb: Some(500),
             custom_theme: None,
             log_retention_days: Some(7),
         };

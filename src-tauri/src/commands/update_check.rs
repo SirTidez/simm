@@ -6,11 +6,13 @@ use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
-use crate::types::UpdateCheckResult;
+use crate::types::{ModMetadata, ModSource, UpdateCheckResult};
 use crate::events;
 use tauri::{AppHandle, State};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
 
@@ -44,6 +46,66 @@ fn build_mod_updates_payload(results: &[serde_json::Value]) -> Vec<serde_json::V
             })
         })
         .collect()
+}
+
+fn extract_package_uuid(package: &serde_json::Value) -> Option<String> {
+    for key in ["uuid4", "uuid", "package_uuid", "packageId", "package_id"] {
+        if let Some(value) = package.get(key).and_then(|v| v.as_str()) {
+            return Some(value.to_string());
+        }
+    }
+
+    package
+        .get("latest")
+        .and_then(|v| v.get("uuid4"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+}
+
+fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
+    package
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("icon"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            package
+                .get("latest")
+                .and_then(|v| v.get("icon"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| package.get("icon").and_then(|v| v.as_str()))
+        .or_else(|| package.get("icon_url").and_then(|v| v.as_str()))
+        .map(|v| v.to_string())
+}
+
+async fn resolve_thunderstore_package_by_source_id(
+    thunderstore_service: &ThunderStoreService,
+    source_id: &str,
+) -> Option<serde_json::Value> {
+    if let Ok(Some(package)) = thunderstore_service.get_package(source_id, Some("schedule-i")).await {
+        return Some(package);
+    }
+
+    let (owner, name) = source_id.split_once('/')?;
+
+    let candidates = thunderstore_service
+        .search_packages_filtered_by_runtime("schedule-i", "unknown", Some(name))
+        .await
+        .ok()?;
+
+    let matching = candidates.into_iter().find(|pkg| {
+        let pkg_owner = pkg.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+        let pkg_name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        pkg_owner.eq_ignore_ascii_case(owner) && pkg_name.eq_ignore_ascii_case(name)
+    })?;
+
+    let package_uuid = extract_package_uuid(&matching)?;
+    thunderstore_service
+        .get_package(&package_uuid, Some("schedule-i"))
+        .await
+        .ok()?
 }
 
 
@@ -197,10 +259,53 @@ pub async fn check_all_updates(
         .filter(|env| matches!(env.status, crate::types::EnvironmentStatus::Completed))
         .collect();
 
+    let mut env_mod_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_mods_refreshing = 0usize;
+    for env in &completed_envs {
+        let count = match mods_service.list_mods(&env.output_dir).await {
+            Ok(value) => value
+                .get("mods")
+                .and_then(|m| m.as_array())
+                .map(|m| m.len())
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+        env_mod_counts.insert(env.id.clone(), count);
+        total_mods_refreshing = total_mods_refreshing.saturating_add(count);
+    }
+
+    let mut seen_storage_ids = HashSet::new();
+    let mut library_thunderstore_targets: Vec<(String, String)> = Vec::new();
+    if let Ok(library) = mods_service.get_mod_library().await {
+        for entry in library.downloaded {
+            if !matches!(entry.source, Some(ModSource::Thunderstore)) {
+                continue;
+            }
+
+            if entry.icon_url.is_some() && entry.icon_cache_path.is_some() {
+                continue;
+            }
+
+            let Some(source_id) = entry.source_id.clone().filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+
+            if seen_storage_ids.insert(entry.storage_id.clone()) {
+                library_thunderstore_targets.push((entry.storage_id, source_id));
+            }
+        }
+    }
+
+    total_mods_refreshing = total_mods_refreshing.saturating_add(library_thunderstore_targets.len());
+
+    let refresh_counter = Arc::new(AtomicUsize::new(total_mods_refreshing));
+    let _ = events::emit_mod_metadata_refresh_status(&app, total_mods_refreshing);
+
     // Check mod updates for all completed environments in parallel
     let app_handle = app.clone();
     let mod_update_tasks: Vec<_> = completed_envs.iter().map(|env| {
         let env_id = env.id.clone();
+        let env_mod_count = env_mod_counts.get(&env.id).copied().unwrap_or(0);
         let app = app_handle.clone();
         let mod_update_service = mod_update_service.clone();
         let mods_service = mods_service.clone();
@@ -208,6 +313,7 @@ pub async fn check_all_updates(
         let thunderstore_service = thunderstore_service.clone();
         let nexus_mods_service = nexus_mods_service.clone();
         let github_service = github_service.clone();
+        let refresh_counter = refresh_counter.clone();
 
         tokio::spawn(async move {
             match mod_update_service.check_mod_updates(
@@ -231,12 +337,127 @@ pub async fn check_all_updates(
                     eprintln!("[UpdateCheck] Failed to check mod updates for environment {}: {}", env_id, e);
                 }
             }
+
+            let remaining = loop {
+                let current = refresh_counter.load(Ordering::SeqCst);
+                let next = current.saturating_sub(env_mod_count);
+                if refresh_counter
+                    .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    break next;
+                }
+            };
+            let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
         })
     }).collect();
 
     // Wait for all mod update checks to complete (but don't fail if they error)
     for task in mod_update_tasks {
         let _ = task.await;
+    }
+
+    // Backfill missing Thunderstore metadata/icons for downloaded library entries
+    for (storage_id, source_id) in library_thunderstore_targets {
+        if let Some(package) = resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await {
+            let now = chrono::Utc::now();
+            let icon_url = extract_thunderstore_icon(&package);
+            let icon_cache_path = mods_service
+                .cache_icon_for_metadata(icon_url.as_deref())
+                .await;
+
+            let metadata_update = ModMetadata {
+                source: Some(ModSource::Thunderstore),
+                source_id: Some(source_id.clone()),
+                source_version: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("version_number"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                author: package
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                mod_name: package
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                source_url: package
+                    .get("package_url")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                summary: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                icon_url,
+                icon_cache_path,
+                downloads: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .map(|versions| {
+                        versions
+                            .iter()
+                            .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                            .sum::<u64>()
+                    }),
+                likes_or_endorsements: package
+                    .get("rating_score")
+                    .and_then(|v| v.as_i64()),
+                updated_at: package
+                    .get("date_updated")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                tags: package
+                    .get("categories")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .filter(|tags| !tags.is_empty()),
+                installed_version: None,
+                library_added_at: None,
+                installed_at: None,
+                last_update_check: Some(now),
+                metadata_last_refreshed: Some(now),
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: Some(storage_id.clone()),
+                symlink_paths: None,
+            };
+
+            if let Err(error) = mods_service
+                .upsert_storage_metadata_by_id(&storage_id, metadata_update)
+                .await
+            {
+                eprintln!(
+                    "[UpdateCheck] Failed to backfill library metadata for {}: {}",
+                    storage_id,
+                    error
+                );
+            }
+        }
+
+        let remaining = loop {
+            let current = refresh_counter.load(Ordering::SeqCst);
+            let next = current.saturating_sub(1);
+            if refresh_counter
+                .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break next;
+            }
+        };
+        let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
     }
 
     // Update environments with the results and emit events

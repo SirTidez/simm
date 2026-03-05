@@ -99,6 +99,11 @@ export interface ModUpdatesCheckedEvent {
   }>;
 }
 
+export interface ModMetadataRefreshStatusEvent {
+  activeCount: number;
+  running: boolean;
+}
+
 export async function onProgress(handler: (data: DownloadProgress) => void): Promise<() => void> {
   return await listen<ProgressEvent>('download_progress', (event) => {
     handler(event.payload.progress);
@@ -191,6 +196,14 @@ export async function onUserLibsChanged(handler: (data: UserLibsChangedEvent) =>
 
 export async function onModUpdatesChecked(handler: (data: ModUpdatesCheckedEvent) => void): Promise<() => void> {
   return await listen<ModUpdatesCheckedEvent>('mod_updates_checked', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onModMetadataRefreshStatus(
+  handler: (data: ModMetadataRefreshStatusEvent) => void
+): Promise<() => void> {
+  return await listen<ModMetadataRefreshStatusEvent>('mod_metadata_refresh_status', (event) => {
     handler(event.payload);
   });
 }

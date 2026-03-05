@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
 
 const eventMocks = vi.hoisted(() => ({
   onModUpdatesChecked: vi.fn(),
+  onModMetadataRefreshStatus: vi.fn(),
 }));
 
 const loggerMocks = vi.hoisted(() => ({
@@ -40,6 +41,7 @@ vi.mock('../services/api', () => ({
 
 vi.mock('../services/events', () => ({
   onModUpdatesChecked: eventMocks.onModUpdatesChecked,
+  onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
 
 vi.mock('../services/logger', () => ({
@@ -78,8 +80,10 @@ describe('Footer', () => {
     settingsStoreMocks.useSettingsStore.mockReset();
     apiMocks.getAllModUpdatesSummary.mockReset();
     eventMocks.onModUpdatesChecked.mockReset();
+    eventMocks.onModMetadataRefreshStatus.mockReset();
 
     eventMocks.onModUpdatesChecked.mockResolvedValue(() => {});
+    eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
     apiMocks.getAllModUpdatesSummary.mockResolvedValue([]);
   });
 

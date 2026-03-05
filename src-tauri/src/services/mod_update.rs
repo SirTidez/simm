@@ -4,7 +4,7 @@ use crate::services::environment::EnvironmentService;
 use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use serde_json::Value;
 
@@ -47,6 +47,7 @@ impl ModUpdateService {
         let mods_dir = Path::new(&env.output_dir).join("Mods");
         let mut all_metadata: HashMap<String, ModMetadata> = mods_service.load_mod_metadata(&mods_dir).await
             .unwrap_or_else(|_| HashMap::new());
+        let mut storage_metadata_updates: HashMap<String, ModMetadata> = HashMap::new();
 
         let mut results = Vec::new();
         let now = Utc::now();
@@ -60,9 +61,12 @@ impl ModUpdateService {
                     let current_version = metadata.source_version.clone();
 
                     if let Some(crate::types::ModSource::Thunderstore) = source {
-                        if let Some(uuid) = source_id {
+                        if let Some(source_id) = source_id {
                             // Check Thunderstore for updates (use Schedule I community endpoint)
-                            if let Ok(Some(package)) = thunderstore_service.get_package(&uuid, Some("schedule-i")).await {
+                            if let Ok((_, package)) = self
+                                .resolve_thunderstore_package(thunderstore_service, &source_id)
+                                .await
+                            {
                                 // Versions array is directly on package, not under "latest"
                                 if let Some(latest_version) = package
                                     .get("versions")
@@ -78,6 +82,54 @@ impl ModUpdateService {
                                     metadata.last_update_check = Some(now);
                                     metadata.update_available = Some(update_available);
                                     metadata.remote_version = Some(latest_version.clone());
+                                    metadata.summary = package
+                                        .get("versions")
+                                        .and_then(|v| v.as_array())
+                                        .and_then(|v| v.first())
+                                        .and_then(|v| v.get("description"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                        .or_else(|| {
+                                            package
+                                                .get("latest")
+                                                .and_then(|v| v.get("description"))
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                        });
+                                    metadata.icon_url = Self::extract_package_icon(&package);
+                                    metadata.icon_cache_path = mods_service
+                                        .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                        .await
+                                        .or_else(|| metadata.icon_cache_path.clone());
+                                    metadata.downloads = package
+                                        .get("versions")
+                                        .and_then(|v| v.as_array())
+                                        .map(|versions| {
+                                            versions
+                                                .iter()
+                                                .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                                                .sum::<u64>()
+                                        });
+                                    metadata.likes_or_endorsements = package
+                                        .get("rating_score")
+                                        .and_then(|v| v.as_i64());
+                                    metadata.updated_at = package
+                                        .get("date_updated")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    metadata.tags = package
+                                        .get("categories")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                                .collect::<Vec<String>>()
+                                        })
+                                        .filter(|tags| !tags.is_empty());
+                                    metadata.metadata_last_refreshed = Some(now);
+                                    if let Some(storage_id) = metadata.mod_storage_id.clone() {
+                                        storage_metadata_updates.insert(storage_id, metadata.clone());
+                                    }
 
                                     results.push(serde_json::json!({
                                         "modFileName": file_name,
@@ -116,6 +168,36 @@ impl ModUpdateService {
                                         metadata.last_update_check = Some(now);
                                         metadata.update_available = Some(update_available);
                                         metadata.remote_version = Some(latest_version.clone());
+                                        metadata.summary = mod_info
+                                            .get("summary")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.icon_url = mod_info
+                                            .get("picture_url")
+                                            .or_else(|| mod_info.get("pictureUrl"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.icon_cache_path = mods_service
+                                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                            .await
+                                            .or_else(|| metadata.icon_cache_path.clone());
+                                        metadata.downloads = mod_info
+                                            .get("mod_downloads")
+                                            .or_else(|| mod_info.get("downloads"))
+                                            .and_then(|v| v.as_u64());
+                                        metadata.likes_or_endorsements = mod_info
+                                            .get("endorsement_count")
+                                            .or_else(|| mod_info.get("endorsements"))
+                                            .and_then(|v| v.as_i64());
+                                        metadata.updated_at = mod_info
+                                            .get("updated_at")
+                                            .or_else(|| mod_info.get("updatedAt"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.metadata_last_refreshed = Some(now);
+                                        if let Some(storage_id) = metadata.mod_storage_id.clone() {
+                                            storage_metadata_updates.insert(storage_id, metadata.clone());
+                                        }
 
                                         results.push(serde_json::json!({
                                             "modFileName": file_name,
@@ -160,6 +242,23 @@ impl ModUpdateService {
                                         metadata.last_update_check = Some(now);
                                         metadata.update_available = Some(update_available);
                                         metadata.remote_version = Some(latest_version.clone());
+                                        metadata.summary = latest_release
+                                            .get("body")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.icon_cache_path = mods_service
+                                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                            .await
+                                            .or_else(|| metadata.icon_cache_path.clone());
+                                        metadata.updated_at = latest_release
+                                            .get("published_at")
+                                            .or_else(|| latest_release.get("created_at"))
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                        metadata.metadata_last_refreshed = Some(now);
+                                        if let Some(storage_id) = metadata.mod_storage_id.clone() {
+                                            storage_metadata_updates.insert(storage_id, metadata.clone());
+                                        }
 
                                         results.push(serde_json::json!({
                                             "modFileName": file_name,
@@ -186,10 +285,150 @@ impl ModUpdateService {
             }
         }
 
+        for (storage_id, metadata_update) in storage_metadata_updates {
+            if let Err(error) = mods_service
+                .upsert_storage_metadata_by_id(&storage_id, metadata_update)
+                .await
+            {
+                log::warn!(
+                    "Failed to sync refreshed metadata to storage {}: {}",
+                    storage_id,
+                    error
+                );
+            }
+        }
+
         // Save updated metadata back to file
         mods_service.save_mod_metadata(&mods_dir, &all_metadata).await?;
 
         Ok(results)
+    }
+
+    pub async fn backfill_missing_thunderstore_library_icons(
+        &self,
+        mods_service: &ModsService,
+        thunderstore_service: &ThunderStoreService,
+    ) -> Result<usize> {
+        use crate::types::{ModMetadata, ModSource};
+        use chrono::Utc;
+
+        let library = mods_service.get_mod_library().await?;
+        let mut seen_storage_ids = HashSet::new();
+        let mut updated = 0usize;
+
+        for entry in library.downloaded {
+            if !matches!(entry.source, Some(ModSource::Thunderstore)) {
+                continue;
+            }
+
+            if entry.icon_url.is_some() && entry.icon_cache_path.is_some() {
+                continue;
+            }
+
+            if !seen_storage_ids.insert(entry.storage_id.clone()) {
+                continue;
+            }
+
+            let Some(source_id) = entry.source_id.clone().filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+
+            let Ok((_, package)) = self
+                .resolve_thunderstore_package(thunderstore_service, &source_id)
+                .await
+            else {
+                continue;
+            };
+
+            let now = Utc::now();
+            let icon_url = Self::extract_package_icon(&package);
+            let icon_cache_path = mods_service
+                .cache_icon_for_metadata(icon_url.as_deref())
+                .await;
+
+            let metadata_update = ModMetadata {
+                source: Some(ModSource::Thunderstore),
+                source_id: Some(source_id.clone()),
+                source_version: Self::extract_package_latest_version(&package),
+                author: package
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                mod_name: package
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                source_url: package
+                    .get("package_url")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                summary: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("description"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                icon_url,
+                icon_cache_path,
+                downloads: package
+                    .get("versions")
+                    .and_then(|v| v.as_array())
+                    .map(|versions| {
+                        versions
+                            .iter()
+                            .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                            .sum::<u64>()
+                    }),
+                likes_or_endorsements: package
+                    .get("rating_score")
+                    .and_then(|v| v.as_i64()),
+                updated_at: package
+                    .get("date_updated")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+                tags: package
+                    .get("categories")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .filter(|tags| !tags.is_empty()),
+                installed_version: None,
+                library_added_at: None,
+                installed_at: None,
+                last_update_check: Some(now),
+                metadata_last_refreshed: Some(now),
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: Some(entry.storage_id.clone()),
+                symlink_paths: None,
+            };
+
+            match mods_service
+                .upsert_storage_metadata_by_id(&entry.storage_id, metadata_update.clone())
+                .await
+            {
+                Ok(_) => {
+                    updated = updated.saturating_add(1);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Failed to backfill Thunderstore metadata for storage {} (source {}, icon {:?}): {}",
+                        entry.storage_id,
+                        source_id,
+                        metadata_update.icon_url,
+                        error
+                    );
+                }
+            }
+        }
+
+        Ok(updated)
     }
 
     fn runtime_label(runtime: &crate::types::Runtime) -> &'static str {
@@ -219,6 +458,24 @@ impl ModUpdateService {
             .and_then(|v| v.first())
             .and_then(|v| v.get("version_number"))
             .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    }
+
+    fn extract_package_icon(package: &Value) -> Option<String> {
+        package
+            .get("versions")
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("icon"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                package
+                    .get("latest")
+                    .and_then(|v| v.get("icon"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| package.get("icon").and_then(|v| v.as_str()))
+            .or_else(|| package.get("icon_url").and_then(|v| v.as_str()))
             .map(|v| v.to_string())
     }
 
@@ -396,6 +653,41 @@ impl ModUpdateService {
                     "sourceUrl": package.get("package_url").and_then(|v| v.as_str()).unwrap_or_default(),
                     "modName": name,
                     "author": owner,
+                    "summary": package
+                        .get("versions")
+                        .and_then(|v| v.as_array())
+                        .and_then(|v| v.first())
+                        .and_then(|v| v.get("description"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    "iconUrl": Self::extract_package_icon(&package).unwrap_or_default(),
+                    "downloads": package
+                        .get("versions")
+                        .and_then(|v| v.as_array())
+                        .map(|versions| {
+                            versions
+                                .iter()
+                                .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                                .sum::<u64>()
+                        })
+                        .unwrap_or(0),
+                    "likesOrEndorsements": package
+                        .get("rating_score")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    "updatedAt": package
+                        .get("date_updated")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    "tags": package
+                        .get("categories")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<&str>>()
+                        })
+                        .unwrap_or_default(),
                 });
 
                 let result = mods_service
@@ -705,6 +997,21 @@ mod tests {
         assert!(ModUpdateService::versions_differ(None, "1.0.0"));
     }
 
+    #[test]
+    fn extract_package_icon_prefers_version_icon() {
+        let package = serde_json::json!({
+            "icon": "https://example.com/top.png",
+            "versions": [
+                {
+                    "icon": "https://example.com/version.png"
+                }
+            ]
+        });
+
+        let icon = ModUpdateService::extract_package_icon(&package);
+        assert_eq!(icon.as_deref(), Some("https://example.com/version.png"));
+    }
+
     #[tokio::test]
     #[serial]
     async fn check_mod_updates_returns_empty_for_no_mods() -> Result<()> {
@@ -801,9 +1108,18 @@ mod tests {
                 author: None,
                 mod_name: Some("Example".to_string()),
                 source_url: None,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
                 installed_version: None,
+                library_added_at: None,
                 installed_at: None,
                 last_update_check: None,
+                metadata_last_refreshed: None,
                 update_available: None,
                 remote_version: None,
                 detected_runtime: None,
@@ -834,3 +1150,5 @@ mod tests {
         Ok(())
     }
 }
+
+

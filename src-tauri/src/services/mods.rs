@@ -1,25 +1,30 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::fs::File;
+use std::time::Duration;
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use tokio::fs;
 #[cfg(target_os = "windows")]
 use tokio::process::Command;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 use unrar::Archive;
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 use crate::types::{ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, Environment};
 use crate::services::settings::SettingsService;
+use reqwest::header::CONTENT_LENGTH;
 use sqlx::SqlitePool;
 
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
+const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
+const ICON_FETCH_TIMEOUT_SECONDS: u64 = 15;
 
 static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
@@ -46,6 +51,15 @@ struct ModInfo {
     disabled: Option<bool>,
     mod_storage_id: Option<String>,
     managed: bool,
+    summary: Option<String>,
+    icon_url: Option<String>,
+    icon_cache_path: Option<String>,
+    downloads: Option<u64>,
+    likes_or_endorsements: Option<i64>,
+    updated_at: Option<String>,
+    tags: Option<Vec<String>>,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    installed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -153,6 +167,776 @@ impl ModsService {
         storage_path.join(STORAGE_METADATA_FILE)
     }
 
+    fn metadata_string(metadata: Option<&serde_json::Value>, key: &str) -> Option<String> {
+        metadata
+            .and_then(|m| m.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn metadata_u64(metadata: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+        metadata.and_then(|m| m.get(key)).and_then(|v| v.as_u64())
+    }
+
+    fn metadata_i64(metadata: Option<&serde_json::Value>, key: &str) -> Option<i64> {
+        metadata.and_then(|m| m.get(key)).and_then(|v| v.as_i64())
+    }
+
+    fn metadata_tags(metadata: Option<&serde_json::Value>) -> Option<Vec<String>> {
+        let raw = metadata
+            .and_then(|m| m.get("tags"))
+            .and_then(|v| v.as_array())?;
+
+        let tags: Vec<String> = raw
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        }
+    }
+
+    fn metadata_value_is_valid(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::String(text) => !text.trim().is_empty(),
+            _ => true,
+        }
+    }
+
+    fn metadata_field<'a>(metadata: &'a serde_json::Value, keys: &[&str]) -> Option<&'a serde_json::Value> {
+        keys.iter().find_map(|key| {
+            metadata
+                .get(*key)
+                .filter(|value| Self::metadata_value_is_valid(value))
+        })
+    }
+
+    fn metadata_string_value(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            serde_json::Value::Number(value) => Some(value.to_string()),
+            serde_json::Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn metadata_bool_value(value: &serde_json::Value) -> Option<bool> {
+        match value {
+            serde_json::Value::Bool(value) => Some(*value),
+            serde_json::Value::Number(value) => value.as_i64().map(|v| v != 0),
+            serde_json::Value::String(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "true" | "1" | "yes" | "y" => Some(true),
+                    "false" | "0" | "no" | "n" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn metadata_u64_value(value: &serde_json::Value) -> Option<u64> {
+        match value {
+            serde_json::Value::Number(value) => value.as_u64().or_else(|| value.as_i64().and_then(|v| if v >= 0 { Some(v as u64) } else { None })),
+            serde_json::Value::String(value) => value.trim().parse::<u64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn metadata_i64_value(value: &serde_json::Value) -> Option<i64> {
+        match value {
+            serde_json::Value::Number(value) => value.as_i64().or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok())),
+            serde_json::Value::String(value) => value.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn metadata_datetime_value(value: &serde_json::Value) -> Option<DateTime<Utc>> {
+        match value {
+            serde_json::Value::Number(value) => value.as_i64().and_then(|seconds| Utc.timestamp_opt(seconds, 0).single()),
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+
+                if let Ok(seconds) = trimmed.parse::<i64>() {
+                    return Utc.timestamp_opt(seconds, 0).single();
+                }
+
+                DateTime::parse_from_rfc3339(trimmed)
+                    .ok()
+                    .map(|parsed| parsed.with_timezone(&Utc))
+            }
+            _ => None,
+        }
+    }
+
+    fn metadata_tags_value(value: &serde_json::Value) -> Option<Vec<String>> {
+        let tags = match value {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .filter_map(Self::metadata_string_value)
+                .collect::<Vec<_>>(),
+            serde_json::Value::String(value) => value
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+
+        if tags.is_empty() {
+            None
+        } else {
+            Some(tags)
+        }
+    }
+
+    fn metadata_string_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<String> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_string_value)
+    }
+
+    fn metadata_bool_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_bool_value)
+    }
+
+    fn metadata_u64_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_u64_value)
+    }
+
+    fn metadata_i64_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_i64_value)
+    }
+
+    fn metadata_datetime_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<DateTime<Utc>> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_datetime_value)
+    }
+
+    fn metadata_tags_from_keys(metadata: &serde_json::Value, keys: &[&str]) -> Option<Vec<String>> {
+        Self::metadata_field(metadata, keys).and_then(Self::metadata_tags_value)
+    }
+
+    fn parse_mod_source_compat(raw: &str) -> Option<ModSource> {
+        let normalized = raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "");
+
+        match normalized.as_str() {
+            "local" => Some(ModSource::Local),
+            "thunderstore" => Some(ModSource::Thunderstore),
+            "nexusmods" | "nexus" => Some(ModSource::Nexusmods),
+            "github" => Some(ModSource::Github),
+            "unknown" => Some(ModSource::Unknown),
+            _ => None,
+        }
+    }
+
+    fn parse_runtime_compat(raw: &str) -> Option<crate::types::Runtime> {
+        let normalized = raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "");
+
+        match normalized.as_str() {
+            "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+            "mono" => Some(crate::types::Runtime::Mono),
+            _ => None,
+        }
+    }
+
+    fn parse_storage_metadata_compat(value: &serde_json::Value) -> Option<ModMetadata> {
+        if !value.is_object() {
+            return None;
+        }
+
+        let source = Self::metadata_string_from_keys(value, &["source"]).and_then(|raw| Self::parse_mod_source_compat(&raw));
+        let detected_runtime = Self::metadata_string_from_keys(value, &["detectedRuntime", "detected_runtime", "runtime"])
+            .and_then(|raw| Self::parse_runtime_compat(&raw));
+
+        Some(ModMetadata {
+            source,
+            source_id: Self::metadata_string_from_keys(value, &["sourceId", "source_id"]),
+            source_version: Self::metadata_string_from_keys(value, &["sourceVersion", "source_version"]),
+            author: Self::metadata_string_from_keys(value, &["author"]),
+            mod_name: Self::metadata_string_from_keys(value, &["modName", "mod_name", "name"]),
+            source_url: Self::metadata_string_from_keys(value, &["sourceUrl", "source_url"]),
+            summary: Self::metadata_string_from_keys(value, &["summary", "description"]),
+            icon_url: Self::metadata_string_from_keys(value, &["iconUrl", "icon_url", "pictureURL", "pictureUrl", "icon"]),
+            icon_cache_path: Self::metadata_string_from_keys(value, &["iconCachePath", "icon_cache_path"]),
+            downloads: Self::metadata_u64_from_keys(value, &["downloads", "modDownloads", "downloadCount"]),
+            likes_or_endorsements: Self::metadata_i64_from_keys(value, &["likesOrEndorsements", "likes_or_endorsements", "endorsementCount", "endorsements"]),
+            updated_at: Self::metadata_string_from_keys(value, &["updatedAt", "updated_at", "updatedTime", "dateUpdated"]),
+            tags: Self::metadata_tags_from_keys(value, &["tags", "categories"]),
+            installed_version: Self::metadata_string_from_keys(value, &["installedVersion", "installed_version", "version"]),
+            library_added_at: Self::metadata_datetime_from_keys(value, &["libraryAddedAt", "library_added_at"]),
+            installed_at: Self::metadata_datetime_from_keys(value, &["installedAt", "installed_at"]),
+            last_update_check: Self::metadata_datetime_from_keys(value, &["lastUpdateCheck", "last_update_check"]),
+            metadata_last_refreshed: Self::metadata_datetime_from_keys(value, &["metadataLastRefreshed", "metadata_last_refreshed"]),
+            update_available: Self::metadata_bool_from_keys(value, &["updateAvailable", "update_available"]),
+            remote_version: Self::metadata_string_from_keys(value, &["remoteVersion", "remote_version"]),
+            detected_runtime,
+            runtime_match: Self::metadata_bool_from_keys(value, &["runtimeMatch", "runtime_match"]),
+            mod_storage_id: Self::metadata_string_from_keys(value, &["modStorageId", "mod_storage_id", "storageId", "storage_id"]),
+            symlink_paths: Self::metadata_tags_from_keys(value, &["symlinkPaths", "symlink_paths"]),
+        })
+    }
+
+    fn mod_metadata_with_storage_id(storage_id: String) -> ModMetadata {
+        ModMetadata {
+            source: None,
+            source_id: None,
+            source_version: None,
+            author: None,
+            mod_name: None,
+            source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
+            installed_version: None,
+            library_added_at: None,
+            installed_at: None,
+            last_update_check: None,
+            metadata_last_refreshed: None,
+            update_available: None,
+            remote_version: None,
+            detected_runtime: None,
+            runtime_match: None,
+            mod_storage_id: Some(storage_id),
+            symlink_paths: None,
+        }
+    }
+
+    fn infer_storage_id_from_index(index: &HashMap<String, Vec<String>>, file_name: &str) -> Option<String> {
+        let mut matches = HashSet::new();
+        for variant in Self::tracked_name_variants(file_name) {
+            if let Some(ids) = index.get(&variant.to_lowercase()) {
+                for id in ids {
+                    matches.insert(id.clone());
+                }
+            }
+        }
+
+        if matches.len() == 1 {
+            matches.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    async fn build_storage_file_index(&self, storage_root: &Path) -> HashMap<String, Vec<String>> {
+        let mut index: HashMap<String, Vec<String>> = HashMap::new();
+
+        let mut entries = match fs::read_dir(storage_root).await {
+            Ok(entries) => entries,
+            Err(_) => return index,
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let entry_path = entry.path();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let storage_id = entry_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if storage_id.is_empty() {
+                continue;
+            }
+
+            let files = match self.collect_storage_files(&entry_path).await {
+                Ok(files) => files,
+                Err(_) => continue,
+            };
+
+            for file_name in files {
+                index
+                    .entry(file_name.to_lowercase())
+                    .or_default()
+                    .push(storage_id.clone());
+            }
+        }
+
+        index
+    }
+
+    async fn build_storage_file_index_if_needed(
+        &self,
+        storage_root: &Path,
+        index: &mut Option<HashMap<String, Vec<String>>>,
+    ) {
+        if index.is_none() {
+            *index = Some(self.build_storage_file_index(storage_root).await);
+        }
+    }
+
+    async fn infer_storage_id_from_symlink(
+        &self,
+        mod_file_path: &Path,
+        storage_root: &Path,
+    ) -> Option<String> {
+        let metadata = fs::symlink_metadata(mod_file_path).await.ok()?;
+        if !metadata.file_type().is_symlink() {
+            return None;
+        }
+
+        let link_target = fs::read_link(mod_file_path).await.ok()?;
+        let resolved_target = if link_target.is_absolute() {
+            link_target
+        } else {
+            mod_file_path.parent()?.join(link_target)
+        };
+
+        let canonical_target = match fs::canonicalize(&resolved_target).await {
+            Ok(path) => path,
+            Err(_) => resolved_target,
+        };
+
+        let canonical_storage_root = match fs::canonicalize(storage_root).await {
+            Ok(path) => path,
+            Err(_) => storage_root.to_path_buf(),
+        };
+
+        let relative = canonical_target.strip_prefix(&canonical_storage_root).ok()?;
+        match relative.components().next() {
+            Some(Component::Normal(value)) => {
+                let storage_id = value.to_string_lossy().trim().to_string();
+                if storage_id.is_empty() {
+                    None
+                } else {
+                    Some(storage_id)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    async fn recover_mod_metadata_from_storage(
+        &self,
+        mods_directory: &Path,
+        metadata: &mut HashMap<String, ModMetadata>,
+    ) -> Result<bool> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let mut storage_file_index: Option<HashMap<String, Vec<String>>> = None;
+
+        let mut entries = match fs::read_dir(mods_directory).await {
+            Ok(entries) => entries,
+            Err(_) => return Ok(false),
+        };
+
+        let mut changed = false;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_string();
+            if file_name.is_empty() {
+                continue;
+            }
+
+            let lower_name = file_name.to_lowercase();
+            if !lower_name.ends_with(".dll") && !lower_name.ends_with(".dll.disabled") {
+                continue;
+            }
+
+            let canonical_name = if lower_name.ends_with(".dll.disabled") {
+                file_name.trim_end_matches(".disabled").to_string()
+            } else {
+                file_name.clone()
+            };
+
+            let existing = metadata
+                .get(&canonical_name)
+                .cloned()
+                .or_else(|| metadata.get(&file_name).cloned());
+
+            let mut effective = existing.clone();
+            let mut storage_id = effective
+                .as_ref()
+                .and_then(|meta| meta.mod_storage_id.clone());
+
+            if storage_id.is_none() {
+                storage_id = self
+                    .infer_storage_id_from_symlink(&path, &storage_root)
+                    .await;
+
+                if storage_id.is_none() {
+                    self
+                        .build_storage_file_index_if_needed(&storage_root, &mut storage_file_index)
+                        .await;
+
+                    if let Some(index) = storage_file_index.as_ref() {
+                        storage_id = Self::infer_storage_id_from_index(index, &canonical_name);
+                    }
+                }
+            }
+
+            let Some(storage_id) = storage_id else {
+                continue;
+            };
+
+            let mut should_mark_changed = existing.is_none();
+            let mut metadata_value = effective
+                .take()
+                .unwrap_or_else(|| Self::mod_metadata_with_storage_id(storage_id.clone()));
+
+            if metadata_value.mod_storage_id.is_none() {
+                metadata_value.mod_storage_id = Some(storage_id.clone());
+                should_mark_changed = true;
+            }
+
+            if let Ok(Some(storage_meta)) = self.load_storage_metadata(&storage_root.join(&storage_id)).await {
+                if metadata_value.source.is_none()
+                    || metadata_value.source_id.is_none()
+                    || metadata_value.source_version.is_none()
+                    || metadata_value.mod_name.is_none()
+                    || metadata_value.source_url.is_none()
+                    || metadata_value.summary.is_none()
+                    || metadata_value.icon_url.is_none()
+                    || metadata_value.icon_cache_path.is_none()
+                    || metadata_value.downloads.is_none()
+                    || metadata_value.likes_or_endorsements.is_none()
+                    || metadata_value.updated_at.is_none()
+                    || metadata_value.tags.is_none()
+                    || metadata_value.detected_runtime.is_none()
+                    || metadata_value.runtime_match.is_none()
+                {
+                    should_mark_changed = true;
+                }
+
+                metadata_value = Self::merge_metadata(metadata_value, storage_meta);
+            }
+
+            if should_mark_changed {
+                metadata.insert(canonical_name, metadata_value);
+                changed = true;
+            }
+        }
+
+        Ok(changed)
+    }
+
+    async fn get_mod_icon_cache_dir(&self) -> Result<PathBuf> {
+        let cache_dir = crate::db::get_data_dir()?
+            .join("cache")
+            .join("mod-icons");
+        fs::create_dir_all(&cache_dir)
+            .await
+            .context("Failed to create mod icon cache directory")?;
+        Ok(cache_dir)
+    }
+
+    async fn enforce_mod_icon_cache_limit(&self) -> Result<()> {
+        let cache_dir = self.get_mod_icon_cache_dir().await?;
+        let mut settings_service = SettingsService::new(self.pool.clone())
+            .context("Failed to create settings service for icon cache limit")?;
+        let settings = settings_service
+            .load_settings()
+            .await
+            .context("Failed to load settings for icon cache limit")?;
+
+        let max_mb = settings.mod_icon_cache_limit_mb.unwrap_or(500) as u64;
+        let max_bytes = max_mb.saturating_mul(1024).saturating_mul(1024);
+
+        let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        let mut total_size = 0u64;
+        let mut entries = fs::read_dir(&cache_dir)
+            .await
+            .context("Failed to read mod icon cache directory")?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let meta = entry.metadata().await?;
+            if !meta.is_file() {
+                continue;
+            }
+            let size = meta.len();
+            let modified = meta
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            total_size = total_size.saturating_add(size);
+            files.push((path, size, modified));
+        }
+
+        if total_size <= max_bytes {
+            return Ok(());
+        }
+
+        files.sort_by_key(|(_, _, modified)| *modified);
+        for (path, size, _) in files {
+            if total_size <= max_bytes {
+                break;
+            }
+            if fs::remove_file(&path).await.is_ok() {
+                total_size = total_size.saturating_sub(size);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn cache_icon_from_url(&self, icon_url: Option<&str>) -> Option<String> {
+        let icon_url = icon_url?.trim();
+        if icon_url.is_empty() {
+            return None;
+        }
+
+        let parsed = reqwest::Url::parse(icon_url).ok()?;
+        if parsed.scheme() != "https" {
+            return None;
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(icon_url.as_bytes());
+        let hash = hex::encode(hasher.finalize());
+
+        let ext = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .and_then(|segment| segment.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()))
+            .filter(|e| ["png", "jpg", "jpeg", "webp", "gif"].contains(&e.as_str()))
+            .unwrap_or_else(|| "img".to_string());
+
+        let cache_dir = self.get_mod_icon_cache_dir().await.ok()?;
+        let file_path = cache_dir.join(format!("{}.{}", hash, ext));
+        if file_path.exists() {
+            return Some(file_path.to_string_lossy().to_string());
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(ICON_FETCH_TIMEOUT_SECONDS))
+            .build()
+            .ok()?;
+
+        let mut response = client.get(parsed).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
+        if let Some(content_length) = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            if content_length == 0 || content_length > MAX_ICON_BYTES as u64 {
+                return None;
+            }
+        }
+
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    bytes.extend_from_slice(&chunk);
+                    if bytes.len() > MAX_ICON_BYTES {
+                        return None;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return None,
+            }
+        }
+
+        if bytes.is_empty() {
+            return None;
+        }
+
+        if fs::write(&file_path, &bytes).await.is_err() {
+            return None;
+        }
+
+        let _ = self.enforce_mod_icon_cache_limit().await;
+        Some(file_path.to_string_lossy().to_string())
+    }
+
+    pub async fn cache_icon_for_metadata(&self, icon_url: Option<&str>) -> Option<String> {
+        self.cache_icon_from_url(icon_url).await
+    }
+
+    async fn normalize_icon_reference_for_compare(
+        &self,
+        icon_ref: &str,
+        cache_dir: &Path,
+    ) -> String {
+        let trimmed = icon_ref.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        let raw_path = Path::new(trimmed);
+        let candidate = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            cache_dir.join(raw_path)
+        };
+
+        let normalized = match fs::canonicalize(&candidate).await {
+            Ok(path) => path,
+            Err(_) => candidate,
+        };
+
+        normalized
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    }
+
+    async fn remove_icon_cache_if_orphaned(
+        &self,
+        icon_cache_path: Option<&str>,
+        excluding_storage_id: &str,
+    ) -> Result<()> {
+        let Some(icon_path) = icon_cache_path.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+
+        let cache_dir = self.get_mod_icon_cache_dir().await?;
+        let normalized_icon_path = self
+            .normalize_icon_reference_for_compare(icon_path, &cache_dir)
+            .await;
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load mod metadata for icon cache pruning")?;
+
+        for (_, data) in rows {
+            let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) else {
+                continue;
+            };
+
+            if meta.mod_storage_id.as_deref() == Some(excluding_storage_id) {
+                continue;
+            }
+
+            let Some(candidate) = meta.icon_cache_path.as_deref() else {
+                continue;
+            };
+
+            let normalized_candidate = self
+                .normalize_icon_reference_for_compare(candidate, &cache_dir)
+                .await;
+            if normalized_candidate == normalized_icon_path {
+                return Ok(());
+            }
+        }
+
+        let storage_root = self.get_mods_storage_dir().await?;
+        if let Ok(mut entries) = fs::read_dir(&storage_root).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let candidate_storage_id = entry.file_name().to_string_lossy().to_string();
+                if candidate_storage_id == excluding_storage_id {
+                    continue;
+                }
+
+                if let Ok(Some(meta)) = self.load_storage_metadata(&entry.path()).await {
+                    let Some(candidate) = meta.icon_cache_path.as_deref() else {
+                        continue;
+                    };
+
+                    let normalized_candidate = self
+                        .normalize_icon_reference_for_compare(candidate, &cache_dir)
+                        .await;
+                    if normalized_candidate == normalized_icon_path {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let cache_dir_canonical = match fs::canonicalize(&cache_dir).await {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!(
+                    "Failed to canonicalize icon cache directory {} while pruning orphan {}: {}",
+                    cache_dir.display(),
+                    icon_path,
+                    error
+                );
+                return Ok(());
+            }
+        };
+
+        let raw_candidate = Path::new(icon_path);
+        let candidate_path = if raw_candidate.is_absolute() {
+            raw_candidate.to_path_buf()
+        } else {
+            cache_dir.join(raw_candidate)
+        };
+
+        if !candidate_path.exists() {
+            return Ok(());
+        }
+
+        let canonical_candidate = match fs::canonicalize(&candidate_path).await {
+            Ok(path) => path,
+            Err(error) => {
+                log::warn!(
+                    "Failed to canonicalize orphan icon candidate {}: {}",
+                    candidate_path.display(),
+                    error
+                );
+                return Ok(());
+            }
+        };
+
+        if !canonical_candidate.starts_with(&cache_dir_canonical) {
+            log::warn!(
+                "Skipping orphan icon cleanup outside cache directory: {}",
+                canonical_candidate.display()
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = fs::remove_file(&canonical_candidate).await {
+            log::warn!(
+                "Failed to remove orphan icon cache file {}: {}",
+                canonical_candidate.display(),
+                error
+            );
+        }
+
+        Ok(())
+    }
+
     async fn load_storage_metadata(&self, storage_path: &Path) -> Result<Option<ModMetadata>> {
         let metadata_file = self.storage_metadata_path(storage_path);
         if !metadata_file.exists() {
@@ -162,9 +946,33 @@ impl ModsService {
         let content = fs::read_to_string(&metadata_file)
             .await
             .context("Failed to read storage metadata file")?;
-        let metadata = serde_json::from_str::<ModMetadata>(&content)
-            .context("Failed to parse storage metadata file")?;
-        Ok(Some(metadata))
+        match serde_json::from_str::<ModMetadata>(&content) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(parse_error) => {
+                let migrated = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|value| Self::parse_storage_metadata_compat(&value));
+
+                if let Some(metadata) = migrated {
+                    if let Err(save_error) = self.save_storage_metadata(storage_path, &metadata).await {
+                        log::warn!(
+                            "Failed to persist migrated storage metadata for {}: {}",
+                            metadata_file.display(),
+                            save_error
+                        );
+                    }
+
+                    return Ok(Some(metadata));
+                }
+
+                log::warn!(
+                    "Skipping unreadable storage metadata file {}: {}",
+                    metadata_file.display(),
+                    parse_error
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn save_storage_metadata(&self, storage_path: &Path, metadata: &ModMetadata) -> Result<()> {
@@ -175,6 +983,27 @@ impl ModsService {
             .await
             .context("Failed to write storage metadata file")?;
         Ok(())
+    }
+
+    pub async fn upsert_storage_metadata_by_id(
+        &self,
+        storage_id: &str,
+        incoming: ModMetadata,
+    ) -> Result<()> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_path = storage_root.join(storage_id);
+
+        let existing = self.load_storage_metadata(&storage_path).await?;
+        let mut next = if let Some(existing) = existing {
+            Self::merge_metadata(incoming, existing)
+        } else {
+            incoming
+        };
+
+        next.mod_storage_id = Some(storage_id.to_string());
+        fs::create_dir_all(&storage_path).await?;
+
+        self.save_storage_metadata(&storage_path, &next).await
     }
 
     fn merge_metadata(mut primary: ModMetadata, fallback: ModMetadata) -> ModMetadata {
@@ -196,14 +1025,41 @@ impl ModsService {
         if primary.source_url.is_none() {
             primary.source_url = fallback.source_url;
         }
+        if primary.summary.is_none() {
+            primary.summary = fallback.summary;
+        }
+        if primary.icon_url.is_none() {
+            primary.icon_url = fallback.icon_url;
+        }
+        if primary.icon_cache_path.is_none() {
+            primary.icon_cache_path = fallback.icon_cache_path;
+        }
+        if primary.downloads.is_none() {
+            primary.downloads = fallback.downloads;
+        }
+        if primary.likes_or_endorsements.is_none() {
+            primary.likes_or_endorsements = fallback.likes_or_endorsements;
+        }
+        if primary.updated_at.is_none() {
+            primary.updated_at = fallback.updated_at;
+        }
+        if primary.tags.is_none() {
+            primary.tags = fallback.tags;
+        }
         if primary.installed_version.is_none() {
             primary.installed_version = fallback.installed_version;
+        }
+        if primary.library_added_at.is_none() {
+            primary.library_added_at = fallback.library_added_at;
         }
         if primary.installed_at.is_none() {
             primary.installed_at = fallback.installed_at;
         }
         if primary.last_update_check.is_none() {
             primary.last_update_check = fallback.last_update_check;
+        }
+        if primary.metadata_last_refreshed.is_none() {
+            primary.metadata_last_refreshed = fallback.metadata_last_refreshed;
         }
         if primary.update_available.is_none() {
             primary.update_available = fallback.update_available;
@@ -436,9 +1292,18 @@ impl ModsService {
                 author: None,
                 mod_name: None,
                 source_url: None,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
                 installed_version: None,
+                library_added_at: None,
                 installed_at: None,
                 last_update_check: None,
+                metadata_last_refreshed: None,
                 update_available: None,
                 remote_version: None,
                 detected_runtime: None,
@@ -854,7 +1719,22 @@ impl ModsService {
             if let Ok(file_metadata) = self.load_mod_metadata_from_file(mods_directory).await {
                 if !file_metadata.is_empty() {
                     self.save_mod_metadata(mods_directory, &file_metadata).await?;
-                    return Ok(file_metadata);
+                    metadata = file_metadata;
+                }
+            }
+        }
+
+        if let Ok(repaired) = self
+            .recover_mod_metadata_from_storage(mods_directory, &mut metadata)
+            .await
+        {
+            if repaired {
+                if let Err(err) = self.save_mod_metadata(mods_directory, &metadata).await {
+                    log::warn!(
+                        "Failed to persist recovered mod metadata for {}: {}",
+                        mods_directory.display(),
+                        err
+                    );
                 }
             }
         }
@@ -1072,6 +1952,14 @@ impl ModsService {
                 .and_then(|m| m.source_url.clone());
             let mod_storage_id = file_metadata.as_ref().and_then(|m| m.mod_storage_id.clone());
             let managed = mod_storage_id.is_some();
+            let summary = file_metadata.as_ref().and_then(|m| m.summary.clone());
+            let icon_url = file_metadata.as_ref().and_then(|m| m.icon_url.clone());
+            let icon_cache_path = file_metadata.as_ref().and_then(|m| m.icon_cache_path.clone());
+            let downloads = file_metadata.as_ref().and_then(|m| m.downloads);
+            let likes_or_endorsements = file_metadata.as_ref().and_then(|m| m.likes_or_endorsements);
+            let updated_at = file_metadata.as_ref().and_then(|m| m.updated_at.clone());
+            let tags = file_metadata.as_ref().and_then(|m| m.tags.clone());
+            let installed_at = file_metadata.as_ref().and_then(|m| m.installed_at);
 
             mods.push(ModInfo {
                 name: mod_name.clone(),
@@ -1083,6 +1971,14 @@ impl ModsService {
                 disabled: Some(is_disabled),
                 mod_storage_id,
                 managed,
+                summary,
+                icon_url,
+                icon_cache_path,
+                downloads,
+                likes_or_endorsements,
+                updated_at,
+                tags,
+                installed_at,
             });
         }
 
@@ -1182,9 +2078,18 @@ impl ModsService {
                             author: None,
                             mod_name: None,
                             source_url: None,
+                            summary: None,
+                            icon_url: None,
+                            icon_cache_path: None,
+                            downloads: None,
+                            likes_or_endorsements: None,
+                            updated_at: None,
+                            tags: None,
                             installed_version: None,
+                            library_added_at: None,
                             installed_at: None,
                             last_update_check: None,
+                            metadata_last_refreshed: None,
                             update_available: None,
                             remote_version: None,
                             detected_runtime: None,
@@ -1266,7 +2171,16 @@ impl ModsService {
                 source_id: template_meta.source_id.clone(),
                 source_version: template_meta.source_version.clone(),
                 source_url: template_meta.source_url.clone(),
+                summary: template_meta.summary.clone(),
+                icon_url: template_meta.icon_url.clone(),
+                icon_cache_path: template_meta.icon_cache_path.clone(),
+                downloads: template_meta.downloads,
+                likes_or_endorsements: template_meta.likes_or_endorsements,
+                updated_at: template_meta.updated_at.clone(),
+                tags: template_meta.tags.clone(),
                 installed_version: installed_version.clone(),
+                library_added_at: template_meta.library_added_at,
+                installed_at: template_meta.installed_at,
                 author: template_meta.author.clone(),
                 update_available: template_meta.update_available,
                 remote_version: template_meta.remote_version.clone(),
@@ -1277,6 +2191,34 @@ impl ModsService {
                 installed_in_by_runtime: installed_in_by_runtime.clone(),
                 files_by_runtime: files_by_runtime.clone(),
             });
+
+            if entry.summary.is_none() {
+                entry.summary = template_meta.summary.clone();
+            }
+            if entry.icon_url.is_none() {
+                entry.icon_url = template_meta.icon_url.clone();
+            }
+            if entry.icon_cache_path.is_none() {
+                entry.icon_cache_path = template_meta.icon_cache_path.clone();
+            }
+            if entry.downloads.is_none() {
+                entry.downloads = template_meta.downloads;
+            }
+            if entry.likes_or_endorsements.is_none() {
+                entry.likes_or_endorsements = template_meta.likes_or_endorsements;
+            }
+            if entry.updated_at.is_none() {
+                entry.updated_at = template_meta.updated_at.clone();
+            }
+            if entry.tags.is_none() {
+                entry.tags = template_meta.tags.clone();
+            }
+            if entry.library_added_at.is_none() {
+                entry.library_added_at = template_meta.library_added_at;
+            }
+            if entry.installed_at.is_none() {
+                entry.installed_at = template_meta.installed_at;
+            }
 
             let mut file_set: HashSet<String> = entry.files.iter().cloned().collect();
             for file in files {
@@ -1412,8 +2354,9 @@ impl ModsService {
             installed_files = result?;
         }
 
-        let source_str = metadata
-            .as_ref()
+        let metadata_ref = metadata.as_ref();
+
+        let source_str = metadata_ref
             .and_then(|m| m.get("source").and_then(|s| s.as_str()));
 
         let mod_source = match source_str {
@@ -1425,15 +2368,18 @@ impl ModsService {
             _ => None,
         };
 
-        let mod_name = metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_url = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let mod_name = Self::metadata_string(metadata_ref, "modName");
+        let author = Self::metadata_string(metadata_ref, "author");
+        let source_url = Self::metadata_string(metadata_ref, "sourceUrl");
+        let summary = Self::metadata_string(metadata_ref, "summary");
+        let icon_url = Self::metadata_string(metadata_ref, "iconUrl");
+        let icon_cache_path = self.cache_icon_from_url(icon_url.as_deref()).await;
+        let downloads = Self::metadata_u64(metadata_ref, "downloads");
+        let likes_or_endorsements = Self::metadata_i64(metadata_ref, "likesOrEndorsements")
+            .or_else(|| Self::metadata_i64(metadata_ref, "endorsementCount"))
+            .or_else(|| Self::metadata_i64(metadata_ref, "ratingScore"));
+        let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
+        let tags = Self::metadata_tags(metadata_ref);
 
         let storage_metadata = ModMetadata {
             source: mod_source,
@@ -1442,9 +2388,18 @@ impl ModsService {
             author,
             mod_name,
             source_url,
+            summary,
+            icon_url,
+            icon_cache_path,
+            downloads,
+            likes_or_endorsements,
+            updated_at,
+            tags,
             installed_version: source_version,
+            library_added_at: Some(Utc::now()),
             installed_at: None,
             last_update_check: None,
+            metadata_last_refreshed: None,
             update_available: None,
             remote_version: None,
             detected_runtime: runtime,
@@ -1541,9 +2496,18 @@ impl ModsService {
                     author: template_meta.as_ref().and_then(|t| t.author.clone()),
                     mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
                     source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                    summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
+                    icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
+                    icon_cache_path: template_meta.as_ref().and_then(|t| t.icon_cache_path.clone()),
+                    downloads: template_meta.as_ref().and_then(|t| t.downloads),
+                    likes_or_endorsements: template_meta.as_ref().and_then(|t| t.likes_or_endorsements),
+                    updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
+                    tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
                     installed_version: template_meta.as_ref().and_then(|t| t.installed_version.clone()),
+                    library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
                     installed_at: None,
                     last_update_check: None,
+                    metadata_last_refreshed: None,
                     update_available: None,
                     remote_version: None,
                     detected_runtime: None,
@@ -1559,6 +2523,15 @@ impl ModsService {
                 meta.author = template.author.clone();
                 meta.mod_name = template.mod_name.clone();
                 meta.source_url = template.source_url.clone();
+                meta.summary = template.summary.clone();
+                meta.icon_url = template.icon_url.clone();
+                meta.icon_cache_path = template.icon_cache_path.clone();
+                meta.downloads = template.downloads;
+                meta.likes_or_endorsements = template.likes_or_endorsements;
+                meta.updated_at = template.updated_at.clone();
+                meta.tags = template.tags.clone();
+                meta.library_added_at = template.library_added_at;
+                meta.metadata_last_refreshed = template.metadata_last_refreshed;
             }
             meta.installed_version = template_meta
                 .as_ref()
@@ -1776,11 +2749,23 @@ impl ModsService {
 
         let storage_dir = self.get_mods_storage_dir().await?;
         let storage_path = storage_dir.join(storage_id);
+        let storage_meta = if storage_path.exists() {
+            self.load_storage_metadata(&storage_path).await?
+        } else {
+            None
+        };
         if storage_path.exists() {
             tokio::fs::remove_dir_all(&storage_path)
                 .await
                 .context("Failed to remove downloaded mod files")?;
         }
+
+        self
+            .remove_icon_cache_if_orphaned(
+                storage_meta.as_ref().and_then(|m| m.icon_cache_path.as_deref()),
+                storage_id,
+            )
+            .await?;
 
         Ok(serde_json::json!({
             "deleted": true,
@@ -1924,8 +2909,12 @@ impl ModsService {
             eprintln!("[DEBUG] Found Thunderstore manifest.json");
             eprintln!("[DEBUG] Manifest contents: {}", serde_json::to_string_pretty(manifest).unwrap_or_default());
 
-            // Override metadata with Thunderstore data
-            let mut ts_metadata = serde_json::Map::new();
+            // Override metadata with Thunderstore data while preserving upstream card fields.
+            let mut ts_metadata = effective_metadata
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
             ts_metadata.insert("source".to_string(), serde_json::Value::String("thunderstore".to_string()));
 
             if let Some(name) = manifest.get("name").and_then(|v| v.as_str()) {
@@ -1942,6 +2931,10 @@ impl ModsService {
 
             if let Some(website) = manifest.get("website_url").and_then(|v| v.as_str()) {
                 ts_metadata.insert("sourceUrl".to_string(), serde_json::Value::String(website.to_string()));
+            }
+
+            if let Some(description) = manifest.get("description").and_then(|v| v.as_str()) {
+                ts_metadata.insert("summary".to_string(), serde_json::Value::String(description.to_string()));
             }
 
             // Create source ID from author/name
@@ -2075,9 +3068,18 @@ impl ModsService {
                                 author: template_meta.as_ref().and_then(|t| t.author.clone()),
                                 mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
                                 source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                                summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
+                                icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
+                                icon_cache_path: template_meta.as_ref().and_then(|t| t.icon_cache_path.clone()),
+                                downloads: template_meta.as_ref().and_then(|t| t.downloads),
+                                likes_or_endorsements: template_meta.as_ref().and_then(|t| t.likes_or_endorsements),
+                                updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
+                                tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
                                 installed_version: template_meta.as_ref().and_then(|t| t.installed_version.clone()),
+                                library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
                                 installed_at: None,
                                 last_update_check: None,
+                                metadata_last_refreshed: None,
                                 update_available: None,
                                 remote_version: None,
                                 detected_runtime: template_meta.as_ref().and_then(|t| t.detected_runtime.clone()),
@@ -2093,6 +3095,15 @@ impl ModsService {
                             meta.author = template.author.clone();
                             meta.mod_name = template.mod_name.clone();
                             meta.source_url = template.source_url.clone();
+                            meta.summary = template.summary.clone();
+                            meta.icon_url = template.icon_url.clone();
+                            meta.icon_cache_path = template.icon_cache_path.clone();
+                            meta.downloads = template.downloads;
+                            meta.likes_or_endorsements = template.likes_or_endorsements;
+                            meta.updated_at = template.updated_at.clone();
+                            meta.tags = template.tags.clone();
+                            meta.library_added_at = template.library_added_at;
+                            meta.metadata_last_refreshed = template.metadata_last_refreshed;
                             meta.detected_runtime = template.detected_runtime.clone();
                             meta.runtime_match = template.runtime_match;
                         }
@@ -2352,15 +3363,19 @@ impl ModsService {
 
         eprintln!("[DEBUG] install_zip_mod: mod_source = {:?}", mod_source);
         // source_id and source_version are already extracted above for duplicate detection
-        let source_url = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let mod_name = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let metadata_ref = effective_metadata.as_ref();
+        let source_url = Self::metadata_string(metadata_ref, "sourceUrl");
+        let mod_name = Self::metadata_string(metadata_ref, "modName");
+        let author = Self::metadata_string(metadata_ref, "author");
+        let summary = Self::metadata_string(metadata_ref, "summary");
+        let icon_url = Self::metadata_string(metadata_ref, "iconUrl");
+        let icon_cache_path = self.cache_icon_from_url(icon_url.as_deref()).await;
+        let downloads = Self::metadata_u64(metadata_ref, "downloads");
+        let likes_or_endorsements = Self::metadata_i64(metadata_ref, "likesOrEndorsements")
+            .or_else(|| Self::metadata_i64(metadata_ref, "endorsementCount"))
+            .or_else(|| Self::metadata_i64(metadata_ref, "ratingScore"));
+        let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
+        let tags = Self::metadata_tags(metadata_ref);
 
         // Detect runtime from environment
         let env_runtime = match runtime {
@@ -2419,12 +3434,37 @@ impl ModsService {
                 if author.is_some() {
                     meta.author = author.clone();
                 }
+                if summary.is_some() {
+                    meta.summary = summary.clone();
+                }
+                if icon_url.is_some() {
+                    meta.icon_url = icon_url.clone();
+                }
+                if icon_cache_path.is_some() {
+                    meta.icon_cache_path = icon_cache_path.clone();
+                }
+                if downloads.is_some() {
+                    meta.downloads = downloads;
+                }
+                if likes_or_endorsements.is_some() {
+                    meta.likes_or_endorsements = likes_or_endorsements;
+                }
+                if updated_at.is_some() {
+                    meta.updated_at = updated_at.clone();
+                }
+                if tags.is_some() {
+                    meta.tags = tags.clone();
+                }
                 // Update runtime detection
                 meta.detected_runtime = detected_runtime.clone();
                 meta.runtime_match = runtime_match;
                 // Update storage info
                 meta.mod_storage_id = Some(mod_id.clone());
                 meta.symlink_paths = Some(symlink_paths.clone());
+                if meta.library_added_at.is_none() {
+                    meta.library_added_at = Some(Utc::now());
+                }
+                meta.metadata_last_refreshed = Some(Utc::now());
             } else {
                 // Create new metadata entry
                 // Extract version from storage file
@@ -2437,9 +3477,18 @@ impl ModsService {
                     author: author.clone(),
                     mod_name: mod_name.clone(),
                     source_url: source_url.clone(),
+                    summary: summary.clone(),
+                    icon_url: icon_url.clone(),
+                    icon_cache_path: icon_cache_path.clone(),
+                    downloads,
+                    likes_or_endorsements,
+                    updated_at: updated_at.clone(),
+                    tags: tags.clone(),
                     installed_version: installed_version,
+                    library_added_at: Some(Utc::now()),
                     installed_at: Some(Utc::now()),
                     last_update_check: None,
+                    metadata_last_refreshed: Some(Utc::now()),
                     update_available: None,
                     remote_version: None,
                     detected_runtime: detected_runtime.clone(),
@@ -3018,15 +4067,19 @@ impl ModsService {
         };
 
         // source_id and source_version are already extracted above for duplicate detection
-        let source_url = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let mod_name = metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let metadata_ref = metadata.as_ref();
+        let source_url = Self::metadata_string(metadata_ref, "sourceUrl");
+        let mod_name = Self::metadata_string(metadata_ref, "modName");
+        let author = Self::metadata_string(metadata_ref, "author");
+        let summary = Self::metadata_string(metadata_ref, "summary");
+        let icon_url = Self::metadata_string(metadata_ref, "iconUrl");
+        let icon_cache_path = self.cache_icon_from_url(icon_url.as_deref()).await;
+        let downloads = Self::metadata_u64(metadata_ref, "downloads");
+        let likes_or_endorsements = Self::metadata_i64(metadata_ref, "likesOrEndorsements")
+            .or_else(|| Self::metadata_i64(metadata_ref, "endorsementCount"))
+            .or_else(|| Self::metadata_i64(metadata_ref, "ratingScore"));
+        let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
+        let tags = Self::metadata_tags(metadata_ref);
 
         // Update metadata
         let mut mod_metadata = self.load_mod_metadata(&mods_directory).await
@@ -3039,9 +4092,18 @@ impl ModsService {
             author,
             mod_name,
             source_url,
+            summary,
+            icon_url,
+            icon_cache_path,
+            downloads,
+            likes_or_endorsements,
+            updated_at,
+            tags,
             installed_version: version,
+            library_added_at: Some(Utc::now()),
             installed_at: Some(Utc::now()),
             last_update_check: None,
+            metadata_last_refreshed: Some(Utc::now()),
             update_available: None,
             remote_version: None,
             detected_runtime,
@@ -3370,6 +4432,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_storage_metadata_compat_uses_alias_when_primary_is_invalid() {
+        let raw = serde_json::json!({
+            "iconUrl": null,
+            "pictureUrl": "https://example.com/alias.png",
+            "downloads": "",
+            "modDownloads": 42
+        });
+
+        let parsed = ModsService::parse_storage_metadata_compat(&raw)
+            .expect("metadata should parse with valid aliases");
+
+        assert_eq!(parsed.icon_url.as_deref(), Some("https://example.com/alias.png"));
+        assert_eq!(parsed.downloads, Some(42));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn remove_icon_cache_if_orphaned_skips_paths_outside_cache_dir() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool);
+
+        let outside_file = temp.path().join("outside-icon.png");
+        fs::write(&outside_file, b"icon-bytes").await?;
+
+        service
+            .remove_icon_cache_if_orphaned(
+                Some(outside_file.to_string_lossy().as_ref()),
+                "storage-1",
+            )
+            .await?;
+
+        assert!(outside_file.exists(), "outside file should not be deleted");
+        Ok(())
+    }
     fn sample_metadata(storage_id: Option<&str>, source_id: Option<&str>, source_version: Option<&str>) -> ModMetadata {
         ModMetadata {
             source: Some(ModSource::Local),
@@ -3378,9 +4478,18 @@ mod tests {
             author: None,
             mod_name: Some("Example".to_string()),
             source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
             installed_version: None,
+            library_added_at: None,
             installed_at: None,
             last_update_check: None,
+            metadata_last_refreshed: None,
             update_available: None,
             remote_version: None,
             detected_runtime: None,
@@ -3416,6 +4525,65 @@ mod tests {
 
         let loaded = service.load_mod_metadata(&mods_dir).await?;
         assert!(loaded.contains_key("Example.dll"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn load_mod_metadata_recovers_storage_metadata_when_db_is_empty() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-storage-recovery");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let storage_id = "storage-recovery-1";
+        let storage_base = download_dir.join("Mods").join(storage_id);
+        let storage_mods = storage_base.join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let mut storage_meta = sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.mod_name = Some("Recovered Managed".to_string());
+        storage_meta.icon_url = Some("https://example.com/icon.png".to_string());
+        storage_meta.summary = Some("Recovered metadata from storage".to_string());
+        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let loaded = service.load_mod_metadata(&mods_dir).await?;
+        let recovered = loaded
+            .get("RecoveredManaged.dll")
+            .expect("recovered metadata entry");
+
+        assert_eq!(recovered.mod_storage_id.as_deref(), Some(storage_id));
+        assert_eq!(recovered.source_id.as_deref(), Some("owner/recovered"));
+        assert!(matches!(recovered.source, Some(ModSource::Thunderstore)));
+        assert_eq!(recovered.icon_url.as_deref(), Some("https://example.com/icon.png"));
 
         Ok(())
     }
@@ -3467,6 +4635,67 @@ mod tests {
         assert_eq!(entry.get("fileName").and_then(|v| v.as_str()), Some("Example.dll"));
         assert_eq!(entry.get("version").and_then(|v| v.as_str()), Some("1.2.3"));
         assert_eq!(entry.get("managed").and_then(|v| v.as_bool()), Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_mods_marks_recovered_storage_entries_as_managed() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-managed-recovery");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let storage_id = "storage-managed-recovery";
+        let storage_base = download_dir.join("Mods").join(storage_id);
+        let storage_mods = storage_base.join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let mut storage_meta = sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.mod_name = Some("Recovered Managed".to_string());
+        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let result = service.list_mods(output_dir.to_string_lossy().as_ref()).await?;
+        let mods = result
+            .get("mods")
+            .and_then(|value| value.as_array())
+            .expect("mods array");
+
+        let entry = mods
+            .iter()
+            .find(|item| item.get("fileName").and_then(|value| value.as_str()) == Some("RecoveredManaged.dll"))
+            .expect("recovered managed mod");
+
+        assert_eq!(entry.get("managed").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(entry.get("source").and_then(|value| value.as_str()), Some("thunderstore"));
 
         Ok(())
     }
@@ -4162,6 +5391,88 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn load_storage_metadata_migrates_legacy_runtime_and_source_values() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool);
+
+        let storage_dir = temp.path().join("storage").join("legacy-entry");
+        fs::create_dir_all(&storage_dir).await?;
+        let metadata_path = storage_dir.join(STORAGE_METADATA_FILE);
+
+        fs::write(
+            &metadata_path,
+            serde_json::json!({
+                "source": "Nexus Mods",
+                "sourceId": "12345",
+                "modName": "Legacy Mod",
+                "detectedRuntime": "Mono",
+                "runtimeMatch": true,
+                "modStorageId": "legacy-entry",
+                "installedAt": "2026-03-05T10:00:00Z"
+            })
+            .to_string(),
+        )
+        .await?;
+
+        let parsed = service
+            .load_storage_metadata(&storage_dir)
+            .await?
+            .expect("storage metadata should parse");
+
+        assert!(matches!(parsed.source, Some(ModSource::Nexusmods)));
+        assert!(matches!(parsed.detected_runtime, Some(Runtime::Mono)));
+        assert_eq!(parsed.mod_name.as_deref(), Some("Legacy Mod"));
+        assert_eq!(parsed.mod_storage_id.as_deref(), Some("legacy-entry"));
+        assert!(parsed.installed_at.is_some());
+
+        let normalized_content = fs::read_to_string(&metadata_path).await?;
+        let normalized = serde_json::from_str::<ModMetadata>(&normalized_content)?;
+        assert!(matches!(normalized.detected_runtime, Some(Runtime::Mono)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_ignores_unreadable_storage_metadata_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let storage_id = "broken-storage";
+        let storage_mods = download_dir.join("Mods").join(storage_id).join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("BrokenExample.dll"), b"binary").await?;
+        fs::write(
+            download_dir
+                .join("Mods")
+                .join(storage_id)
+                .join(STORAGE_METADATA_FILE),
+            "{not valid json",
+        )
+        .await?;
+
+        let library = service.get_mod_library().await?;
+        assert!(library.downloaded.iter().any(|entry| entry.storage_id == storage_id));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn get_mod_library_keeps_distinct_entries_for_distinct_installed_versions() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
@@ -4528,3 +5839,4 @@ mod tests {
         Ok(())
     }
 }
+
