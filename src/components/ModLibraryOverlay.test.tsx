@@ -17,6 +17,10 @@ vi.mock('../services/api', () => ({
   ApiService: apiMocks,
 }));
 
+const eventMocks = vi.hoisted(() => ({
+  onModMetadataRefreshStatus: vi.fn(),
+}));
+
 function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
   return {
     storageId: 'storage-1',
@@ -33,6 +37,10 @@ function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
   };
 }
 
+vi.mock('../services/events', () => ({
+  onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
+}));
+
 describe('ModLibraryOverlay', () => {
   beforeEach(() => {
     apiMocks.getModLibrary.mockReset();
@@ -42,11 +50,13 @@ describe('ModLibraryOverlay', () => {
     apiMocks.getMLVScanReleases.mockReset();
     apiMocks.downloadS1APIToLibrary.mockReset();
     apiMocks.downloadMLVScanToLibrary.mockReset();
+    eventMocks.onModMetadataRefreshStatus.mockReset();
 
     apiMocks.getS1APIReleases.mockResolvedValue([]);
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
+    eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
     apiMocks.getMLVScanLatestRelease.mockResolvedValue({
       tag_name: 'v1.0.0',
       name: 'v1.0.0',
