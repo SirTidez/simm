@@ -45,7 +45,11 @@ impl SettingsService {
             .encrypt(&nonce, data.as_bytes())
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        Ok(format!("{}:{}", hex::encode(nonce), hex::encode(ciphertext)))
+        Ok(format!(
+            "{}:{}",
+            hex::encode(nonce),
+            hex::encode(ciphertext)
+        ))
     }
 
     async fn decrypt_credentials(encrypted: &str) -> Result<String> {
@@ -206,8 +210,8 @@ impl SettingsService {
         }
 
         let decrypted = Self::decrypt_credentials(&encrypted).await?;
-        let creds: serde_json::Value = serde_json::from_str(&decrypted)
-            .context("Failed to parse credentials")?;
+        let creds: serde_json::Value =
+            serde_json::from_str(&decrypted).context("Failed to parse credentials")?;
 
         let username = creds
             .get("username")
@@ -307,10 +311,8 @@ mod tests {
     async fn save_and_load_settings_merges_updates() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set(
-            "SIMMRUST_DATA_DIR",
-            data_dir.to_string_lossy().as_ref(),
-        );
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
 
         let pool = initialize_pool().await?;
@@ -339,10 +341,8 @@ mod tests {
     async fn credentials_and_nexus_round_trip() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set(
-            "SIMMRUST_DATA_DIR",
-            data_dir.to_string_lossy().as_ref(),
-        );
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
 
         let pool = initialize_pool().await?;
@@ -372,16 +372,16 @@ mod tests {
     async fn secrets_are_encrypted_in_database() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set(
-            "SIMMRUST_DATA_DIR",
-            data_dir.to_string_lossy().as_ref(),
-        );
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
 
         let pool = initialize_pool().await?;
         let service = SettingsService::new(pool.clone())?;
 
-        service.save_credentials("user".to_string(), "pass".to_string()).await?;
+        service
+            .save_credentials("user".to_string(), "pass".to_string())
+            .await?;
         service.save_nexus_mods_api_key("nexus".to_string()).await?;
 
         let rows = sqlx::query("SELECT key, encrypted FROM secrets")

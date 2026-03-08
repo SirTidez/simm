@@ -87,6 +87,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [exporting, setExporting] = useState(false);
   const [isWatching, setIsWatching] = useState(false);
+  const [watchedPath, setWatchedPath] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [timePeriod, setTimePeriod] = useState<TimePeriod>('all');
   const [customTimeStart, setCustomTimeStart] = useState<string>('');
@@ -95,6 +96,18 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   const [showModCard, setShowModCard] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
+
+  const isSharedPlayerLogFile = (file: LogFile | null): boolean => {
+    if (!file) return false;
+    const normalizedPath = file.path.replace(/\\/g, '/').toLowerCase();
+    return normalizedPath.endsWith('/player.log') || normalizedPath.endsWith('/player-prev.log');
+  };
+
+  const isLiveLogFile = (file: LogFile | null): boolean => {
+    if (!file) return false;
+    const normalizedPath = file.path.replace(/\\/g, '/').toLowerCase();
+    return file.isLatest || normalizedPath.endsWith('/player.log');
+  };
   // Normalize mod tag for comparison (handles space variations)
   const normalizeModTag = (modTag: string): string => {
     return modTag.replace(/\s+/g, '').toLowerCase();
@@ -182,6 +195,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
       setTimePeriod('all');
       setSelectedModTag(null);
       setShowModCard(false);
+      setWatchedPath(null);
     }
   }, [isOpen, environmentId]);
 
@@ -189,15 +203,14 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
     if (selectedLogFile) {
       loadLogFile(selectedLogFile.path);
 
-      // Auto-start watching if it's Latest.log
-      if (selectedLogFile.isLatest && !isWatching) {
+      const shouldWatch = isLiveLogFile(selectedLogFile);
+      if (shouldWatch) {
         startWatching(selectedLogFile.path);
-      } else if (!selectedLogFile.isLatest && isWatching) {
+      } else if (isWatching) {
         stopWatching();
       }
     }
-  }, [selectedLogFile]);
-
+  }, [selectedLogFile, isWatching, watchedPath]);
   // Listen for log updates
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -234,10 +247,13 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
       const files = await ApiService.getLogFiles(environmentId);
       setLogFiles(files);
 
-      // Auto-select Latest.log if available
+      // Auto-select environment Latest.log, then shared Player.log, then first entry
       const latestLog = files.find(f => f.isLatest);
+      const sharedPlayerLog = files.find(f => f.path.replace(/\\/g, '/').toLowerCase().endsWith('/player.log'));
       if (latestLog) {
         setSelectedLogFile(latestLog);
+      } else if (sharedPlayerLog) {
+        setSelectedLogFile(sharedPlayerLog);
       } else if (files.length > 0) {
         setSelectedLogFile(files[0]);
       }
@@ -265,17 +281,26 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
 
   const startWatching = async (logPath: string) => {
     try {
+      if (isWatching && watchedPath === logPath) {
+        return;
+      }
+
+      if (isWatching && watchedPath && watchedPath !== logPath) {
+        await ApiService.stopWatchingLog();
+      }
+
       await ApiService.watchLogFile(logPath);
       setIsWatching(true);
+      setWatchedPath(logPath);
     } catch (err) {
       console.error('Failed to start watching log file:', err);
     }
   };
-
   const stopWatching = async () => {
     try {
       await ApiService.stopWatchingLog();
       setIsWatching(false);
+      setWatchedPath(null);
     } catch (err) {
       console.error('Failed to stop watching log file:', err);
     }
@@ -478,7 +503,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
         </button>
         </div>
 
-      <div className="mods-content" style={{ display: 'flex', flex: 1, gap: '1rem', overflow: 'hidden', minHeight: 0, padding: 0 }}>
+      <div className="mods-content" style={{ display: 'flex', flexDirection: 'row', flex: 1, gap: '1rem', overflow: 'hidden', minHeight: 0, padding: 0 }}>
           {/* Log Files Sidebar */}
           <div style={{ width: '250px', borderRight: '1px solid #3a3a3a', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '1rem', borderBottom: '1px solid #3a3a3a' }}>
@@ -525,7 +550,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                       {file.name}
                     </div>
                     <div style={{ fontSize: '0.75rem', color: '#888' }}>
-                      {file.isLatest && <span style={{ color: '#4a90e2' }}>Latest • </span>}
+                      {file.isLatest && <span style={{ color: '#4a90e2' }}>Latest • </span>}{isSharedPlayerLogFile(file) && <span style={{ color: '#7ec8ff' }}>Shared • </span>}
                       {(file.size / 1024).toFixed(1)} KB
                       {file.modified && (
                         <> • {new Date(file.modified).toLocaleDateString()}</>
@@ -701,7 +726,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                 />
               </div>
 
-              {selectedLogFile?.isLatest && autoScroll && (
+              {isLiveLogFile(selectedLogFile) && autoScroll && (
                 <button
                   onClick={() => setAutoScroll(false)}
                   className="btn btn-secondary"
@@ -712,7 +737,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                 </button>
               )}
 
-              {selectedLogFile?.isLatest && !autoScroll && (
+              {isLiveLogFile(selectedLogFile) && !autoScroll && (
                 <button
                   onClick={() => setAutoScroll(true)}
                   className="btn btn-secondary"

@@ -1366,19 +1366,21 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     return !!updateInfo?.updateAvailable && canAutoUpdate;
   }).length;
 
-  const filteredMods = mods.filter((mod) => {
-    const updateAvailable = !!modUpdates.get(mod.fileName)?.updateAvailable;
-    switch (modListFilter) {
-      case 'updates':
-        return updateAvailable;
-      case 'enabled':
-        return !mod.disabled;
-      case 'disabled':
-        return !!mod.disabled;
-      default:
-        return true;
-    }
-  });
+  const filteredMods = [...mods]
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    .filter((mod) => {
+      const updateAvailable = !!modUpdates.get(mod.fileName)?.updateAvailable;
+      switch (modListFilter) {
+        case 'updates':
+          return updateAvailable;
+        case 'enabled':
+          return !mod.disabled;
+        case 'disabled':
+          return !!mod.disabled;
+        default:
+          return true;
+      }
+    });
 
   const openInstalledModView = (mod: ModInfo) => {
     const update = modUpdates.get(mod.fileName);
@@ -2592,4 +2594,5 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     </>
   );
 }
+
 

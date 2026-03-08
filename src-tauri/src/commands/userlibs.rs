@@ -1,17 +1,22 @@
-use crate::services::userlibs::UserLibsService;
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
+use crate::services::userlibs::UserLibsService;
+use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
-use once_cell::sync::Lazy;
 use tauri::State;
+use tokio::sync::Mutex as AsyncMutex;
 
-static USERLIBS_SERVICE: Lazy<AsyncMutex<Option<Arc<UserLibsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static USERLIBS_SERVICE: Lazy<AsyncMutex<Option<Arc<UserLibsService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
-async fn get_environment_output_dir(db: Arc<SqlitePool>, environment_id: &str) -> Result<String, String> {
+async fn get_environment_output_dir(
+    db: Arc<SqlitePool>,
+    environment_id: &str,
+) -> Result<String, String> {
     let env_service = EnvironmentService::new(db).map_err(|e| e.to_string())?;
     let env = env_service
         .get_environment(environment_id)
@@ -85,7 +90,6 @@ async fn get_userlibs_service() -> Result<Arc<UserLibsService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
     let mut service = FS_SERVICE.lock().await;
     if service.is_none() {
@@ -134,7 +138,8 @@ pub async fn open_user_libs_folder(
     environment_id: String,
 ) -> Result<(), String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service.get_environment(&environment_id)
+    let env = env_service
+        .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
@@ -145,14 +150,17 @@ pub async fn open_user_libs_folder(
 
     let userlibs_dir = Path::new(&env.output_dir).join("UserLibs");
     let fs_service = get_fs_service().await?;
-    fs_service.open_folder(&userlibs_dir.to_string_lossy().to_string())
+    fs_service
+        .open_folder(&userlibs_dir.to_string_lossy().to_string())
         .await
         .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{disable_user_lib_impl, enable_user_lib_impl, get_userlibs_count_impl, get_userlibs_impl};
+    use super::{
+        disable_user_lib_impl, enable_user_lib_impl, get_userlibs_count_impl, get_userlibs_impl,
+    };
     use crate::services::environment::EnvironmentService;
     use crate::test_helpers::init_test_pool_with_temp_data_dir;
     use crate::types::schedule_i_config;
@@ -163,12 +171,16 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn enable_disable_userlib_keeps_list_and_count_consistent() {
-        let (_temp, _guard, pool) = init_test_pool_with_temp_data_dir().await.expect("test pool");
+        let (_temp, _guard, pool) = init_test_pool_with_temp_data_dir()
+            .await
+            .expect("test pool");
         let env_root = tempdir().expect("env temp");
         let env_service = EnvironmentService::new(pool.clone()).expect("env service");
 
         let output_dir = env_root.path().join("env-userlibs");
-        fs::create_dir_all(output_dir.join("UserLibs")).await.expect("create userlibs dir");
+        fs::create_dir_all(output_dir.join("UserLibs"))
+            .await
+            .expect("create userlibs dir");
         let env = env_service
             .create_environment(
                 schedule_i_config().app_id,
@@ -196,10 +208,19 @@ mod tests {
         let listed = get_userlibs_impl(pool.clone(), env.id.clone())
             .await
             .expect("list after disable");
-        let entries = listed.get("userLibs").and_then(|v| v.as_array()).expect("entries");
+        let entries = listed
+            .get("userLibs")
+            .and_then(|v| v.as_array())
+            .expect("entries");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].get("fileName").and_then(|v| v.as_str()), Some("LibA.dll"));
-        assert_eq!(entries[0].get("disabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            entries[0].get("fileName").and_then(|v| v.as_str()),
+            Some("LibA.dll")
+        );
+        assert_eq!(
+            entries[0].get("disabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
         enable_user_lib_impl(pool.clone(), env.id.clone(), "LibA.dll".to_string())
             .await

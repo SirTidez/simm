@@ -1,7 +1,7 @@
-use std::path::Path;
-use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
 use tokio::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +58,10 @@ impl ConfigService {
         // Parse MelonPreferences.cfg
         let melon_prefs_path = userdata_path.join("MelonPreferences.cfg");
         if melon_prefs_path.exists() {
-            if let Ok(config) = self.parse_ini_file(&melon_prefs_path, ConfigFileType::MelonPreferences).await {
+            if let Ok(config) = self
+                .parse_ini_file(&melon_prefs_path, ConfigFileType::MelonPreferences)
+                .await
+            {
                 config_files.push(config);
             }
         }
@@ -66,7 +69,10 @@ impl ConfigService {
         // Parse Loader.cfg (MelonLoader settings)
         let loader_cfg_path = game_path.join("MelonLoader").join("Loader.cfg");
         if loader_cfg_path.exists() {
-            if let Ok(config) = self.parse_ini_file(&loader_cfg_path, ConfigFileType::LoaderConfig).await {
+            if let Ok(config) = self
+                .parse_ini_file(&loader_cfg_path, ConfigFileType::LoaderConfig)
+                .await
+            {
                 config_files.push(config);
             }
         }
@@ -78,7 +84,9 @@ impl ConfigService {
                 if path.is_file() {
                     if let Some(ext) = path.extension() {
                         if ext == "cfg" && path.file_name().unwrap() != "MelonPreferences.cfg" {
-                            if let Ok(config) = self.parse_ini_file(&path, ConfigFileType::Other).await {
+                            if let Ok(config) =
+                                self.parse_ini_file(&path, ConfigFileType::Other).await
+                            {
                                 config_files.push(config);
                             }
                         }
@@ -250,15 +258,16 @@ impl ConfigService {
         // e.g., "HighBaller_IL2CPP", "HighBaller_IL2CPP_Automation", "HighBaller_IL2CPP_Features" -> "HighBaller"
         let mod_names: Vec<String> = grouped.keys().cloned().collect();
         let mut mod_name_groups: HashMap<String, Vec<String>> = HashMap::new(); // Maps base_mod_name -> list of full mod_names
-        let mut processed_mods: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
+        let mut processed_mods: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         // Group mods by their base mod name (first segment before underscore)
         for mod_name in &mod_names {
             // Only process mod names without dots (already grouped by dot)
             if mod_name.contains('.') || processed_mods.contains(mod_name) {
                 continue;
             }
-            
+
             // Extract the base mod name (first segment)
             let base_mod_name = if let Some(underscore_pos) = mod_name.find('_') {
                 mod_name[..underscore_pos].to_string()
@@ -266,18 +275,18 @@ impl ConfigService {
                 // No underscore, skip (keep as-is)
                 continue;
             };
-            
+
             // Find all mods that start with this base mod name followed by underscore
             let matching_mods: Vec<String> = mod_names
                 .iter()
                 .filter(|name| {
-                    !name.contains('.') && 
-                    !processed_mods.contains(*name) &&
-                    name.starts_with(&format!("{}_", base_mod_name))
+                    !name.contains('.')
+                        && !processed_mods.contains(*name)
+                        && name.starts_with(&format!("{}_", base_mod_name))
                 })
                 .cloned()
                 .collect();
-            
+
             // Group all mods sharing this base name (even if only one)
             if !matching_mods.is_empty() {
                 for m in &matching_mods {
@@ -286,11 +295,11 @@ impl ConfigService {
                 mod_name_groups.insert(base_mod_name, matching_mods);
             }
         }
-        
+
         // Merge groups by base mod name
         let mut merged_grouped: HashMap<String, Vec<ConfigSection>> = HashMap::new();
         let mut processed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
+
         // First, merge groups that share a common base mod name
         for (base_mod_name, mod_names_to_merge) in mod_name_groups {
             let mut merged_sections = Vec::new();
@@ -302,7 +311,7 @@ impl ConfigService {
             }
             merged_grouped.insert(base_mod_name, merged_sections);
         }
-        
+
         // Then, add all mods that weren't grouped
         for (mod_name, sections) in grouped {
             if !processed.contains(&mod_name) {
@@ -343,9 +352,7 @@ mod tests {
             .await?;
 
         let sections = section_map(&config.sections);
-        let general = sections
-            .get("General")
-            .expect("expected General section");
+        let general = sections.get("General").expect("expected General section");
         let foo_entry = general.iter().find(|entry| entry.key == "foo").unwrap();
         assert_eq!(foo_entry.value, "bar");
         assert_eq!(foo_entry.comment.as_deref(), Some("comment for foo"));
@@ -399,9 +406,7 @@ mod tests {
             .await?;
 
         let sections = section_map(&config.sections);
-        let general = sections
-            .get("General")
-            .expect("expected General section");
+        let general = sections.get("General").expect("expected General section");
         assert_eq!(general.len(), 1);
         assert_eq!(general[0].key, "key");
         assert_eq!(general[0].value, "value");
@@ -433,7 +438,9 @@ mod tests {
         };
 
         let grouped = service.group_by_mod(&config);
-        let high_baller = grouped.get("HighBaller").expect("expected HighBaller group");
+        let high_baller = grouped
+            .get("HighBaller")
+            .expect("expected HighBaller group");
         assert_eq!(high_baller.len(), 2);
         assert!(grouped.contains_key("AnotherMod"));
     }

@@ -33,12 +33,18 @@ impl NexusModsService {
     }
 
     pub async fn validate_api_key(&self) -> Result<Value> {
-        let api_key = self.api_key.read().await.clone()
+        let api_key = self
+            .api_key
+            .read()
+            .await
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
         let detailed = nexus_api::validate_api_key_detailed(&api_key)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to validate API key via nexus-api crate: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to validate API key via nexus-api crate: {}", e)
+            })?;
 
         let validation = serde_json::json!({
             "name": detailed.name,
@@ -54,7 +60,11 @@ impl NexusModsService {
     }
 
     pub async fn get_rate_limits(&self) -> Result<Value> {
-        let api_key = self.api_key.read().await.clone()
+        let api_key = self
+            .api_key
+            .read()
+            .await
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
 
         let detailed = nexus_api::validate_api_key_detailed(&api_key)
@@ -79,10 +89,22 @@ impl NexusModsService {
     }
 
     fn map_rate_limits_to_legacy(rate_limits: Option<nexus_api::RateLimits>) -> Value {
-        let daily = rate_limits.as_ref().and_then(|r| r.daily_limit).unwrap_or(0);
-        let hourly = rate_limits.as_ref().and_then(|r| r.hourly_limit).unwrap_or(0);
-        let daily_remaining = rate_limits.as_ref().and_then(|r| r.daily_remaining).unwrap_or(0);
-        let hourly_remaining = rate_limits.as_ref().and_then(|r| r.hourly_remaining).unwrap_or(0);
+        let daily = rate_limits
+            .as_ref()
+            .and_then(|r| r.daily_limit)
+            .unwrap_or(0);
+        let hourly = rate_limits
+            .as_ref()
+            .and_then(|r| r.hourly_limit)
+            .unwrap_or(0);
+        let daily_remaining = rate_limits
+            .as_ref()
+            .and_then(|r| r.daily_remaining)
+            .unwrap_or(0);
+        let hourly_remaining = rate_limits
+            .as_ref()
+            .and_then(|r| r.hourly_remaining)
+            .unwrap_or(0);
         let daily_used = daily.saturating_sub(daily_remaining);
         let hourly_used = hourly.saturating_sub(hourly_remaining);
 
@@ -98,8 +120,9 @@ impl NexusModsService {
 
     async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
         if let Ok(id) = game_input.parse::<u32>() {
-            let data = self.graphql_request(
-                r#"
+            let data = self
+                .graphql_request(
+                    r#"
                     query ResolveGameById($id: ID!) {
                         game(id: $id) {
                             id
@@ -107,19 +130,34 @@ impl NexusModsService {
                         }
                     }
                 "#,
-                serde_json::json!({ "id": id.to_string() }),
-            ).await?;
+                    serde_json::json!({ "id": id.to_string() }),
+                )
+                .await?;
 
-            let game = data.get("game").ok_or_else(|| anyhow::anyhow!("Game not found for id {}", id))?;
-            let resolved_id = game.get("id").and_then(|v| v.as_i64()).map(|v| v.to_string())
-                .or_else(|| game.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            let game = data
+                .get("game")
+                .ok_or_else(|| anyhow::anyhow!("Game not found for id {}", id))?;
+            let resolved_id = game
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .map(|v| v.to_string())
+                .or_else(|| {
+                    game.get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .ok_or_else(|| anyhow::anyhow!("Missing game id in GraphQL response"))?;
-            let domain = game.get("domainName").and_then(|v| v.as_str()).unwrap_or(game_input).to_string();
+            let domain = game
+                .get("domainName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(game_input)
+                .to_string();
             return Ok((resolved_id, domain));
         }
 
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query ResolveGameByDomain($domainName: String!) {
                     game(domainName: $domainName) {
                         id
@@ -127,14 +165,28 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({ "domainName": game_input }),
-        ).await?;
+                serde_json::json!({ "domainName": game_input }),
+            )
+            .await?;
 
-        let game = data.get("game").ok_or_else(|| anyhow::anyhow!("Game not found for domain {}", game_input))?;
-        let resolved_id = game.get("id").and_then(|v| v.as_i64()).map(|v| v.to_string())
-            .or_else(|| game.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        let game = data
+            .get("game")
+            .ok_or_else(|| anyhow::anyhow!("Game not found for domain {}", game_input))?;
+        let resolved_id = game
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.to_string())
+            .or_else(|| {
+                game.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .ok_or_else(|| anyhow::anyhow!("Missing game id in GraphQL response"))?;
-        let domain = game.get("domainName").and_then(|v| v.as_str()).unwrap_or(game_input).to_string();
+        let domain = game
+            .get("domainName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(game_input)
+            .to_string();
         Ok((resolved_id, domain))
     }
 
@@ -143,7 +195,13 @@ impl NexusModsService {
             .get("author")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .or_else(|| mod_node.get("uploader").and_then(|u| u.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string()));
+            .or_else(|| {
+                mod_node
+                    .get("uploader")
+                    .and_then(|u| u.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
 
         serde_json::json!({
             "mod_id": mod_node.get("modId"),
@@ -207,7 +265,11 @@ impl NexusModsService {
             .collect::<Vec<_>>()
             .join(" ");
 
-        if !camel_collapsed.is_empty() && !variants.iter().any(|v| v.eq_ignore_ascii_case(&camel_collapsed)) {
+        if !camel_collapsed.is_empty()
+            && !variants
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(&camel_collapsed))
+        {
             variants.push(camel_collapsed);
         }
 
@@ -224,8 +286,9 @@ impl NexusModsService {
 
     /// Get list of all games supported by NexusMods
     pub async fn get_games(&self) -> Result<Vec<Value>> {
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query ListGames($count: Int) {
                     games(count: $count) {
                         nodes {
@@ -239,8 +302,9 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({ "count": 500 }),
-        ).await?;
+                serde_json::json!({ "count": 500 }),
+            )
+            .await?;
 
         let games = data
             .get("games")
@@ -249,26 +313,25 @@ impl NexusModsService {
             .cloned()
             .unwrap_or_default();
 
-        Ok(games.into_iter().map(|game| {
-            serde_json::json!({
-                "id": game.get("id"),
-                "domain_name": game.get("domainName"),
-                "name": game.get("name"),
-                "genre": game.get("genre"),
-                "mods": game.get("modCount"),
-                "collections": game.get("collectionCount")
+        Ok(games
+            .into_iter()
+            .map(|game| {
+                serde_json::json!({
+                    "id": game.get("id"),
+                    "domain_name": game.get("domainName"),
+                    "name": game.get("name"),
+                    "genre": game.get("genre"),
+                    "mods": game.get("modCount"),
+                    "collections": game.get("collectionCount")
+                })
             })
-        }).collect())
+            .collect())
     }
 
     /// Search for mods on NexusMods using GraphQL API v2
     /// Note: Runtime filtering is not done at search time since NexusMods uses separate files
     /// for different runtimes rather than tags. Files should be filtered by runtime when displayed.
-    pub async fn search_mods(
-        &self,
-        game_domain: &str,
-        query: &str,
-    ) -> Result<Vec<Value>> {
+    pub async fn search_mods(&self, game_domain: &str, query: &str) -> Result<Vec<Value>> {
         let gql = r#"
             query SearchMods($filter: ModsFilter, $offset: Int, $count: Int) {
                 mods(filter: $filter, offset: $offset, count: $count) {
@@ -333,8 +396,9 @@ impl NexusModsService {
     /// Get latest added mods using GraphQL API v2
     pub async fn get_latest_added_mods(&self, game_id: &str) -> Result<Vec<Value>> {
         let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query LatestAddedMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int) {
                     mods(filter: $filter, sort: $sort, count: $count) {
                         nodes {
@@ -353,12 +417,13 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({
-                "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
-                "sort": [{"createdAt": {"direction": "DESC"}}],
-                "count": 100
-            }),
-        ).await?;
+                serde_json::json!({
+                    "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
+                    "sort": [{"createdAt": {"direction": "DESC"}}],
+                    "count": 100
+                }),
+            )
+            .await?;
 
         let nodes = data
             .get("mods")
@@ -366,14 +431,18 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(nodes.into_iter().map(|n| Self::map_mod_node_to_legacy_shape(&n)).collect())
+        Ok(nodes
+            .into_iter()
+            .map(|n| Self::map_mod_node_to_legacy_shape(&n))
+            .collect())
     }
 
     /// Get latest updated mods using GraphQL API v2
     pub async fn get_latest_updated_mods(&self, game_id: &str) -> Result<Vec<Value>> {
         let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query LatestUpdatedMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int) {
                     mods(filter: $filter, sort: $sort, count: $count) {
                         nodes {
@@ -392,12 +461,13 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({
-                "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
-                "sort": [{"updatedAt": {"direction": "DESC"}}],
-                "count": 100
-            }),
-        ).await?;
+                serde_json::json!({
+                    "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
+                    "sort": [{"updatedAt": {"direction": "DESC"}}],
+                    "count": 100
+                }),
+            )
+            .await?;
 
         let nodes = data
             .get("mods")
@@ -405,14 +475,18 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(nodes.into_iter().map(|n| Self::map_mod_node_to_legacy_shape(&n)).collect())
+        Ok(nodes
+            .into_iter()
+            .map(|n| Self::map_mod_node_to_legacy_shape(&n))
+            .collect())
     }
 
     /// Get trending mods using GraphQL API v2
     pub async fn get_trending_mods(&self, game_id: &str) -> Result<Vec<Value>> {
         let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query TrendingMods($filter: ModsFilter, $sort: [ModsSort!], $count: Int) {
                     mods(filter: $filter, sort: $sort, count: $count) {
                         nodes {
@@ -431,12 +505,13 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({
-                "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
-                "sort": [{"endorsements": {"direction": "DESC"}}],
-                "count": 100
-            }),
-        ).await?;
+                serde_json::json!({
+                    "filter": { "gameDomainName": [{"value": domain_name, "op": "EQUALS"}] },
+                    "sort": [{"endorsements": {"direction": "DESC"}}],
+                    "count": 100
+                }),
+            )
+            .await?;
 
         let nodes = data
             .get("mods")
@@ -444,14 +519,18 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(nodes.into_iter().map(|n| Self::map_mod_node_to_legacy_shape(&n)).collect())
+        Ok(nodes
+            .into_iter()
+            .map(|n| Self::map_mod_node_to_legacy_shape(&n))
+            .collect())
     }
 
     /// Get mod details by ID
     pub async fn get_mod(&self, game_id: &str, mod_id: u32) -> Result<Value> {
         let (resolved_game_id, _domain_name) = self.resolve_game_by_input(game_id).await?;
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query GetMod($gameId: ID!, $modId: ID!) {
                     mod(gameId: $gameId, modId: $modId) {
                         modId
@@ -471,21 +550,26 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({
-                "gameId": resolved_game_id,
-                "modId": mod_id.to_string()
-            }),
-        ).await?;
+                serde_json::json!({
+                    "gameId": resolved_game_id,
+                    "modId": mod_id.to_string()
+                }),
+            )
+            .await?;
 
-        let mod_node = data.get("mod").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mod_node = data
+            .get("mod")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         Ok(Self::map_mod_node_to_legacy_shape(&mod_node))
     }
 
     /// Get mod files by mod ID
     pub async fn get_mod_files(&self, game_id: &str, mod_id: u32) -> Result<Vec<Value>> {
         let (resolved_game_id, _domain_name) = self.resolve_game_by_input(game_id).await?;
-        let data = self.graphql_request(
-            r#"
+        let data = self
+            .graphql_request(
+                r#"
                 query GetModFiles($gameId: ID!, $modId: ID!) {
                     modFiles(gameId: $gameId, modId: $modId) {
                         fileId
@@ -499,18 +583,22 @@ impl NexusModsService {
                     }
                 }
             "#,
-            serde_json::json!({
-                "gameId": resolved_game_id,
-                "modId": mod_id.to_string()
-            }),
-        ).await?;
+                serde_json::json!({
+                    "gameId": resolved_game_id,
+                    "modId": mod_id.to_string()
+                }),
+            )
+            .await?;
 
         let files = data
             .get("modFiles")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(files.into_iter().map(|f| Self::map_file_node_to_legacy_shape(&f)).collect())
+        Ok(files
+            .into_iter()
+            .map(|f| Self::map_file_node_to_legacy_shape(&f))
+            .collect())
     }
 
     /// Check if a mod has an update available
@@ -551,7 +639,10 @@ impl NexusModsService {
         let mut results = Vec::new();
 
         for (mod_id, current_version) in mods {
-            match self.check_mod_update(game_domain, mod_id, &current_version).await {
+            match self
+                .check_mod_update(game_domain, mod_id, &current_version)
+                .await
+            {
                 Ok(update_info) => results.push(update_info),
                 Err(e) => {
                     // Log error but continue checking other mods
@@ -577,27 +668,31 @@ impl NexusModsService {
         mod_id: u32,
         file_id: u32,
     ) -> Result<Vec<u8>> {
-        let api_key = self.api_key.read().await.clone()
+        let api_key = self
+            .api_key
+            .read()
+            .await
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
         let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
-        let game_id_i64 = resolved_game_id
-            .parse::<i64>()
-            .map_err(|e| anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e))?;
+        let game_id_i64 = resolved_game_id.parse::<i64>().map_err(|e| {
+            anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e)
+        })?;
 
-        let links = nexus_api::get_download_links(
-            &api_key,
-            game_id_i64,
-            mod_id as i64,
-            file_id as i64,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get Nexus download links via crate: {}", e))?;
+        let links =
+            nexus_api::get_download_links(&api_key, game_id_i64, mod_id as i64, file_id as i64)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to get Nexus download links via crate: {}", e)
+                })?;
 
         let first_url = links
             .links
             .first()
             .map(|link| link.uri.clone())
-            .ok_or_else(|| anyhow::anyhow!("No Nexus download links returned for file {}", file_id))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("No Nexus download links returned for file {}", file_id)
+            })?;
 
         let downloaded = nexus_api::download_from_url(&first_url, Some(&api_key))
             .await
@@ -616,9 +711,9 @@ impl Default for NexusModsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context;
     use crate::db::get_database_path;
     use crate::services::settings::SettingsService;
+    use anyhow::Context;
     use serial_test::serial;
     use sqlx::sqlite::SqliteConnectOptions;
     use sqlx::SqlitePool;
@@ -638,8 +733,14 @@ mod tests {
 
         assert_eq!(mapped.get("daily").and_then(|v| v.as_u64()), Some(1000));
         assert_eq!(mapped.get("hourly").and_then(|v| v.as_u64()), Some(120));
-        assert_eq!(mapped.get("dailyRemaining").and_then(|v| v.as_u64()), Some(950));
-        assert_eq!(mapped.get("hourlyRemaining").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(
+            mapped.get("dailyRemaining").and_then(|v| v.as_u64()),
+            Some(950)
+        );
+        assert_eq!(
+            mapped.get("hourlyRemaining").and_then(|v| v.as_u64()),
+            Some(100)
+        );
         assert_eq!(mapped.get("dailyUsed").and_then(|v| v.as_u64()), Some(50));
         assert_eq!(mapped.get("hourlyUsed").and_then(|v| v.as_u64()), Some(20));
     }

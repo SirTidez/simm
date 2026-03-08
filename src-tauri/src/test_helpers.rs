@@ -13,12 +13,6 @@ impl EnvVarGuard {
         std::env::set_var(key, value);
         Self { key, original }
     }
-
-    pub fn unset(key: &'static str) -> Self {
-        let original = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, original }
-    }
 }
 
 impl Drop for EnvVarGuard {
@@ -31,7 +25,8 @@ impl Drop for EnvVarGuard {
     }
 }
 
-pub async fn init_test_pool_with_temp_data_dir() -> Result<(tempfile::TempDir, EnvVarGuard, std::sync::Arc<SqlitePool>)> {
+pub async fn init_test_pool_with_temp_data_dir(
+) -> Result<(tempfile::TempDir, EnvVarGuard, std::sync::Arc<SqlitePool>)> {
     let temp = tempfile::tempdir()?;
     let data_dir: PathBuf = temp.path().join("simmrust");
     let guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());

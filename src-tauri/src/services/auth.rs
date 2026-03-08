@@ -1,7 +1,7 @@
+use crate::utils::depot_downloader_detector::detect_depot_downloader;
+use anyhow::{Context, Result};
 use std::process::Stdio;
 use tokio::process::Command;
-use anyhow::{Context, Result};
-use crate::utils::depot_downloader_detector::detect_depot_downloader;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuthResult {
@@ -28,7 +28,9 @@ impl AuthService {
         if !detector_info.installed || detector_info.path.is_none() {
             return Ok(AuthResult {
                 success: false,
-                error: Some("DepotDownloader is not installed. Please install it first.".to_string()),
+                error: Some(
+                    "DepotDownloader is not installed. Please install it first.".to_string(),
+                ),
                 requires_steam_guard: None,
             });
         }
@@ -59,7 +61,7 @@ impl AuthService {
 
         #[cfg(target_os = "windows")]
         let mut child = {
-            #[allow(unused_imports)]  // Required for CommandExt trait methods
+            #[allow(unused_imports)] // Required for CommandExt trait methods
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
                 .args(&args)
@@ -95,8 +97,7 @@ impl AuthService {
         }
 
         let output = child.wait_with_output().await?;
-        let all_output = String::from_utf8_lossy(&output.stdout)
-            .to_string()
+        let all_output = String::from_utf8_lossy(&output.stdout).to_string()
             + &String::from_utf8_lossy(&output.stderr).to_string();
         let lower_output = all_output.to_lowercase();
 
@@ -109,9 +110,7 @@ impl AuthService {
                 error: None,
                 requires_steam_guard: None,
             })
-        } else if lower_output.contains("steam guard")
-            || lower_output.contains("two-factor")
-        {
+        } else if lower_output.contains("steam guard") || lower_output.contains("two-factor") {
             Ok(AuthResult {
                 success: false,
                 error: Some("Steam Guard approval required".to_string()),
@@ -204,15 +203,18 @@ mod tests {
         let system32 = format!("{}\\System32", system_root);
         let _path_guard = EnvVarGuard::set("PATH", &system32);
         let _local_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
-        let _program_guard = EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
+        let _program_guard =
+            EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
 
         let service = AuthService::new();
-        let result = service
-            .authenticate("user".to_string(), None, None)
-            .await?;
+        let result = service.authenticate("user".to_string(), None, None).await?;
 
         assert!(!result.success);
-        assert!(result.error.as_deref().unwrap_or("").contains("DepotDownloader"));
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("DepotDownloader"));
         assert_eq!(result.requires_steam_guard, None);
 
         Ok(())

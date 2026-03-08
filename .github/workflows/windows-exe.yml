@@ -32,28 +32,76 @@ jobs:
       - name: Build Windows installer
         run: npm run tauri build -- --bundles nsis
 
+      - name: Resolve build version
+        id: version
+        shell: pwsh
+        run: |
+          $version = ''
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v')) {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          }
+
+          if (-not $version) {
+            $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+            $version = $config.version
+          }
+
+          if (-not $version) {
+            throw 'Unable to determine build version.'
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Resolved version: $version"
+
       - name: Inspect build outputs
         shell: pwsh
         run: |
           Write-Host "Listing target/release contents"
-          if (Test-Path "target/release") {
-            Get-ChildItem -Path "target/release" -Recurse | Select-Object FullName
+          if (Test-Path 'target/release') {
+            Get-ChildItem -Path 'target/release' -Recurse | Select-Object FullName
           } else {
-            Write-Host "target/release does not exist"
+            Write-Host 'target/release does not exist'
           }
+
+      - name: Prepare renamed Windows executables
+        id: renamed
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
+
+          $portableSource = Get-ChildItem -Path 'target/release' -File -Filter '*.exe' | Select-Object -First 1
+          if (-not $portableSource) {
+            throw 'Portable executable not found in target/release.'
+          }
+
+          $setupSource = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe' | Select-Object -First 1
+          if (-not $setupSource) {
+            throw 'Setup executable not found in target/release/bundle/nsis.'
+          }
+
+          $portableTarget = "artifacts/SIMM-$version.exe"
+          $setupTarget = "artifacts/SIMM-Setup-$version.exe"
+
+          Copy-Item -LiteralPath $portableSource.FullName -Destination $portableTarget -Force
+          Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
+
+          "portable_file=$portableTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload standalone executable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-portable-exe
-          path: target/release/*.exe
+          name: SIMM-${{ steps.version.outputs.version }}-portable
+          path: ${{ steps.renamed.outputs.portable_file }}
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-setup-exe
-          path: target/release/bundle/nsis/*.exe
+          name: SIMM-${{ steps.version.outputs.version }}-setup
+          path: ${{ steps.renamed.outputs.setup_file }}
           if-no-files-found: error
           retention-days: 14

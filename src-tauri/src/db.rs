@@ -112,12 +112,10 @@ fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
     }
 
     let target_normalized = normalize_path(&target_db_path.to_string_lossy());
-    let source = legacy_database_paths()
-        .into_iter()
-        .find(|candidate| {
-            let candidate_normalized = normalize_path(&candidate.to_string_lossy());
-            candidate_normalized != target_normalized && candidate.exists()
-        });
+    let source = legacy_database_paths().into_iter().find(|candidate| {
+        let candidate_normalized = normalize_path(&candidate.to_string_lossy());
+        candidate_normalized != target_normalized && candidate.exists()
+    });
 
     let Some(source_db_path) = source else {
         return Ok(());
@@ -266,8 +264,10 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
 
     let mut secrets_written = false;
     for dir in &legacy_dirs {
-        secrets_written |= migrate_secret_file(pool, dir, "credentials.enc", "steam_credentials").await?;
-        secrets_written |= migrate_secret_file(pool, dir, "nexus_mods_api_key.enc", "nexus_mods_api_key").await?;
+        secrets_written |=
+            migrate_secret_file(pool, dir, "credentials.enc", "steam_credentials").await?;
+        secrets_written |=
+            migrate_secret_file(pool, dir, "nexus_mods_api_key.enc", "nexus_mods_api_key").await?;
     }
 
     let mut mod_metadata_migrated = false;
@@ -277,25 +277,26 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
     }
 
     if settings_migrated || !environments.is_empty() || secrets_written || mod_metadata_migrated {
-        sqlx::query("INSERT INTO app_meta (key, value) VALUES (?, ?) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(MIGRATION_FLAG_KEY)
-            .bind("true")
-            .execute(pool)
-            .await
-            .context("Failed to set migration flag")?;
+        sqlx::query(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(MIGRATION_FLAG_KEY)
+        .bind("true")
+        .execute(pool)
+        .await
+        .context("Failed to set migration flag")?;
     }
 
     Ok(())
 }
 
 async fn has_expected_schema(pool: &SqlitePool) -> Result<bool> {
-    let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'table'",
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to read database schema")?;
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .fetch_all(pool)
+            .await
+            .context("Failed to read database schema")?;
 
     let required = [
         "_sqlx_migrations",
@@ -306,9 +307,10 @@ async fn has_expected_schema(pool: &SqlitePool) -> Result<bool> {
         "mod_metadata",
     ];
 
-    Ok(required.iter().all(|table| tables.contains(&table.to_string())))
+    Ok(required
+        .iter()
+        .all(|table| tables.contains(&table.to_string())))
 }
-
 async fn migrate_secret_file(
     pool: &SqlitePool,
     dir: &Path,
@@ -341,31 +343,44 @@ async fn migrate_secret_file(
     Ok(true)
 }
 
-async fn migrate_mod_metadata_for_env(pool: &SqlitePool, env: &Environment, kind: &str) -> Result<bool> {
+async fn migrate_mod_metadata_for_env(
+    pool: &SqlitePool,
+    env: &Environment,
+    kind: &str,
+) -> Result<bool> {
     let metadata_path = if kind == "mods" {
-        Path::new(&env.output_dir).join("Mods").join(".mods-metadata.json")
+        Path::new(&env.output_dir)
+            .join("Mods")
+            .join(".mods-metadata.json")
     } else {
-        Path::new(&env.output_dir).join("Plugins").join(".plugins-metadata.json")
+        Path::new(&env.output_dir)
+            .join("Plugins")
+            .join(".plugins-metadata.json")
     };
 
     if !metadata_path.exists() {
         return Ok(false);
     }
 
-    let content = fs::read_to_string(&metadata_path)
-        .await
-        .with_context(|| format!("Failed to read {} metadata file {}", kind, metadata_path.display()))?;
+    let content = fs::read_to_string(&metadata_path).await.with_context(|| {
+        format!(
+            "Failed to read {} metadata file {}",
+            kind,
+            metadata_path.display()
+        )
+    })?;
     if content.trim().is_empty() {
         return Ok(false);
     }
 
-    let metadata: std::collections::HashMap<String, ModMetadata> = match serde_json::from_str(&content) {
-        Ok(value) => value,
-        Err(err) => {
-            log::warn!("Failed to parse {} metadata for {}: {}", kind, env.id, err);
-            return Ok(false);
-        }
-    };
+    let metadata: std::collections::HashMap<String, ModMetadata> =
+        match serde_json::from_str(&content) {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("Failed to parse {} metadata for {}: {}", kind, env.id, err);
+                return Ok(false);
+            }
+        };
 
     for (file_name, meta) in metadata {
         let serialized = serde_json::to_string(&meta)?;
@@ -388,9 +403,7 @@ async fn migrate_mod_metadata_for_env(pool: &SqlitePool, env: &Environment, kind
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        EnvironmentStatus, LogLevel, ModSource, Platform, Runtime, Theme,
-    };
+    use crate::types::{EnvironmentStatus, LogLevel, ModSource, Platform, Runtime, Theme};
     use serial_test::serial;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -522,7 +535,8 @@ mod tests {
     async fn get_data_dir_defaults_to_simm_home_directory() -> Result<()> {
         let temp = tempdir()?;
         let _data_guard = EnvVarGuard::unset("SIMMRUST_DATA_DIR");
-        let _home_guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
 
         let data_dir = get_data_dir()?;
         assert_eq!(data_dir, temp.path().join("SIMM"));
@@ -537,7 +551,8 @@ mod tests {
         let target_dir = temp.path().join("SIMM");
         let legacy_db_path = temp.path().join("simmrust").join("data.db");
 
-        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
 
         if let Some(parent) = legacy_db_path.parent() {
             fs::create_dir_all(parent).await?;
@@ -582,13 +597,18 @@ mod tests {
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
 
         let pool = initialize_pool().await?;
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type = 'table'",
-        )
-        .fetch_all(&*pool)
-        .await?;
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&*pool)
+                .await?;
 
-        for table in ["app_meta", "settings", "environments", "secrets", "mod_metadata"] {
+        for table in [
+            "app_meta",
+            "settings",
+            "environments",
+            "secrets",
+            "mod_metadata",
+        ] {
             assert!(tables.contains(&table.to_string()));
         }
 
@@ -632,22 +652,20 @@ mod tests {
 
         let pool = initialize_pool().await?;
 
-        let stored_settings: Option<String> = sqlx::query_scalar(
-            "SELECT data FROM settings WHERE id = 1",
-        )
-        .fetch_optional(&*pool)
-        .await?;
+        let stored_settings: Option<String> =
+            sqlx::query_scalar("SELECT data FROM settings WHERE id = 1")
+                .fetch_optional(&*pool)
+                .await?;
         let stored_settings = stored_settings.expect("expected settings row");
         let stored_value: serde_json::Value = serde_json::from_str(&stored_settings)?;
         let expected_value = serde_json::to_value(&settings)?;
         assert_eq!(stored_value, expected_value);
 
-        let stored_env: Option<String> = sqlx::query_scalar(
-            "SELECT data FROM environments WHERE id = ?",
-        )
-        .bind("env-1")
-        .fetch_optional(&*pool)
-        .await?;
+        let stored_env: Option<String> =
+            sqlx::query_scalar("SELECT data FROM environments WHERE id = ?")
+                .bind("env-1")
+                .fetch_optional(&*pool)
+                .await?;
         let stored_env = stored_env.expect("expected environment row");
         let deserialized_env: Environment = serde_json::from_str(&stored_env)?;
         assert_eq!(deserialized_env.output_dir, environment.output_dir);
@@ -656,12 +674,11 @@ mod tests {
             Some(EnvironmentType::DepotDownloader)
         );
 
-        let stored_secret: Option<String> = sqlx::query_scalar(
-            "SELECT encrypted FROM secrets WHERE key = ?",
-        )
-        .bind("steam_credentials")
-        .fetch_optional(&*pool)
-        .await?;
+        let stored_secret: Option<String> =
+            sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+                .bind("steam_credentials")
+                .fetch_optional(&*pool)
+                .await?;
         assert_eq!(stored_secret.as_deref(), Some("secret"));
 
         let stored_mod: Option<String> = sqlx::query_scalar(
@@ -677,12 +694,11 @@ mod tests {
         let expected_mod_value = serde_json::to_value(sample_metadata())?;
         assert_eq!(stored_mod_value, expected_mod_value);
 
-        let migration_flag: Option<String> = sqlx::query_scalar(
-            "SELECT value FROM app_meta WHERE key = ?",
-        )
-        .bind(MIGRATION_FLAG_KEY)
-        .fetch_optional(&*pool)
-        .await?;
+        let migration_flag: Option<String> =
+            sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+                .bind(MIGRATION_FLAG_KEY)
+                .fetch_optional(&*pool)
+                .await?;
         assert_eq!(migration_flag.as_deref(), Some("true"));
 
         Ok(())
@@ -712,17 +728,20 @@ mod tests {
         .execute(&*pool)
         .await?;
 
-        let stored_env: String = sqlx::query_scalar(
-            "SELECT data FROM environments WHERE id = ?",
-        )
-        .bind(&env.id)
-        .fetch_one(&*pool)
-        .await?;
+        let stored_env: String = sqlx::query_scalar("SELECT data FROM environments WHERE id = ?")
+            .bind(&env.id)
+            .fetch_one(&*pool)
+            .await?;
         let stored_value: serde_json::Value = serde_json::from_str(&stored_env)?;
         assert_eq!(stored_value, serde_json::to_value(&env)?);
 
         let updated_env = Environment {
-            output_dir: temp.path().join("envs").join("env-2b").to_string_lossy().to_string(),
+            output_dir: temp
+                .path()
+                .join("envs")
+                .join("env-2b")
+                .to_string_lossy()
+                .to_string(),
             ..env.clone()
         };
         let updated_serialized = serde_json::to_string(&updated_env)?;
@@ -738,12 +757,11 @@ mod tests {
         .execute(&*pool)
         .await?;
 
-        let stored_output: String = sqlx::query_scalar(
-            "SELECT output_dir FROM environments WHERE id = ?",
-        )
-        .bind(&updated_env.id)
-        .fetch_one(&*pool)
-        .await?;
+        let stored_output: String =
+            sqlx::query_scalar("SELECT output_dir FROM environments WHERE id = ?")
+                .bind(&updated_env.id)
+                .fetch_one(&*pool)
+                .await?;
         assert_eq!(stored_output, updated_env.output_dir);
 
         let metadata = sample_metadata();
@@ -769,20 +787,17 @@ mod tests {
         let stored_metadata_value: serde_json::Value = serde_json::from_str(&stored_metadata)?;
         assert_eq!(stored_metadata_value, serde_json::to_value(&metadata)?);
 
-        sqlx::query(
-            "INSERT INTO secrets (key, encrypted) VALUES (?, ?)",
-        )
-        .bind("test-secret")
-        .bind("secret-data")
-        .execute(&*pool)
-        .await?;
+        sqlx::query("INSERT INTO secrets (key, encrypted) VALUES (?, ?)")
+            .bind("test-secret")
+            .bind("secret-data")
+            .execute(&*pool)
+            .await?;
 
-        let stored_secret: String = sqlx::query_scalar(
-            "SELECT encrypted FROM secrets WHERE key = ?",
-        )
-        .bind("test-secret")
-        .fetch_one(&*pool)
-        .await?;
+        let stored_secret: String =
+            sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+                .bind("test-secret")
+                .fetch_one(&*pool)
+                .await?;
         assert_eq!(stored_secret, "secret-data");
 
         Ok(())

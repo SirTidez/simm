@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::utils::http_identity;
+use anyhow::{Context, Result};
 
 const DEFAULT_RELEASE_API_BASE_URL: &str = "https://api.lockwirelabs.dev";
 
@@ -25,7 +25,10 @@ impl GitHubReleasesService {
     }
 
     fn latest_endpoint(owner: &str, repo: &str, include_prereleases: bool) -> Result<&'static str> {
-        match (owner.to_ascii_lowercase().as_str(), repo.to_ascii_lowercase().as_str()) {
+        match (
+            owner.to_ascii_lowercase().as_str(),
+            repo.to_ascii_lowercase().as_str(),
+        ) {
             ("lavagang", "melonloader") => {
                 if include_prereleases {
                     Ok("/releases/melonloader/latest/prerelease")
@@ -48,7 +51,10 @@ impl GitHubReleasesService {
     }
 
     fn all_endpoint(owner: &str, repo: &str) -> Result<&'static str> {
-        match (owner.to_ascii_lowercase().as_str(), repo.to_ascii_lowercase().as_str()) {
+        match (
+            owner.to_ascii_lowercase().as_str(),
+            repo.to_ascii_lowercase().as_str(),
+        ) {
             ("lavagang", "melonloader") => Ok("/releases/melonloader/all"),
             ("ifbars", "s1api") => Ok("/releases/s1api/all"),
             ("ifbars", "mlvscan") => Ok("/releases/mlvscan/all"),
@@ -121,7 +127,12 @@ impl GitHubReleasesService {
         mut releases: Vec<serde_json::Value>,
         include_prereleases: bool,
     ) -> Vec<serde_json::Value> {
-        releases.retain(|release| !release.get("draft").and_then(|v| v.as_bool()).unwrap_or(false));
+        releases.retain(|release| {
+            !release
+                .get("draft")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        });
 
         if !include_prereleases {
             releases.retain(|release| {
@@ -233,9 +244,8 @@ impl GitHubReleasesService {
             for asset in assets {
                 if let Some(name) = asset.get("name").and_then(|n| n.as_str()) {
                     if name.to_lowercase().ends_with(".zip") {
-                        if let Some(url) = asset
-                            .get("browser_download_url")
-                            .and_then(|u| u.as_str())
+                        if let Some(url) =
+                            asset.get("browser_download_url").and_then(|u| u.as_str())
                         {
                             return Some(url.to_string());
                         }
@@ -260,9 +270,8 @@ impl GitHubReleasesService {
                         && !name_lower.contains("macos")
                         && !name_lower.contains("osx")
                     {
-                        if let Some(url) = asset
-                            .get("browser_download_url")
-                            .and_then(|u| u.as_str())
+                        if let Some(url) =
+                            asset.get("browser_download_url").and_then(|u| u.as_str())
                         {
                             return Some(url.to_string());
                         }

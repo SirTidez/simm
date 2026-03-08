@@ -1,14 +1,14 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use anyhow::{Context, Result};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::events;
 use crate::services::environment::EnvironmentService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
+use anyhow::{Context, Result};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sqlx::SqlitePool;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Manager;
+use tokio::sync::RwLock;
 
 pub struct FileSystemWatcherService {
     watchers: Arc<RwLock<std::collections::HashMap<String, RecommendedWatcher>>>,
@@ -134,8 +134,12 @@ impl FileSystemWatcherService {
         })
         .context("Failed to create file watcher")?;
 
-        <RecommendedWatcher as Watcher>::watch(&mut watcher, &dir_path, RecursiveMode::NonRecursive)
-            .context("Failed to start watching directory")?;
+        <RecommendedWatcher as Watcher>::watch(
+            &mut watcher,
+            &dir_path,
+            RecursiveMode::NonRecursive,
+        )
+        .context("Failed to start watching directory")?;
 
         let mut watchers = self.watchers.write().await;
         watchers.insert(watch_key, watcher);

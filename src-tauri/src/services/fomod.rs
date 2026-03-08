@@ -1,11 +1,11 @@
-use std::path::Path;
-use std::collections::HashMap;
-use std::io::Read;
-use std::fs::File;
 use anyhow::{Context, Result};
-use zip::ZipArchive;
 use quick_xml::de::from_str;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+use zip::ZipArchive;
 
 /// FOMOD detection and parsing service
 #[derive(Clone)]
@@ -232,11 +232,9 @@ impl FomodService {
 
     /// Detect if a ZIP file is a FOMOD archive
     pub fn detect_fomod(&self, zip_path: &Path) -> Result<FomodDetectionResult> {
-        let file = File::open(zip_path)
-            .context("Failed to open zip file")?;
+        let file = File::open(zip_path).context("Failed to open zip file")?;
 
-        let mut archive = ZipArchive::new(file)
-            .context("Failed to read zip archive")?;
+        let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
 
         let mut has_module_config = false;
         let mut has_script_cs = false;
@@ -246,7 +244,8 @@ impl FomodService {
 
         // First pass: find FOMOD files and their indices
         for i in 0..archive.len() {
-            let file = archive.by_index(i)
+            let file = archive
+                .by_index(i)
                 .context("Failed to read file from archive")?;
 
             let file_name = file.name().to_lowercase();
@@ -261,10 +260,12 @@ impl FomodService {
 
         // Second pass: read and parse ModuleConfig.xml if found
         if let Some(idx) = config_index {
-            let mut file_reader = archive.by_index(idx)
+            let mut file_reader = archive
+                .by_index(idx)
                 .context("Failed to read ModuleConfig.xml")?;
             let mut content = String::new();
-            file_reader.read_to_string(&mut content)
+            file_reader
+                .read_to_string(&mut content)
                 .context("Failed to read ModuleConfig.xml content")?;
 
             // Parse XML (basic parsing for name and image)
@@ -292,16 +293,15 @@ impl FomodService {
 
     /// Parse FOMOD XML configuration
     pub fn parse_fomod_xml(&self, zip_path: &Path) -> Result<FomodConfig> {
-        let file = File::open(zip_path)
-            .context("Failed to open zip file")?;
+        let file = File::open(zip_path).context("Failed to open zip file")?;
 
-        let mut archive = ZipArchive::new(file)
-            .context("Failed to read zip archive")?;
+        let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
 
         // Find ModuleConfig.xml index
         let mut config_index = None;
         for i in 0..archive.len() {
-            let file = archive.by_index(i)
+            let file = archive
+                .by_index(i)
                 .context("Failed to read file from archive")?;
 
             let file_name = file.name().to_lowercase();
@@ -316,15 +316,16 @@ impl FomodService {
             .ok_or_else(|| anyhow::anyhow!("ModuleConfig.xml not found in FOMOD archive"))?;
 
         // Read the config file
-        let mut file_reader = archive.by_index(idx)
+        let mut file_reader = archive
+            .by_index(idx)
             .context("Failed to read ModuleConfig.xml")?;
         let mut content = String::new();
-        file_reader.read_to_string(&mut content)
+        file_reader
+            .read_to_string(&mut content)
             .context("Failed to read ModuleConfig.xml content")?;
 
         // Parse XML
-        let config: FomodConfig = from_str(&content)
-            .context("Failed to parse ModuleConfig.xml")?;
+        let config: FomodConfig = from_str(&content).context("Failed to parse ModuleConfig.xml")?;
 
         Ok(config)
     }

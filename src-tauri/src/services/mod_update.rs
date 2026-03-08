@@ -1,12 +1,12 @@
-use anyhow::{Context, Result};
-use crate::services::mods::ModsService;
 use crate::services::environment::EnvironmentService;
-use crate::services::thunderstore::ThunderStoreService;
-use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
+use crate::services::mods::ModsService;
+use crate::services::nexus_mods::NexusModsService;
+use crate::services::thunderstore::ThunderStoreService;
+use anyhow::{Context, Result};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use serde_json::Value;
 
 #[derive(Clone)]
 pub struct ModUpdateService;
@@ -28,7 +28,8 @@ impl ModUpdateService {
         use crate::types::ModMetadata;
         use chrono::Utc;
 
-        let env = env_service.get_environment(environment_id)
+        let env = env_service
+            .get_environment(environment_id)
             .await
             .context("Failed to get environment")?
             .ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
@@ -39,13 +40,16 @@ impl ModUpdateService {
 
         // Get mods list
         let mods_result = mods_service.list_mods(&env.output_dir).await?;
-        let mods_array = mods_result.get("mods")
+        let mods_array = mods_result
+            .get("mods")
             .and_then(|m| m.as_array())
             .ok_or_else(|| anyhow::anyhow!("Invalid mods list format"))?;
 
         // Load metadata
         let mods_dir = Path::new(&env.output_dir).join("Mods");
-        let mut all_metadata: HashMap<String, ModMetadata> = mods_service.load_mod_metadata(&mods_dir).await
+        let mut all_metadata: HashMap<String, ModMetadata> = mods_service
+            .load_mod_metadata(&mods_dir)
+            .await
             .unwrap_or_else(|_| HashMap::new());
         let mut storage_metadata_updates: HashMap<String, ModMetadata> = HashMap::new();
 
@@ -58,7 +62,10 @@ impl ModUpdateService {
                 if let Some(metadata) = all_metadata.get_mut(file_name) {
                     let source = metadata.source.clone();
                     let source_id = metadata.source_id.clone();
-                    let current_version = metadata.source_version.clone();
+                    let current_version = metadata
+                        .source_version
+                        .clone()
+                        .or_else(|| metadata.installed_version.clone());
 
                     if let Some(crate::types::ModSource::Thunderstore) = source {
                         if let Some(source_id) = source_id {
@@ -76,7 +83,10 @@ impl ModUpdateService {
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
                                 {
-                                    let update_available = current_version.as_ref().map(|cv| cv != &latest_version).unwrap_or(true);
+                                    let update_available = Self::versions_differ(
+                                        current_version.as_deref(),
+                                        &latest_version,
+                                    );
 
                                     // Update metadata with check results
                                     metadata.last_update_check = Some(now);
@@ -107,12 +117,15 @@ impl ModUpdateService {
                                         .map(|versions| {
                                             versions
                                                 .iter()
-                                                .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
+                                                .map(|ver| {
+                                                    ver.get("downloads")
+                                                        .and_then(|v| v.as_u64())
+                                                        .unwrap_or(0)
+                                                })
                                                 .sum::<u64>()
                                         });
-                                    metadata.likes_or_endorsements = package
-                                        .get("rating_score")
-                                        .and_then(|v| v.as_i64());
+                                    metadata.likes_or_endorsements =
+                                        package.get("rating_score").and_then(|v| v.as_i64());
                                     metadata.updated_at = package
                                         .get("date_updated")
                                         .and_then(|v| v.as_str())
@@ -128,7 +141,8 @@ impl ModUpdateService {
                                         .filter(|tags| !tags.is_empty());
                                     metadata.metadata_last_refreshed = Some(now);
                                     if let Some(storage_id) = metadata.mod_storage_id.clone() {
-                                        storage_metadata_updates.insert(storage_id, metadata.clone());
+                                        storage_metadata_updates
+                                            .insert(storage_id, metadata.clone());
                                     }
 
                                     results.push(serde_json::json!({
@@ -155,14 +169,19 @@ impl ModUpdateService {
                             if let Ok(mod_id) = mod_id_str.parse::<u32>() {
                                 let game_id = "schedule1";
                                 // Check NexusMods for updates
-                                if let Ok(mod_info) = nexus_mods_service.get_mod(game_id, mod_id).await {
+                                if let Ok(mod_info) =
+                                    nexus_mods_service.get_mod(game_id, mod_id).await
+                                {
                                     // Get latest version from mod info
                                     if let Some(latest_version) = mod_info
                                         .get("version")
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string())
                                     {
-                                        let update_available = current_version.as_ref().map(|cv| cv != &latest_version).unwrap_or(true);
+                                        let update_available = Self::versions_differ(
+                                            current_version.as_deref(),
+                                            &latest_version,
+                                        );
 
                                         // Update metadata with check results
                                         metadata.last_update_check = Some(now);
@@ -196,7 +215,8 @@ impl ModUpdateService {
                                             .map(|s| s.to_string());
                                         metadata.metadata_last_refreshed = Some(now);
                                         if let Some(storage_id) = metadata.mod_storage_id.clone() {
-                                            storage_metadata_updates.insert(storage_id, metadata.clone());
+                                            storage_metadata_updates
+                                                .insert(storage_id, metadata.clone());
                                         }
 
                                         results.push(serde_json::json!({
@@ -227,7 +247,10 @@ impl ModUpdateService {
                                 let repo_name = parts[1];
 
                                 // Check GitHub for latest release
-                                if let Ok(Some(latest_release)) = github_service.get_latest_release(owner, repo_name, false).await {
+                                if let Ok(Some(latest_release)) = github_service
+                                    .get_latest_release(owner, repo_name, false)
+                                    .await
+                                {
                                     if let Some(latest_version) = latest_release
                                         .get("tag_name")
                                         .and_then(|v| v.as_str())
@@ -257,7 +280,8 @@ impl ModUpdateService {
                                             .map(|s| s.to_string());
                                         metadata.metadata_last_refreshed = Some(now);
                                         if let Some(storage_id) = metadata.mod_storage_id.clone() {
-                                            storage_metadata_updates.insert(storage_id, metadata.clone());
+                                            storage_metadata_updates
+                                                .insert(storage_id, metadata.clone());
                                         }
 
                                         results.push(serde_json::json!({
@@ -299,7 +323,9 @@ impl ModUpdateService {
         }
 
         // Save updated metadata back to file
-        mods_service.save_mod_metadata(&mods_dir, &all_metadata).await?;
+        mods_service
+            .save_mod_metadata(&mods_dir, &all_metadata)
+            .await?;
 
         Ok(results)
     }
@@ -329,7 +355,11 @@ impl ModUpdateService {
                 continue;
             }
 
-            let Some(source_id) = entry.source_id.clone().filter(|value| !value.trim().is_empty()) else {
+            let Some(source_id) = entry
+                .source_id
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            else {
                 continue;
             };
 
@@ -380,9 +410,7 @@ impl ModUpdateService {
                             .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
                             .sum::<u64>()
                     }),
-                likes_or_endorsements: package
-                    .get("rating_score")
-                    .and_then(|v| v.as_i64()),
+                likes_or_endorsements: package.get("rating_score").and_then(|v| v.as_i64()),
                 updated_at: package
                     .get("date_updated")
                     .and_then(|v| v.as_str())
@@ -484,7 +512,10 @@ impl ModUpdateService {
         thunderstore_service: &ThunderStoreService,
         source_id: &str,
     ) -> Result<(String, Value)> {
-        if let Ok(Some(package)) = thunderstore_service.get_package(source_id, Some("schedule-i")).await {
+        if let Ok(Some(package)) = thunderstore_service
+            .get_package(source_id, Some("schedule-i"))
+            .await
+        {
             return Ok((source_id.to_string(), package));
         }
 
@@ -522,10 +553,7 @@ impl ModUpdateService {
         Ok((package_uuid, package))
     }
 
-    fn select_nexus_file_for_runtime(
-        files: &[Value],
-        runtime_label: &str,
-    ) -> Option<Value> {
+    fn select_nexus_file_for_runtime(files: &[Value], runtime_label: &str) -> Option<Value> {
         let runtime_lower = runtime_label.to_lowercase();
         let compatible: Vec<Value> = files
             .iter()
@@ -548,10 +576,11 @@ impl ModUpdateService {
             .collect();
 
         if !compatible.is_empty() {
-            if let Some(primary) = compatible
-                .iter()
-                .find(|f| f.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false))
-            {
+            if let Some(primary) = compatible.iter().find(|f| {
+                f.get("is_primary")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            }) {
                 return Some(primary.clone());
             }
             return compatible.first().cloned();
@@ -559,7 +588,11 @@ impl ModUpdateService {
 
         files
             .iter()
-            .find(|f| f.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false))
+            .find(|f| {
+                f.get("is_primary")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
             .cloned()
             .or_else(|| files.first().cloned())
     }
@@ -619,9 +652,15 @@ impl ModUpdateService {
                     .resolve_thunderstore_package(thunderstore_service, &source_id)
                     .await?;
 
-                let latest_version = Self::extract_package_latest_version(&package)
-                    .ok_or_else(|| anyhow::anyhow!("Thunderstore package has no version information"))?;
-                if !Self::versions_differ(metadata.source_version.as_deref(), &latest_version) {
+                let latest_version =
+                    Self::extract_package_latest_version(&package).ok_or_else(|| {
+                        anyhow::anyhow!("Thunderstore package has no version information")
+                    })?;
+                let current_version = metadata
+                    .source_version
+                    .as_deref()
+                    .or(metadata.installed_version.as_deref());
+                if !Self::versions_differ(current_version, &latest_version) {
                     return Ok(serde_json::json!({
                         "success": true,
                         "message": "Already up to date",
@@ -720,7 +759,8 @@ impl ModUpdateService {
                 let file_id = target_file
                     .get("file_id")
                     .and_then(|v| v.as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("Nexus file is missing file_id"))? as u32;
+                    .ok_or_else(|| anyhow::anyhow!("Nexus file is missing file_id"))?
+                    as u32;
                 let latest_version = target_file
                     .get("version")
                     .or_else(|| target_file.get("mod_version"))
@@ -728,8 +768,12 @@ impl ModUpdateService {
                     .unwrap_or_default()
                     .to_string();
 
+                let current_version = metadata
+                    .source_version
+                    .as_deref()
+                    .or(metadata.installed_version.as_deref());
                 if !latest_version.is_empty()
-                    && !Self::versions_differ(metadata.source_version.as_deref(), &latest_version)
+                    && !Self::versions_differ(current_version, &latest_version)
                 {
                     return Ok(serde_json::json!({
                         "success": true,
@@ -737,7 +781,6 @@ impl ModUpdateService {
                         "alreadyUpToDate": true
                     }));
                 }
-
                 let bytes = nexus_mods_service
                     .download_mod_file("schedule1", mod_id, file_id)
                     .await
@@ -751,15 +794,13 @@ impl ModUpdateService {
                     .extension()
                     .and_then(|v| v.to_str())
                     .unwrap_or("zip");
-                let temp_path = std::env::temp_dir().join(format!("{}.{}", temp_file_name, extension));
+                let temp_path =
+                    std::env::temp_dir().join(format!("{}.{}", temp_file_name, extension));
                 tokio::fs::write(&temp_path, bytes)
                     .await
                     .context("Failed to write Nexus update file")?;
 
-                let mod_info = nexus_mods_service
-                    .get_mod("schedule1", mod_id)
-                    .await
-                    .ok();
+                let mod_info = nexus_mods_service.get_mod("schedule1", mod_id).await.ok();
                 let metadata_json = serde_json::json!({
                     "source": "nexusmods",
                     "sourceId": source_id,
@@ -810,8 +851,12 @@ impl ModUpdateService {
                     .unwrap_or_default()
                     .to_string();
 
+                let current_version = metadata
+                    .source_version
+                    .as_deref()
+                    .or(metadata.installed_version.as_deref());
                 if !latest_version.is_empty()
-                    && !Self::versions_differ(metadata.source_version.as_deref(), &latest_version)
+                    && !Self::versions_differ(current_version, &latest_version)
                 {
                     return Ok(serde_json::json!({
                         "success": true,
@@ -819,10 +864,9 @@ impl ModUpdateService {
                         "alreadyUpToDate": true
                     }));
                 }
-
-                let asset_url = github_service
-                    .get_zip_asset_url(&release)
-                    .ok_or_else(|| anyhow::anyhow!("No ZIP asset found for latest GitHub release"))?;
+                let asset_url = github_service.get_zip_asset_url(&release).ok_or_else(|| {
+                    anyhow::anyhow!("No ZIP asset found for latest GitHub release")
+                })?;
                 let bytes = github_service
                     .download_release_asset(&asset_url)
                     .await
@@ -886,11 +930,11 @@ mod tests {
     use super::*;
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
+    use crate::services::github_releases::GitHubReleasesService;
     use crate::services::mods::ModsService;
     use crate::services::nexus_mods::NexusModsService;
     use crate::services::thunderstore::ThunderStoreService;
     use crate::types::{schedule_i_config, ModMetadata, ModSource};
-    use crate::services::github_releases::GitHubReleasesService;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -1144,11 +1188,15 @@ mod tests {
 
         assert!(!results.is_empty());
         let entry = results.first().expect("update result");
-        assert_eq!(entry.get("modFileName").and_then(|v| v.as_str()), Some("Example.dll"));
-        assert_eq!(entry.get("source").and_then(|v| v.as_str()), Some("thunderstore"));
+        assert_eq!(
+            entry.get("modFileName").and_then(|v| v.as_str()),
+            Some("Example.dll")
+        );
+        assert_eq!(
+            entry.get("source").and_then(|v| v.as_str()),
+            Some("thunderstore")
+        );
 
         Ok(())
     }
 }
-
-

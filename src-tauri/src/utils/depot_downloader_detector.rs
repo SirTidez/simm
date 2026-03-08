@@ -1,9 +1,9 @@
-use std::path::Path;
-use std::process::Command;
-use anyhow::Result;
+use crate::types::{DepotDownloaderInfo, DetectionMethod};
 #[cfg(all(test, target_os = "windows"))]
 use anyhow::Context;
-use crate::types::{DepotDownloaderInfo, DetectionMethod};
+use anyhow::Result;
+use std::path::Path;
+use std::process::Command;
 
 /// Detects if DepotDownloader is installed and returns its path
 pub async fn detect_depot_downloader() -> Result<DepotDownloaderInfo> {
@@ -30,22 +30,19 @@ pub async fn detect_depot_downloader() -> Result<DepotDownloaderInfo> {
     };
 
     #[cfg(not(target_os = "windows"))]
-    let output = Command::new(which_command)
-        .arg(executable_name)
-        .output();
+    let output = Command::new(which_command).arg(executable_name).output();
 
     if let Ok(output) = output {
         if output.status.success() {
             let path_str = String::from_utf8_lossy(&output.stdout);
-            let path = path_str.lines().next()
-                .and_then(|line| {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() && Path::new(trimmed).exists() {
-                        Some(trimmed.to_string())
-                    } else {
-                        None
-                    }
-                });
+            let path = path_str.lines().next().and_then(|line| {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && Path::new(trimmed).exists() {
+                    Some(trimmed.to_string())
+                } else {
+                    None
+                }
+            });
 
             if let Some(path) = path {
                 return Ok(DepotDownloaderInfo {
@@ -99,7 +96,10 @@ fn get_common_paths(executable_name: &str) -> Vec<(String, DetectionMethod)> {
         }
         if let Ok(cwd) = std::env::current_dir() {
             paths.push((
-                cwd.join("DepotDownloader").join(executable_name).to_string_lossy().to_string(),
+                cwd.join("DepotDownloader")
+                    .join(executable_name)
+                    .to_string_lossy()
+                    .to_string(),
                 DetectionMethod::Manual,
             ));
         }
@@ -202,7 +202,10 @@ mod tests {
 
         let result = detect_depot_downloader().await?;
         assert!(result.installed);
-        assert_eq!(result.path.as_deref(), Some(exe_path.to_string_lossy().as_ref()));
+        assert_eq!(
+            result.path.as_deref(),
+            Some(exe_path.to_string_lossy().as_ref())
+        );
         assert!(matches!(result.method, Some(DetectionMethod::Path)));
 
         Ok(())
@@ -222,13 +225,20 @@ mod tests {
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
         let system32 = format!("{}\\System32", system_root);
         let _path_guard = EnvVarGuard::set("PATH", &system32);
-        let _local_app_data_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
+        let _local_app_data_guard =
+            EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
         let program_files_nonexistent = temp.path().join("does_not_exist");
-        let _program_files_guard = EnvVarGuard::set("PROGRAMFILES", program_files_nonexistent.to_string_lossy().as_ref());
+        let _program_files_guard = EnvVarGuard::set(
+            "PROGRAMFILES",
+            program_files_nonexistent.to_string_lossy().as_ref(),
+        );
 
         let result = detect_depot_downloader().await?;
         assert!(result.installed);
-        assert_eq!(result.path.as_deref(), Some(exe_path.to_string_lossy().as_ref()));
+        assert_eq!(
+            result.path.as_deref(),
+            Some(exe_path.to_string_lossy().as_ref())
+        );
         assert!(matches!(result.method, Some(DetectionMethod::Manual)));
 
         Ok(())
