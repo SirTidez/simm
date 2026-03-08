@@ -26,6 +26,7 @@ interface Props {
   onClose: () => void;
   environmentId: string;
   environment: Environment;
+  onOpenModLibraryView?: (focus: { storageId: string; modTag: string }) => void;
 }
 
 type TimePeriod = 'all' | 'last5min' | 'last15min' | 'last1hour' | 'custom';
@@ -76,7 +77,7 @@ function highlightText(text: string, query: string): ReactNode {
   return parts;
 }
 
-export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Props) {
+export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpenModLibraryView }: Props) {
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
   const [selectedLogFile, setSelectedLogFile] = useState<LogFile | null>(null);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
@@ -94,7 +95,10 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   const [customTimeEnd, setCustomTimeEnd] = useState<string>('');
   const [selectedModTag, setSelectedModTag] = useState<string | null>(null);
   const [showModCard, setShowModCard] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [openingModView, setOpeningModView] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 
   const isSharedPlayerLogFile = (file: LogFile | null): boolean => {
@@ -498,6 +502,52 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   const handleModTagClick = (modTag: string) => {
     setSelectedModTag(modTag);
     setShowModCard(true);
+  };
+
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, 4000);
+  };
+
+  const handleOpenModLibraryView = async () => {
+    if (!selectedModTag || !onOpenModLibraryView) {
+      return;
+    }
+
+    try {
+      setOpeningModView(true);
+      const library = await ApiService.getModLibrary();
+      const normalizedTag = normalizeModTag(selectedModTag);
+      const remoteSources = new Set(['thunderstore', 'nexusmods', 'github']);
+      const matches = library.downloaded.filter((entry) => {
+        const source = entry.source ?? 'unknown';
+        return remoteSources.has(source) && normalizeModTag(entry.displayName) === normalizedTag;
+      });
+
+      if (matches.length === 0) {
+        showToast('No mod found from an online/downloaded source. Mod may be locally installed.');
+        return;
+      }
+
+      const preferredMatch =
+        matches.find((entry) => entry.installedIn?.includes(environmentId)) ?? matches[0];
+
+      onOpenModLibraryView({
+        storageId: preferredMatch.storageId,
+        modTag: selectedModTag,
+      });
+    } catch (err) {
+      console.error('Failed to open mod library view from logs:', err);
+      showToast('Failed to open mod view from logs.');
+    } finally {
+      setOpeningModView(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -963,6 +1013,17 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <button
                       onClick={() => {
+                        void handleOpenModLibraryView();
+                      }}
+                      disabled={openingModView || !selectedModTag || !onOpenModLibraryView}
+                      className="btn btn-secondary"
+                      style={{ width: '100%', justifyContent: 'flex-start' }}
+                    >
+                      <i className="fas fa-external-link-alt" style={{ marginRight: '0.5rem' }}></i>
+                      {openingModView ? 'Opening Mod View...' : 'Open In Mod Library'}
+                    </button>
+                    <button
+                      onClick={() => {
                         // Filter to show only this mod's logs
                         setShowModCard(false);
                       }}
@@ -989,6 +1050,26 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
             </div>
           )}
       </div>
+      {toastMessage && (
+        <div
+          style={{
+            position: 'fixed',
+            right: '1rem',
+            bottom: '1rem',
+            zIndex: 9999,
+            backgroundColor: '#1f2a36',
+            border: '1px solid #3f5f7c',
+            color: '#d9e9ff',
+            padding: '0.75rem 1rem',
+            borderRadius: '6px',
+            maxWidth: '420px',
+            boxShadow: '0 6px 18px rgba(0, 0, 0, 0.4)',
+            fontSize: '0.875rem',
+          }}
+        >
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 }

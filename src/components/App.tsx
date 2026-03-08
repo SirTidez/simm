@@ -29,21 +29,124 @@ function AppContent() {
   const [showStartupSplash, setShowStartupSplash] = useState(true);
   const [isMaximized, setIsMaximized] = useState(false);
   const [lastEnvironmentWorkspaceView, setLastEnvironmentWorkspaceView] = useState<'mods' | 'plugins' | 'userLibs' | 'logs' | 'config'>('mods');
+  const [backgroundWorkspace, setBackgroundWorkspace] = useState<WorkspaceRoute | null>(null);
+  const [libraryFocusRequest, setLibraryFocusRequest] = useState<{ storageId: string; modTag: string; requestId: number } | null>(null);
 
   const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
+    setBackgroundWorkspace(null);
+    setLibraryFocusRequest(null);
     setActiveWorkspace(workspace);
   }, []);
 
   const goHome = useCallback(() => {
+    setBackgroundWorkspace(null);
+    setLibraryFocusRequest(null);
     setActiveWorkspace({ view: 'home' });
   }, []);
 
-  const selectedEnvironmentId =
-    'environmentId' in activeWorkspace ? activeWorkspace.environmentId : null;
+  const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
+    setBackgroundWorkspace(activeWorkspace);
+    setLibraryFocusRequest((previous) => ({
+      storageId: focus.storageId,
+      modTag: focus.modTag,
+      requestId: (previous?.requestId ?? 0) + 1,
+    }));
+    setActiveWorkspace({ view: 'library' });
+  }, [activeWorkspace]);
 
-  const selectedEnvironment = selectedEnvironmentId
-    ? environments.find((env) => env.id === selectedEnvironmentId) ?? null
-    : null;
+  const closeLibrary = useCallback(() => {
+    if (backgroundWorkspace) {
+      setActiveWorkspace(backgroundWorkspace);
+      setBackgroundWorkspace(null);
+      setLibraryFocusRequest(null);
+      return;
+    }
+
+    goHome();
+  }, [backgroundWorkspace, goHome]);
+
+  const getEnvironmentById = useCallback((environmentId: string) => {
+    return environments.find((env) => env.id === environmentId) ?? null;
+  }, [environments]);
+
+  const renderWorkspacePanelFor = useCallback((workspace: WorkspaceRoute, onCloseHandler: () => void) => {
+    switch (workspace.view) {
+      case 'library':
+        return (
+          <ModLibraryOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            focusStorageId={libraryFocusRequest?.storageId ?? null}
+            focusRequestId={libraryFocusRequest?.requestId}
+            focusModTag={libraryFocusRequest?.modTag ?? null}
+          />
+        );
+      case 'wizard':
+        return <EnvironmentCreationWizard onClose={onCloseHandler} />;
+      case 'accounts':
+        return <SteamAccountOverlay isOpen={true} onClose={onCloseHandler} />;
+      case 'help':
+        return <HelpOverlay isOpen={true} onClose={onCloseHandler} />;
+      case 'settings':
+        return <Settings isOpen={true} onClose={onCloseHandler} />;
+      case 'welcome':
+        return <WelcomeOverlay isOpen={true} onClose={onCloseHandler} />;
+      case 'mods':
+        return (
+          <ModsOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+            onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
+            onModUpdatesChecked={(count) => {
+              window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
+            }}
+          />
+        );
+      case 'plugins':
+        return (
+          <PluginsOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+          />
+        );
+      case 'userLibs':
+        return (
+          <UserLibsOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+          />
+        );
+      case 'logs': {
+        const environment = getEnvironmentById(workspace.environmentId);
+        return environment ? (
+          <LogsOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+            environment={environment}
+            onOpenModLibraryView={openLibraryFromLogs}
+          />
+        ) : null;
+      }
+      case 'config': {
+        const environment = getEnvironmentById(workspace.environmentId);
+        return environment ? (
+          <ConfigurationOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+            environment={environment}
+          />
+        ) : null;
+      }
+      case 'home':
+      default:
+        return null;
+    }
+  }, [getEnvironmentById, libraryFocusRequest?.requestId, libraryFocusRequest?.storageId, openLibraryFromLogs, openWorkspace]);
 
   useEffect(() => {
     if (
@@ -154,69 +257,19 @@ function AppContent() {
   };
 
   const renderWorkspacePanel = () => {
-    switch (activeWorkspace.view) {
-      case 'library':
-        return <ModLibraryOverlay isOpen={true} onClose={goHome} />;
-      case 'wizard':
-        return <EnvironmentCreationWizard onClose={goHome} />;
-      case 'accounts':
-        return <SteamAccountOverlay isOpen={true} onClose={goHome} />;
-      case 'help':
-        return <HelpOverlay isOpen={true} onClose={goHome} />;
-      case 'settings':
-        return <Settings isOpen={true} onClose={goHome} />;
-      case 'welcome':
-        return <WelcomeOverlay isOpen={true} onClose={goHome} />;
-      case 'mods':
-        return selectedEnvironmentId ? (
-          <ModsOverlay
-            isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-            onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
-            onModUpdatesChecked={(count) => {
-              window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: selectedEnvironmentId, count } }));
-            }}
-          />
-        ) : null;
-      case 'plugins':
-        return selectedEnvironmentId ? (
-          <PluginsOverlay
-            isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-          />
-        ) : null;
-      case 'userLibs':
-        return selectedEnvironmentId ? (
-          <UserLibsOverlay
-            isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-          />
-        ) : null;
-      case 'logs':
-        return selectedEnvironmentId && selectedEnvironment ? (
-          <LogsOverlay
-            isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-            environment={selectedEnvironment}
-          />
-        ) : null;
-      case 'config':
-        return selectedEnvironmentId && selectedEnvironment ? (
-          <ConfigurationOverlay
-            isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-            environment={selectedEnvironment}
-          />
-        ) : null;
-      case 'home':
-      default:
-        return null;
+    const activeCloseHandler = activeWorkspace.view === 'library' ? closeLibrary : goHome;
+    const activePanel = renderWorkspacePanelFor(activeWorkspace, activeCloseHandler);
+    if (activeWorkspace.view === 'library' && backgroundWorkspace) {
+      return (
+        <>
+          <div style={{ display: 'none' }}>
+            {renderWorkspacePanelFor(backgroundWorkspace, goHome)}
+          </div>
+          {activePanel}
+        </>
+      );
     }
+    return activePanel;
   };
 
   return (
