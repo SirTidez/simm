@@ -407,10 +407,29 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
     return true;
   };
 
+  const getEffectiveLevel = (line: LogLine): 'ERROR' | 'WARN' | 'DEBUG' | 'INFO' => {
+    const sourceText = `${line.level ?? ''} ${line.content}`.toLowerCase();
+
+    if (/\berror\b|\bfatal\b/.test(sourceText)) {
+      return 'ERROR';
+    }
+
+    if (/\bwarn(ing)?\b/.test(sourceText)) {
+      return 'WARN';
+    }
+
+    if (/\bdebug\b/.test(sourceText)) {
+      return 'DEBUG';
+    }
+
+    return 'INFO';
+  };
+
   const filteredLines = logLines.filter(line => {
     // Filter by level
     if (filterLevel !== 'ALL') {
-      if (!line.level || line.level.toUpperCase() !== filterLevel.toUpperCase()) {
+      const effectiveLevel = getEffectiveLevel(line);
+      if (effectiveLevel !== filterLevel.toUpperCase()) {
         return false;
       }
     }
