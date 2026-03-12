@@ -465,12 +465,19 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         success: boolean;
         result?: {
           kind?: 'library' | 'install';
+          requestedKind?: 'library' | 'install';
           environmentId?: string;
         };
+        requestedKind?: 'library' | 'install';
         error?: string;
       }>).detail;
+      const requestedKind = detail?.requestedKind ?? detail?.result?.requestedKind;
 
-      if (detail?.result?.kind !== 'install' && !installingNexusMod) {
+      if (requestedKind === 'library' || detail?.result?.kind === 'library') {
+        return;
+      }
+
+      if (!installingNexusMod && requestedKind !== 'install' && detail?.result?.kind !== 'install') {
         return;
       }
 

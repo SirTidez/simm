@@ -179,11 +179,13 @@ function AppContent() {
     success: boolean;
     result?: {
       kind?: 'library' | 'install';
+      requestedKind?: 'library' | 'install';
       environmentId?: string;
       storageId?: string;
       modId?: number;
       fileId?: number;
     };
+    requestedKind?: 'library' | 'install';
     error?: string;
     nxmUrl?: string;
   }) => {
@@ -216,18 +218,25 @@ function AppContent() {
     setActiveWorkspace({ view: 'accounts' });
 
     try {
-      await ApiService.completeNexusOAuthCallback(callbackUrl);
+      const result = await ApiService.completeNexusOAuthCallback(callbackUrl);
+      if (!result.success) {
+        dispatchNexusOAuthResult({
+          success: false,
+          error: 'Failed to complete Nexus OAuth login',
+        });
+        return;
+      }
       completedNexusCallbackRef.current = callbackUrl;
       dispatchNexusOAuthResult({ success: true });
     } catch (error) {
-      inFlightNexusCallbackRef.current = null;
       dispatchNexusOAuthResult({
         success: false,
         error: error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login',
       });
       return;
+    } finally {
+      inFlightNexusCallbackRef.current = null;
     }
-    inFlightNexusCallbackRef.current = null;
   }, [dispatchNexusOAuthResult]);
 
   const handleNexusManualDownloadCallback = useCallback(async (nxmUrl: string) => {
@@ -258,10 +267,20 @@ function AppContent() {
         });
         return;
       }
+      if (!result.success) {
+        dispatchNexusManualDownloadResult({
+          success: false,
+          error: result.error || 'Failed to complete Nexus manual download',
+          requestedKind: result.requestedKind,
+          nxmUrl,
+        });
+        return;
+      }
       completedNxmCallbackRef.current.add(nxmUrl);
       dispatchNexusManualDownloadResult({
         success: true,
         result,
+        requestedKind: result.requestedKind,
         nxmUrl,
       });
     } catch (error) {
@@ -292,10 +311,20 @@ function AppContent() {
 
     try {
       const result = await ApiService.completeNexusManualDownloadSession(pending.nxmUrl, runtime);
+      if (!result.success) {
+        dispatchNexusManualDownloadResult({
+          success: false,
+          error: result.error || 'Failed to complete Nexus manual download',
+          requestedKind: result.requestedKind ?? pending.kind,
+          nxmUrl: pending.nxmUrl,
+        });
+        return;
+      }
       completedNxmCallbackRef.current.add(pending.nxmUrl);
       dispatchNexusManualDownloadResult({
         success: true,
         result,
+        requestedKind: result.requestedKind ?? pending.kind,
         nxmUrl: pending.nxmUrl,
       });
     } catch (error) {

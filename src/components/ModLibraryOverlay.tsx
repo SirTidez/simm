@@ -696,20 +696,30 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         success: boolean;
         result?: {
           kind?: 'library' | 'install';
+          requestedKind?: 'library' | 'install';
         };
+        requestedKind?: 'library' | 'install';
         error?: string;
       }>).detail;
       const pendingAction = pendingNexusManualActionRef.current;
-      const isLibraryResult = detail?.result?.kind === 'library';
+      const requestedKind = detail?.requestedKind ?? detail?.result?.requestedKind;
+      const isLibraryResult = detail?.result?.kind === 'library' || requestedKind === 'library';
 
-      if (pendingAction) {
+      if (pendingAction && isLibraryResult) {
         clearNexusManualTimeout();
         pendingNexusManualActionRef.current = null;
         setDownloading(null);
         setUpdatingGroup(null);
 
         if (detail?.success) {
-          await pendingAction.onSuccess();
+          try {
+            await pendingAction.onSuccess();
+          } catch (error) {
+            showLibraryNotice(
+              pendingAction.onErrorTitle || 'Nexus Download Failed',
+              error instanceof Error ? error.message : 'Failed to refresh the mod library after the Nexus download completed.',
+            );
+          }
           return;
         }
 
@@ -1106,6 +1116,10 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
               message: 'Free Nexus downloads must be confirmed one file at a time. Choose the runtime to update now.',
               onSelect: (runtime) => {
                 if (runtime === 'Both') {
+                  showLibraryNotice(
+                    'Select One Runtime',
+                    'Choose Mono or IL2CPP for this update. Repeat the update for the other runtime separately.',
+                  );
                   return;
                 }
                 setRuntimePrompt(null);
@@ -1507,6 +1521,10 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         message: 'Free Nexus downloads must be confirmed one file at a time. Choose the runtime to download now.',
         onSelect: (runtime) => {
           if (runtime === 'Both') {
+            showLibraryNotice(
+              'Select One Runtime',
+              'Choose Mono or IL2CPP for this manual Nexus download. Repeat the download for the other runtime separately.',
+            );
             return;
           }
           setRuntimePrompt(null);

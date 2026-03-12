@@ -716,6 +716,7 @@ export class ApiService {
     runtimeOverride?: 'IL2CPP' | 'Mono' | 'Both'
   ): Promise<{
     success: boolean;
+    error?: string;
     kind?: 'library' | 'install';
     environmentId?: string;
     storageId?: string;

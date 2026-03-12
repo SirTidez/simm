@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
@@ -592,7 +593,12 @@ impl NexusModsService {
             .ok_or_else(|| anyhow::anyhow!("Missing game domainName for game {}", game_id_i64))?;
 
         let endpoint = format!("https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json", domain, mod_id, file_id);
-        let response = reqwest::Client::new()
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build Nexus OAuth download link client: {}", e))?;
+
+        let response = client
             .get(endpoint)
             .bearer_auth(access_token)
             .header("Application-Name", "SIMM")
@@ -602,14 +608,21 @@ impl NexusModsService {
             .map_err(|e| anyhow::anyhow!("Failed Nexus OAuth download link request: {}", e))?;
 
         let status = response.status();
-        let value = response
-            .json::<serde_json::Value>()
+        let body = response
+            .text()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse Nexus OAuth download link response: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to read Nexus OAuth download link response: {}", e))?;
 
         if !status.is_success() {
-            return Err(anyhow::anyhow!("Nexus OAuth download-link request failed ({}): {}", status, value));
+            return Err(anyhow::anyhow!(
+                "Nexus OAuth download-link request failed ({}): {}",
+                status,
+                body
+            ));
         }
+
+        let value = serde_json::from_str::<serde_json::Value>(&body)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Nexus OAuth download link response: {}", e))?;
 
         let arr = value
             .as_array()

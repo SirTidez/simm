@@ -25,6 +25,8 @@ const SUPPORTED_NEXUS_GAME_ID: &str = "schedule1";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingNexusManualDownload {
+    #[serde(default)]
+    session_id: String,
     kind: String,
     game_id: String,
     mod_id: u32,
@@ -63,6 +65,10 @@ fn now_epoch_seconds() -> i64 {
         .as_secs() as i64
 }
 
+fn new_pending_session_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -85,6 +91,32 @@ fn oauth_client_secret() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn build_nexus_oauth_status_value(session: &Value) -> Value {
+    let account = derive_account_summary(
+        session.get("accessToken").and_then(|v| v.as_str()),
+        session.get("userinfo"),
+        session.get("account"),
+    );
+    let expires_at = session.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    json!({
+        "connected": true,
+        "expiresAt": expires_at,
+        "account": account,
+    })
+}
+
+fn should_require_manual_nexus_download(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("download-link request failed (403)")
+        || normalized.contains("forbidden")
+        || normalized.contains("requires website confirmation")
+        || normalized.contains("confirm downloads")
+        || normalized.contains("confirm the download")
+        || normalized.contains("site confirmation")
+        || normalized.contains("premium")
 }
 
 fn oauth_redirect_uri(prefer_localhost: bool) -> String {
@@ -212,7 +244,12 @@ async fn get_nxm_download_links(
         urlencoding::encode(user_id)
     );
 
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to build Nexus manual download client: {}", e))?;
+
+    let response = client
         .get(&url)
         .bearer_auth(access_token)
         .header("Application-Name", "Schedule I Mod Manager")
@@ -222,17 +259,20 @@ async fn get_nxm_download_links(
         .map_err(|e| format!("Failed to request Nexus manual download links: {}", e))?;
 
     let status = response.status();
-    let value = response
-        .json::<Value>()
+    let body = response
+        .text()
         .await
-        .map_err(|e| format!("Invalid Nexus manual download response: {}", e))?;
+        .map_err(|e| format!("Failed to read Nexus manual download response: {}", e))?;
 
     if !status.is_success() {
         return Err(format!(
             "Nexus manual download-link request failed ({}): {}",
-            status, value
+            status, body
         ));
     }
+
+    let value = serde_json::from_str::<Value>(&body)
+        .map_err(|e| format!("Invalid Nexus manual download response: {}", e))?;
 
     let links = value
         .as_array()
@@ -1315,7 +1355,7 @@ pub async fn complete_nexus_oauth_callback(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(json!({ "success": true, "status": session }))
+    Ok(json!({ "success": true, "status": build_nexus_oauth_status_value(&session) }))
 }
 
 #[tauri::command]
@@ -1323,17 +1363,7 @@ pub async fn get_nexus_oauth_status(db: State<'_, Arc<SqlitePool>>) -> Result<Va
     let session = refresh_nexus_oauth_token_if_needed_inner(db.inner().clone()).await?;
 
     if let Some(session) = session {
-        let account = derive_account_summary(
-            session.get("accessToken").and_then(|v| v.as_str()),
-            session.get("userinfo"),
-            session.get("account"),
-        );
-        let expires_at = session.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
-        return Ok(json!({
-            "connected": true,
-            "expiresAt": expires_at,
-            "account": account,
-        }));
+        return Ok(build_nexus_oauth_status_value(&session));
     }
 
     Ok(json!({
@@ -1406,6 +1436,7 @@ pub async fn begin_nexus_manual_download_session(
     let settings = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
 
     let pending = PendingNexusManualDownload {
+        session_id: new_pending_session_id(),
         kind: kind.clone(),
         game_id: game_id.clone(),
         mod_id,
@@ -1421,6 +1452,7 @@ pub async fn begin_nexus_manual_download_session(
         .map_err(|e| e.to_string())?;
 
     let db_for_cleanup = db.inner().clone();
+    let session_id = pending.session_id.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20 * 60)).await;
         let Ok(settings) = SettingsService::new(db_for_cleanup.clone()) else {
@@ -1436,7 +1468,9 @@ pub async fn begin_nexus_manual_download_session(
             let _ = clear_nxm_pending_download(db_for_cleanup.clone()).await;
             return;
         };
-        if current_pending.created_at == created_at {
+        if (!current_pending.session_id.is_empty() && current_pending.session_id == session_id)
+            || (current_pending.session_id.is_empty() && current_pending.created_at == created_at)
+        {
             let _ = clear_nxm_pending_download(db_for_cleanup.clone()).await;
         }
     });
@@ -1501,7 +1535,11 @@ pub async fn complete_nexus_manual_download_session(
 
     match (result, cleanup_result) {
         (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
+        (Err(error), Ok(())) => Ok(json!({
+            "success": false,
+            "error": error,
+            "requestedKind": pending.as_ref().map(|value| value.kind.clone()),
+        })),
         (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
         (Err(error), Err(cleanup_error)) => Err(format!("{}; cleanup failed: {}", error, cleanup_error)),
     }
@@ -1702,6 +1740,7 @@ pub async fn install_nexus_mods_mod(
     let version = file_info
         .get("version")
         .and_then(|v| v.as_str())
+        .or_else(|| file_info.get("mod_version").and_then(|v| v.as_str()))
         .unwrap_or("1.0.0")
         .to_string();
 
@@ -1726,13 +1765,19 @@ pub async fn install_nexus_mods_mod(
         .await
     {
         Ok(links) => links,
-        Err(_) => {
+        Err(error) if should_require_manual_nexus_download(&error.to_string()) => {
             return Ok(json!({
                 "success": false,
                 "requiresManualDownload": true,
                 "modUrl": format!("https://www.nexusmods.com/{}/mods/{}", game_id, mod_id),
                 "error": "This Nexus account must confirm downloads on Nexus Mods website.",
             }))
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to request Nexus OAuth download links for mod {} file {}: {}",
+                mod_id, file_id, error
+            ))
         }
     };
 
