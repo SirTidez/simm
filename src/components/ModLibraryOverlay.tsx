@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiService } from '../services/api';
-import { applyNexusAccessModeOverride } from '../services/nexusAccessMode';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus } from '../services/events';
@@ -636,7 +635,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   }, [clearNexusManualTimeout, showLibraryNotice]);
 
   const getEffectiveNexusDownloadAccess = useCallback(async () => {
-    const status = applyNexusAccessModeOverride(await ApiService.getNexusOAuthStatus());
+    const status = await ApiService.getNexusOAuthStatus();
     return {
       connected: !!status.connected,
       canDirectDownload: !!status.connected && !!status.account?.canDirectDownload,

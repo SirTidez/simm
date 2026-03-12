@@ -2,13 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
-import {
-  applyNexusAccessModeOverride,
-  canForceFreeMode,
-  isNexusForceFreeModeEnabled,
-  onNexusForceFreeModeChanged,
-  setNexusForceFreeModeEnabled,
-} from '../services/nexusAccessMode';
 
 interface NexusOAuthStatus {
   connected: boolean;
@@ -32,7 +25,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   const [nexusStatus, setNexusStatus] = useState<NexusOAuthStatus>({ connected: false });
   const [nexusBusy, setNexusBusy] = useState(false);
   const [nexusError, setNexusError] = useState<string | null>(null);
-  const [nexusForceFreeMode, setNexusForceFreeModeState] = useState<boolean>(() => isNexusForceFreeModeEnabled());
   const oauthTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -53,7 +45,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
     const loadNexusStatus = async () => {
       try {
-        const status = applyNexusAccessModeOverride(await ApiService.getNexusOAuthStatus());
+        const status = await ApiService.getNexusOAuthStatus();
         setNexusStatus(status);
       } catch (err) {
         console.error('Failed to load Nexus OAuth status:', err);
@@ -83,19 +75,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
     loadReleaseApiHealth();
   }, [isOpen]);
-
-  useEffect(() => {
-    const unlisten = onNexusForceFreeModeChanged((enabled) => {
-      setNexusForceFreeModeState(enabled);
-      void loadNexusStatus().catch((error) => {
-        console.error('Failed to refresh Nexus status after access mode change:', error);
-      });
-    });
-
-    return () => {
-      unlisten();
-    };
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -151,7 +130,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       : 'Website confirmation required';
 
   const loadNexusStatus = async () => {
-    const status = applyNexusAccessModeOverride(await ApiService.getNexusOAuthStatus());
+    const status = await ApiService.getNexusOAuthStatus();
     setNexusStatus(status);
   };
 
@@ -223,8 +202,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     setShowAuthModal(false);
     await refreshSettings();
   };
-
-  const canToggleFreeMode = canForceFreeMode(nexusStatus);
 
   if (!isOpen) return null;
 
@@ -381,23 +358,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 <i className={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'}></i>
                 {capabilityLabel}
               </span>
-              {nexusForceFreeMode && canToggleFreeMode && (
-                <span style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  padding: '0.28rem 0.6rem',
-                  borderRadius: '999px',
-                  fontSize: '0.78rem',
-                  fontWeight: 600,
-                  border: '1px solid #6b4f1d',
-                  backgroundColor: '#3a2a12',
-                  color: '#ffd27a'
-                }}>
-                  <i className="fas fa-flask"></i>
-                  Acting as Free (Testing)
-                </span>
-              )}
             </div>
 
             {nexusStatus.connected ? (
@@ -405,30 +365,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 <div style={{ fontSize: '0.85rem', color: '#ccc', marginBottom: '0.65rem' }}>
                   <div><strong>User:</strong> {nexusStatus.account?.name || 'Connected'}</div>
                 </div>
-                {canToggleFreeMode && (
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: '0.65rem',
-                    marginBottom: '0.85rem',
-                    padding: '0.7rem',
-                    borderRadius: '6px',
-                    border: '1px solid #6b4f1d',
-                    backgroundColor: 'rgba(58, 42, 18, 0.75)',
-                    color: '#f3d8a0',
-                    cursor: 'pointer'
-                  }}>
-                    <input
-                      type="checkbox"
-                      checked={nexusForceFreeMode}
-                      onChange={(event) => setNexusForceFreeModeEnabled(event.target.checked)}
-                      style={{ marginTop: '0.15rem' }}
-                    />
-                    <span style={{ fontSize: '0.82rem', lineHeight: '1.45' }}>
-                      <strong>Testing override:</strong> act as a free Nexus user. Direct manager downloads are disabled and the app will use the website confirmation path instead.
-                    </span>
-                  </label>
-                )}
                 <button onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy} style={{ width: '100%' }}>
                   {nexusBusy ? 'Working...' : 'Logout from Nexus'}
                 </button>
