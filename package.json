@@ -1,7 +1,7 @@
 {
   "name": "simmrust",
   "private": true,
-  "version": "0.7.2",
+  "version": "0.7.3",
   "author": "LockWire Labs",
   "license": "AGPL-3.0",
   "type": "module",

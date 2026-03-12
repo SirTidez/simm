@@ -1,6 +1,6 @@
 [package]
 name = "simmrust"
-version = "0.7.2"
+version = "0.7.3"
 description = "Schedule I Developer Environment Manager"
 authors = ["LockWire Labs"]
 license = "AGPL-3.0"
@@ -61,5 +61,4 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-
 
