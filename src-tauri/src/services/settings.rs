@@ -19,6 +19,11 @@ pub struct SettingsService {
 const SETTINGS_ID: i64 = 1;
 const STEAM_CREDENTIALS_KEY: &str = "steam_credentials";
 const NEXUS_MODS_API_KEY: &str = "nexus_mods_api_key";
+const NEXUS_OAUTH_SESSION_KEY: &str = "nexus_oauth_session";
+const NEXUS_OAUTH_PENDING_KEY: &str = "nexus_oauth_pending";
+const NEXUS_OAUTH_LAST_CALLBACK_KEY: &str = "nexus_oauth_last_callback";
+const NEXUS_NXM_PENDING_DOWNLOAD_KEY: &str = "nexus_nxm_pending_download";
+const NEXUS_NXM_PROTOCOL_BACKUP_KEY: &str = "nexus_nxm_protocol_backup";
 
 impl SettingsService {
     pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
@@ -260,9 +265,131 @@ impl SettingsService {
         let encrypted = Self::encrypt_credentials(&api_key).await?;
         self.set_secret(NEXUS_MODS_API_KEY, &encrypted).await
     }
-
     pub async fn clear_nexus_mods_api_key(&self) -> Result<()> {
         self.clear_secret(NEXUS_MODS_API_KEY).await
+    }
+
+    pub async fn get_nexus_oauth_session(&self) -> Result<Option<serde_json::Value>> {
+        let encrypted = match self.get_secret(NEXUS_OAUTH_SESSION_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        if encrypted.is_empty() {
+            return Ok(None);
+        }
+
+        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
+            .context("Failed to parse nexus oauth session json")?;
+        Ok(Some(parsed))
+    }
+
+    pub async fn save_nexus_oauth_session(&self, session: &serde_json::Value) -> Result<()> {
+        let encrypted = Self::encrypt_credentials(&session.to_string()).await?;
+        self.set_secret(NEXUS_OAUTH_SESSION_KEY, &encrypted).await
+    }
+
+    pub async fn clear_nexus_oauth_session(&self) -> Result<()> {
+        self.clear_secret(NEXUS_OAUTH_SESSION_KEY).await
+    }
+
+    pub async fn get_nexus_oauth_pending(&self) -> Result<Option<serde_json::Value>> {
+        let encrypted = match self.get_secret(NEXUS_OAUTH_PENDING_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        if encrypted.is_empty() {
+            return Ok(None);
+        }
+
+        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
+            .context("Failed to parse nexus oauth pending json")?;
+        Ok(Some(parsed))
+    }
+
+    pub async fn save_nexus_oauth_pending(&self, pending: &serde_json::Value) -> Result<()> {
+        let encrypted = Self::encrypt_credentials(&pending.to_string()).await?;
+        self.set_secret(NEXUS_OAUTH_PENDING_KEY, &encrypted).await
+    }
+
+    pub async fn clear_nexus_oauth_pending(&self) -> Result<()> {
+        self.clear_secret(NEXUS_OAUTH_PENDING_KEY).await
+    }
+
+    pub async fn save_nexus_oauth_last_callback_url(&self, callback_url: &str) -> Result<()> {
+        let encrypted = Self::encrypt_credentials(callback_url).await?;
+        self.set_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY, &encrypted).await
+    }
+
+    pub async fn get_nexus_oauth_last_callback_url(&self) -> Result<Option<String>> {
+        let encrypted = match self.get_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        if encrypted.is_empty() {
+            return Ok(None);
+        }
+
+        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        Ok(Some(decrypted))
+    }
+
+    pub async fn clear_nexus_oauth_last_callback_url(&self) -> Result<()> {
+        self.clear_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY).await
+    }
+
+    pub async fn get_nexus_nxm_pending_download(&self) -> Result<Option<serde_json::Value>> {
+        let encrypted = match self.get_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        if encrypted.is_empty() {
+            return Ok(None);
+        }
+
+        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
+            .context("Failed to parse nexus nxm pending download json")?;
+        Ok(Some(parsed))
+    }
+
+    pub async fn save_nexus_nxm_pending_download(&self, pending: &serde_json::Value) -> Result<()> {
+        let encrypted = Self::encrypt_credentials(&pending.to_string()).await?;
+        self.set_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted).await
+    }
+
+    pub async fn clear_nexus_nxm_pending_download(&self) -> Result<()> {
+        self.clear_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await
+    }
+
+    pub async fn get_nexus_nxm_protocol_backup(&self) -> Result<Option<serde_json::Value>> {
+        let encrypted = match self.get_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY).await? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        if encrypted.is_empty() {
+            return Ok(None);
+        }
+
+        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
+            .context("Failed to parse nexus nxm protocol backup json")?;
+        Ok(Some(parsed))
+    }
+
+    pub async fn save_nexus_nxm_protocol_backup(&self, backup: &serde_json::Value) -> Result<()> {
+        let encrypted = Self::encrypt_credentials(&backup.to_string()).await?;
+        self.set_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted).await
+    }
+
+    pub async fn clear_nexus_nxm_protocol_backup(&self) -> Result<()> {
+        self.clear_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY).await
     }
 }
 
@@ -411,3 +538,7 @@ mod tests {
         Ok(())
     }
 }
+
+
+
+

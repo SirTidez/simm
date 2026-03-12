@@ -4,12 +4,21 @@ import { App } from './App';
 import type { ReactNode } from 'react';
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const deepLinkMocks = vi.hoisted(() => ({
+  getCurrent: vi.fn(),
+  onOpenUrl: vi.fn(),
+}));
 const environmentStoreMocks = vi.hoisted(() => ({
   useEnvironmentStore: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
+}));
+
+vi.mock('@tauri-apps/plugin-deep-link', () => ({
+  getCurrent: deepLinkMocks.getCurrent,
+  onOpenUrl: deepLinkMocks.onOpenUrl,
 }));
 
 const windowMocks = vi.hoisted(() => ({
@@ -108,6 +117,10 @@ describe('App', () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
+    deepLinkMocks.getCurrent.mockReset();
+    deepLinkMocks.onOpenUrl.mockReset();
+    deepLinkMocks.getCurrent.mockResolvedValue(null);
+    deepLinkMocks.onOpenUrl.mockResolvedValue(() => {});
 
     windowMocks.isMaximized.mockReset();
     windowMocks.onResized.mockReset();

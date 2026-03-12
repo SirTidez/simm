@@ -164,6 +164,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [nexusModsFiles, setNexusModsFiles] = useState<Map<number, NexusModFile[]>>(new Map());
   const [showNexusKeyRequiredModal, setShowNexusKeyRequiredModal] = useState(false);
   const [hasNexusDownloadAccess, setHasNexusDownloadAccess] = useState<boolean>(false);
+  const [nexusRequiresSiteConfirmation, setNexusRequiresSiteConfirmation] = useState<boolean>(true);
 
   // Mod updates state
   const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
@@ -179,6 +180,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const modsScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const modsScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
+  const nexusManualTimeoutRef = useRef<number | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
 
   const libraryVersionCountByName = useMemo(() => {
@@ -201,11 +203,32 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const refreshNexusDownloadAccess = async () => {
     try {
-      const hasKey = await ApiService.hasNexusModsApiKey();
-      setHasNexusDownloadAccess(hasKey);
-    } catch {
+      const status = await ApiService.getNexusOAuthStatus();
+      const isConnected = !!status.connected;
+      const requiresSiteConfirmation = isConnected && !!status.account?.requiresSiteConfirmation;
+
+      setHasNexusDownloadAccess(isConnected);
+      setNexusRequiresSiteConfirmation(requiresSiteConfirmation);
+    } catch (err) {
+      console.error('Failed to refresh Nexus download access:', err);
       setHasNexusDownloadAccess(false);
+      setNexusRequiresSiteConfirmation(true);
     }
+  };
+
+  const clearNexusManualTimeout = () => {
+    if (nexusManualTimeoutRef.current !== null) {
+      window.clearTimeout(nexusManualTimeoutRef.current);
+      nexusManualTimeoutRef.current = null;
+    }
+  };
+
+  const startNexusManualTimeout = () => {
+    clearNexusManualTimeout();
+    nexusManualTimeoutRef.current = window.setTimeout(() => {
+      setInstallingNexusMod(null);
+      setError('Nexus manual download timed out. Start the download again from the Files page.');
+    }, 5 * 60 * 1000);
   };
 
   const loadInstalledMods = async (showSpinner: boolean = true, refresh: boolean = false) => {
@@ -435,6 +458,58 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
     return () => window.removeEventListener('library-updated', handler);
   }, [isOpen, environmentId]);
+
+  useEffect(() => {
+    const handleManualDownloadResult = async (event: Event) => {
+      const detail = (event as CustomEvent<{
+        success: boolean;
+        result?: {
+          kind?: 'library' | 'install';
+          requestedKind?: 'library' | 'install';
+          environmentId?: string;
+        };
+        requestedKind?: 'library' | 'install';
+        error?: string;
+      }>).detail;
+      const requestedKind = detail?.requestedKind ?? detail?.result?.requestedKind;
+
+      if (requestedKind === 'library' || detail?.result?.kind === 'library') {
+        return;
+      }
+
+      if (!installingNexusMod && requestedKind !== 'install' && detail?.result?.kind !== 'install') {
+        return;
+      }
+
+      if (detail?.result?.kind === 'install' && detail.result.environmentId && detail.result.environmentId !== environmentId) {
+        return;
+      }
+
+      clearNexusManualTimeout();
+      setInstallingNexusMod(null);
+
+      if (detail?.success) {
+        setError(null);
+        await loadInstalledMods(false, true);
+        await loadDownloadedLibrary();
+        await loadCachedModUpdates();
+        onModsChanged?.();
+        setShowNexusModsResults(false);
+        setNexusModsSearchQuery('');
+        return;
+      }
+
+      if (detail?.error) {
+        setError(detail.error);
+      }
+    };
+
+    window.addEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
+    return () => {
+      clearNexusManualTimeout();
+      window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
+    };
+  }, [environmentId, installingNexusMod, onModsChanged]);
 
   // Auto-load files for NexusMods search results
   useEffect(() => {
@@ -1194,11 +1269,19 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   };
 
   const handleInstallNexusModsMod = async (modId: number, fileId?: number) => {
-    if (!environment) return;
+    if (!environment) {
+      setError('Environment not loaded');
+      return;
+    }
 
-    const hasKey = await ApiService.hasNexusModsApiKey();
-    setHasNexusDownloadAccess(hasKey);
-    if (!hasKey) {
+    const status = await ApiService.getNexusOAuthStatus();
+    const isConnected = !!status.connected;
+    const canDirectDownload = isConnected && !!status.account?.canDirectDownload;
+    const requiresSiteConfirmation = isConnected && !!status.account?.requiresSiteConfirmation;
+
+    setHasNexusDownloadAccess(isConnected);
+    setNexusRequiresSiteConfirmation(requiresSiteConfirmation);
+    if (!isConnected) {
       setShowNexusKeyRequiredModal(true);
       return;
     }
@@ -1246,7 +1329,23 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
     setInstallingNexusMod({ modId, fileId: targetFile.file_id });
     setError(null);
+    let keepPendingInstall = false;
     try {
+      if (!canDirectDownload && requiresSiteConfirmation) {
+        await ApiService.beginNexusManualDownloadSession({
+          kind: 'install',
+          modId,
+          fileId: targetFile.file_id,
+          gameId: 'schedule1',
+          environmentId,
+          runtime: environment.runtime,
+        });
+        startNexusManualTimeout();
+        setError('Confirm the Mod Manager download on Nexus. SIMM will continue when the nxm link returns.');
+        keepPendingInstall = true;
+        return;
+      }
+
       console.log(`Installing NexusMods mod: ${modId} file: ${targetFile.file_id}`);
       const result = await ApiService.installNexusModsMod(environmentId, modId, targetFile.file_id);
 
@@ -1291,6 +1390,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         setShowNexusModsResults(false);
         setNexusModsSearchQuery('');
       } else {
+        if (result.requiresManualDownload && result.modUrl) {
+          window.open(result.modUrl, '_blank', 'noopener,noreferrer');
+          setError('This Nexus account requires website confirmation. Opened the mod page in your browser.');
+          return;
+        }
         const errorMsg = result.error || 'Failed to install mod';
         console.error(`Failed to install mod ${modId}:`, errorMsg);
         setError(errorMsg);
@@ -1305,7 +1409,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       console.error(`Extracted error message:`, errorMsg);
       setError(errorMsg);
     } finally {
-      setInstallingNexusMod(null);
+      if (!keepPendingInstall) {
+        setInstallingNexusMod(null);
+      }
     }
   };
 
@@ -1506,7 +1612,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
           }
         }}
         title="Nexus Login Required"
-        message="Downloading from NexusMods requires Nexus Login. Open Accounts to add your Nexus credentials and continue."
+        message={nexusRequiresSiteConfirmation ? 'This Nexus account must confirm downloads on NexusMods website for each file. Open Accounts for details.' : 'Downloading from NexusMods requires Nexus Login. Open Accounts to continue.'}
         confirmText="Open Accounts"
         cancelText="Not Now"
         isNested
@@ -2043,11 +2149,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             <button
                               onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
                               className={`${isAlreadyInstalled ? 'btn btn-secondary' : 'btn btn-primary'} btn-small mod-card-action-button`}
-                              disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled || !hasNexusDownloadAccess}
+                              disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled}
                               title={isAlreadyInstalled
                                 ? 'This mod is already installed'
                                 : !hasNexusDownloadAccess
                                   ? 'Requires Nexus Login to download'
+                                  : nexusRequiresSiteConfirmation
+                                    ? 'Open NexusMods website to confirm and download this mod'
                                   : bestFile
                                     ? `Install ${bestFile.file_name || bestFile.name || 'mod'}`
                                     : 'Loading files...'}
@@ -2056,7 +2164,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                 ? 'Installing...'
                                 : isAlreadyInstalled
                                   ? 'Installed'
-                                  : 'Install'}
+                                  : nexusRequiresSiteConfirmation
+                                    ? 'Open Page'
+                                    : 'Install'}
                             </button>
                           </div>
                         </div>
@@ -2594,5 +2704,3 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     </>
   );
 }
-
-
