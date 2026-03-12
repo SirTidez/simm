@@ -1,25 +1,29 @@
-use crate::services::update_check::UpdateCheckService;
+use crate::events;
 use crate::services::environment::EnvironmentService;
+use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
-use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
-use crate::services::github_releases::GitHubReleasesService;
 use crate::services::settings::SettingsService;
+use crate::services::thunderstore::ThunderStoreService;
+use crate::services::update_check::UpdateCheckService;
 use crate::types::{ModMetadata, ModSource, UpdateCheckResult};
-use crate::events;
-use tauri::{AppHandle, State};
-use sqlx::SqlitePool;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::collections::{HashMap, HashSet};
-use tokio::sync::Mutex as AsyncMutex;
 use once_cell::sync::Lazy;
+use sqlx::SqlitePool;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, State};
+use tokio::sync::Mutex as AsyncMutex;
 
-static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 fn extract_mod_name_for_event(result: &serde_json::Value) -> String {
     result
@@ -35,7 +39,11 @@ fn extract_mod_name_for_event(result: &serde_json::Value) -> String {
 fn build_mod_updates_payload(results: &[serde_json::Value]) -> Vec<serde_json::Value> {
     results
         .iter()
-        .filter(|r| r.get("updateAvailable").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter(|r| {
+            r.get("updateAvailable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .map(|r| {
             serde_json::json!({
                 "modFileName": r.get("modFileName").and_then(|v| v.as_str()).unwrap_or(""),
@@ -84,7 +92,10 @@ async fn resolve_thunderstore_package_by_source_id(
     thunderstore_service: &ThunderStoreService,
     source_id: &str,
 ) -> Option<serde_json::Value> {
-    if let Ok(Some(package)) = thunderstore_service.get_package(source_id, Some("schedule-i")).await {
+    if let Ok(Some(package)) = thunderstore_service
+        .get_package(source_id, Some("schedule-i"))
+        .await
+    {
         return Some(package);
     }
 
@@ -108,8 +119,6 @@ async fn resolve_thunderstore_package_by_source_id(
         .ok()?
 }
 
-
-
 async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     let mut service = MOD_UPDATE_SERVICE.lock().await;
     if service.is_none() {
@@ -117,7 +126,6 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
     }
     Ok(service.as_ref().unwrap().clone())
 }
-
 
 async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
     let _ = db;
@@ -168,14 +176,19 @@ pub async fn check_update(
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let manual = manual.unwrap_or(false);
-    let env = env_service.get_environment(&environment_id)
+    let env = env_service
+        .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
 
     if !manual {
-        let mut settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-        let settings = settings_service.load_settings().await.map_err(|e| e.to_string())?;
+        let mut settings_service =
+            SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+        let settings = settings_service
+            .load_settings()
+            .await
+            .map_err(|e| e.to_string())?;
         let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
         let now = chrono::Utc::now();
         if let Some(last_check) = env.last_update_check {
@@ -198,7 +211,8 @@ pub async fn check_update(
     }
 
     let update_service = UpdateCheckService::new(db.inner().clone());
-    let result = update_service.check_update_for_environment(&env)
+    let result = update_service
+        .check_update_for_environment(&env)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -219,14 +233,20 @@ pub async fn check_all_updates(
     app: AppHandle,
     manual: Option<bool>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let env_service = Arc::new(EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?);
-    let envs = env_service.get_environments()
+    let env_service =
+        Arc::new(EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?);
+    let envs = env_service
+        .get_environments()
         .await
         .map_err(|e| e.to_string())?;
 
     let manual = manual.unwrap_or(false);
-    let mut settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let settings = settings_service.load_settings().await.map_err(|e| e.to_string())?;
+    let mut settings_service =
+        SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let settings = settings_service
+        .load_settings()
+        .await
+        .map_err(|e| e.to_string())?;
     let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
     let now = chrono::Utc::now();
     let envs_to_check: Vec<_> = if manual {
@@ -243,7 +263,8 @@ pub async fn check_all_updates(
     };
 
     let update_service = UpdateCheckService::new(db.inner().clone());
-    let results = update_service.check_all_environments(&envs_to_check)
+    let results = update_service
+        .check_all_environments(&envs_to_check)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -255,7 +276,8 @@ pub async fn check_all_updates(
     let github_service = get_github_service(db.inner().clone()).await?;
 
     // Filter to only completed environments and check mod updates in parallel
-    let completed_envs: Vec<_> = envs.iter()
+    let completed_envs: Vec<_> = envs
+        .iter()
         .filter(|env| matches!(env.status, crate::types::EnvironmentStatus::Completed))
         .collect();
 
@@ -286,7 +308,11 @@ pub async fn check_all_updates(
                 continue;
             }
 
-            let Some(source_id) = entry.source_id.clone().filter(|value| !value.trim().is_empty()) else {
+            let Some(source_id) = entry
+                .source_id
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            else {
                 continue;
             };
 
@@ -296,61 +322,73 @@ pub async fn check_all_updates(
         }
     }
 
-    total_mods_refreshing = total_mods_refreshing.saturating_add(library_thunderstore_targets.len());
+    total_mods_refreshing =
+        total_mods_refreshing.saturating_add(library_thunderstore_targets.len());
 
     let refresh_counter = Arc::new(AtomicUsize::new(total_mods_refreshing));
     let _ = events::emit_mod_metadata_refresh_status(&app, total_mods_refreshing);
 
     // Check mod updates for all completed environments in parallel
     let app_handle = app.clone();
-    let mod_update_tasks: Vec<_> = completed_envs.iter().map(|env| {
-        let env_id = env.id.clone();
-        let env_mod_count = env_mod_counts.get(&env.id).copied().unwrap_or(0);
-        let app = app_handle.clone();
-        let mod_update_service = mod_update_service.clone();
-        let mods_service = mods_service.clone();
-        let env_service = env_service.clone();
-        let thunderstore_service = thunderstore_service.clone();
-        let nexus_mods_service = nexus_mods_service.clone();
-        let github_service = github_service.clone();
-        let refresh_counter = refresh_counter.clone();
+    let mod_update_tasks: Vec<_> = completed_envs
+        .iter()
+        .map(|env| {
+            let env_id = env.id.clone();
+            let env_mod_count = env_mod_counts.get(&env.id).copied().unwrap_or(0);
+            let app = app_handle.clone();
+            let mod_update_service = mod_update_service.clone();
+            let mods_service = mods_service.clone();
+            let env_service = env_service.clone();
+            let thunderstore_service = thunderstore_service.clone();
+            let nexus_mods_service = nexus_mods_service.clone();
+            let github_service = github_service.clone();
+            let refresh_counter = refresh_counter.clone();
 
-        tokio::spawn(async move {
-            match mod_update_service.check_mod_updates(
-                &env_id,
-                env_service.as_ref(),
-                mods_service.as_ref(),
-                &thunderstore_service,
-                &nexus_mods_service,
-                &github_service,
-            )
-            .await {
-                Ok(results) => {
-                    eprintln!("[UpdateCheck] Successfully checked mod updates for environment {}", env_id);
-                    // Build minimal payload for mods that need updating
-                    let updates = build_mod_updates_payload(&results);
-                    let count = updates.len();
-                    let _ = events::emit_mod_updates_checked(&app, env_id, count, updates);
-                }
-                Err(e) => {
-                    // Log but don't fail - mod updates are nice to have but not critical
-                    eprintln!("[UpdateCheck] Failed to check mod updates for environment {}: {}", env_id, e);
-                }
-            }
-
-            let remaining = loop {
-                let current = refresh_counter.load(Ordering::SeqCst);
-                let next = current.saturating_sub(env_mod_count);
-                if refresh_counter
-                    .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
+            tokio::spawn(async move {
+                match mod_update_service
+                    .check_mod_updates(
+                        &env_id,
+                        env_service.as_ref(),
+                        mods_service.as_ref(),
+                        &thunderstore_service,
+                        &nexus_mods_service,
+                        &github_service,
+                    )
+                    .await
                 {
-                    break next;
+                    Ok(results) => {
+                        eprintln!(
+                            "[UpdateCheck] Successfully checked mod updates for environment {}",
+                            env_id
+                        );
+                        // Build minimal payload for mods that need updating
+                        let updates = build_mod_updates_payload(&results);
+                        let count = updates.len();
+                        let _ = events::emit_mod_updates_checked(&app, env_id, count, updates);
+                    }
+                    Err(e) => {
+                        // Log but don't fail - mod updates are nice to have but not critical
+                        eprintln!(
+                            "[UpdateCheck] Failed to check mod updates for environment {}: {}",
+                            env_id, e
+                        );
+                    }
                 }
-            };
-            let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
+
+                let remaining = loop {
+                    let current = refresh_counter.load(Ordering::SeqCst);
+                    let next = current.saturating_sub(env_mod_count);
+                    if refresh_counter
+                        .compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        break next;
+                    }
+                };
+                let _ = events::emit_mod_metadata_refresh_status(&app, remaining);
+            })
         })
-    }).collect();
+        .collect();
 
     // Wait for all mod update checks to complete (but don't fail if they error)
     for task in mod_update_tasks {
@@ -359,7 +397,9 @@ pub async fn check_all_updates(
 
     // Backfill missing Thunderstore metadata/icons for downloaded library entries
     for (storage_id, source_id) in library_thunderstore_targets {
-        if let Some(package) = resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await {
+        if let Some(package) =
+            resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await
+        {
             let now = chrono::Utc::now();
             let icon_url = extract_thunderstore_icon(&package);
             let icon_cache_path = mods_service
@@ -406,9 +446,7 @@ pub async fn check_all_updates(
                             .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
                             .sum::<u64>()
                     }),
-                likes_or_endorsements: package
-                    .get("rating_score")
-                    .and_then(|v| v.as_i64()),
+                likes_or_endorsements: package.get("rating_score").and_then(|v| v.as_i64()),
                 updated_at: package
                     .get("date_updated")
                     .and_then(|v| v.as_str())
@@ -441,8 +479,7 @@ pub async fn check_all_updates(
             {
                 eprintln!(
                     "[UpdateCheck] Failed to backfill library metadata for {}: {}",
-                    storage_id,
-                    error
+                    storage_id, error
                 );
             }
         }
@@ -463,28 +500,49 @@ pub async fn check_all_updates(
     // Update environments with the results and emit events
     for (env_id, result) in &results {
         let mut updates = Vec::new();
-        updates.push(("lastUpdateCheck".to_string(), serde_json::json!(result.checked_at.timestamp())));
-        updates.push(("updateAvailable".to_string(), serde_json::json!(result.update_available)));
+        updates.push((
+            "lastUpdateCheck".to_string(),
+            serde_json::json!(result.checked_at.timestamp()),
+        ));
+        updates.push((
+            "updateAvailable".to_string(),
+            serde_json::json!(result.update_available),
+        ));
 
         if let Some(ref remote_manifest_id) = result.remote_manifest_id {
-            updates.push(("remoteManifestId".to_string(), serde_json::json!(remote_manifest_id)));
+            updates.push((
+                "remoteManifestId".to_string(),
+                serde_json::json!(remote_manifest_id),
+            ));
         }
 
         if let Some(ref remote_build_id) = result.remote_build_id {
-            updates.push(("remoteBuildId".to_string(), serde_json::json!(remote_build_id)));
+            updates.push((
+                "remoteBuildId".to_string(),
+                serde_json::json!(remote_build_id),
+            ));
         }
 
         if let Some(ref current_game_version) = result.current_game_version {
-            updates.push(("currentGameVersion".to_string(), serde_json::json!(current_game_version)));
+            updates.push((
+                "currentGameVersion".to_string(),
+                serde_json::json!(current_game_version),
+            ));
         }
 
         if let Some(ref update_game_version) = result.update_game_version {
-            updates.push(("updateGameVersion".to_string(), serde_json::json!(update_game_version)));
+            updates.push((
+                "updateGameVersion".to_string(),
+                serde_json::json!(update_game_version),
+            ));
         }
 
         // Update the environment
         if let Err(e) = env_service.update_environment(env_id, updates).await {
-            eprintln!("[UpdateCheck] Failed to update environment {}: {:#}", env_id, e);
+            eprintln!(
+                "[UpdateCheck] Failed to update environment {}: {:#}",
+                env_id, e
+            );
         }
 
         // Emit update check complete event
@@ -523,7 +581,8 @@ pub async fn get_update_status(
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service.get_environment(&environment_id)
+    let env = env_service
+        .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
@@ -573,11 +632,16 @@ mod tests {
     async fn get_github_service_returns_singleton_instance() {
         let temp = tempdir().expect("temp dir");
         let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
 
         let pool = initialize_pool().await.expect("pool");
-        let first = get_github_service(pool.clone()).await.expect("first service");
-        let second = get_github_service(pool.clone()).await.expect("second service");
+        let first = get_github_service(pool.clone())
+            .await
+            .expect("first service");
+        let second = get_github_service(pool.clone())
+            .await
+            .expect("second service");
 
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -626,7 +690,13 @@ mod tests {
 
         let updates = build_mod_updates_payload(&results);
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].get("modFileName").and_then(|v| v.as_str()), Some("A.dll"));
-        assert_eq!(updates[0].get("source").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(
+            updates[0].get("modFileName").and_then(|v| v.as_str()),
+            Some("A.dll")
+        );
+        assert_eq!(
+            updates[0].get("source").and_then(|v| v.as_str()),
+            Some("github")
+        );
     }
 }

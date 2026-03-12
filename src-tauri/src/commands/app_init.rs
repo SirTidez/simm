@@ -26,4 +26,3 @@ pub async fn mark_welcome_message_seen() -> Result<(), String> {
     // For now, we'll just use the was_created flag which resets on each launch
     Ok(())
 }
-

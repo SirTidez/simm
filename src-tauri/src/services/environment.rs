@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::time::{sleep, Duration};
 
-use crate::types::{Environment, Runtime, schedule_i_config};
+use crate::types::{schedule_i_config, Environment, Runtime};
 
 pub struct EnvironmentService {
     pool: Arc<SqlitePool>,
@@ -71,6 +71,29 @@ impl EnvironmentService {
         msg.contains("database is locked") || msg.contains("database is busy")
     }
 
+    fn is_missing_normalized_output_dir_column(err: &sqlx::Error) -> bool {
+        let msg = err.to_string().to_lowercase();
+        msg.contains("normalized_output_dir")
+            && (msg.contains("no such column") || msg.contains("has no column named"))
+    }
+
+    async fn ensure_normalized_output_dir_column(&self) -> Result<()> {
+        let result = sqlx::query("ALTER TABLE environments ADD COLUMN normalized_output_dir TEXT")
+            .execute(&*self.pool)
+            .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string().to_lowercase();
+                if msg.contains("duplicate column name") || msg.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(err).context("Failed to add normalized_output_dir column")
+                }
+            }
+        }
+    }
     async fn save_environment(&self, env: &Environment) -> Result<()> {
         let normalized_output_dir = Self::normalize_path(&env.output_dir);
         let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
@@ -109,17 +132,33 @@ impl EnvironmentService {
             if success.is_some() {
                 Ok(())
             } else {
-                Err(last_error.unwrap_or_else(|| sqlx::Error::Protocol("unknown sqlite write failure".to_string())))
+                Err(last_error.unwrap_or_else(|| {
+                    sqlx::Error::Protocol("unknown sqlite write failure".to_string())
+                }))
             }
         };
 
         match upsert_with_normalized {
             Ok(_) => Ok(()),
-            Err(err) if err
-                .to_string()
-                .to_lowercase()
-                .contains("no such column: normalized_output_dir") => {
-                let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
+            Err(err) if Self::is_missing_normalized_output_dir_column(&err) => {
+                if self.ensure_normalized_output_dir_column().await.is_ok() {
+                    sqlx::query(
+                        "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
+                         ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
+                    )
+                    .bind(&env.id)
+                    .bind(&env.output_dir)
+                    .bind(&normalized_output_dir)
+                    .bind(&serialized)
+                    .execute(&*self.pool)
+                    .await
+                    .context("Failed to save environment")?;
+
+                    return Ok(());
+                }
+
+                let serialized =
+                    serde_json::to_string(env).context("Failed to serialize environment")?;
                 sqlx::query(
                     "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
                      ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
@@ -133,10 +172,12 @@ impl EnvironmentService {
 
                 Ok(())
             }
-            Err(err) if err
-                .to_string()
-                .to_lowercase()
-                .contains("unique constraint failed") => {
+            Err(err)
+                if err
+                    .to_string()
+                    .to_lowercase()
+                    .contains("unique constraint failed") =>
+            {
                 let update_by_normalized = sqlx::query(
                     "UPDATE environments SET output_dir = ?, data = ? WHERE normalized_output_dir = ?",
                 )
@@ -152,14 +193,13 @@ impl EnvironmentService {
                     }
                 }
 
-                let update_by_output_dir = sqlx::query(
-                    "UPDATE environments SET data = ? WHERE output_dir = ?",
-                )
-                .bind(&serialized)
-                .bind(&env.output_dir)
-                .execute(&*self.pool)
-                .await
-                .context("Failed to resolve environment save conflict by output_dir")?;
+                let update_by_output_dir =
+                    sqlx::query("UPDATE environments SET data = ? WHERE output_dir = ?")
+                        .bind(&serialized)
+                        .bind(&env.output_dir)
+                        .execute(&*self.pool)
+                        .await
+                        .context("Failed to resolve environment save conflict by output_dir")?;
 
                 if update_by_output_dir.rows_affected() > 0 {
                     return Ok(());
@@ -240,7 +280,12 @@ impl EnvironmentService {
             .find(|b| b.name == branch)
             .ok_or_else(|| anyhow::anyhow!("Unknown branch: {} for app {}", branch, app_id))?;
 
-        let id = format!("{}-{}-{}", app_id, branch, chrono::Utc::now().timestamp_millis());
+        let id = format!(
+            "{}-{}-{}",
+            app_id,
+            branch,
+            chrono::Utc::now().timestamp_millis()
+        );
 
         let branch_name = branch_config
             .display_name
@@ -293,11 +338,16 @@ impl EnvironmentService {
 
         let path = Path::new(&steam_path);
         if !crate::services::steam::SteamService::validate_steam_installation(path)? {
-            return Err(anyhow::anyhow!("Invalid Steam installation path: {}", steam_path));
+            return Err(anyhow::anyhow!(
+                "Invalid Steam installation path: {}",
+                steam_path
+            ));
         }
 
         let game_version_service = crate::services::game_version::GameVersionService::new();
-        let current_game_version = game_version_service.extract_game_version(&steam_path).await?;
+        let current_game_version = game_version_service
+            .extract_game_version(&steam_path)
+            .await?;
 
         let steam_service = crate::services::steam::SteamService::new();
         let runtime_from_files = Self::infer_runtime_from_installation_path(path);
@@ -306,7 +356,8 @@ impl EnvironmentService {
             .await
             .ok()
             .flatten();
-        let branch = detected_branch.unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
+        let branch =
+            detected_branch.unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
         let runtime = Self::runtime_for_branch(&branch).unwrap_or(runtime_from_files);
 
         let id = format!("steam-{}", chrono::Utc::now().timestamp_millis());
@@ -359,7 +410,10 @@ impl EnvironmentService {
         // Validate installation - check for game executable
         let executable = path.join("Schedule I.exe");
         if !executable.exists() {
-            return Err(anyhow::anyhow!("Invalid installation path: Schedule I.exe not found in {}", local_path));
+            return Err(anyhow::anyhow!(
+                "Invalid installation path: Schedule I.exe not found in {}",
+                local_path
+            ));
         }
 
         let runtime = Self::infer_runtime_from_installation_path(path);
@@ -367,7 +421,11 @@ impl EnvironmentService {
 
         // Extract game version
         let game_version_service = crate::services::game_version::GameVersionService::new();
-        let current_game_version = game_version_service.extract_game_version(&local_path).await.ok().flatten();
+        let current_game_version = game_version_service
+            .extract_game_version(&local_path)
+            .await
+            .ok()
+            .flatten();
 
         // Check MelonLoader status
         let melon_loader_version = self.detect_melon_loader_version(path).await;
@@ -543,8 +601,10 @@ impl EnvironmentService {
 
                 let mut updated_env = env.clone();
                 let current_path_valid =
-                    crate::services::steam::SteamService::validate_steam_installation(Path::new(&updated_env.output_dir))
-                        .unwrap_or(false);
+                    crate::services::steam::SteamService::validate_steam_installation(Path::new(
+                        &updated_env.output_dir,
+                    ))
+                    .unwrap_or(false);
 
                 if current_path_valid {
                     updated_env.status = crate::types::EnvironmentStatus::Completed;
@@ -576,7 +636,9 @@ impl EnvironmentService {
             if should_delete_files {
                 tokio::fs::remove_dir_all(&env.output_dir)
                     .await
-                    .with_context(|| format!("Failed to delete output directory: {}", env.output_dir))?;
+                    .with_context(|| {
+                        format!("Failed to delete output directory: {}", env.output_dir)
+                    })?;
             }
 
             sqlx::query("DELETE FROM environments WHERE id = ?")
@@ -659,7 +721,10 @@ mod tests {
         assert_eq!(env.branch, "main");
         assert!(matches!(env.runtime, Runtime::Il2cpp));
         assert!(matches!(env.status, EnvironmentStatus::NotDownloaded));
-        assert!(matches!(env.environment_type, Some(EnvironmentType::DepotDownloader)));
+        assert!(matches!(
+            env.environment_type,
+            Some(EnvironmentType::DepotDownloader)
+        ));
 
         let stored = service.get_environment(&env.id).await?;
         assert!(stored.is_some());
@@ -709,7 +774,10 @@ mod tests {
         assert!(matches!(updated.status, EnvironmentStatus::Completed));
         assert_eq!(updated.size, Some(1234));
         assert_eq!(updated.last_manifest_id.as_deref(), Some("manifest"));
-        assert_eq!(updated.last_update_check.map(|dt| dt.timestamp()), Some(timestamp));
+        assert_eq!(
+            updated.last_update_check.map(|dt| dt.timestamp()),
+            Some(timestamp)
+        );
         assert_eq!(updated.update_available, Some(true));
         assert_eq!(updated.remote_manifest_id.as_deref(), Some("remote"));
         assert_eq!(updated.remote_build_id.as_deref(), Some("build"));
@@ -795,12 +863,11 @@ mod tests {
         assert!(!output_dir.exists());
         assert!(service.get_environment(&env.id).await?.is_none());
 
-        let metadata_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?",
-        )
-        .bind(&env.id)
-        .fetch_one(&*pool)
-        .await?;
+        let metadata_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?")
+                .bind(&env.id)
+                .fetch_one(&*pool)
+                .await?;
         assert_eq!(metadata_count, 0);
 
         let deleted_missing = service.delete_environment("missing", true).await?;
@@ -844,14 +911,12 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&steam_env)?;
-        sqlx::query(
-            "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)",
-        )
-        .bind(&steam_env.id)
-        .bind(&steam_env.output_dir)
-        .bind(serialized)
-        .execute(&*pool)
-        .await?;
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind(&steam_env.id)
+            .bind(&steam_env.output_dir)
+            .bind(serialized)
+            .execute(&*pool)
+            .await?;
 
         sqlx::query(
             "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?)",
@@ -863,19 +928,16 @@ mod tests {
         .await?;
 
         let service = EnvironmentService::new(pool.clone())?;
-        let deleted = service
-            .delete_environment(&steam_env.id, true)
-            .await?;
+        let deleted = service.delete_environment(&steam_env.id, true).await?;
         assert!(deleted);
         let after = service.get_environment(&steam_env.id).await?;
         assert!(after.is_some());
 
-        let metadata_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?",
-        )
-        .bind(&steam_env.id)
-        .fetch_one(&*service.pool)
-        .await?;
+        let metadata_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?")
+                .bind(&steam_env.id)
+                .fetch_one(&*service.pool)
+                .await?;
         assert_eq!(metadata_count, 0);
 
         assert!(matches!(
@@ -926,11 +988,7 @@ mod tests {
         let service = EnvironmentService::new(pool)?;
 
         let err = service
-            .create_steam_environment(
-                temp.path().to_string_lossy().to_string(),
-                None,
-                None,
-            )
+            .create_steam_environment(temp.path().to_string_lossy().to_string(), None, None)
             .await
             .expect_err("expected invalid steam path error");
         assert!(err.to_string().contains("Invalid Steam installation path"));

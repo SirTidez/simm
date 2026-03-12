@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use regex::Regex;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 /// Steam detection and management service
@@ -55,8 +55,10 @@ impl SteamService {
 
         #[cfg(target_os = "macos")]
         {
-            let steam_path = PathBuf::from(format!("{}/Library/Application Support/Steam", 
-                dirs::home_dir()?.to_string_lossy()));
+            let steam_path = PathBuf::from(format!(
+                "{}/Library/Application Support/Steam",
+                dirs::home_dir()?.to_string_lossy()
+            ));
             if steam_path.join("Steam.app").exists() {
                 return Some(steam_path);
             }
@@ -85,7 +87,10 @@ impl SteamService {
 
         // Check each library folder for Schedule I
         for library_path in library_folders {
-            let game_path = library_path.join("steamapps").join("common").join("Schedule I");
+            let game_path = library_path
+                .join("steamapps")
+                .join("common")
+                .join("Schedule I");
             let executable_path = game_path.join("Schedule I.exe");
 
             if executable_path.exists() {
@@ -109,13 +114,14 @@ impl SteamService {
 
         // Parse libraryfolders.vdf
         let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
-        
+
         if !vdf_path.exists() {
             // If libraryfolders.vdf doesn't exist, just return default
             return Ok(folders);
         }
 
-        let content = fs::read_to_string(&vdf_path).await
+        let content = fs::read_to_string(&vdf_path)
+            .await
             .context("Failed to read libraryfolders.vdf")?;
 
         // Parse VDF file manually (simple parsing for libraryfolders)
@@ -176,7 +182,8 @@ impl SteamService {
             return Ok(None);
         };
 
-        let manifest_path = steamapps_dir.join(format!("appmanifest_{}.acf", Self::get_steam_app_id()));
+        let manifest_path =
+            steamapps_dir.join(format!("appmanifest_{}.acf", Self::get_steam_app_id()));
         if !manifest_path.exists() {
             return Ok(None);
         }
@@ -210,4 +217,3 @@ impl Default for SteamService {
         Self::new()
     }
 }
-

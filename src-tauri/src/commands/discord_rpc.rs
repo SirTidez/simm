@@ -7,7 +7,7 @@ use crate::discord_rpc::{initialize_discord, shutdown_discord};
 #[tauri::command]
 pub async fn discord_initialize(application_id: String) -> Result<(), String> {
     log::info!("Initializing Discord RPC with static presence");
-    
+
     match initialize_discord(&application_id) {
         Ok(_) => {
             log::info!("Discord RPC initialized with static presence");
@@ -25,6 +25,6 @@ pub async fn discord_initialize(application_id: String) -> Result<(), String> {
 pub async fn discord_shutdown() -> Result<(), String> {
     match shutdown_discord() {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to shutdown: {}", e))
+        Err(e) => Err(format!("Failed to shutdown: {}", e)),
     }
 }

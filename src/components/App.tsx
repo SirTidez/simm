@@ -48,21 +48,45 @@ function AppContent() {
   const inFlightNxmCallbackRef = useRef<string | null>(null);
   const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
+  const [backgroundWorkspace, setBackgroundWorkspace] = useState<WorkspaceRoute | null>(null);
+  const [libraryFocusRequest, setLibraryFocusRequest] = useState<{ storageId: string; modTag: string; requestId: number } | null>(null);
 
   const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
+    setBackgroundWorkspace(null);
+    setLibraryFocusRequest(null);
     setActiveWorkspace(workspace);
   }, []);
 
   const goHome = useCallback(() => {
+    setBackgroundWorkspace(null);
+    setLibraryFocusRequest(null);
     setActiveWorkspace({ view: 'home' });
   }, []);
 
-  const selectedEnvironmentId =
-    'environmentId' in activeWorkspace ? activeWorkspace.environmentId : null;
+  const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
+    setBackgroundWorkspace(activeWorkspace);
+    setLibraryFocusRequest((previous) => ({
+      storageId: focus.storageId,
+      modTag: focus.modTag,
+      requestId: (previous?.requestId ?? 0) + 1,
+    }));
+    setActiveWorkspace({ view: 'library' });
+  }, [activeWorkspace]);
 
-  const selectedEnvironment = selectedEnvironmentId
-    ? environments.find((env) => env.id === selectedEnvironmentId) ?? null
-    : null;
+  const closeLibrary = useCallback(() => {
+    if (backgroundWorkspace) {
+      setActiveWorkspace(backgroundWorkspace);
+      setBackgroundWorkspace(null);
+      setLibraryFocusRequest(null);
+      return;
+    }
+
+    goHome();
+  }, [backgroundWorkspace, goHome]);
+
+  const getEnvironmentById = useCallback((environmentId: string) => {
+    return environments.find((env) => env.id === environmentId) ?? null;
+  }, [environments]);
 
   useEffect(() => {
     if (
@@ -393,70 +417,97 @@ function AppContent() {
     }
   };
 
-  const renderWorkspacePanel = () => {
-    switch (activeWorkspace.view) {
+  const renderWorkspacePanelFor = useCallback((workspace: WorkspaceRoute, onCloseHandler: () => void) => {
+    switch (workspace.view) {
       case 'library':
-        return <ModLibraryOverlay isOpen={true} onClose={goHome} />;
+        return (
+          <ModLibraryOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            focusStorageId={libraryFocusRequest?.storageId ?? null}
+            focusRequestId={libraryFocusRequest?.requestId}
+            focusModTag={libraryFocusRequest?.modTag ?? null}
+          />
+        );
       case 'wizard':
-        return <EnvironmentCreationWizard onClose={goHome} />;
+        return <EnvironmentCreationWizard onClose={onCloseHandler} />;
       case 'accounts':
-        return <SteamAccountOverlay isOpen={true} onClose={goHome} />;
+        return <SteamAccountOverlay isOpen={true} onClose={onCloseHandler} />;
       case 'help':
-        return <HelpOverlay isOpen={true} onClose={goHome} />;
+        return <HelpOverlay isOpen={true} onClose={onCloseHandler} />;
       case 'settings':
-        return <Settings isOpen={true} onClose={goHome} />;
+        return <Settings isOpen={true} onClose={onCloseHandler} />;
       case 'welcome':
-        return <WelcomeOverlay isOpen={true} onClose={goHome} />;
+        return <WelcomeOverlay isOpen={true} onClose={onCloseHandler} />;
       case 'mods':
-        return selectedEnvironmentId ? (
+        return 'environmentId' in workspace ? (
           <ModsOverlay
             isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
             onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
             onModUpdatesChecked={(count) => {
-              window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: selectedEnvironmentId, count } }));
+              window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
             }}
           />
         ) : null;
       case 'plugins':
-        return selectedEnvironmentId ? (
+        return 'environmentId' in workspace ? (
           <PluginsOverlay
             isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
           />
         ) : null;
       case 'userLibs':
-        return selectedEnvironmentId ? (
+        return 'environmentId' in workspace ? (
           <UserLibsOverlay
             isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
           />
         ) : null;
       case 'logs':
-        return selectedEnvironmentId && selectedEnvironment ? (
+        return 'environmentId' in workspace && getEnvironmentById(workspace.environmentId) ? (
           <LogsOverlay
             isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-            environment={selectedEnvironment}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+            environment={getEnvironmentById(workspace.environmentId)!}
+            onOpenModLibraryView={openLibraryFromLogs}
           />
         ) : null;
       case 'config':
-        return selectedEnvironmentId && selectedEnvironment ? (
+        return 'environmentId' in workspace && getEnvironmentById(workspace.environmentId) ? (
           <ConfigurationOverlay
             isOpen={true}
-            onClose={goHome}
-            environmentId={selectedEnvironmentId}
-            environment={selectedEnvironment}
+            onClose={onCloseHandler}
+            environmentId={workspace.environmentId}
+            environment={getEnvironmentById(workspace.environmentId)!}
           />
         ) : null;
       case 'home':
       default:
         return null;
     }
+  }, [getEnvironmentById, libraryFocusRequest?.modTag, libraryFocusRequest?.requestId, libraryFocusRequest?.storageId, openLibraryFromLogs, openWorkspace]);
+
+  const renderWorkspacePanel = () => {
+    const activeCloseHandler = activeWorkspace.view === 'library' ? closeLibrary : goHome;
+    const activePanel = renderWorkspacePanelFor(activeWorkspace, activeCloseHandler);
+
+    if (activeWorkspace.view === 'library' && backgroundWorkspace) {
+      return (
+        <>
+          <div style={{ display: 'none' }}>
+            {renderWorkspacePanelFor(backgroundWorkspace, goHome)}
+          </div>
+          {activePanel}
+        </>
+      );
+    }
+
+    return activePanel;
   };
 
   return (

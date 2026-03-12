@@ -1,14 +1,15 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
-use once_cell::sync::Lazy;
 use crate::services::config::ConfigService;
 use crate::services::environment::EnvironmentService;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::Mutex as AsyncMutex;
 
-static CONFIG_SERVICE: Lazy<AsyncMutex<Option<Arc<ConfigService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static CONFIG_SERVICE: Lazy<AsyncMutex<Option<Arc<ConfigService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_config_service() -> Result<Arc<ConfigService>, String> {
     let mut service = CONFIG_SERVICE.lock().await;
@@ -17,7 +18,6 @@ async fn get_config_service() -> Result<Arc<ConfigService>, String> {
     }
     Ok(service.as_ref().unwrap().clone())
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,10 +85,7 @@ pub async fn get_grouped_config(
 }
 
 #[tauri::command]
-pub async fn update_config(
-    file_path: String,
-    updates: Vec<ConfigUpdate>,
-) -> Result<(), String> {
+pub async fn update_config(file_path: String, updates: Vec<ConfigUpdate>) -> Result<(), String> {
     let config_service = get_config_service().await?;
 
     // Convert updates to nested HashMap

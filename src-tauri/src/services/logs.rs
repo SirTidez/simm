@@ -1,12 +1,12 @@
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use anyhow::{Context, Result};
+use tauri::{AppHandle, Emitter};
 use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
-use chrono::{DateTime, Utc};
-use regex::Regex;
-use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogFile {
@@ -39,6 +39,7 @@ pub enum LogCategory {
 pub struct LogsService {
     watching: Arc<RwLock<bool>>,
     last_position: Arc<RwLock<u64>>,
+    last_line_count: Arc<RwLock<usize>>,
 }
 
 impl LogsService {
@@ -46,6 +47,7 @@ impl LogsService {
         Self {
             watching: Arc::new(RwLock::new(false)),
             last_position: Arc::new(RwLock::new(0)),
+            last_line_count: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -61,28 +63,36 @@ impl LogsService {
         self.get_melonloader_logs_dir(game_dir).join("Logs")
     }
 
-    pub async fn list_log_files(&self, game_dir: &str) -> Result<Vec<LogFile>> {
-        let melonloader_dir = self.get_melonloader_logs_dir(game_dir);
-        
-        if !melonloader_dir.exists() {
-            return Ok(Vec::new());
+    pub fn get_shared_player_log_dir(&self) -> Option<PathBuf> {
+        if let Ok(user_profile) = std::env::var("USERPROFILE") {
+            let trimmed = user_profile.trim();
+            if !trimmed.is_empty() {
+                return Some(
+                    PathBuf::from(trimmed)
+                        .join("AppData")
+                        .join("LocalLow")
+                        .join("TVGS")
+                        .join("Schedule I"),
+                );
+            }
         }
 
+        None
+    }
+    pub async fn list_log_files(&self, game_dir: &str) -> Result<Vec<LogFile>> {
         let mut log_files = Vec::new();
 
-        // Check for Latest.log
+        // Check for environment-specific Latest.log
         let latest_log = self.get_latest_log_path(game_dir);
         if latest_log.exists() {
             if let Ok(metadata) = fs::metadata(&latest_log).await {
-                let modified = metadata.modified()
-                    .ok()
-                    .and_then(|t| {
-                        DateTime::<Utc>::from_timestamp(
-                            t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
-                            0
-                        )
-                    });
-                
+                let modified = metadata.modified().ok().and_then(|t| {
+                    DateTime::<Utc>::from_timestamp(
+                        t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
+                        0,
+                    )
+                });
+
                 log_files.push(LogFile {
                     name: "Latest.log".to_string(),
                     path: latest_log.to_string_lossy().to_string(),
@@ -93,30 +103,30 @@ impl LogsService {
             }
         }
 
-        // Check for logs in Logs directory
+        // Check for environment-specific archived logs in MelonLoader/Logs
         let logs_dir = self.get_logs_dir(game_dir);
         if logs_dir.exists() {
-            let mut entries = fs::read_dir(&logs_dir).await
+            let mut entries = fs::read_dir(&logs_dir)
+                .await
                 .context("Failed to read Logs directory")?;
-            
+
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
                 if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("log") {
                     if let Ok(metadata) = entry.metadata().await {
-                        let file_name = path.file_name()
+                        let file_name = path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("unknown.log")
                             .to_string();
-                        
-                        let modified = metadata.modified()
-                            .ok()
-                            .and_then(|t| {
-                                DateTime::<Utc>::from_timestamp(
-                                    t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
-                                    0
-                                )
-                            });
-                        
+
+                        let modified = metadata.modified().ok().and_then(|t| {
+                            DateTime::<Utc>::from_timestamp(
+                                t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
+                                0,
+                            )
+                        });
+
                         log_files.push(LogFile {
                             name: file_name,
                             path: path.to_string_lossy().to_string(),
@@ -129,34 +139,84 @@ impl LogsService {
             }
         }
 
-        // Sort by modified date (newest first), with Latest.log always first
-        log_files.sort_by(|a, b| {
-            if a.is_latest {
-                std::cmp::Ordering::Less
-            } else if b.is_latest {
-                std::cmp::Ordering::Greater
-            } else {
-                match (a.modified, b.modified) {
-                    (Some(a_time), Some(b_time)) => b_time.cmp(&a_time),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
+        // Check for shared Unity player logs in LocalLow/TVGS/Schedule I
+        if let Some(shared_dir) = self.get_shared_player_log_dir() {
+            let shared_logs: [(&str, &str); 2] = [
+                ("Player.log", "Player.log (Shared)"),
+                ("Player-prev.log", "Player-prev.log (Shared)"),
+            ];
+
+            for (file_name, display_name) in shared_logs {
+                let shared_path = shared_dir.join(file_name);
+                if shared_path.exists() {
+                    if let Ok(metadata) = fs::metadata(&shared_path).await {
+                        let modified = metadata.modified().ok().and_then(|t| {
+                            DateTime::<Utc>::from_timestamp(
+                                t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64,
+                                0,
+                            )
+                        });
+
+                        log_files.push(LogFile {
+                            name: display_name.to_string(),
+                            path: shared_path.to_string_lossy().to_string(),
+                            size: metadata.len(),
+                            modified,
+                            is_latest: false,
+                        });
+                    }
                 }
+            }
+        }
+
+        // Sort so live logs are first, then newest historical logs.
+        log_files.sort_by(|a, b| {
+            let rank = |file: &LogFile| -> u8 {
+                if file.is_latest {
+                    return 0;
+                }
+
+                let lower_name = file.name.to_ascii_lowercase();
+                if lower_name.starts_with("player.log") {
+                    return 1;
+                }
+                if lower_name.starts_with("player-prev.log") {
+                    return 2;
+                }
+
+                3
+            };
+
+            let a_rank = rank(a);
+            let b_rank = rank(b);
+            if a_rank != b_rank {
+                return a_rank.cmp(&b_rank);
+            }
+
+            match (a.modified, b.modified) {
+                (Some(a_time), Some(b_time)) => b_time.cmp(&a_time),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.name.cmp(&b.name),
             }
         });
 
         Ok(log_files)
     }
 
-    pub async fn read_log_file(&self, log_path: &str, max_lines: Option<usize>) -> Result<Vec<LogLine>> {
+    pub async fn read_log_file(
+        &self,
+        log_path: &str,
+        max_lines: Option<usize>,
+    ) -> Result<Vec<LogLine>> {
         let path = Path::new(log_path);
-        
+
         if !path.exists() {
             return Err(anyhow::anyhow!("Log file does not exist: {}", log_path));
         }
 
-        let content = fs::read_to_string(path).await
-            .context("Failed to read log file")?;
+        let file_bytes = fs::read(path).await.context("Failed to read log file")?;
+        let content = Self::decode_log_content(&file_bytes);
 
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
@@ -191,6 +251,32 @@ impl LogsService {
         }
 
         Ok(log_lines)
+    }
+
+    fn decode_log_content(bytes: &[u8]) -> String {
+        // UTF-16 LE with BOM
+        if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+            let utf16: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            return String::from_utf16_lossy(&utf16);
+        }
+
+        // UTF-16 BE with BOM
+        if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+            let utf16: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect();
+            return String::from_utf16_lossy(&utf16);
+        }
+
+        // UTF-8 first, then lossy fallback for ANSI/non-UTF content.
+        match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
+            Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+        }
     }
 
     fn extract_log_level(line: &str) -> Option<String> {
@@ -236,18 +322,19 @@ impl LogsService {
 
                     // Skip if it's a log level or timestamp
                     if ["INFO", "WARN", "ERROR", "DEBUG", "FATAL", "TRACE"].contains(&tag_str)
-                        || tag_str.contains(':') {
+                        || tag_str.contains(':')
+                    {
                         return None;
                     }
 
                     // Skip MelonLoader system tags
-                    let melonloader_system_tags = [
-                        "Il2CppAssemblyGenerator",
-                        "Il2CppInterop",
-                        "StoragePatches",
-                    ];
+                    let melonloader_system_tags =
+                        ["Il2CppAssemblyGenerator", "Il2CppInterop", "StoragePatches"];
 
-                    if melonloader_system_tags.iter().any(|&sys_tag| tag_str == sys_tag) {
+                    if melonloader_system_tags
+                        .iter()
+                        .any(|&sys_tag| tag_str == sys_tag)
+                    {
                         return None;
                     }
 
@@ -258,7 +345,11 @@ impl LogsService {
         None
     }
 
-    fn strip_timestamp_and_tag(line: &str, timestamp: &Option<String>, mod_tag: &Option<String>) -> String {
+    fn strip_timestamp_and_tag(
+        line: &str,
+        timestamp: &Option<String>,
+        mod_tag: &Option<String>,
+    ) -> String {
         let mut cleaned = line.to_string();
 
         // Remove timestamp if present
@@ -297,11 +388,17 @@ impl LogsService {
         }
 
         // Check if line contains MelonLoader-specific text
-        if line.contains("MelonLoader") || line.contains("Unity") || line.contains("Game Name:")
-            || line.contains("Game Developer:") || line.contains("Loading Plugins...")
-            || line.contains("Loading Mods...") || line.contains("Melon Assembly loaded:")
-            || line.contains("SHA256 Hash:") || line.contains("Support Module Loaded:")
-            || line.contains("Scene loaded:") {
+        if line.contains("MelonLoader")
+            || line.contains("Unity")
+            || line.contains("Game Name:")
+            || line.contains("Game Developer:")
+            || line.contains("Loading Plugins...")
+            || line.contains("Loading Mods...")
+            || line.contains("Melon Assembly loaded:")
+            || line.contains("SHA256 Hash:")
+            || line.contains("Support Module Loaded:")
+            || line.contains("Scene loaded:")
+        {
             return LogCategory::MelonLoader;
         }
 
@@ -320,12 +417,16 @@ impl LogsService {
 
         // Normalize mod tag for comparison (removes spaces and converts to lowercase)
         let normalize_mod_tag = |tag: &str| -> String {
-            tag.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+            tag.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_lowercase()
         };
 
         let normalized_filter_tag = filter_mod_tag.map(normalize_mod_tag);
 
-        let filtered_lines = log_lines.iter()
+        let filtered_lines = log_lines
+            .iter()
             .filter(|line| {
                 // Filter by level
                 if let Some(level) = filter_level {
@@ -351,7 +452,9 @@ impl LogsService {
 
                 // Filter by search query
                 if let Some(query) = search_query {
-                    if !query.is_empty() && !line.content.to_lowercase().contains(&query.to_lowercase()) {
+                    if !query.is_empty()
+                        && !line.content.to_lowercase().contains(&query.to_lowercase())
+                    {
                         return false;
                     }
                 }
@@ -361,25 +464,25 @@ impl LogsService {
             .map(|line| {
                 // Reconstruct the full log line with timestamp and mod tag
                 let mut full_line = String::new();
-                
+
                 // Add timestamp if present
                 if let Some(ref timestamp) = line.timestamp {
                     full_line.push_str(&format!("[{}] ", timestamp));
                 }
-                
+
                 // Add mod tag if present
                 if let Some(ref mod_tag) = line.mod_tag {
                     full_line.push_str(&format!("[{}] ", mod_tag));
                 }
-                
+
                 // Add level if present
                 if let Some(ref level) = line.level {
                     full_line.push_str(&format!("[{}] ", level));
                 }
-                
+
                 // Add content
                 full_line.push_str(&line.content);
-                
+
                 full_line
             })
             .collect::<Vec<_>>();
@@ -404,7 +507,8 @@ impl LogsService {
 
         output.push_str(&filtered_lines.join("\n"));
 
-        fs::write(output_path, output).await
+        fs::write(output_path, output)
+            .await
             .context("Failed to write export file")?;
 
         Ok(())
@@ -420,12 +524,16 @@ impl LogsService {
         // Set watching flag
         *self.watching.write().await = true;
 
-        // Get initial file size
+        // Get initial file size and line count
         let metadata = fs::metadata(&path).await?;
         *self.last_position.write().await = metadata.len();
+        let initial_bytes = fs::read(&path).await.unwrap_or_default();
+        let initial_content = Self::decode_log_content(&initial_bytes);
+        *self.last_line_count.write().await = initial_content.lines().count();
 
         let watching = Arc::clone(&self.watching);
         let last_position = Arc::clone(&self.last_position);
+        let last_line_count = Arc::clone(&self.last_line_count);
 
         // Watch loop
         while *watching.read().await {
@@ -441,23 +549,16 @@ impl LogsService {
 
             // Check if file has new content
             if current_size > last_pos {
-                // Read new content
-                if let Ok(file_content) = fs::read_to_string(&path).await {
+                if let Ok(file_bytes) = fs::read(&path).await {
+                    let file_content = Self::decode_log_content(&file_bytes);
                     let lines: Vec<&str> = file_content.lines().collect();
-
-                    // Calculate which lines are new
-                    let all_content_up_to_last = file_content
-                        .chars()
-                        .take(last_pos as usize)
-                        .collect::<String>();
-                    let last_line_count = all_content_up_to_last.lines().count();
-
-                    let new_lines: Vec<_> = lines.iter().skip(last_line_count).collect();
+                    let previous_line_count = *last_line_count.read().await;
+                    let new_lines: Vec<_> = lines.iter().skip(previous_line_count).collect();
 
                     if !new_lines.is_empty() {
                         let mut log_lines = Vec::new();
                         for (idx, line) in new_lines.iter().enumerate() {
-                            let line_number = last_line_count + idx + 1;
+                            let line_number = previous_line_count + idx + 1;
                             let raw_content = line.to_string();
 
                             let timestamp = Self::extract_melonloader_timestamp(&raw_content);
@@ -466,7 +567,8 @@ impl LogsService {
                             let category = Self::categorize_log(&raw_content, &mod_tag);
 
                             // Strip timestamp and mod tag from content
-                            let content = Self::strip_timestamp_and_tag(&raw_content, &timestamp, &mod_tag);
+                            let content =
+                                Self::strip_timestamp_and_tag(&raw_content, &timestamp, &mod_tag);
 
                             log_lines.push(LogLine {
                                 line_number,
@@ -479,25 +581,31 @@ impl LogsService {
                         }
 
                         // Emit event with new log lines
-                        let _ = app_handle.emit("log-update", serde_json::json!({
-                            "lines": log_lines,
-                        }));
+                        let _ = app_handle.emit(
+                            "log-update",
+                            serde_json::json!({
+                                "lines": log_lines,
+                            }),
+                        );
                     }
+
+                    *last_line_count.write().await = lines.len();
                 }
 
                 *last_position.write().await = current_size;
             } else if current_size < last_pos {
-                // File was truncated or replaced, reset position
+                // File was truncated or replaced, reset position and line counter
                 *last_position.write().await = 0;
+                *last_line_count.write().await = 0;
             }
         }
 
         Ok(())
     }
-
     pub async fn stop_watching(&self) {
         *self.watching.write().await = false;
         *self.last_position.write().await = 0;
+        *self.last_line_count.write().await = 0;
     }
 }
 
@@ -506,4 +614,3 @@ impl Default for LogsService {
         Self::new()
     }
 }
-

@@ -1,20 +1,24 @@
-use anyhow::Result;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex as AsyncMutex;
-use crate::utils::directory_init;
-use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::services::environment::EnvironmentService;
+use crate::services::filesystem_watcher::FileSystemWatcherService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
-use tauri::{AppHandle, Manager};
+use crate::utils::directory_init;
+use anyhow::Result;
 use sqlx::SqlitePool;
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::{AppHandle, Manager};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Initialize SIMM directory and return whether it was just created
 pub fn initialize_simm_directory() -> Result<bool> {
     match directory_init::initialize_simm_directory() {
         Ok((simm_dir, was_created)) => {
-            log::info!("SIMM directory initialized at: {:?} (was_created: {})", simm_dir, was_created);
+            log::info!(
+                "SIMM directory initialized at: {:?} (was_created: {})",
+                simm_dir,
+                was_created
+            );
             Ok(was_created)
         }
         Err(e) => {
@@ -93,9 +97,15 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
                     let plugins_dir = std::path::Path::new(&env.output_dir).join("Plugins");
                     let userlibs_dir = std::path::Path::new(&env.output_dir).join("UserLibs");
 
-                    let _ = watcher_guard.start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods").await;
-                    let _ = watcher_guard.start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
-                    let _ = watcher_guard.start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+                    let _ = watcher_guard
+                        .start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods")
+                        .await;
+                    let _ = watcher_guard
+                        .start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins")
+                        .await;
+                    let _ = watcher_guard
+                        .start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs")
+                        .await;
                 }
             }
             log::info!("Started watching {} environment(s)", env_count);
@@ -117,7 +127,9 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
             match maintenance_mods_service.reconcile_tracked_mod_state().await {
                 Ok(affected_envs) => {
                     for env_id in affected_envs {
-                        if let Err(err) = crate::events::emit_mods_changed(&maintenance_app, env_id.clone()) {
+                        if let Err(err) =
+                            crate::events::emit_mods_changed(&maintenance_app, env_id.clone())
+                        {
                             log::warn!("Failed to emit mods_changed for {}: {}", env_id, err);
                         }
                     }

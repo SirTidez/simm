@@ -1,12 +1,13 @@
-use crate::services::game_version::GameVersionService;
 use crate::services::environment::EnvironmentService;
+use crate::services::game_version::GameVersionService;
+use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
-use once_cell::sync::Lazy;
 use tauri::State;
+use tokio::sync::Mutex as AsyncMutex;
 
-static GAME_VERSION_SERVICE: Lazy<AsyncMutex<Option<Arc<GameVersionService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static GAME_VERSION_SERVICE: Lazy<AsyncMutex<Option<Arc<GameVersionService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_game_version_service() -> Result<Arc<GameVersionService>, String> {
     let mut service = GAME_VERSION_SERVICE.lock().await;
@@ -16,7 +17,6 @@ async fn get_game_version_service() -> Result<Arc<GameVersionService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-
 /// Extract game version from a game directory
 #[tauri::command]
 pub async fn extract_game_version(
@@ -24,7 +24,8 @@ pub async fn extract_game_version(
     environment_id: String,
 ) -> Result<Option<String>, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service.get_environment(&environment_id)
+    let env = env_service
+        .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
@@ -34,7 +35,8 @@ pub async fn extract_game_version(
     }
 
     let game_version_service = get_game_version_service().await?;
-    game_version_service.extract_game_version(&env.output_dir)
+    game_version_service
+        .extract_game_version(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
 }
@@ -43,8 +45,8 @@ pub async fn extract_game_version(
 #[tauri::command]
 pub async fn extract_game_version_from_path(game_dir: String) -> Result<Option<String>, String> {
     let game_version_service = get_game_version_service().await?;
-    game_version_service.extract_game_version(&game_dir)
+    game_version_service
+        .extract_game_version(&game_dir)
         .await
         .map_err(|e| e.to_string())
 }
-

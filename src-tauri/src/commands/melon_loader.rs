@@ -1,14 +1,15 @@
-use crate::services::melon_loader::MelonLoaderService;
+use crate::events;
 use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
-use crate::events;
-use tauri::{AppHandle, State};
+use crate::services::melon_loader::MelonLoaderService;
+use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
-use once_cell::sync::Lazy;
 
-static MELON_LOADER_SERVICE: Lazy<AsyncMutex<Option<Arc<MelonLoaderService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static MELON_LOADER_SERVICE: Lazy<AsyncMutex<Option<Arc<MelonLoaderService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_melon_loader_service() -> Result<Arc<MelonLoaderService>, String> {
     let mut service = MELON_LOADER_SERVICE.lock().await;
@@ -18,15 +19,14 @@ async fn get_melon_loader_service() -> Result<Arc<MelonLoaderService>, String> {
     Ok(service.as_ref().unwrap().clone())
 }
 
-
-
 #[tauri::command]
 pub async fn get_melon_loader_status(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service.get_environment(&environment_id)
+    let env = env_service
+        .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
@@ -38,7 +38,8 @@ pub async fn get_melon_loader_status(
     let melon_loader_service = get_melon_loader_service().await?;
     let installed = melon_loader_service.is_melon_loader_installed(&env.output_dir);
     let version = if installed {
-        melon_loader_service.get_installed_version(&env.output_dir)
+        melon_loader_service
+            .get_installed_version(&env.output_dir)
             .await
             .map_err(|e| e.to_string())?
     } else {
@@ -56,15 +57,26 @@ pub async fn install_melon_loader(
     db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
     environment_id: String,
-    version_tag: String
+    version_tag: String,
 ) -> Result<serde_json::Value, String> {
-    eprintln!("[install_melon_loader] Starting installation for environment: {}, version: {}", environment_id, version_tag);
+    eprintln!(
+        "[install_melon_loader] Starting installation for environment: {}, version: {}",
+        environment_id, version_tag
+    );
 
     // Generate a download_id for tracking this installation
-    let download_id = format!("melonloader-{}-{}", environment_id, chrono::Utc::now().timestamp_millis());
+    let download_id = format!(
+        "melonloader-{}-{}",
+        environment_id,
+        chrono::Utc::now().timestamp_millis()
+    );
 
     // Emit installing event
-    let _ = events::emit_melonloader_installing(&app, download_id.clone(), format!("Starting MelonLoader {} installation...", version_tag));
+    let _ = events::emit_melonloader_installing(
+        &app,
+        download_id.clone(),
+        format!("Starting MelonLoader {} installation...", version_tag),
+    );
 
     // Helper to return error as JSON
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
@@ -77,13 +89,13 @@ pub async fn install_melon_loader(
 
     let env_service = match EnvironmentService::new(db.inner().clone()) {
         Ok(service) => service,
-        Err(e) => return error_json(format!("Failed to get environment service: {}", e))
+        Err(e) => return error_json(format!("Failed to get environment service: {}", e)),
     };
 
     let env = match env_service.get_environment(&environment_id).await {
         Ok(Some(env)) => env,
         Ok(None) => return error_json("Environment not found".to_string()),
-        Err(e) => return error_json(format!("Failed to get environment: {}", e))
+        Err(e) => return error_json(format!("Failed to get environment: {}", e)),
     };
 
     if env.output_dir.is_empty() {
@@ -95,26 +107,36 @@ pub async fn install_melon_loader(
     let github_service = GitHubReleasesService::new();
 
     eprintln!("[install_melon_loader] Fetching MelonLoader releases from release API...");
-    let releases = match github_service.get_all_releases("LavaGang", "MelonLoader", false).await {
+    let releases = match github_service
+        .get_all_releases("LavaGang", "MelonLoader", false)
+        .await
+    {
         Ok(releases) => {
             eprintln!("[install_melon_loader] Found {} releases", releases.len());
             releases
-        },
-        Err(e) => return error_json(format!("Failed to fetch MelonLoader releases: {}", e))
+        }
+        Err(e) => return error_json(format!("Failed to fetch MelonLoader releases: {}", e)),
     };
 
     // Find the release matching the version tag
-    eprintln!("[install_melon_loader] Looking for version tag: {}", version_tag);
-    let release = match releases.iter()
-        .find(|r| r.get("tag_name")
+    eprintln!(
+        "[install_melon_loader] Looking for version tag: {}",
+        version_tag
+    );
+    let release = match releases.iter().find(|r| {
+        r.get("tag_name")
             .and_then(|t| t.as_str())
             .map(|t| t == version_tag)
-            .unwrap_or(false)) {
+            .unwrap_or(false)
+    }) {
         Some(release) => {
-            eprintln!("[install_melon_loader] Found release: {:?}", release.get("tag_name"));
+            eprintln!(
+                "[install_melon_loader] Found release: {:?}",
+                release.get("tag_name")
+            );
             release
-        },
-        None => return error_json(format!("MelonLoader version {} not found", version_tag))
+        }
+        None => return error_json(format!("MelonLoader version {} not found", version_tag)),
     };
 
     // Get the Windows x64 ZIP asset URL
@@ -123,7 +145,7 @@ pub async fn install_melon_loader(
         Some(url) => {
             eprintln!("[install_melon_loader] Windows x64 ZIP URL: {}", url);
             url
-        },
+        }
         None => {
             // Fallback: log available assets for debugging
             if let Some(assets) = release.get("assets").and_then(|a| a.as_array()) {
@@ -134,7 +156,7 @@ pub async fn install_melon_loader(
                     }
                 }
             }
-            return error_json(format!("No Windows x64 ZIP asset found for MelonLoader version {}. Please ensure the release contains a MelonLoader.x64.zip file.", version_tag))
+            return error_json(format!("No Windows x64 ZIP asset found for MelonLoader version {}. Please ensure the release contains a MelonLoader.x64.zip file.", version_tag));
         }
     };
 
@@ -144,14 +166,17 @@ pub async fn install_melon_loader(
         Ok(bytes) => {
             eprintln!("[install_melon_loader] Downloaded {} bytes", bytes.len());
             bytes
-        },
-        Err(e) => return error_json(format!("Failed to download MelonLoader: {}", e))
+        }
+        Err(e) => return error_json(format!("Failed to download MelonLoader: {}", e)),
     };
 
     // Save to temp file
     let temp_dir = std::env::temp_dir();
     // Sanitize version tag for filename (remove invalid characters)
-    let sanitized_tag = version_tag.replace('/', "_").replace('\\', "_").replace(':', "_");
+    let sanitized_tag = version_tag
+        .replace('/', "_")
+        .replace('\\', "_")
+        .replace(':', "_");
     let temp_zip_path = temp_dir.join(format!("melonloader-{}.zip", sanitized_tag));
 
     if let Err(e) = tokio::fs::write(&temp_zip_path, zip_bytes).await {
@@ -167,10 +192,9 @@ pub async fn install_melon_loader(
         }
     };
 
-    let result = melon_loader_service.install_melon_loader(
-        &env.output_dir,
-        &temp_zip_path.to_string_lossy()
-    ).await;
+    let result = melon_loader_service
+        .install_melon_loader(&env.output_dir, &temp_zip_path.to_string_lossy())
+        .await;
 
     // Clean up temp file (ignore errors)
     let _ = tokio::fs::remove_file(&temp_zip_path).await;
@@ -183,7 +207,8 @@ pub async fn install_melon_loader(
             if let Some(success) = json_result.get("success").and_then(|s| s.as_bool()) {
                 if success {
                     // Extract version from result if available
-                    let version = json_result.get("version")
+                    let version = json_result
+                        .get("version")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
@@ -191,20 +216,25 @@ pub async fn install_melon_loader(
                         &app,
                         download_id.clone(),
                         format!("MelonLoader {} installed successfully", version_tag),
-                        version
+                        version,
                     );
                 } else {
                     // Installation failed
-                    let error_msg = json_result.get("error")
+                    let error_msg = json_result
+                        .get("error")
                         .and_then(|e| e.as_str())
                         .unwrap_or("Installation failed")
                         .to_string();
 
-                    let _ = events::emit_melonloader_error(&app, download_id.clone(), error_msg.clone());
+                    let _ = events::emit_melonloader_error(
+                        &app,
+                        download_id.clone(),
+                        error_msg.clone(),
+                    );
                 }
             }
             Ok(json_result)
-        },
+        }
         Err(e) => {
             let error_msg = format!("Installation failed: {}", e);
             let _ = events::emit_melonloader_error(&app, download_id.clone(), error_msg.clone());
@@ -220,12 +250,14 @@ pub async fn get_available_melonloader_versions(
     let _ = db;
     let github_service = GitHubReleasesService::new();
 
-    let releases = github_service.get_all_releases("LavaGang", "MelonLoader", false)
+    let releases = github_service
+        .get_all_releases("LavaGang", "MelonLoader", false)
         .await
         .map_err(|e| format!("Failed to fetch MelonLoader releases: {}", e))?;
 
     // Map to simplified version objects
-    let versions: Vec<serde_json::Value> = releases.into_iter()
+    let versions: Vec<serde_json::Value> = releases
+        .into_iter()
         .map(|release| {
             serde_json::json!({
                 "tag": release.get("tag_name").and_then(|t| t.as_str()).unwrap_or(""),
@@ -245,7 +277,8 @@ pub async fn uninstall_melon_loader(
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service.get_environment(&environment_id)
+    let env = env_service
+        .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
@@ -255,7 +288,8 @@ pub async fn uninstall_melon_loader(
     }
 
     let melon_loader_service = get_melon_loader_service().await?;
-    melon_loader_service.uninstall_melon_loader(&env.output_dir)
+    melon_loader_service
+        .uninstall_melon_loader(&env.output_dir)
         .await
         .map_err(|e| e.to_string())
 }

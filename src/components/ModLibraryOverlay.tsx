@@ -328,6 +328,9 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
 interface Props {
   isOpen: boolean;
   onClose: () => void;
+  focusStorageId?: string | null;
+  focusRequestId?: number;
+  focusModTag?: string | null;
 }
 
 interface RuntimePromptState {
@@ -336,7 +339,7 @@ interface RuntimePromptState {
   onSelect: (runtime: 'IL2CPP' | 'Mono' | 'Both') => void;
 }
 
-export function ModLibraryOverlay({ isOpen, onClose }: Props) {
+export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusRequestId, focusModTag }: Props) {
   const [library, setLibrary] = useState<ModLibraryResult | null>(null);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [selectedModIds, setSelectedModIds] = useState<Set<string>>(new Set());
@@ -371,6 +374,10 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
   const [downloadedSearch, setDownloadedSearch] = useState('');
   const [activeModView, setActiveModView] = useState<LibraryModViewState | null>(null);
+  const [openedFromLogs, setOpenedFromLogs] = useState<{ active: boolean; modTag: string | null }>({
+    active: false,
+    modTag: null,
+  });
   const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const libraryScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
@@ -379,6 +386,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     onSuccess: () => Promise<void>;
     onErrorTitle?: string;
   }>(null);
+  const lastHandledFocusRequestIdRef = useRef<number | null>(null);
 
   const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
     tag_name: string;
@@ -427,17 +435,23 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   useEffect(() => {
     if (!isOpen) {
       setActiveModView(null);
+      setOpenedFromLogs({ active: false, modTag: null });
     }
   }, [isOpen]);
 
   const closeModView = useCallback(() => {
+    if (openedFromLogs.active) {
+      onClose();
+      return;
+    }
+
     setActiveModView(null);
     window.requestAnimationFrame(() => {
       if (libraryScrollContainerRef.current) {
         libraryScrollContainerRef.current.scrollTop = libraryScrollTopRef.current;
       }
     });
-  }, []);
+  }, [onClose, openedFromLogs.active]);
 
   const openModView = useCallback((nextView: LibraryModViewState) => {
     if (libraryScrollContainerRef.current) {
@@ -1507,8 +1521,17 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     runDownload(hasIl2cpp ? 'IL2CPP' : 'Mono');
   };
 
-  const openDownloadedModView = useCallback((group: DownloadedModGroup) => {
-    const activeEntry = getActiveEntryForGroup(group) || group.entries[0];
+  const openDownloadedModView = useCallback((group: DownloadedModGroup, preferredStorageId?: string) => {
+    const preferredEntry = preferredStorageId
+      ? group.entries.find(entry => {
+          if (entry.storageId === preferredStorageId) {
+            return true;
+          }
+
+          return Object.values(entry.storageIdsByRuntime || {}).includes(preferredStorageId);
+        })
+      : null;
+    const activeEntry = preferredEntry || getActiveEntryForGroup(group) || group.entries[0];
     openModView({
       id: group.key,
       name: group.displayName,
@@ -1529,6 +1552,43 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       kind: 'downloaded',
     });
   }, [getActiveEntryForGroup, openModView]);
+
+  useEffect(() => {
+    if (!isOpen || !focusStorageId || !focusRequestId) {
+      return;
+    }
+
+    if (lastHandledFocusRequestIdRef.current === focusRequestId) {
+      return;
+    }
+
+    if (downloadedGroups.length === 0) {
+      return;
+    }
+
+    const targetGroup = downloadedGroups.find(group =>
+      group.entries.some(entry =>
+        entry.storageId === focusStorageId || Object.values(entry.storageIdsByRuntime || {}).includes(focusStorageId)
+      )
+    );
+
+    if (!targetGroup) {
+      return;
+    }
+
+    lastHandledFocusRequestIdRef.current = focusRequestId;
+    setOpenedFromLogs({ active: true, modTag: focusModTag ?? null });
+    void handleSelectVersion(targetGroup, focusStorageId);
+    openDownloadedModView(targetGroup, focusStorageId);
+  }, [
+    downloadedGroups,
+    focusModTag,
+    focusRequestId,
+    focusStorageId,
+    handleSelectVersion,
+    isOpen,
+    openDownloadedModView,
+  ]);
 
   const openThunderstoreModView = useCallback((pkg: ThunderstorePackageGroup) => {
     const il2cpp = pkg.packagesByRuntime.IL2CPP;
@@ -2576,6 +2636,22 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                 <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                   <i className="fas fa-cube"></i>
                   Mod View
+                  {openedFromLogs.active && (
+                    <span
+                      style={{
+                        fontSize: '0.72rem',
+                        color: '#9ed0ff',
+                        backgroundColor: '#1a2f46',
+                        border: '1px solid #335d83',
+                        borderRadius: '999px',
+                        padding: '0.12rem 0.5rem',
+                      }}
+                    >
+                      <i className="fas fa-file-alt"></i>
+                      {' '}
+                      Opened from Logs{openedFromLogs.modTag ? `: ${openedFromLogs.modTag}` : ''}
+                    </span>
+                  )}
                 </h2>
                 <button className="btn btn-secondary btn-small" onClick={closeModView}>
                   <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>

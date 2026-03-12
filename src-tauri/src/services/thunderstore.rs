@@ -50,20 +50,24 @@ impl ThunderStoreService {
             let query_lower = q.trim().to_lowercase();
             if !query_lower.is_empty() {
                 packages.retain(|pkg| {
-                    let name = pkg.get("name")
+                    let name = pkg
+                        .get("name")
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    let full_name = pkg.get("latest")
+                    let full_name = pkg
+                        .get("latest")
                         .and_then(|l| l.get("full_name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    let owner = pkg.get("owner")
+                    let owner = pkg
+                        .get("owner")
                         .and_then(|o| o.as_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    let description = pkg.get("latest")
+                    let description = pkg
+                        .get("latest")
                         .and_then(|l| l.get("description"))
                         .and_then(|d| d.as_str())
                         .or_else(|| {
@@ -87,14 +91,20 @@ impl ThunderStoreService {
         // Filter by runtime if specified
         if runtime != "unknown" {
             let runtime_lower = runtime.to_lowercase();
-            let other_runtime = if runtime_lower == "il2cpp" { "mono" } else { "il2cpp" };
+            let other_runtime = if runtime_lower == "il2cpp" {
+                "mono"
+            } else {
+                "il2cpp"
+            };
 
             packages.retain(|pkg| {
-                let name = pkg.get("name")
+                let name = pkg
+                    .get("name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("")
                     .to_lowercase();
-                let full_name = pkg.get("latest")
+                let full_name = pkg
+                    .get("latest")
                     .and_then(|l| l.get("full_name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("")
@@ -102,7 +112,8 @@ impl ThunderStoreService {
 
                 // Check categories/tags for runtime compatibility
                 // Packages can have categories like "il2cpp", "mono", "client-side", etc.
-                let has_target_runtime_category = pkg.get("categories")
+                let has_target_runtime_category = pkg
+                    .get("categories")
                     .and_then(|c| c.as_array())
                     .map(|cats| {
                         cats.iter().any(|cat| {
@@ -113,7 +124,8 @@ impl ThunderStoreService {
                     })
                     .unwrap_or(false);
 
-                let has_other_runtime_category = pkg.get("categories")
+                let has_other_runtime_category = pkg
+                    .get("categories")
                     .and_then(|c| c.as_array())
                     .map(|cats| {
                         cats.iter().any(|cat| {
@@ -140,25 +152,35 @@ impl ThunderStoreService {
                 }
 
                 // Include if mentions target runtime, or if no runtime specified (assume compatible)
-                name.contains(&runtime_lower) || full_name.contains(&runtime_lower) ||
-                (!name.contains("il2cpp") && !name.contains("mono") &&
-                 !full_name.contains("il2cpp") && !full_name.contains("mono"))
+                name.contains(&runtime_lower)
+                    || full_name.contains(&runtime_lower)
+                    || (!name.contains("il2cpp")
+                        && !name.contains("mono")
+                        && !full_name.contains("il2cpp")
+                        && !full_name.contains("mono"))
             });
         }
 
         // Filter out deprecated packages
         packages.retain(|pkg| {
-            !pkg.get("is_deprecated").and_then(|d| d.as_bool()).unwrap_or(false) &&
-            !pkg.get("latest")
-                .and_then(|l| l.get("is_deprecated"))
+            !pkg.get("is_deprecated")
                 .and_then(|d| d.as_bool())
                 .unwrap_or(false)
+                && !pkg
+                    .get("latest")
+                    .and_then(|l| l.get("is_deprecated"))
+                    .and_then(|d| d.as_bool())
+                    .unwrap_or(false)
         });
 
         Ok(packages)
     }
 
-    pub async fn get_package(&self, package_uuid: &str, game_id: Option<&str>) -> Result<Option<serde_json::Value>> {
+    pub async fn get_package(
+        &self,
+        package_uuid: &str,
+        game_id: Option<&str>,
+    ) -> Result<Option<serde_json::Value>> {
         let path = if let Some(gid) = game_id {
             if gid == "schedule-i" {
                 format!("/c/{}/api/v1/package/{}/", gid, package_uuid)
@@ -191,9 +213,15 @@ impl ThunderStoreService {
         Ok(Some(package))
     }
 
-    pub async fn download_package(&self, package_uuid: &str, game_id: Option<&str>) -> Result<Vec<u8>> {
+    pub async fn download_package(
+        &self,
+        package_uuid: &str,
+        game_id: Option<&str>,
+    ) -> Result<Vec<u8>> {
         // First get package info to find download URL
-        let package = self.get_package(package_uuid, game_id).await?
+        let package = self
+            .get_package(package_uuid, game_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Package not found"))?;
 
         // Get latest version download URL (versions array is directly on package, not under "latest")
@@ -207,7 +235,9 @@ impl ThunderStoreService {
 
         let response = thunderstore_api::request_url("GET", download_url, None, None)
             .await
-            .map_err(|e| anyhow::anyhow!("Thunderstore crate absolute download request failed: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Thunderstore crate absolute download request failed: {}", e)
+            })?;
 
         if !(200..300).contains(&response.status) {
             return Err(anyhow::anyhow!(

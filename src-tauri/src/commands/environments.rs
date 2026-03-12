@@ -1,11 +1,13 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
-use crate::types::{Environment, EnvironmentStatus, AppConfig, schedule_i_config};
-use crate::utils::validation::{validate_app_id, validate_branch_name, validate_environment_name, validate_directory_path};
+use crate::types::{schedule_i_config, AppConfig, Environment, EnvironmentStatus};
+use crate::utils::validation::{
+    validate_app_id, validate_branch_name, validate_directory_path, validate_environment_name,
+};
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 use tauri::State;
+use tokio::sync::Mutex as AsyncMutex;
 
 fn normalize_path(path: &str) -> String {
     path.replace('/', "\\")
@@ -26,7 +28,8 @@ fn environment_status_rank(status: &EnvironmentStatus) -> u8 {
 fn should_replace_existing_for_path(existing: &Environment, candidate: &Environment) -> bool {
     let existing_is_steam = existing.environment_type == Some(crate::types::EnvironmentType::Steam)
         || existing.id.starts_with("steam-");
-    let candidate_is_steam = candidate.environment_type == Some(crate::types::EnvironmentType::Steam)
+    let candidate_is_steam = candidate.environment_type
+        == Some(crate::types::EnvironmentType::Steam)
         || candidate.id.starts_with("steam-");
 
     if candidate_is_steam != existing_is_steam {
@@ -39,8 +42,14 @@ fn should_replace_existing_for_path(existing: &Environment, candidate: &Environm
         return candidate_rank > existing_rank;
     }
 
-    let existing_updated = existing.last_updated.map(|dt| dt.timestamp()).unwrap_or_default();
-    let candidate_updated = candidate.last_updated.map(|dt| dt.timestamp()).unwrap_or_default();
+    let existing_updated = existing
+        .last_updated
+        .map(|dt| dt.timestamp())
+        .unwrap_or_default();
+    let candidate_updated = candidate
+        .last_updated
+        .map(|dt| dt.timestamp())
+        .unwrap_or_default();
     if candidate_updated != existing_updated {
         return candidate_updated > existing_updated;
     }
@@ -122,9 +131,15 @@ async fn start_watchers_for_env(
     let mods_dir = std::path::Path::new(output_dir).join("Mods");
     let plugins_dir = std::path::Path::new(output_dir).join("Plugins");
     let userlibs_dir = std::path::Path::new(output_dir).join("UserLibs");
-    let _ = watcher_guard.start_watching(env_id, mods_dir.to_str().unwrap_or(""), "mods").await;
-    let _ = watcher_guard.start_watching(env_id, plugins_dir.to_str().unwrap_or(""), "plugins").await;
-    let _ = watcher_guard.start_watching(env_id, userlibs_dir.to_str().unwrap_or(""), "userlibs").await;
+    let _ = watcher_guard
+        .start_watching(env_id, mods_dir.to_str().unwrap_or(""), "mods")
+        .await;
+    let _ = watcher_guard
+        .start_watching(env_id, plugins_dir.to_str().unwrap_or(""), "plugins")
+        .await;
+    let _ = watcher_guard
+        .start_watching(env_id, userlibs_dir.to_str().unwrap_or(""), "userlibs")
+        .await;
 }
 
 #[tauri::command]
@@ -133,7 +148,8 @@ pub async fn get_environments(
     watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
 ) -> Result<Vec<Environment>, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let mut envs = service.get_environments()
+    let mut envs = service
+        .get_environments()
         .await
         .map_err(|e| e.to_string())?;
 
@@ -146,8 +162,10 @@ pub async fn get_environments(
 
     // De-duplicate any environments that point to the same install path before
     // attempting status reconciliation/upserts to avoid unique-path write conflicts.
-    let mut keeper_by_path: std::collections::HashMap<String, Environment> = std::collections::HashMap::new();
-    let mut duplicate_ids_to_remove: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut keeper_by_path: std::collections::HashMap<String, Environment> =
+        std::collections::HashMap::new();
+    let mut duplicate_ids_to_remove: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for env in &envs {
         let key = normalize_path(&env.output_dir);
@@ -178,10 +196,11 @@ pub async fn get_environments(
             continue;
         }
 
-        let is_current_path_valid = crate::services::steam::SteamService::validate_steam_installation(
-            std::path::Path::new(&env.output_dir),
-        )
-        .unwrap_or(false);
+        let is_current_path_valid =
+            crate::services::steam::SteamService::validate_steam_installation(
+                std::path::Path::new(&env.output_dir),
+            )
+            .unwrap_or(false);
 
         if is_current_path_valid {
             let runtime_from_files = crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
@@ -193,9 +212,14 @@ pub async fn get_environments(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| {
-                    crate::services::environment::EnvironmentService::branch_for_runtime(&runtime_from_files)
+                    crate::services::environment::EnvironmentService::branch_for_runtime(
+                        &runtime_from_files,
+                    )
                 });
-            let detected_runtime = crate::services::environment::EnvironmentService::runtime_for_branch(&detected_branch)
+            let detected_runtime =
+                crate::services::environment::EnvironmentService::runtime_for_branch(
+                    &detected_branch,
+                )
                 .unwrap_or(runtime_from_files);
 
             let mut changed = false;
@@ -241,10 +265,14 @@ pub async fn get_environments(
                     .ok()
                     .flatten()
                     .unwrap_or_else(|| {
-                        crate::services::environment::EnvironmentService::branch_for_runtime(&runtime_from_files)
+                        crate::services::environment::EnvironmentService::branch_for_runtime(
+                            &runtime_from_files,
+                        )
                     });
-                env.runtime = crate::services::environment::EnvironmentService::runtime_for_branch(&detected_branch)
-                    .unwrap_or(runtime_from_files);
+                env.runtime = crate::services::environment::EnvironmentService::runtime_for_branch(
+                    &detected_branch,
+                )
+                .unwrap_or(runtime_from_files);
                 env.branch = detected_branch;
                 env.status = crate::types::EnvironmentStatus::Completed;
                 env.last_updated = Some(chrono::Utc::now());
@@ -291,9 +319,9 @@ pub async fn get_environments(
         let a_is_steam = a.environment_type == Some(crate::types::EnvironmentType::Steam);
         let b_is_steam = b.environment_type == Some(crate::types::EnvironmentType::Steam);
         match (a_is_steam, b_is_steam) {
-            (true, false) => std::cmp::Ordering::Less,  // Steam comes first
+            (true, false) => std::cmp::Ordering::Less, // Steam comes first
             (false, true) => std::cmp::Ordering::Greater, // Steam comes first
-            _ => std::cmp::Ordering::Equal, // Maintain original order for same type
+            _ => std::cmp::Ordering::Equal,            // Maintain original order for same type
         }
     });
 
@@ -301,9 +329,13 @@ pub async fn get_environments(
 }
 
 #[tauri::command]
-pub async fn get_environment(db: State<'_, Arc<SqlitePool>>, id: String) -> Result<Option<Environment>, String> {
+pub async fn get_environment(
+    db: State<'_, Arc<SqlitePool>>,
+    id: String,
+) -> Result<Option<Environment>, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service.get_environment(&id)
+    service
+        .get_environment(&id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -351,7 +383,10 @@ pub async fn delete_environment(
     delete_files: Option<bool>,
 ) -> Result<bool, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let existing_env = service.get_environment(&id).await.map_err(|e| e.to_string())?;
+    let existing_env = service
+        .get_environment(&id)
+        .await
+        .map_err(|e| e.to_string())?;
     let is_steam_env = existing_env.as_ref().is_some_and(|env| {
         env.environment_type == Some(crate::types::EnvironmentType::Steam)
             || env.id.starts_with("steam-")
@@ -363,11 +398,20 @@ pub async fn delete_environment(
         let _ = watcher_guard.stop_watching_environment(&id).await;
     }
 
-    let deleted = delete_environment_impl(db.inner().clone(), id.clone(), delete_files.unwrap_or(false)).await?;
+    let deleted = delete_environment_impl(
+        db.inner().clone(),
+        id.clone(),
+        delete_files.unwrap_or(false),
+    )
+    .await?;
 
     if is_steam_env {
         // Steam delete action clears metadata only; keep watchers active and aligned.
-        if let Some(updated_env) = service.get_environment(&id).await.map_err(|e| e.to_string())? {
+        if let Some(updated_env) = service
+            .get_environment(&id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
             let watcher_guard = watcher.lock().await;
             start_watchers_for_env(&watcher_guard, &updated_env.id, &updated_env.output_dir).await;
         }
@@ -386,7 +430,8 @@ pub async fn detect_steam_installations() -> Result<serde_json::Value, String> {
     use crate::services::steam::SteamService;
 
     let service = SteamService::new();
-    let installations = service.detect_steam_installations()
+    let installations = service
+        .detect_steam_installations()
         .await
         .map_err(|e| e.to_string())?;
 
@@ -402,7 +447,8 @@ pub async fn create_steam_environment(
     description: Option<String>,
 ) -> Result<Environment, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = service.create_steam_environment(steam_path.clone(), name, description)
+    let env = service
+        .create_steam_environment(steam_path.clone(), name, description)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -434,7 +480,10 @@ pub async fn import_local_environment(
 
 #[cfg(test)]
 mod tests {
-    use super::{create_environment_impl, delete_environment_impl, parse_updates_object, update_environment_impl};
+    use super::{
+        create_environment_impl, delete_environment_impl, parse_updates_object,
+        update_environment_impl,
+    };
     use crate::services::environment::EnvironmentService;
     use crate::test_helpers::init_test_pool_with_temp_data_dir;
     use crate::types::schedule_i_config;
@@ -446,7 +495,8 @@ mod tests {
         let good = parse_updates_object(serde_json::json!({"name":"New Name"})).expect("map");
         assert_eq!(good.get("name"), Some(&serde_json::json!("New Name")));
 
-        let bad = parse_updates_object(serde_json::json!(["not", "object"])).expect_err("expected error");
+        let bad =
+            parse_updates_object(serde_json::json!(["not", "object"])).expect_err("expected error");
         assert_eq!(bad, "Updates must be an object");
     }
 
@@ -483,10 +533,7 @@ mod tests {
         assert!(deleted);
 
         let service = EnvironmentService::new(pool.clone()).expect("service");
-        let after = service
-            .get_environment(&created.id)
-            .await
-            .expect("query");
+        let after = service.get_environment(&created.id).await.expect("query");
         assert!(after.is_none());
     }
 }

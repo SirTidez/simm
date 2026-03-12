@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl UserLibsService {
 
     pub async fn list_user_libs(&self, game_dir: &str) -> Result<serde_json::Value> {
         let user_libs_directory = self.get_user_libs_directory(game_dir);
-        
+
         if !user_libs_directory.exists() {
             return Ok(serde_json::json!({
                 "userLibs": [],
@@ -44,18 +44,20 @@ impl UserLibsService {
             }));
         }
 
-        let mut entries = fs::read_dir(&user_libs_directory).await
+        let mut entries = fs::read_dir(&user_libs_directory)
+            .await
             .context("Failed to read UserLibs directory")?;
 
         let mut user_libs = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
             let metadata = fs::metadata(&entry_path).await?;
-            
-            let file_name = entry_path.file_name()
+
+            let file_name = entry_path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            
+
             let is_disabled = !metadata.is_dir() && file_name.to_lowercase().ends_with(".disabled");
             let original_file_name = if is_disabled {
                 file_name.replace(".disabled", "")
@@ -90,9 +92,7 @@ impl UserLibsService {
 
     pub async fn count_user_libs(&self, game_dir: &str) -> Result<u32> {
         let result = self.list_user_libs(game_dir).await?;
-        let count = result.get("count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         Ok(count)
     }
 
@@ -106,7 +106,9 @@ impl UserLibsService {
         }
 
         if enabled_path.exists() {
-            return Err(anyhow::anyhow!("User lib file already exists (not disabled)"));
+            return Err(anyhow::anyhow!(
+                "User lib file already exists (not disabled)"
+            ));
         }
 
         // Verify it's actually a file or directory
@@ -116,7 +118,8 @@ impl UserLibsService {
         }
 
         // Rename the file/directory back
-        fs::rename(&disabled_path, &enabled_path).await
+        fs::rename(&disabled_path, &enabled_path)
+            .await
             .context("Failed to enable user lib")?;
 
         Ok(())
@@ -142,7 +145,8 @@ impl UserLibsService {
         }
 
         // Rename the file/directory
-        fs::rename(&enabled_path, &disabled_path).await
+        fs::rename(&enabled_path, &disabled_path)
+            .await
             .context("Failed to disable user lib")?;
 
         Ok(())

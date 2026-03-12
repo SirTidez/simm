@@ -1,13 +1,13 @@
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 fn main() {
     // Build the frontend before building Tauri
     // This ensures the frontend is always built when building with cargo
     println!("cargo:warning=Building frontend...");
-    
+
     let root_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    
+
     // Check if dist directory exists and is recent (optional optimization)
     let dist_dir = root_dir.join("dist");
     let should_build = if dist_dir.exists() {
@@ -42,16 +42,23 @@ fn main() {
                 println!("cargo:warning=Frontend build completed successfully");
             }
             Ok(status) => {
-                eprintln!("cargo:warning=Frontend build failed with exit code: {:?}", status.code());
+                eprintln!(
+                    "cargo:warning=Frontend build failed with exit code: {:?}",
+                    status.code()
+                );
                 eprintln!("cargo:warning=Continuing with Rust build anyway. Make sure to run 'npm run build' manually if needed.");
             }
             Err(e) => {
-                eprintln!("cargo:warning=Failed to run npm build: {}. Continuing anyway...", e);
-                eprintln!("cargo:warning=Make sure npm is installed and 'npm run build' works manually.");
+                eprintln!(
+                    "cargo:warning=Failed to run npm build: {}. Continuing anyway...",
+                    e
+                );
+                eprintln!(
+                    "cargo:warning=Make sure npm is installed and 'npm run build' works manually."
+                );
             }
         }
     }
 
     tauri_build::build()
 }
-

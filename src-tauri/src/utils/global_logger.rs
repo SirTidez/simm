@@ -1,7 +1,7 @@
+use crate::types::LogLevel;
 use log::{Level, Metadata, Record};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
-use crate::types::LogLevel;
 
 struct LogMessage {
     level: LogLevel,
@@ -100,9 +100,8 @@ impl log::Log for GlobalLogger {
     }
 }
 
-static GLOBAL_LOGGER: once_cell::sync::Lazy<GlobalLogger> = once_cell::sync::Lazy::new(|| {
-    GlobalLogger::new()
-});
+static GLOBAL_LOGGER: once_cell::sync::Lazy<GlobalLogger> =
+    once_cell::sync::Lazy::new(|| GlobalLogger::new());
 
 /// Initialize the global logger
 pub fn init_global_logger() {

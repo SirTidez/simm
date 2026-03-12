@@ -26,6 +26,7 @@ interface Props {
   onClose: () => void;
   environmentId: string;
   environment: Environment;
+  onOpenModLibraryView?: (focus: { storageId: string; modTag: string }) => void;
 }
 
 type TimePeriod = 'all' | 'last5min' | 'last15min' | 'last1hour' | 'custom';
@@ -76,7 +77,7 @@ function highlightText(text: string, query: string): ReactNode {
   return parts;
 }
 
-export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Props) {
+export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpenModLibraryView }: Props) {
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
   const [selectedLogFile, setSelectedLogFile] = useState<LogFile | null>(null);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
@@ -87,14 +88,30 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [exporting, setExporting] = useState(false);
   const [isWatching, setIsWatching] = useState(false);
+  const [watchedPath, setWatchedPath] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [timePeriod, setTimePeriod] = useState<TimePeriod>('all');
   const [customTimeStart, setCustomTimeStart] = useState<string>('');
   const [customTimeEnd, setCustomTimeEnd] = useState<string>('');
   const [selectedModTag, setSelectedModTag] = useState<string | null>(null);
   const [showModCard, setShowModCard] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [openingModView, setOpeningModView] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+
+  const isSharedPlayerLogFile = (file: LogFile | null): boolean => {
+    if (!file) return false;
+    const normalizedPath = file.path.replace(/\\/g, '/').toLowerCase();
+    return normalizedPath.endsWith('/player.log') || normalizedPath.endsWith('/player-prev.log');
+  };
+
+  const isLiveLogFile = (file: LogFile | null): boolean => {
+    if (!file) return false;
+    const normalizedPath = file.path.replace(/\\/g, '/').toLowerCase();
+    return file.isLatest || normalizedPath.endsWith('/player.log');
+  };
   // Normalize mod tag for comparison (handles space variations)
   const normalizeModTag = (modTag: string): string => {
     return modTag.replace(/\s+/g, '').toLowerCase();
@@ -182,6 +199,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
       setTimePeriod('all');
       setSelectedModTag(null);
       setShowModCard(false);
+      setWatchedPath(null);
     }
   }, [isOpen, environmentId]);
 
@@ -189,15 +207,14 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
     if (selectedLogFile) {
       loadLogFile(selectedLogFile.path);
 
-      // Auto-start watching if it's Latest.log
-      if (selectedLogFile.isLatest && !isWatching) {
+      const shouldWatch = isLiveLogFile(selectedLogFile);
+      if (shouldWatch) {
         startWatching(selectedLogFile.path);
-      } else if (!selectedLogFile.isLatest && isWatching) {
+      } else if (isWatching) {
         stopWatching();
       }
     }
-  }, [selectedLogFile]);
-
+  }, [selectedLogFile, isWatching, watchedPath]);
   // Listen for log updates
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -234,10 +251,13 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
       const files = await ApiService.getLogFiles(environmentId);
       setLogFiles(files);
 
-      // Auto-select Latest.log if available
+      // Auto-select environment Latest.log, then shared Player.log, then first entry
       const latestLog = files.find(f => f.isLatest);
+      const sharedPlayerLog = files.find(f => f.path.replace(/\\/g, '/').toLowerCase().endsWith('/player.log'));
       if (latestLog) {
         setSelectedLogFile(latestLog);
+      } else if (sharedPlayerLog) {
+        setSelectedLogFile(sharedPlayerLog);
       } else if (files.length > 0) {
         setSelectedLogFile(files[0]);
       }
@@ -265,17 +285,26 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
 
   const startWatching = async (logPath: string) => {
     try {
+      if (isWatching && watchedPath === logPath) {
+        return;
+      }
+
+      if (isWatching && watchedPath && watchedPath !== logPath) {
+        await ApiService.stopWatchingLog();
+      }
+
       await ApiService.watchLogFile(logPath);
       setIsWatching(true);
+      setWatchedPath(logPath);
     } catch (err) {
       console.error('Failed to start watching log file:', err);
     }
   };
-
   const stopWatching = async () => {
     try {
       await ApiService.stopWatchingLog();
       setIsWatching(false);
+      setWatchedPath(null);
     } catch (err) {
       console.error('Failed to stop watching log file:', err);
     }
@@ -382,10 +411,29 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
     return true;
   };
 
+  const getEffectiveLevel = (line: LogLine): 'ERROR' | 'WARN' | 'DEBUG' | 'INFO' => {
+    const sourceText = `${line.level ?? ''} ${line.content}`.toLowerCase();
+
+    if (/\berror\b|\bfatal\b/.test(sourceText)) {
+      return 'ERROR';
+    }
+
+    if (/\bwarn(ing)?\b/.test(sourceText)) {
+      return 'WARN';
+    }
+
+    if (/\bdebug\b/.test(sourceText)) {
+      return 'DEBUG';
+    }
+
+    return 'INFO';
+  };
+
   const filteredLines = logLines.filter(line => {
     // Filter by level
     if (filterLevel !== 'ALL') {
-      if (!line.level || line.level.toUpperCase() !== filterLevel.toUpperCase()) {
+      const effectiveLevel = getEffectiveLevel(line);
+      if (effectiveLevel !== filterLevel.toUpperCase()) {
         return false;
       }
     }
@@ -456,6 +504,52 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
     setShowModCard(true);
   };
 
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, 4000);
+  };
+
+  const handleOpenModLibraryView = async () => {
+    if (!selectedModTag || !onOpenModLibraryView) {
+      return;
+    }
+
+    try {
+      setOpeningModView(true);
+      const library = await ApiService.getModLibrary();
+      const normalizedTag = normalizeModTag(selectedModTag);
+      const remoteSources = new Set(['thunderstore', 'nexusmods', 'github']);
+      const matches = library.downloaded.filter((entry) => {
+        const source = entry.source ?? 'unknown';
+        return remoteSources.has(source) && normalizeModTag(entry.displayName) === normalizedTag;
+      });
+
+      if (matches.length === 0) {
+        showToast('No mod found from an online/downloaded source. Mod may be locally installed.');
+        return;
+      }
+
+      const preferredMatch =
+        matches.find((entry) => entry.installedIn?.includes(environmentId)) ?? matches[0];
+
+      onOpenModLibraryView({
+        storageId: preferredMatch.storageId,
+        modTag: selectedModTag,
+      });
+    } catch (err) {
+      console.error('Failed to open mod library view from logs:', err);
+      showToast('Failed to open mod view from logs.');
+    } finally {
+      setOpeningModView(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -478,7 +572,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
         </button>
         </div>
 
-      <div className="mods-content" style={{ display: 'flex', flex: 1, gap: '1rem', overflow: 'hidden', minHeight: 0, padding: 0 }}>
+      <div className="mods-content" style={{ display: 'flex', flexDirection: 'row', flex: 1, gap: '1rem', overflow: 'hidden', minHeight: 0, padding: 0 }}>
           {/* Log Files Sidebar */}
           <div style={{ width: '250px', borderRight: '1px solid #3a3a3a', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             <div style={{ padding: '1rem', borderBottom: '1px solid #3a3a3a' }}>
@@ -525,7 +619,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                       {file.name}
                     </div>
                     <div style={{ fontSize: '0.75rem', color: '#888' }}>
-                      {file.isLatest && <span style={{ color: '#4a90e2' }}>Latest • </span>}
+                      {file.isLatest && <span style={{ color: '#4a90e2' }}>Latest • </span>}{isSharedPlayerLogFile(file) && <span style={{ color: '#7ec8ff' }}>Shared • </span>}
                       {(file.size / 1024).toFixed(1)} KB
                       {file.modified && (
                         <> • {new Date(file.modified).toLocaleDateString()}</>
@@ -701,7 +795,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                 />
               </div>
 
-              {selectedLogFile?.isLatest && autoScroll && (
+              {isLiveLogFile(selectedLogFile) && autoScroll && (
                 <button
                   onClick={() => setAutoScroll(false)}
                   className="btn btn-secondary"
@@ -712,7 +806,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                 </button>
               )}
 
-              {selectedLogFile?.isLatest && !autoScroll && (
+              {isLiveLogFile(selectedLogFile) && !autoScroll && (
                 <button
                   onClick={() => setAutoScroll(true)}
                   className="btn btn-secondary"
@@ -919,6 +1013,17 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <button
                       onClick={() => {
+                        void handleOpenModLibraryView();
+                      }}
+                      disabled={openingModView || !selectedModTag || !onOpenModLibraryView}
+                      className="btn btn-secondary"
+                      style={{ width: '100%', justifyContent: 'flex-start' }}
+                    >
+                      <i className="fas fa-external-link-alt" style={{ marginRight: '0.5rem' }}></i>
+                      {openingModView ? 'Opening Mod View...' : 'Open In Mod Library'}
+                    </button>
+                    <button
+                      onClick={() => {
                         // Filter to show only this mod's logs
                         setShowModCard(false);
                       }}
@@ -945,6 +1050,26 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment }: Pro
             </div>
           )}
       </div>
+      {toastMessage && (
+        <div
+          style={{
+            position: 'fixed',
+            right: '1rem',
+            bottom: '1rem',
+            zIndex: 9999,
+            backgroundColor: '#1f2a36',
+            border: '1px solid #3f5f7c',
+            color: '#d9e9ff',
+            padding: '0.75rem 1rem',
+            borderRadius: '6px',
+            maxWidth: '420px',
+            boxShadow: '0 6px 18px rgba(0, 0, 0, 0.4)',
+            fontSize: '0.875rem',
+          }}
+        >
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 }

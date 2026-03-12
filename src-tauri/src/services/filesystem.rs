@@ -1,5 +1,5 @@
-use std::path::Path;
 use anyhow::{Context, Result};
+use std::path::Path;
 
 #[derive(Clone)]
 pub struct FileSystemService;
@@ -39,25 +39,30 @@ impl FileSystemService {
         Ok(())
     }
 
-    pub async fn launch_game(&self, game_dir: Option<&str>, launch_method: Option<&str>) -> Result<String> {
+    pub async fn launch_game(
+        &self,
+        game_dir: Option<&str>,
+        launch_method: Option<&str>,
+    ) -> Result<String> {
         let method = launch_method.unwrap_or("steam");
 
         eprintln!(
             "[Launch] launch_game called with method: {:?}, game_dir: {:?}",
-            method,
-            game_dir
+            method, game_dir
         );
 
         match method {
             "steam" => {
                 eprintln!("[Launch] Using Steam launch method");
                 self.launch_via_steam(game_dir).await
-            },
+            }
             "direct" => {
                 eprintln!("[Launch] Using direct launch method");
-                let dir = game_dir.ok_or_else(|| anyhow::anyhow!("Game directory is required for direct launch"))?;
+                let dir = game_dir.ok_or_else(|| {
+                    anyhow::anyhow!("Game directory is required for direct launch")
+                })?;
                 self.launch_directly(dir).await
-            },
+            }
             _ => Err(anyhow::anyhow!("Unknown launch method: {}", method)),
         }
     }
@@ -65,7 +70,10 @@ impl FileSystemService {
     async fn launch_via_steam(&self, game_dir: Option<&str>) -> Result<String> {
         let app_id = crate::services::steam::SteamService::get_steam_app_id();
 
-        eprintln!("[Launch] launch_via_steam called with game_dir: {:?}", game_dir);
+        eprintln!(
+            "[Launch] launch_via_steam called with game_dir: {:?}",
+            game_dir
+        );
 
         // If we have a custom game directory, use executable method to pass the path
         // Otherwise, try protocol first for simplicity
@@ -89,16 +97,20 @@ impl FileSystemService {
 
         #[cfg(target_os = "windows")]
         {
-            use winapi::um::shellapi::ShellExecuteW;
-            use winapi::um::winuser::SW_SHOW;
             use std::ffi::OsStr;
             use std::os::windows::ffi::OsStrExt;
+            use winapi::um::shellapi::ShellExecuteW;
+            use winapi::um::winuser::SW_SHOW;
 
             let url_wide: Vec<u16> = OsStr::new(&url).encode_wide().chain(Some(0)).collect();
             let result = unsafe {
                 ShellExecuteW(
                     std::ptr::null_mut(),
-                    OsStr::new("open").encode_wide().chain(Some(0)).collect::<Vec<_>>().as_ptr(),
+                    OsStr::new("open")
+                        .encode_wide()
+                        .chain(Some(0))
+                        .collect::<Vec<_>>()
+                        .as_ptr(),
                     url_wide.as_ptr(),
                     std::ptr::null(),
                     std::ptr::null(),
@@ -130,7 +142,11 @@ impl FileSystemService {
         Ok(())
     }
 
-    async fn launch_via_steam_executable(&self, app_id: &str, game_dir: Option<&str>) -> Result<()> {
+    async fn launch_via_steam_executable(
+        &self,
+        app_id: &str,
+        game_dir: Option<&str>,
+    ) -> Result<()> {
         // If we have a custom game directory, we need to launch the executable directly
         // but ensure Steam is running so it can inject its API for authentication
         if let Some(dir) = game_dir {
@@ -148,7 +164,10 @@ impl FileSystemService {
 
             let executable_path = Path::new(dir).join(executable_name);
             if !executable_path.exists() {
-                return Err(anyhow::anyhow!("Game executable not found at {:?}", executable_path));
+                return Err(anyhow::anyhow!(
+                    "Game executable not found at {:?}",
+                    executable_path
+                ));
             }
 
             // Launch with Steam environment variables to ensure proper authentication
@@ -165,8 +184,7 @@ impl FileSystemService {
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW flag
             }
 
-            cmd.spawn()
-                .context("Failed to launch game executable")?;
+            cmd.spawn().context("Failed to launch game executable")?;
 
             return Ok(());
         }
@@ -178,13 +196,20 @@ impl FileSystemService {
         let steam_exe = if cfg!(target_os = "windows") {
             steam_path.join("steam.exe")
         } else if cfg!(target_os = "macos") {
-            steam_path.join("Steam.app").join("Contents").join("MacOS").join("steam.sh")
+            steam_path
+                .join("Steam.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("steam.sh")
         } else {
             steam_path.join("steam")
         };
 
         if !steam_exe.exists() {
-            return Err(anyhow::anyhow!("Steam executable not found at {:?}", steam_exe));
+            return Err(anyhow::anyhow!(
+                "Steam executable not found at {:?}",
+                steam_exe
+            ));
         }
 
         #[cfg(target_os = "windows")]
@@ -217,24 +242,28 @@ impl FileSystemService {
         let steam_exe = if cfg!(target_os = "windows") {
             steam_path.join("steam.exe")
         } else if cfg!(target_os = "macos") {
-            steam_path.join("Steam.app").join("Contents").join("MacOS").join("steam.sh")
+            steam_path
+                .join("Steam.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("steam.sh")
         } else {
             steam_path.join("steam")
         };
 
         if !steam_exe.exists() {
-            return Err(anyhow::anyhow!("Steam executable not found at {:?}", steam_exe));
+            return Err(anyhow::anyhow!(
+                "Steam executable not found at {:?}",
+                steam_exe
+            ));
         }
 
         // Check if Steam is already running
         #[cfg(target_os = "windows")]
         {
-            use std::process::Command;
             use std::os::windows::process::CommandExt;
-            let steam_exe_name = steam_exe.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            use std::process::Command;
+            let steam_exe_name = steam_exe.file_name().unwrap().to_string_lossy().to_string();
 
             let output = Command::new("tasklist")
                 .arg("/FI")
@@ -305,7 +334,10 @@ impl FileSystemService {
         let executable_path = Path::new(game_dir).join(executable_name);
 
         if !executable_path.exists() {
-            return Err(anyhow::anyhow!("Game executable not found at {:?}", executable_path));
+            return Err(anyhow::anyhow!(
+                "Game executable not found at {:?}",
+                executable_path
+            ));
         }
 
         #[cfg(target_os = "windows")]
@@ -377,6 +409,8 @@ mod tests {
             .launch_game(None, Some("direct"))
             .await
             .expect_err("expected missing directory error");
-        assert!(err.to_string().contains("Game directory is required for direct launch"));
+        assert!(err
+            .to_string()
+            .contains("Game directory is required for direct launch"));
     }
 }

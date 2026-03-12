@@ -1,17 +1,17 @@
+use crate::types::LogLevel;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Local, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc, Local};
-use crate::types::LogLevel;
+use tokio::sync::RwLock;
 
 pub struct LoggerService {
     log_level: Arc<RwLock<LogLevel>>,
     logs_dir: PathBuf,
     server_log_file: PathBuf, // Server/backend log file for this session
-    app_log_file: PathBuf, // App/frontend log file for this session
+    app_log_file: PathBuf,    // App/frontend log file for this session
     retention_days: Arc<RwLock<u32>>,
 }
 
@@ -70,19 +70,18 @@ impl LoggerService {
             "data": data
         });
 
-        // Print to console (for dev mode)
-        println!("[{}] {}", level_str, message);
-
         // Write to file
         let log_line = if let Some(d) = data {
-            format!("[{}] [{}] {} | Data: {}\n",
+            format!(
+                "[{}] [{}] {} | Data: {}\n",
                 local_time.format("%Y-%m-%d %H:%M:%S"),
                 level_str,
                 message,
                 serde_json::to_string(&d).unwrap_or_default()
             )
         } else {
-            format!("[{}] [{}] {}\n",
+            format!(
+                "[{}] [{}] {}\n",
                 local_time.format("%Y-%m-%d %H:%M:%S"),
                 level_str,
                 message
@@ -110,11 +109,11 @@ impl LoggerService {
             .await
             .context("Failed to open log file")?;
 
-        file.write_all(content.as_bytes()).await
+        file.write_all(content.as_bytes())
+            .await
             .context("Failed to write to log file")?;
 
-        file.flush().await
-            .context("Failed to flush log file")?;
+        file.flush().await.context("Failed to flush log file")?;
 
         Ok(())
     }
@@ -127,15 +126,13 @@ impl LoggerService {
             let path = entry.path();
 
             if path.is_file() {
-                let file_name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
                 // Only process our log files (server-*.log, app-*.log, or legacy log-*.log)
-                let is_log_file = (file_name.starts_with("server-") ||
-                                  file_name.starts_with("app-") ||
-                                  file_name.starts_with("log-")) &&
-                                  file_name.ends_with(".log");
+                let is_log_file = (file_name.starts_with("server-")
+                    || file_name.starts_with("app-")
+                    || file_name.starts_with("log-"))
+                    && file_name.ends_with(".log");
 
                 if is_log_file {
                     let metadata = fs::metadata(&path).await?;
@@ -157,17 +154,31 @@ impl LoggerService {
         match message_level {
             LogLevel::Debug => matches!(current_level, LogLevel::Debug),
             LogLevel::Info => matches!(current_level, LogLevel::Debug | LogLevel::Info),
-            LogLevel::Warn => matches!(current_level, LogLevel::Debug | LogLevel::Info | LogLevel::Warn),
+            LogLevel::Warn => matches!(
+                current_level,
+                LogLevel::Debug | LogLevel::Info | LogLevel::Warn
+            ),
             LogLevel::Error => true,
         }
     }
 
     #[allow(dead_code)]
-    pub async fn log_backend(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
-        self.log(level, &format!("[Backend] {}", message), data).await;
+    pub async fn log_backend(
+        &self,
+        level: LogLevel,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) {
+        self.log(level, &format!("[Backend] {}", message), data)
+            .await;
     }
 
-    pub async fn log_frontend(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
+    pub async fn log_frontend(
+        &self,
+        level: LogLevel,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) {
         let current_level = self.log_level.read().await.clone();
         if !self.should_log(level.clone(), current_level.clone()) {
             return;
@@ -177,19 +188,18 @@ impl LoggerService {
         let timestamp = Utc::now();
         let local_time = timestamp.with_timezone(&Local);
 
-        // Print to console (for dev mode)
-        println!("[App] [{}] {}", level_str, message);
-
         // Write to app log file
         let log_line = if let Some(d) = data {
-            format!("[{}] [{}] {} | Data: {}\n",
+            format!(
+                "[{}] [{}] {} | Data: {}\n",
                 local_time.format("%Y-%m-%d %H:%M:%S"),
                 level_str,
                 message,
                 serde_json::to_string(&d).unwrap_or_default()
             )
         } else {
-            format!("[{}] [{}] {}\n",
+            format!(
+                "[{}] [{}] {}\n",
                 local_time.format("%Y-%m-%d %H:%M:%S"),
                 level_str,
                 message
@@ -210,23 +220,47 @@ impl LoggerService {
     }
 
     #[allow(dead_code)]
-    pub async fn log_game_version(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
-        self.log(level, &format!("[GameVersion] {}", message), data).await;
+    pub async fn log_game_version(
+        &self,
+        level: LogLevel,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) {
+        self.log(level, &format!("[GameVersion] {}", message), data)
+            .await;
     }
 
     #[allow(dead_code)]
-    pub async fn log_update_check(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
-        self.log(level, &format!("[UpdateCheck] {}", message), data).await;
+    pub async fn log_update_check(
+        &self,
+        level: LogLevel,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) {
+        self.log(level, &format!("[UpdateCheck] {}", message), data)
+            .await;
     }
 
     #[allow(dead_code)]
-    pub async fn log_melon_loader(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
-        self.log(level, &format!("[MelonLoader] {}", message), data).await;
+    pub async fn log_melon_loader(
+        &self,
+        level: LogLevel,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) {
+        self.log(level, &format!("[MelonLoader] {}", message), data)
+            .await;
     }
 
     #[allow(dead_code)]
-    pub async fn log_websocket(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
-        self.log(level, &format!("[WebSocket] {}", message), data).await;
+    pub async fn log_websocket(
+        &self,
+        level: LogLevel,
+        message: &str,
+        data: Option<serde_json::Value>,
+    ) {
+        self.log(level, &format!("[WebSocket] {}", message), data)
+            .await;
     }
 
     /// Get list of available log files
@@ -239,10 +273,10 @@ impl LoggerService {
             if path.is_file() {
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                     // Include server-*, app-*, and legacy log-* files
-                    let is_log_file = (file_name.starts_with("server-") ||
-                                      file_name.starts_with("app-") ||
-                                      file_name.starts_with("log-")) &&
-                                      file_name.ends_with(".log");
+                    let is_log_file = (file_name.starts_with("server-")
+                        || file_name.starts_with("app-")
+                        || file_name.starts_with("log-"))
+                        && file_name.ends_with(".log");
                     if is_log_file {
                         log_files.push(file_name.to_string());
                     }
@@ -264,7 +298,8 @@ impl LoggerService {
             return Err(anyhow::anyhow!("Invalid filename"));
         }
 
-        fs::read_to_string(&file_path).await
+        fs::read_to_string(&file_path)
+            .await
             .context("Failed to read log file")
     }
 }

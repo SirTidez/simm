@@ -1,17 +1,17 @@
-use std::collections::HashMap;
-use std::process::Stdio;
-#[cfg(target_os = "windows")]
-#[allow(unused_imports)]  // Required for CommandExt trait methods
-use std::os::windows::process::CommandExt;
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Command, Child};
-use tokio::sync::RwLock;
-use anyhow::{Context, Result};
-use regex::Regex;
 use crate::types::{DepotDownloadOptions, DownloadProgress, DownloadStatus};
 use crate::utils::depot_downloader_detector::detect_depot_downloader;
+use anyhow::{Context, Result};
+use regex::Regex;
+use std::collections::HashMap;
+#[cfg(target_os = "windows")]
+#[allow(unused_imports)] // Required for CommandExt trait methods
+use std::os::windows::process::CommandExt;
+use std::process::Stdio;
+use std::sync::Arc;
 use tauri::{AppHandle, Runtime};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::RwLock;
 
 pub struct DepotDownloaderService {
     active_downloads: Arc<RwLock<HashMap<String, Child>>>,
@@ -105,14 +105,20 @@ impl DepotDownloaderService {
         // Check for password prompts
         if lower_line.contains("enter account password")
             || lower_line.contains("password for")
-            || (lower_line.contains("password") && (lower_line.contains(':') || lower_line.contains('>'))) {
+            || (lower_line.contains("password")
+                && (lower_line.contains(':') || lower_line.contains('>')))
+        {
             progress.message = Some(line.trim().to_string());
-            self.download_progress.write().await.insert(download_id.to_string(), progress.clone());
+            self.download_progress
+                .write()
+                .await
+                .insert(download_id.to_string(), progress.clone());
             crate::events::emit_progress(app, progress.clone())?;
             crate::events::emit_auth_error(
                 app,
                 download_id.to_string(),
-                "Password prompt detected. Please provide credentials in the authentication modal.".to_string(),
+                "Password prompt detected. Please provide credentials in the authentication modal."
+                    .to_string(),
             )?;
             return Ok(());
         }
@@ -122,9 +128,13 @@ impl DepotDownloaderService {
             || lower_line.contains("two-factor")
             || lower_line.contains("2fa")
             || lower_line.contains("mobile authenticator")
-            || lower_line.contains("approve") {
+            || lower_line.contains("approve")
+        {
             progress.message = Some("Waiting for Steam Guard approval...".to_string());
-            self.download_progress.write().await.insert(download_id.to_string(), progress.clone());
+            self.download_progress
+                .write()
+                .await
+                .insert(download_id.to_string(), progress.clone());
             crate::events::emit_progress(app, progress.clone())?;
             crate::events::emit_auth_waiting(
                 app,
@@ -138,10 +148,14 @@ impl DepotDownloaderService {
         if lower_line.contains("password")
             && (lower_line.contains("incorrect")
                 || lower_line.contains("invalid")
-                || lower_line.contains("wrong")) {
+                || lower_line.contains("wrong"))
+        {
             progress.status = DownloadStatus::Error;
             progress.error = Some("Invalid password".to_string());
-            self.download_progress.write().await.insert(download_id.to_string(), progress.clone());
+            self.download_progress
+                .write()
+                .await
+                .insert(download_id.to_string(), progress.clone());
             crate::events::emit_progress(app, progress.clone())?;
             crate::events::emit_auth_error(
                 app,
@@ -156,10 +170,14 @@ impl DepotDownloaderService {
             || lower_line.contains("too many")
             || lower_line.contains("suspicious")
             || lower_line.contains("blocked")
-            || lower_line.contains("temporarily") {
+            || lower_line.contains("temporarily")
+        {
             progress.status = DownloadStatus::Error;
             progress.error = Some("Steam rate limit or suspicious activity detected".to_string());
-            self.download_progress.write().await.insert(download_id.to_string(), progress.clone());
+            self.download_progress
+                .write()
+                .await
+                .insert(download_id.to_string(), progress.clone());
             crate::events::emit_progress(app, progress.clone())?;
             crate::events::emit_auth_error(
                 app,
@@ -173,9 +191,13 @@ impl DepotDownloaderService {
         if lower_line.contains("logged in")
             || lower_line.contains("authentication successful")
             || lower_line.contains("login successful")
-            || lower_line.contains("authenticated") {
+            || lower_line.contains("authenticated")
+        {
             progress.message = Some("Authentication successful, starting download...".to_string());
-            self.download_progress.write().await.insert(download_id.to_string(), progress.clone());
+            self.download_progress
+                .write()
+                .await
+                .insert(download_id.to_string(), progress.clone());
             crate::events::emit_progress(app, progress.clone())?;
             crate::events::emit_auth_success(app, download_id.to_string())?;
         }
@@ -215,7 +237,9 @@ impl DepotDownloaderService {
                 // Calculate progress from file counts if percentage wasn't found
                 // This ensures we always have a progress value
                 if progress.progress == 0.0 && total > 0 {
-                    progress.progress = ((downloaded as f64 / total as f64) * 100.0).min(100.0).max(0.0);
+                    progress.progress = ((downloaded as f64 / total as f64) * 100.0)
+                        .min(100.0)
+                        .max(0.0);
                 }
             }
         }
@@ -232,11 +256,15 @@ impl DepotDownloaderService {
         // - "Manifest ID: 1234567890"
         // - "Using manifest 1234567890"
         if progress.manifest_id.is_none() {
-            let manifest_pattern = Regex::new(r"(?i)(?:manifest|manifestid)[:\s]+(\d{10,})").unwrap();
+            let manifest_pattern =
+                Regex::new(r"(?i)(?:manifest|manifestid)[:\s]+(\d{10,})").unwrap();
             if let Some(caps) = manifest_pattern.captures(line) {
                 if let Some(manifest_id) = caps.get(1) {
                     progress.manifest_id = Some(manifest_id.as_str().to_string());
-                    eprintln!("[DepotDownloader] Captured manifest ID: {}", manifest_id.as_str());
+                    eprintln!(
+                        "[DepotDownloader] Captured manifest ID: {}",
+                        manifest_id.as_str()
+                    );
                 }
             }
         }
@@ -258,15 +286,18 @@ impl DepotDownloaderService {
 
             // Remove percentage patterns from message to avoid duplication
             // Remove format: (45%)
-            clean_message = Regex::new(r"\s*\(\d+%\)\s*").unwrap()
+            clean_message = Regex::new(r"\s*\(\d+%\)\s*")
+                .unwrap()
                 .replace_all(&clean_message, " ")
                 .to_string();
             // Remove format: 05.30% or 45% at start of line
-            clean_message = Regex::new(r"^\d+\.?\d*%\s*").unwrap()
+            clean_message = Regex::new(r"^\d+\.?\d*%\s*")
+                .unwrap()
                 .replace_all(&clean_message, "")
                 .to_string();
             // Remove any remaining standalone percentages
-            clean_message = Regex::new(r"\s+\d+\.?\d*%\s+").unwrap()
+            clean_message = Regex::new(r"\s+\d+\.?\d*%\s+")
+                .unwrap()
                 .replace_all(&clean_message, " ")
                 .to_string();
 
@@ -276,7 +307,10 @@ impl DepotDownloaderService {
             }
         }
 
-        self.download_progress.write().await.insert(download_id.to_string(), progress.clone());
+        self.download_progress
+            .write()
+            .await
+            .insert(download_id.to_string(), progress.clone());
         crate::events::emit_progress(app, progress)?;
 
         Ok(())
@@ -292,14 +326,19 @@ impl DepotDownloaderService {
         {
             let map = self.active_downloads.read().await;
             if map.contains_key(&download_id) {
-                return Err(anyhow::anyhow!("Download {} is already in progress", download_id));
+                return Err(anyhow::anyhow!(
+                    "Download {} is already in progress",
+                    download_id
+                ));
             }
         }
 
         // Detect DepotDownloader
         let detector_info = detect_depot_downloader().await?;
         if !detector_info.installed || detector_info.path.is_none() {
-            return Err(anyhow::anyhow!("DepotDownloader is not installed. Please install it first."));
+            return Err(anyhow::anyhow!(
+                "DepotDownloader is not installed. Please install it first."
+            ));
         }
 
         let executable_path = detector_info.path.unwrap();
@@ -307,18 +346,21 @@ impl DepotDownloaderService {
         // Initialize progress
         {
             let mut map = self.download_progress.write().await;
-            map.insert(download_id.clone(), DownloadProgress {
-                download_id: download_id.clone(),
-                status: DownloadStatus::Downloading,
-                progress: 0.0,
-                downloaded_files: None,
-                total_files: None,
-                speed: None,
-                eta: None,
-                message: None,
-                error: None,
-                manifest_id: None,
-            });
+            map.insert(
+                download_id.clone(),
+                DownloadProgress {
+                    download_id: download_id.clone(),
+                    status: DownloadStatus::Downloading,
+                    progress: 0.0,
+                    downloaded_files: None,
+                    total_files: None,
+                    speed: None,
+                    eta: None,
+                    message: None,
+                    error: None,
+                    manifest_id: None,
+                },
+            );
         }
 
         // Build command
@@ -364,9 +406,12 @@ impl DepotDownloaderService {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if !line.trim().is_empty() {
-                            if let Err(e) = service_stdout.parse_progress(&line, &download_id_stdout, &app_stdout).await {
-                                eprintln!("Error parsing progress: {}", e);
-                            }
+                        if let Err(e) = service_stdout
+                            .parse_progress(&line, &download_id_stdout, &app_stdout)
+                            .await
+                        {
+                            eprintln!("Error parsing progress: {}", e);
+                        }
                     }
                 }
             });
@@ -382,16 +427,22 @@ impl DepotDownloaderService {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     if !line.trim().is_empty() {
-                            if let Err(e) = service_stderr.parse_progress(&line, &download_id_stderr, &app_stderr).await {
-                                eprintln!("Error parsing progress: {}", e);
-                            }
+                        if let Err(e) = service_stderr
+                            .parse_progress(&line, &download_id_stderr, &app_stderr)
+                            .await
+                        {
+                            eprintln!("Error parsing progress: {}", e);
+                        }
                     }
                 }
             });
         }
 
         // Store child process
-        self.active_downloads.write().await.insert(download_id.clone(), child);
+        self.active_downloads
+            .write()
+            .await
+            .insert(download_id.clone(), child);
 
         // Handle process completion
         let app_complete = app.clone();
@@ -409,33 +460,48 @@ impl DepotDownloaderService {
                             drop(map);
 
                             if status.success() {
-                                let mut progress_map = service_complete.download_progress.write().await;
-                                let manifest_id = if let Some(progress) = progress_map.get(&download_id_complete) {
+                                let mut progress_map =
+                                    service_complete.download_progress.write().await;
+                                let manifest_id = if let Some(progress) =
+                                    progress_map.get(&download_id_complete)
+                                {
                                     progress.manifest_id.clone()
                                 } else {
                                     None
                                 };
 
-                                if let Some(progress) = progress_map.get_mut(&download_id_complete) {
+                                if let Some(progress) = progress_map.get_mut(&download_id_complete)
+                                {
                                     progress.status = DownloadStatus::Completed;
                                     progress.progress = 100.0;
                                     let progress_clone = progress.clone();
                                     drop(progress_map);
-                                    let _ = crate::events::emit_progress(&app_complete, progress_clone);
+                                    let _ =
+                                        crate::events::emit_progress(&app_complete, progress_clone);
                                 } else {
                                     drop(progress_map);
                                 }
 
                                 // Emit complete event with manifest ID
-                                let _ = crate::events::emit_complete(&app_complete, download_id_complete.clone(), manifest_id);
+                                let _ = crate::events::emit_complete(
+                                    &app_complete,
+                                    download_id_complete.clone(),
+                                    manifest_id,
+                                );
                             } else {
-                                let mut progress_map = service_complete.download_progress.write().await;
-                                if let Some(progress) = progress_map.get_mut(&download_id_complete) {
+                                let mut progress_map =
+                                    service_complete.download_progress.write().await;
+                                if let Some(progress) = progress_map.get_mut(&download_id_complete)
+                                {
                                     progress.status = DownloadStatus::Error;
-                                    progress.error = Some(format!("Process exited with code {:?}", status.code()));
+                                    progress.error = Some(format!(
+                                        "Process exited with code {:?}",
+                                        status.code()
+                                    ));
                                     let progress_clone = progress.clone();
                                     drop(progress_map);
-                                    let _ = crate::events::emit_progress(&app_complete, progress_clone);
+                                    let _ =
+                                        crate::events::emit_progress(&app_complete, progress_clone);
                                 }
                                 let _ = crate::events::emit_error(
                                     &app_complete,
@@ -457,7 +523,8 @@ impl DepotDownloaderService {
                             let mut progress_map = service_complete.download_progress.write().await;
                             if let Some(progress) = progress_map.get_mut(&download_id_complete) {
                                 progress.status = DownloadStatus::Error;
-                                progress.error = Some(format!("Error checking process status: {}", e));
+                                progress.error =
+                                    Some(format!("Error checking process status: {}", e));
                                 let progress_clone = progress.clone();
                                 drop(progress_map);
                                 let _ = crate::events::emit_progress(&app_complete, progress_clone);
@@ -527,8 +594,8 @@ impl Default for DepotDownloaderService {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use tempfile::tempdir;
     use tauri::test::mock_app;
+    use tempfile::tempdir;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -629,7 +696,8 @@ mod tests {
         let system32 = format!("{}\\System32", system_root);
         let _path_guard = EnvVarGuard::set("PATH", &system32);
         let _local_guard = EnvVarGuard::set("LOCALAPPDATA", temp.path().to_string_lossy().as_ref());
-        let _program_guard = EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
+        let _program_guard =
+            EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
 
         let service = DepotDownloaderService::new();
         let app = mock_app();
@@ -667,7 +735,10 @@ mod tests {
             .parse_progress("Downloading depot 123 (45%)", "download-2", &handle)
             .await?;
 
-        let progress = service.get_progress("download-2").await.expect("progress set");
+        let progress = service
+            .get_progress("download-2")
+            .await
+            .expect("progress set");
         assert_eq!(progress.progress, 45.0);
 
         Ok(())
@@ -683,7 +754,10 @@ mod tests {
             .parse_progress("Steam Guard required", "download-3", &handle)
             .await?;
 
-        let progress = service.get_progress("download-3").await.expect("progress set");
+        let progress = service
+            .get_progress("download-3")
+            .await
+            .expect("progress set");
         assert_eq!(
             progress.message.as_deref(),
             Some("Waiting for Steam Guard approval...")
@@ -702,7 +776,10 @@ mod tests {
             .parse_progress("Password incorrect", "download-4", &handle)
             .await?;
 
-        let progress = service.get_progress("download-4").await.expect("progress set");
+        let progress = service
+            .get_progress("download-4")
+            .await
+            .expect("progress set");
         assert!(matches!(progress.status, DownloadStatus::Error));
         assert_eq!(progress.error.as_deref(), Some("Invalid password"));
 
@@ -719,7 +796,10 @@ mod tests {
             .parse_progress("Too many requests", "download-5", &handle)
             .await?;
 
-        let progress = service.get_progress("download-5").await.expect("progress set");
+        let progress = service
+            .get_progress("download-5")
+            .await
+            .expect("progress set");
         assert!(matches!(progress.status, DownloadStatus::Error));
         assert_eq!(
             progress.error.as_deref(),
@@ -748,7 +828,10 @@ mod tests {
             .parse_progress("Download complete", "download-6", &handle)
             .await?;
 
-        let progress = service.get_progress("download-6").await.expect("progress set");
+        let progress = service
+            .get_progress("download-6")
+            .await
+            .expect("progress set");
         assert_eq!(progress.downloaded_files, Some(5));
         assert_eq!(progress.total_files, Some(10));
         assert_eq!(progress.speed.as_deref(), Some("1.2 MB/s"));
@@ -769,7 +852,10 @@ mod tests {
             .parse_progress("Validating files", "download-7", &handle)
             .await?;
 
-        let progress = service.get_progress("download-7").await.expect("progress set");
+        let progress = service
+            .get_progress("download-7")
+            .await
+            .expect("progress set");
         assert!(matches!(progress.status, DownloadStatus::Validating));
 
         Ok(())

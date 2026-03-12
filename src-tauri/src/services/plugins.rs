@@ -1,14 +1,14 @@
-use std::path::{Path, PathBuf};
+use crate::types::{ModMetadata, ModSource};
+use anyhow::{Context, Result};
+use chrono;
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fs::File;
-use std::sync::Arc;
 use std::io::Read;
-use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
-use chrono;
 use zip::ZipArchive;
-use crate::types::{ModMetadata, ModSource};
-use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct PluginsService {
@@ -63,17 +63,19 @@ impl PluginsService {
         let normalized_query = sqlx::query_scalar::<_, String>(
             "SELECT id FROM environments WHERE normalized_output_dir = ? OR output_dir = ? LIMIT 1",
         )
-            .bind(normalized_game_dir)
-            .bind(game_dir)
-            .fetch_optional(&*self.pool)
-            .await;
+        .bind(normalized_game_dir)
+        .bind(game_dir)
+        .fetch_optional(&*self.pool)
+        .await;
 
         let id = match normalized_query {
             Ok(id) => id,
-            Err(err) if err
-                .to_string()
-                .to_lowercase()
-                .contains("no such column: normalized_output_dir") => {
+            Err(err)
+                if err
+                    .to_string()
+                    .to_lowercase()
+                    .contains("no such column: normalized_output_dir") =>
+            {
                 let rows = sqlx::query_as::<_, (String, String)>(
                     "SELECT id, output_dir FROM environments",
                 )
@@ -82,7 +84,9 @@ impl PluginsService {
                 .context("Failed to resolve environment id")?;
 
                 rows.into_iter()
-                    .find(|(_, output_dir)| Self::normalize_path(output_dir) == Self::normalize_path(game_dir))
+                    .find(|(_, output_dir)| {
+                        Self::normalize_path(output_dir) == Self::normalize_path(game_dir)
+                    })
                     .map(|(id, _)| id)
             }
             Err(err) => return Err(err).context("Failed to resolve environment id"),
@@ -91,8 +95,14 @@ impl PluginsService {
         Ok(id)
     }
 
-    pub async fn load_plugin_metadata(&self, plugins_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
-        let game_dir = plugins_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+    pub async fn load_plugin_metadata(
+        &self,
+        plugins_directory: &Path,
+    ) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = plugins_directory
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
         let env_id = self.environment_id_for_dir(game_dir).await?;
         let mut metadata = HashMap::new();
 
@@ -113,9 +123,11 @@ impl PluginsService {
         }
 
         if metadata.is_empty() {
-            if let Ok(file_metadata) = self.load_plugin_metadata_from_file(plugins_directory).await {
+            if let Ok(file_metadata) = self.load_plugin_metadata_from_file(plugins_directory).await
+            {
                 if !file_metadata.is_empty() {
-                    self.save_plugin_metadata(plugins_directory, &file_metadata).await?;
+                    self.save_plugin_metadata(plugins_directory, &file_metadata)
+                        .await?;
                     return Ok(file_metadata);
                 }
             }
@@ -124,8 +136,14 @@ impl PluginsService {
         Ok(metadata)
     }
 
-    async fn load_mods_metadata(&self, mods_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
-        let game_dir = mods_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+    async fn load_mods_metadata(
+        &self,
+        mods_directory: &Path,
+    ) -> Result<HashMap<String, ModMetadata>> {
+        let game_dir = mods_directory
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
         let env_id = self.environment_id_for_dir(game_dir).await?;
         let mut metadata = HashMap::new();
 
@@ -148,30 +166,48 @@ impl PluginsService {
         Ok(metadata)
     }
 
-    async fn load_plugin_metadata_from_file(&self, plugins_directory: &Path) -> Result<HashMap<String, ModMetadata>> {
+    async fn load_plugin_metadata_from_file(
+        &self,
+        plugins_directory: &Path,
+    ) -> Result<HashMap<String, ModMetadata>> {
         let metadata_file = plugins_directory.join(".plugins-metadata.json");
         if !metadata_file.exists() {
             return Ok(HashMap::new());
         }
 
-        let content = fs::read_to_string(&metadata_file).await
+        let content = fs::read_to_string(&metadata_file)
+            .await
             .context("Failed to read plugin metadata file")?;
-        let metadata: HashMap<String, ModMetadata> = serde_json::from_str(&content)
-            .context("Failed to parse plugin metadata file")?;
+        let metadata: HashMap<String, ModMetadata> =
+            serde_json::from_str(&content).context("Failed to parse plugin metadata file")?;
         Ok(metadata)
     }
 
-    pub async fn save_plugin_metadata(&self, plugins_directory: &Path, metadata: &HashMap<String, ModMetadata>) -> Result<()> {
-        let game_dir = plugins_directory.parent().and_then(|p| p.to_str()).unwrap_or("");
+    pub async fn save_plugin_metadata(
+        &self,
+        plugins_directory: &Path,
+        metadata: &HashMap<String, ModMetadata>,
+    ) -> Result<()> {
+        let game_dir = plugins_directory
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
         let env_id = match self.environment_id_for_dir(game_dir).await? {
             Some(id) => id,
             None => {
-                log::warn!("Skipping plugin metadata save; environment not found for {}", game_dir);
+                log::warn!(
+                    "Skipping plugin metadata save; environment not found for {}",
+                    game_dir
+                );
                 return Ok(());
             }
         };
 
-        let mut tx = self.pool.begin().await.context("Failed to begin transaction for plugin metadata")?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin transaction for plugin metadata")?;
 
         sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ? AND kind = 'plugins'")
             .bind(&env_id)
@@ -180,7 +216,8 @@ impl PluginsService {
             .context("Failed to clear plugin metadata")?;
 
         for (file_name, meta) in metadata {
-            let serialized = serde_json::to_string(meta).context("Failed to serialize plugin metadata")?;
+            let serialized =
+                serde_json::to_string(meta).context("Failed to serialize plugin metadata")?;
             sqlx::query(
                 "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'plugins', ?, ?)",
             )
@@ -192,7 +229,9 @@ impl PluginsService {
             .context("Failed to save plugin metadata")?;
         }
 
-        tx.commit().await.context("Failed to commit plugin metadata transaction")?;
+        tx.commit()
+            .await
+            .context("Failed to commit plugin metadata transaction")?;
         Ok(())
     }
 
@@ -220,7 +259,12 @@ impl PluginsService {
         None
     }
 
-    pub async fn install_zip_plugin(&self, game_dir: &str, zip_path: &str, metadata: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    pub async fn install_zip_plugin(
+        &self,
+        game_dir: &str,
+        zip_path: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         let plugins_directory = self.get_plugins_directory(game_dir);
         fs::create_dir_all(&plugins_directory).await?;
 
@@ -232,32 +276,50 @@ impl PluginsService {
         let mut effective_metadata = metadata.clone();
         if let Some(ref manifest) = thunderstore_manifest {
             eprintln!("[DEBUG] Found Thunderstore manifest.json in plugin ZIP");
-            eprintln!("[DEBUG] Manifest contents: {}", serde_json::to_string_pretty(manifest).unwrap_or_default());
+            eprintln!(
+                "[DEBUG] Manifest contents: {}",
+                serde_json::to_string_pretty(manifest).unwrap_or_default()
+            );
 
             // Override metadata with Thunderstore data
             let mut ts_metadata = serde_json::Map::new();
-            ts_metadata.insert("source".to_string(), serde_json::Value::String("thunderstore".to_string()));
+            ts_metadata.insert(
+                "source".to_string(),
+                serde_json::Value::String("thunderstore".to_string()),
+            );
 
             if let Some(name) = manifest.get("name").and_then(|v| v.as_str()) {
-                ts_metadata.insert("modName".to_string(), serde_json::Value::String(name.to_string()));
+                ts_metadata.insert(
+                    "modName".to_string(),
+                    serde_json::Value::String(name.to_string()),
+                );
             }
 
             if let Some(version) = manifest.get("version_number").and_then(|v| v.as_str()) {
-                ts_metadata.insert("sourceVersion".to_string(), serde_json::Value::String(version.to_string()));
+                ts_metadata.insert(
+                    "sourceVersion".to_string(),
+                    serde_json::Value::String(version.to_string()),
+                );
             }
 
             if let Some(author) = manifest.get("author").and_then(|v| v.as_str()) {
-                ts_metadata.insert("author".to_string(), serde_json::Value::String(author.to_string()));
+                ts_metadata.insert(
+                    "author".to_string(),
+                    serde_json::Value::String(author.to_string()),
+                );
             }
 
             if let Some(website) = manifest.get("website_url").and_then(|v| v.as_str()) {
-                ts_metadata.insert("sourceUrl".to_string(), serde_json::Value::String(website.to_string()));
+                ts_metadata.insert(
+                    "sourceUrl".to_string(),
+                    serde_json::Value::String(website.to_string()),
+                );
             }
 
             // Create source ID from author/name
             if let (Some(author), Some(name)) = (
                 manifest.get("author").and_then(|v| v.as_str()),
-                manifest.get("name").and_then(|v| v.as_str())
+                manifest.get("name").and_then(|v| v.as_str()),
             ) {
                 let source_id = format!("{}/{}", author, name);
                 ts_metadata.insert("sourceId".to_string(), serde_json::Value::String(source_id));
@@ -267,22 +329,27 @@ impl PluginsService {
         }
 
         // Create temp directory for extraction
-        let temp_dir = std::env::temp_dir()
-            .join(format!("plugin-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()));
-        fs::create_dir_all(&temp_dir).await
+        let temp_dir = std::env::temp_dir().join(format!(
+            "plugin-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ));
+        fs::create_dir_all(&temp_dir)
+            .await
             .context("Failed to create temp directory")?;
 
         // Extract ZIP to temp directory (same pattern as mods)
-        let file = File::open(archive_path)
-            .context("Failed to open zip file")?;
-        let mut archive = ZipArchive::new(file)
-            .context("Failed to read zip archive")?;
+        let file = File::open(archive_path).context("Failed to open zip file")?;
+        let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
 
         // Extract all files to temp directory
         // First, collect all file data synchronously (before any await)
         let mut file_data = Vec::new();
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
+            let mut file = archive
+                .by_index(i)
                 .context("Failed to read file from archive")?;
 
             let file_name = file.name().to_string();
@@ -331,19 +398,22 @@ impl PluginsService {
         // Copy DLL files from source to plugins directory
         if source_plugins_dir.is_dir() {
             // Copy from Plugins/ folder
-            let mut entries = fs::read_dir(&source_plugins_dir).await
+            let mut entries = fs::read_dir(&source_plugins_dir)
+                .await
                 .context("Failed to read Plugins directory from archive")?;
 
             while let Some(entry) = entries.next_entry().await? {
                 let entry_path = entry.path();
                 if entry_path.is_file() {
-                    let file_name = entry_path.file_name()
+                    let file_name = entry_path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
 
                     if file_name.to_lowercase().ends_with(".dll") {
                         let dest_path = plugins_directory.join(file_name);
-                        fs::copy(&entry_path, &dest_path).await
+                        fs::copy(&entry_path, &dest_path)
+                            .await
                             .context("Failed to copy plugin file")?;
                         installed_files.push(file_name.to_string());
                     }
@@ -351,20 +421,23 @@ impl PluginsService {
             }
         } else {
             // Legacy structure: DLLs at root level
-            let mut entries = fs::read_dir(&source_plugins_dir).await
+            let mut entries = fs::read_dir(&source_plugins_dir)
+                .await
                 .context("Failed to read temp directory")?;
 
             while let Some(entry) = entries.next_entry().await? {
                 let entry_path = entry.path();
                 if entry_path.is_file() {
-                    let file_name = entry_path.file_name()
+                    let file_name = entry_path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("");
 
                     // Only root-level DLLs (not in subdirectories)
                     if file_name.to_lowercase().ends_with(".dll") {
                         let dest_path = plugins_directory.join(file_name);
-                        fs::copy(&entry_path, &dest_path).await
+                        fs::copy(&entry_path, &dest_path)
+                            .await
                             .context("Failed to copy plugin file")?;
                         installed_files.push(file_name.to_string());
                     }
@@ -383,7 +456,9 @@ impl PluginsService {
         }
 
         // Update plugin metadata
-        let mut plugin_metadata = self.load_plugin_metadata(&plugins_directory).await
+        let mut plugin_metadata = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
 
         // Extract metadata from effective metadata
@@ -399,53 +474,67 @@ impl PluginsService {
             _ => Some(ModSource::Local),
         };
 
-        let source_id = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceId").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_version = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceVersion").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_url = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let mod_name = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let author = effective_metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_id = effective_metadata.as_ref().and_then(|m| {
+            m.get("sourceId")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        let source_version = effective_metadata.as_ref().and_then(|m| {
+            m.get("sourceVersion")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        let source_url = effective_metadata.as_ref().and_then(|m| {
+            m.get("sourceUrl")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        let mod_name = effective_metadata.as_ref().and_then(|m| {
+            m.get("modName")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        let author = effective_metadata.as_ref().and_then(|m| {
+            m.get("author")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
 
         // Update metadata for all installed files
         for file_name in &installed_files {
-            plugin_metadata.insert(file_name.clone(), ModMetadata {
-                source: mod_source.clone(),
-                source_id: source_id.clone(),
-                source_version: source_version.clone(),
-                author: author.clone(),
-                mod_name: mod_name.clone(),
-                source_url: source_url.clone(),
-                summary: None,
-                icon_url: None,
-                icon_cache_path: None,
-                downloads: None,
-                likes_or_endorsements: None,
-                updated_at: None,
-                tags: None,
-                installed_version: None,
-                library_added_at: None,
-                installed_at: Some(chrono::Utc::now()),
-                last_update_check: None,
-                metadata_last_refreshed: None,
-                update_available: None,
-                remote_version: None,
-                detected_runtime: None,
-                runtime_match: None,
-                mod_storage_id: None,
-                symlink_paths: None,
-            });
+            plugin_metadata.insert(
+                file_name.clone(),
+                ModMetadata {
+                    source: mod_source.clone(),
+                    source_id: source_id.clone(),
+                    source_version: source_version.clone(),
+                    author: author.clone(),
+                    mod_name: mod_name.clone(),
+                    source_url: source_url.clone(),
+                    summary: None,
+                    icon_url: None,
+                    icon_cache_path: None,
+                    downloads: None,
+                    likes_or_endorsements: None,
+                    updated_at: None,
+                    tags: None,
+                    installed_version: None,
+                    library_added_at: None,
+                    installed_at: Some(chrono::Utc::now()),
+                    last_update_check: None,
+                    metadata_last_refreshed: None,
+                    update_available: None,
+                    remote_version: None,
+                    detected_runtime: None,
+                    runtime_match: None,
+                    mod_storage_id: None,
+                    symlink_paths: None,
+                },
+            );
         }
 
-        self.save_plugin_metadata(&plugins_directory, &plugin_metadata).await?;
+        self.save_plugin_metadata(&plugins_directory, &plugin_metadata)
+            .await?;
 
         let response_source = match mod_source {
             Some(ModSource::Thunderstore) => "thunderstore",
@@ -474,16 +563,15 @@ impl PluginsService {
             }));
         }
 
-        let mut entries = fs::read_dir(&plugins_directory).await
+        let mut entries = fs::read_dir(&plugins_directory)
+            .await
             .context("Failed to read Plugins directory")?;
 
         let mut dll_files = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.is_file() {
-                let file_name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 let lower_name = file_name.to_lowercase();
                 if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
                     let path_string = path.to_string_lossy().to_string();
@@ -493,12 +581,16 @@ impl PluginsService {
         }
 
         // Load metadata
-        let plugin_metadata = self.load_plugin_metadata(&plugins_directory).await
+        let plugin_metadata = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
 
         // Also check mods metadata to find related mods
         let mods_directory = self.get_mods_directory(game_dir);
-        let mods_metadata = self.load_mods_metadata(&mods_directory).await
+        let mods_metadata = self
+            .load_mods_metadata(&mods_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
 
         let mut plugins = Vec::new();
@@ -510,29 +602,30 @@ impl PluginsService {
                 file_name.clone()
             };
 
-            let plugin_name = original_file_name
-                .replace(".dll", "")
-                .replace(".DLL", "");
+            let plugin_name = original_file_name.replace(".dll", "").replace(".DLL", "");
 
             // Get metadata for the original filename (without .disabled)
-            let file_metadata = plugin_metadata.get(&original_file_name)
+            let file_metadata = plugin_metadata
+                .get(&original_file_name)
                 .or_else(|| plugin_metadata.get(&file_name))
                 .cloned();
 
             // Check for related mod in mods metadata
-            let related_mod = mods_metadata.values()
+            let related_mod = mods_metadata
+                .values()
                 .find(|meta| {
-                    meta.mod_name.as_ref()
+                    meta.mod_name
+                        .as_ref()
                         .map(|n| n.to_lowercase() == plugin_name.to_lowercase())
                         .unwrap_or(false)
                 })
                 .and_then(|meta| meta.mod_name.clone());
 
-            let version = file_metadata.as_ref()
+            let version = file_metadata
+                .as_ref()
                 .and_then(|m| m.installed_version.clone());
 
-            let source = file_metadata.as_ref()
-                .and_then(|m| m.source.clone());
+            let source = file_metadata.as_ref().and_then(|m| m.source.clone());
 
             plugins.push(PluginInfo {
                 name: plugin_name.clone(),
@@ -556,9 +649,7 @@ impl PluginsService {
 
     pub async fn count_plugins(&self, game_dir: &str) -> Result<u32> {
         let result = self.list_plugins(game_dir).await?;
-        let count = result.get("count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         Ok(count)
     }
 
@@ -586,14 +677,18 @@ impl PluginsService {
             return Err(anyhow::anyhow!("Path is not a file"));
         }
 
-        fs::remove_file(&file_to_delete).await
+        fs::remove_file(&file_to_delete)
+            .await
             .context("Failed to delete plugin file")?;
 
         // Remove from metadata
-        let mut metadata_map = self.load_plugin_metadata(&plugins_directory).await
+        let mut metadata_map = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
         metadata_map.remove(plugin_file_name);
-        self.save_plugin_metadata(&plugins_directory, &metadata_map).await?;
+        self.save_plugin_metadata(&plugins_directory, &metadata_map)
+            .await?;
 
         Ok(())
     }
@@ -623,7 +718,8 @@ impl PluginsService {
         }
 
         // Rename the file
-        fs::rename(&plugin_path, &disabled_path).await
+        fs::rename(&plugin_path, &disabled_path)
+            .await
             .context("Failed to disable plugin")?;
 
         Ok(())
@@ -654,7 +750,8 @@ impl PluginsService {
         }
 
         // Rename the file back
-        fs::rename(&disabled_path, &plugin_path).await
+        fs::rename(&disabled_path, &plugin_path)
+            .await
             .context("Failed to enable plugin")?;
 
         Ok(())
@@ -668,7 +765,8 @@ impl PluginsService {
         metadata: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
         let plugins_directory = self.get_plugins_directory(game_dir);
-        fs::create_dir_all(&plugins_directory).await
+        fs::create_dir_all(&plugins_directory)
+            .await
             .context("Failed to create plugins directory")?;
 
         let source_path = Path::new(dll_path);
@@ -677,11 +775,14 @@ impl PluginsService {
         }
 
         if !original_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Only .dll files are supported for plugin installation"));
+            return Err(anyhow::anyhow!(
+                "Only .dll files are supported for plugin installation"
+            ));
         }
 
         let dest_path = plugins_directory.join(original_file_name);
-        fs::copy(source_path, &dest_path).await
+        fs::copy(source_path, &dest_path)
+            .await
             .context("Failed to copy plugin file")?;
 
         let source_str = metadata
@@ -695,18 +796,28 @@ impl PluginsService {
             _ => Some(ModSource::Local),
         };
 
-        let source_id = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceId").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_version = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceVersion").and_then(|s| s.as_str()).map(|s| s.to_string()));
-        let source_url = metadata
-            .as_ref()
-            .and_then(|m| m.get("sourceUrl").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let source_id = metadata.as_ref().and_then(|m| {
+            m.get("sourceId")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        let source_version = metadata.as_ref().and_then(|m| {
+            m.get("sourceVersion")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        let source_url = metadata.as_ref().and_then(|m| {
+            m.get("sourceUrl")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
         let mod_name = metadata
             .as_ref()
-            .and_then(|m| m.get("modName").and_then(|s| s.as_str()).map(|s| s.to_string()))
+            .and_then(|m| {
+                m.get("modName")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            })
             .or_else(|| {
                 Some(
                     original_file_name
@@ -715,43 +826,49 @@ impl PluginsService {
                         .to_string(),
                 )
             });
-        let author = metadata
-            .as_ref()
-            .and_then(|m| m.get("author").and_then(|s| s.as_str()).map(|s| s.to_string()));
+        let author = metadata.as_ref().and_then(|m| {
+            m.get("author")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
 
         let mut plugin_metadata = self
             .load_plugin_metadata(&plugins_directory)
             .await
             .unwrap_or_else(|_| HashMap::new());
 
-        plugin_metadata.insert(original_file_name.to_string(), ModMetadata {
-            source: mod_source.clone(),
-            source_id,
-            source_version,
-            author,
-            mod_name,
-            source_url,
-            summary: None,
-            icon_url: None,
-            icon_cache_path: None,
-            downloads: None,
-            likes_or_endorsements: None,
-            updated_at: None,
-            tags: None,
-            installed_version: None,
-            library_added_at: None,
-            installed_at: Some(chrono::Utc::now()),
-            last_update_check: None,
-            metadata_last_refreshed: None,
-            update_available: None,
-            remote_version: None,
-            detected_runtime: None,
-            runtime_match: None,
-            mod_storage_id: None,
-            symlink_paths: None,
-        });
+        plugin_metadata.insert(
+            original_file_name.to_string(),
+            ModMetadata {
+                source: mod_source.clone(),
+                source_id,
+                source_version,
+                author,
+                mod_name,
+                source_url,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
+                installed_version: None,
+                library_added_at: None,
+                installed_at: Some(chrono::Utc::now()),
+                last_update_check: None,
+                metadata_last_refreshed: None,
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: None,
+                symlink_paths: None,
+            },
+        );
 
-        self.save_plugin_metadata(&plugins_directory, &plugin_metadata).await?;
+        self.save_plugin_metadata(&plugins_directory, &plugin_metadata)
+            .await?;
 
         let response_source = match mod_source {
             Some(ModSource::Thunderstore) => "thunderstore",
@@ -769,9 +886,15 @@ impl PluginsService {
         }))
     }
 
-    pub async fn install_mlvscan(&self, game_dir: &str, dll_path: &str, version: &str) -> Result<serde_json::Value> {
+    pub async fn install_mlvscan(
+        &self,
+        game_dir: &str,
+        dll_path: &str,
+        version: &str,
+    ) -> Result<serde_json::Value> {
         let plugins_directory = self.get_plugins_directory(game_dir);
-        fs::create_dir_all(&plugins_directory).await
+        fs::create_dir_all(&plugins_directory)
+            .await
             .context("Failed to create plugins directory")?;
 
         let source_path = Path::new(dll_path);
@@ -780,11 +903,14 @@ impl PluginsService {
         let dest_path = plugins_directory.join("MLVScan.dll");
 
         // Copy the DLL file
-        fs::copy(source_path, &dest_path).await
+        fs::copy(source_path, &dest_path)
+            .await
             .context("Failed to copy MLVScan.dll")?;
 
         // Update plugin metadata
-        let mut metadata = self.load_plugin_metadata(&plugins_directory).await
+        let mut metadata = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
 
         let mlvscan_metadata = ModMetadata {
@@ -815,7 +941,8 @@ impl PluginsService {
         };
 
         metadata.insert("MLVScan.dll".to_string(), mlvscan_metadata);
-        self.save_plugin_metadata(&plugins_directory, &metadata).await?;
+        self.save_plugin_metadata(&plugins_directory, &metadata)
+            .await?;
 
         Ok(serde_json::json!({
             "success": true,
@@ -832,12 +959,14 @@ impl PluginsService {
         // Try to delete both enabled and disabled versions
         let mut deleted = false;
         if plugin_path.exists() {
-            fs::remove_file(&plugin_path).await
+            fs::remove_file(&plugin_path)
+                .await
                 .context("Failed to remove MLVScan.dll")?;
             deleted = true;
         }
         if disabled_path.exists() {
-            fs::remove_file(&disabled_path).await
+            fs::remove_file(&disabled_path)
+                .await
                 .context("Failed to remove MLVScan.dll.disabled")?;
             deleted = true;
         }
@@ -850,10 +979,13 @@ impl PluginsService {
         }
 
         // Remove from metadata
-        let mut metadata = self.load_plugin_metadata(&plugins_directory).await
+        let mut metadata = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
         metadata.remove("MLVScan.dll");
-        self.save_plugin_metadata(&plugins_directory, &metadata).await?;
+        self.save_plugin_metadata(&plugins_directory, &metadata)
+            .await?;
 
         Ok(serde_json::json!({
             "success": true,
@@ -861,7 +993,10 @@ impl PluginsService {
         }))
     }
 
-    pub async fn get_mlvscan_installation_status(&self, game_dir: &str) -> Result<serde_json::Value> {
+    pub async fn get_mlvscan_installation_status(
+        &self,
+        game_dir: &str,
+    ) -> Result<serde_json::Value> {
         let plugins_directory = self.get_plugins_directory(game_dir);
 
         if !plugins_directory.exists() {
@@ -887,12 +1022,16 @@ impl PluginsService {
 
         // Try to extract version from metadata or DLL
         let mut version: Option<String> = None;
-        let metadata = self.load_plugin_metadata(&plugins_directory).await
+        let metadata = self
+            .load_plugin_metadata(&plugins_directory)
+            .await
             .unwrap_or_else(|_| HashMap::new());
 
         if let Some(meta) = metadata.get("MLVScan.dll") {
             // Check installed_version first, then fall back to source_version
-            version = meta.installed_version.clone()
+            version = meta
+                .installed_version
+                .clone()
                 .or_else(|| meta.source_version.clone());
         }
 
@@ -989,9 +1128,15 @@ mod tests {
         let status = service
             .get_mlvscan_installation_status(output_dir.to_string_lossy().as_ref())
             .await?;
-        assert_eq!(status.get("installed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            status.get("installed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert_eq!(status.get("enabled").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(status.get("version").and_then(|v| v.as_str()), Some("v1.2.3"));
+        assert_eq!(
+            status.get("version").and_then(|v| v.as_str()),
+            Some("v1.2.3")
+        );
 
         let list = service
             .list_plugins(output_dir.to_string_lossy().as_ref())
@@ -1094,7 +1239,10 @@ mod tests {
             .await?;
 
         assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(result.get("source").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(
+            result.get("source").and_then(|v| v.as_str()),
+            Some("github")
+        );
 
         let plugins_dir = output_dir.join("Plugins");
         assert!(plugins_dir.join("InstalledPlugin.dll").exists());

@@ -2,12 +2,15 @@ import { invoke } from '@tauri-apps/api/core';
 
 // Keep reference to original console methods before interception
 const originalConsole = {
+
   log: console.log.bind(console),
   info: console.info.bind(console),
   warn: console.warn.bind(console),
   error: console.error.bind(console),
   debug: console.debug.bind(console),
 };
+
+let consoleIntercepted = false;
 
 /**
  * Safely stringify an object, handling circular references
@@ -84,6 +87,11 @@ export const logger = new Logger();
  * Call this in your app initialization
  */
 export function interceptConsole() {
+  if (consoleIntercepted) {
+    return;
+  }
+
+  consoleIntercepted = true;
   console.log = (...args: any[]) => {
     originalConsole.log(...args);
     const message = args.map(arg =>
@@ -126,3 +134,5 @@ export function interceptConsole() {
 
   originalConsole.info('[Logger] Console interception enabled - all console output will be logged to file');
 }
+
+
