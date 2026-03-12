@@ -302,7 +302,7 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
         return areVersionsEquivalent(entry.sourceVersion || entry.installedVersion, remoteVersion);
       });
       const hasFlaggedUpdate = group.updateAvailable;
-      const updateAvailable = hasRemoteVersion ? !hasRemoteDownloaded : hasFlaggedUpdate;
+      const updateAvailable = hasFlaggedUpdate || (hasRemoteVersion && !hasRemoteDownloaded);
 
       return {
         key: group.key,
