@@ -155,9 +155,14 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       clearOAuthTimeout();
 
       if (detail?.success) {
-        await loadNexusStatus();
-        setNexusBusy(false);
-        setNexusError(null);
+        try {
+          await loadNexusStatus();
+          setNexusError(null);
+        } catch (error) {
+          setNexusError(error instanceof Error ? error.message : 'Failed to refresh Nexus status');
+        } finally {
+          setNexusBusy(false);
+        }
         return;
       }
 

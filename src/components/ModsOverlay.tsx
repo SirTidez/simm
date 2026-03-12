@@ -1322,6 +1322,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
     setInstallingNexusMod({ modId, fileId: targetFile.file_id });
     setError(null);
+    let keepPendingInstall = false;
     try {
       if (!canDirectDownload && requiresSiteConfirmation) {
         await ApiService.beginNexusManualDownloadSession({
@@ -1334,6 +1335,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         });
         startNexusManualTimeout();
         setError('Confirm the Mod Manager download on Nexus. SIMM will continue when the nxm link returns.');
+        keepPendingInstall = true;
         return;
       }
 
@@ -1400,7 +1402,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       console.error(`Extracted error message:`, errorMsg);
       setError(errorMsg);
     } finally {
-      if (canDirectDownload) {
+      if (!keepPendingInstall) {
         setInstallingNexusMod(null);
       }
     }

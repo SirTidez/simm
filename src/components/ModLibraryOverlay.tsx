@@ -1073,7 +1073,6 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
               runtime,
               async () => {
                 await refreshLibrary();
-                notifyLibraryUpdated();
 
                 if (runtimesToUpdate.length > 1) {
                   showLibraryNotice(
@@ -1155,6 +1154,10 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       }
     } catch (err) {
       console.error('Failed to update and activate mod version:', err);
+      showLibraryNotice(
+        'Mod Update Failed',
+        err instanceof Error ? err.message : 'Failed to update this mod version.',
+      );
     } finally {
       if (!keepPendingUpdate) {
         setUpdatingGroup(null);

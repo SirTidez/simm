@@ -906,7 +906,13 @@ pub(crate) async fn ensure_nxm_runtime_registration(db: Arc<SqlitePool>) -> Resu
                 .await
                 .map_err(|e| e.to_string())?;
         } else {
-            register_windows_protocol_handler(NXM_PROTOCOL)?;
+            let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
+            settings
+                .save_nexus_nxm_protocol_backup(
+                    &serde_json::to_value(backup).map_err(|e| e.to_string())?,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
