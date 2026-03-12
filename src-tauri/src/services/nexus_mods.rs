@@ -570,43 +570,85 @@ impl NexusModsService {
         Ok(results)
     }
 
-    /// Download mod file by mod ID and file ID
-    pub async fn download_mod_file(
+    pub async fn get_oauth_download_links(
         &self,
+        access_token: &str,
         game_id: &str,
         mod_id: u32,
         file_id: u32,
-    ) -> Result<Vec<u8>> {
-        let api_key = self.api_key.read().await.clone()
-            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
+    ) -> Result<Vec<String>> {
         let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
         let game_id_i64 = resolved_game_id
             .parse::<i64>()
             .map_err(|e| anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e))?;
 
-        let links = nexus_api::get_download_links(
-            &api_key,
-            game_id_i64,
-            mod_id as i64,
-            file_id as i64,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get Nexus download links via crate: {}", e))?;
+        let game_query = r#"query($id: ID) { game(id: $id) { domainName } }"#;
+        let game_vars = serde_json::json!({ "id": game_id_i64.to_string() });
+        let game_data = self.graphql_request(game_query, game_vars).await?;
+        let domain = game_data
+            .get("game")
+            .and_then(|g| g.get("domainName"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing game domainName for game {}", game_id_i64))?;
 
-        let first_url = links
-            .links
-            .first()
-            .map(|link| link.uri.clone())
+        let endpoint = format!("https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json", domain, mod_id, file_id);
+        let response = reqwest::Client::new()
+            .get(endpoint)
+            .bearer_auth(access_token)
+            .header("Application-Name", "SIMM")
+            .header("Application-Version", env!("CARGO_PKG_VERSION"))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed Nexus OAuth download link request: {}", e))?;
+
+        let status = response.status();
+        let value = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse Nexus OAuth download link response: {}", e))?;
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("Nexus OAuth download-link request failed ({}): {}", status, value));
+        }
+
+        let arr = value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Nexus download-link response was not an array"))?;
+        let links: Vec<String> = arr
+            .iter()
+            .filter_map(|item| item.get("URI").or_else(|| item.get("uri")).and_then(|v| v.as_str()))
+            .map(|uri| uri.to_string())
+            .collect();
+
+        if links.is_empty() {
+            return Err(anyhow::anyhow!("No Nexus OAuth download links returned"));
+        }
+
+        Ok(links)
+    }
+
+    /// Download mod file by mod ID and file ID using OAuth access token
+    pub async fn download_mod_file(
+        &self,
+        access_token: &str,
+        game_id: &str,
+        mod_id: u32,
+        file_id: u32,
+    ) -> Result<Vec<u8>> {
+        let first_url = self
+            .get_oauth_download_links(access_token, game_id, mod_id, file_id)
+            .await?
+            .into_iter()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("No Nexus download links returned for file {}", file_id))?;
 
-        let downloaded = nexus_api::download_from_url(&first_url, Some(&api_key))
+        let downloaded = nexus_api::download_from_url(&first_url, None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to download Nexus file via crate: {}", e))?;
 
         Ok(downloaded.bytes)
     }
 }
-
 impl Default for NexusModsService {
     fn default() -> Self {
         Self::new()
@@ -693,3 +735,6 @@ mod tests {
         Ok(())
     }
 }
+
+
+

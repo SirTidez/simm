@@ -572,6 +572,7 @@ impl ModUpdateService {
         mods_service: &ModsService,
         thunderstore_service: &ThunderStoreService,
         nexus_mods_service: &NexusModsService,
+        nexus_access_token: Option<&str>,
         github_service: &GitHubReleasesService,
     ) -> Result<serde_json::Value> {
         use crate::types::ModSource;
@@ -738,8 +739,11 @@ impl ModUpdateService {
                     }));
                 }
 
+                let access_token = nexus_access_token
+                    .ok_or_else(|| anyhow::anyhow!("Nexus OAuth login required to download updates"))?;
+
                 let bytes = nexus_mods_service
-                    .download_mod_file("schedule1", mod_id, file_id)
+                    .download_mod_file(access_token, "schedule1", mod_id, file_id)
                     .await
                     .context("Failed to download Nexus update")?;
                 let original_file_name = target_file
@@ -980,6 +984,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                None,
                 &github_service,
             )
             .await
@@ -1150,5 +1155,4 @@ mod tests {
         Ok(())
     }
 }
-
 

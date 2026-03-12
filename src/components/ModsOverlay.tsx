@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ApiService } from '../services/api';
+import { applyNexusAccessModeOverride } from '../services/nexusAccessMode';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
@@ -164,6 +165,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [nexusModsFiles, setNexusModsFiles] = useState<Map<number, NexusModFile[]>>(new Map());
   const [showNexusKeyRequiredModal, setShowNexusKeyRequiredModal] = useState(false);
   const [hasNexusDownloadAccess, setHasNexusDownloadAccess] = useState<boolean>(false);
+  const [nexusRequiresSiteConfirmation, setNexusRequiresSiteConfirmation] = useState<boolean>(true);
 
   // Mod updates state
   const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
@@ -179,6 +181,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const modsScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const modsScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
+  const nexusManualTimeoutRef = useRef<number | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
 
   const libraryVersionCountByName = useMemo(() => {
@@ -201,1004 +204,113 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const refreshNexusDownloadAccess = async () => {
     try {
-      const hasKey = await ApiService.hasNexusModsApiKey();
-      setHasNexusDownloadAccess(hasKey);
-    } catch {
+      const status = applyNexusAccessModeOverride(await ApiService.getNexusOAuthStatus());
+      const isConnected = !!status.connected;
+      const requiresSiteConfirmation = isConnected && !!status.account?.requiresSiteConfirmation;
+
+      setHasNexusDownloadAccess(isConnected);
+      setNexusRequiresSiteConfirmation(requiresSiteConfirmation);
+    } catch (err) {
+      console.error('Failed to refresh Nexus download access:', err);
       setHasNexusDownloadAccess(false);
+      setNexusRequiresSiteConfirmation(true);
     }
   };
 
-  const loadInstalledMods = async (showSpinner: boolean = true, refresh: boolean = false) => {
-    const requestId = ++activeLoadRequestRef.current;
-    if (showSpinner) {
-      setLoading(true);
-      setError(null);
-    }
-
-    try {
-      const result = await ApiService.getMods(environmentId, refresh);
-      if (requestId !== activeLoadRequestRef.current) {
-        return;
-      }
-
-      const normalizedMods = result.mods.map(mod => ({
-        ...mod,
-        source: mod.source as ModInfo['source'],
-      }));
-      setMods(previous => mergeModSnapshots(previous, normalizedMods));
-      setModsDirectory(result.modsDirectory);
-    } catch (err) {
-      if (requestId !== activeLoadRequestRef.current) {
-        return;
-      }
-
-      if (showSpinner) {
-        setError(err instanceof Error ? err.message : 'Failed to load mods');
-      } else {
-        console.warn('Failed to refresh installed mods:', err);
-      }
-    } finally {
-      if (showSpinner && requestId === activeLoadRequestRef.current) {
-        setLoading(false);
-      }
+  const clearNexusManualTimeout = () => {
+    if (nexusManualTimeoutRef.current !== null) {
+      window.clearTimeout(nexusManualTimeoutRef.current);
+      nexusManualTimeoutRef.current = null;
     }
   };
 
-  const loadDownloadedLibrary = async () => {
-    try {
-      const library = await ApiService.getModLibrary();
-      setDownloadedMods(library.downloaded || []);
-    } catch (err) {
-      console.warn('Failed to load downloaded mod library:', err);
-    }
-  };
-
-  const loadCachedModUpdates = async () => {
-    try {
-      const summary = await ApiService.getModUpdatesSummary(environmentId);
-      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
-      for (const update of summary.updates || []) {
-        updatesMap.set(update.modFileName, {
-          updateAvailable: true,
-          currentVersion: update.currentVersion,
-          latestVersion: update.latestVersion,
-        });
-      }
-      setModUpdates(updatesMap);
-      onModUpdatesChecked?.(summary.count || updatesMap.size);
-    } catch (err) {
-      console.warn('Failed to load cached mod update summary:', err);
-    }
-  };
-
-  const loadModsPanelData = async () => {
-    await loadInstalledMods(true, false);
-    await loadDownloadedLibrary();
-    void loadCachedModUpdates();
+  const startNexusManualTimeout = () => {
+    clearNexusManualTimeout();
+    nexusManualTimeoutRef.current = window.setTimeout(() => {
+      setInstallingNexusMod(null);
+      setError('Nexus manual download timed out. Start the download again from the Files page.');
+    }, 5 * 60 * 1000);
   };
 
   useEffect(() => {
-    if (isOpen && environmentId) {
-      void loadEnvironment();
-      void loadModsPanelData();
-      void refreshNexusDownloadAccess();
-
-      // Listen for filesystem changes
-      let unlistenModsChanged: (() => void) | null = null;
-      let unlistenModsSnapshot: (() => void) | null = null;
-
-      const scheduleInstalledModsRefresh = () => {
-        if (modsReloadTimerRef.current) {
-          window.clearTimeout(modsReloadTimerRef.current);
-        }
-
-        modsReloadTimerRef.current = window.setTimeout(() => {
-          modsReloadTimerRef.current = null;
-          if (Date.now() < suppressWatcherReloadUntilRef.current) {
-            return;
-          }
-          void loadInstalledMods(false, true);
-          void loadCachedModUpdates();
-          onModsChanged?.();
-        }, 350);
-      };
-
-      const setupListener = async () => {
-        try {
-          unlistenModsChanged = await onModsChangedEvent((data) => {
-            if (data.environmentId === environmentId) {
-              scheduleInstalledModsRefresh();
-            }
-          });
-
-          unlistenModsSnapshot = await onModsSnapshotUpdated((data) => {
-            if (data.environmentId !== environmentId || !data.snapshot) {
-              return;
-            }
-
-            const normalizedMods = (data.snapshot.mods || []).map(mod => ({
-              ...mod,
-              source: mod.source as ModInfo['source'],
-            }));
-
-            setMods(previous => mergeModSnapshots(previous, normalizedMods));
-            setModsDirectory(data.snapshot.modsDirectory || '');
-          });
-        } catch (error) {
-          console.error('Failed to set up mods changed listener:', error);
-        }
-      };
-
-      void setupListener();
-
-      return () => {
-        activeLoadRequestRef.current += 1;
-        if (modsReloadTimerRef.current) {
-          window.clearTimeout(modsReloadTimerRef.current);
-          modsReloadTimerRef.current = null;
-        }
-        if (unlistenModsChanged) unlistenModsChanged();
-        if (unlistenModsSnapshot) unlistenModsSnapshot();
-      };
-    }
-
-    activeLoadRequestRef.current += 1;
-    if (modsReloadTimerRef.current) {
-      window.clearTimeout(modsReloadTimerRef.current);
-      modsReloadTimerRef.current = null;
-    }
-
-    // Reset state when closing
-    setMods([]);
-    setError(null);
-    setModsDirectory('');
-    setEnvironment(null);
-    setSearchQuery('');
-    setSearchResults([]);
-    setShowSearchResults(false);
-    setSearchSource('thunderstore');
-    setNexusModsSearchQuery('');
-    setNexusModsSearchResults([]);
-    setShowNexusModsResults(false);
-    setNexusModsFiles(new Map());
-    setModUpdates(new Map());
-    setUpdatingAllMods(false);
-    setShowSearchInOverlay(false);
-    setModListFilter('all');
-    setConfirmDialog(null);
-    setPendingRuntimeSelection(null);
-    setPendingUpload(null);
-    setDownloadedMods([]);
-    setActiveModView(null);
-  }, [isOpen, environmentId]);
-
-  useEffect(() => {
-    if (!isOpen || !environmentId) {
-      return;
-    }
-
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void onModMetadataRefreshStatus((data) => {
-      const running = Boolean(data.running) || (data.activeCount || 0) > 0;
-      const wasRunning = metadataRefreshRunningRef.current;
-      metadataRefreshRunningRef.current = running;
-
-      if (wasRunning && !running) {
-        void loadDownloadedLibrary();
-        void loadInstalledMods(false, true);
-      }
-    })
-      .then((fn) => {
-        if (disposed) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-      })
-      .catch((error) => {
-        console.warn('Failed to register mod metadata refresh listener:', error);
-      });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-      metadataRefreshRunningRef.current = false;
-    };
-  }, [isOpen, environmentId]);
-
-  const openModView = (nextView: ModViewState) => {
-    if (modsScrollContainerRef.current) {
-      modsScrollTopRef.current = modsScrollContainerRef.current.scrollTop;
-    }
-    setActiveModView(nextView);
-  };
-
-  const closeModView = () => {
-    setActiveModView(null);
-    window.requestAnimationFrame(() => {
-      if (modsScrollContainerRef.current) {
-        modsScrollContainerRef.current.scrollTop = modsScrollTopRef.current;
-      }
-    });
-  };
-
-  // Refresh library when notified (e.g. after download in another view) or when opening
-  useEffect(() => {
-    if (!isOpen || !environmentId) return;
-    const handler = () => void loadDownloadedLibrary();
-    window.addEventListener('library-updated', handler);
-    // Check if library was updated while we were away (e.g. user downloaded in Library then switched here)
-    if (sessionStorage.getItem('library-needs-refresh') === '1') {
-      sessionStorage.removeItem('library-needs-refresh');
-      void loadDownloadedLibrary();
-    }
-    return () => window.removeEventListener('library-updated', handler);
-  }, [isOpen, environmentId]);
-
-  // Auto-load files for NexusMods search results
-  useEffect(() => {
-    if (showNexusModsResults && nexusModsSearchResults.length > 0) {
-      nexusModsSearchResults.forEach((mod) => {
-        if (!nexusModsFiles.has(mod.mod_id)) {
-          handleLoadNexusModFiles(mod.mod_id);
-        }
-      });
-    }
-  }, [showNexusModsResults, nexusModsSearchResults]);
-
-  const checkModUpdates = async (showErrors: boolean = false) => {
-    try {
-      const updates = await ApiService.checkModUpdates(environmentId);
-      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
-      updates.forEach(update => {
-        updatesMap.set(update.modFileName, {
-          updateAvailable: update.updateAvailable,
-          currentVersion: update.currentVersion,
-          latestVersion: update.latestVersion
-        });
-      });
-      setModUpdates(updatesMap);
-      const count = Array.from(updatesMap.values()).filter(u => u.updateAvailable).length;
-      onModUpdatesChecked?.(count);
-    } catch (updateErr) {
-      if (showErrors) {
-        throw updateErr; // Re-throw if called manually so we can show error
-      } else {
-        // Fail silently - updates are nice to have but not critical
-        console.warn('Failed to check mod updates:', updateErr);
-      }
-    }
-  };
-
-  const handleCheckModUpdates = async () => {
-    setCheckingModUpdates(true);
-    setError(null);
-    try {
-      await checkModUpdates(true); // Show errors when manually triggered
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to check for mod updates');
-    } finally {
-      setCheckingModUpdates(false);
-    }
-  };
-
-  const handleDeleteMod = async (mod: ModInfo) => {
-    setDeletingMod(mod.fileName);
-    try {
-      await ApiService.deleteMod(environmentId, mod.fileName);
-      // Reload mods list after deletion
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-      await loadCachedModUpdates();
-      // Notify parent that mods changed (so it can refresh the count)
-      if (onModsChanged) {
-        onModsChanged();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete mod');
-    } finally {
-      setDeletingMod(null);
-    }
-  };
-
-  const handleUpdateMod = async (mod: ModInfo) => {
-    setUpdatingMod(mod.fileName);
-    setError(null);
-    try {
-      const result = await ApiService.updateMod(environmentId, mod.fileName);
-      if (!result.success) {
-        throw new Error(result.error || result.message || 'Failed to update mod');
-      }
-
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-      await loadCachedModUpdates();
-      if (onModsChanged) {
-        onModsChanged();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update mod');
-    } finally {
-      setUpdatingMod(null);
-    }
-  };
-
-  const handleUpdateAllMods = async () => {
-    const updatableMods = mods.filter((mod) => {
-      const updateInfo = modUpdates.get(mod.fileName);
-      const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
-      return !!updateInfo?.updateAvailable && canAutoUpdate;
-    });
-
-    if (updatableMods.length === 0) {
-      setError('No supported mod updates are currently available');
-      return;
-    }
-
-    setUpdatingAllMods(true);
-    setError(null);
-
-    const failed: string[] = [];
-    for (const mod of updatableMods) {
-      setUpdatingMod(mod.fileName);
-      try {
-        const result = await ApiService.updateMod(environmentId, mod.fileName);
-        if (!result.success) {
-          failed.push(mod.name);
-        }
-      } catch {
-        failed.push(mod.name);
-      }
-    }
-
-    setUpdatingMod(null);
-    setUpdatingAllMods(false);
-
-    await loadInstalledMods(false, true);
-    await loadDownloadedLibrary();
-    await loadCachedModUpdates();
-    if (onModsChanged) {
-      onModsChanged();
-    }
-
-    if (failed.length > 0) {
-      setError(`Updated ${updatableMods.length - failed.length}/${updatableMods.length} mods. Failed: ${failed.join(', ')}`);
-    }
-  };
-
-  const requestDeleteMod = (mod: ModInfo) => {
-    const dialog: ConfirmDialog = {
-      title: 'Delete Mod',
-      message: `Are you sure you want to delete "${mod.name}"?`,
-      confirmText: 'Delete',
-      cancelText: 'Cancel',
-      onConfirm: () => handleDeleteMod(mod),
-      readyAt: Date.now() + 200,
-    };
-
-    window.setTimeout(() => {
-      setConfirmDialog(dialog);
-    }, 0);
-  };
-
-  const handleDisableMod = async (mod: ModInfo) => {
-    setDisablingMod(mod.fileName);
-    try {
-      suppressWatcherReloadUntilRef.current = Date.now() + 1500;
-      await ApiService.disableMod(environmentId, mod.fileName);
-      // Update the specific mod in-place to avoid a full list reload flash
-      setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: true } : m));
-      if (onModsChanged) {
-        onModsChanged();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to disable mod');
-    } finally {
-      setDisablingMod(null);
-    }
-  };
-
-  const handleEnableMod = async (mod: ModInfo) => {
-    setEnablingMod(mod.fileName);
-    try {
-      suppressWatcherReloadUntilRef.current = Date.now() + 1500;
-      await ApiService.enableMod(environmentId, mod.fileName);
-      // Update the specific mod in-place to avoid a full list reload flash
-      setMods(prev => prev.map(m => m.fileName === mod.fileName ? { ...m, disabled: false } : m));
-      if (onModsChanged) {
-        onModsChanged();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to enable mod');
-    } finally {
-      setEnablingMod(null);
-    }
-  };
-
-  const handleOpenFolder = async () => {
-    try {
-      await ApiService.openModsFolder(environmentId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to open mods folder');
-    }
-  };
-
-  const handleInstallDownloaded = async (entry: ModLibraryEntry) => {
-    const runtime = environment?.runtime;
-    const storageId = runtime
-      ? entry.storageIdsByRuntime?.[runtime] || entry.storageId
-      : entry.storageId;
-
-    if (!storageId) {
-      setError('No compatible storage entry found for this runtime');
-      return;
-    }
-
-    setInstallingDownloaded(storageId);
-    try {
-      await ApiService.installDownloadedMod(storageId, [environmentId]);
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-      await loadCachedModUpdates();
-      if (onModsChanged) {
-        onModsChanged();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to install downloaded mod');
-    } finally {
-      setInstallingDownloaded(null);
-    }
-  };
-
-  const handleConfirmDialog = () => {
-    if (!confirmDialog) return;
-    if (confirmDialog.readyAt && Date.now() < confirmDialog.readyAt) {
-      return;
-    }
-    const action = confirmDialog.onConfirm;
-    setConfirmDialog(null);
-    Promise.resolve(action()).catch((err) => {
-      console.error('Confirm action failed:', err);
-      setError(err instanceof Error ? err.message : 'Action failed');
-    });
-  };
-
-  const extractModNameFromFileName = (fileName: string): string => {
-    // Remove file extensions
-    let modName = fileName.replace(/\.(dll|zip|rar)$/i, '');
-
-    // Remove common version patterns (e.g., "ModName-1.2.3", "ModName_v1.0", "ModName 2.0")
-    modName = modName.replace(/[-_ ]?v?\d+\.\d+(\.\d+)?([-_ ].*)?$/i, '');
-    modName = modName.replace(/[-_ ]?\d+\.\d+\.\d+.*$/i, '');
-
-    // Remove common suffixes like "-IL2CPP", "-Mono", etc.
-    modName = modName.replace(/[-_ ]?(il2cpp|mono|beta|alpha|release).*$/i, '');
-
-    // Remove numeric IDs at the start (e.g., "12345-ModName")
-    modName = modName.replace(/^\d+-/, '');
-
-    // Trim and clean up
-    modName = modName.trim().replace(/[-_]+/g, ' ').trim();
-
-    return modName || fileName.replace(/\.(dll|zip|rar)$/i, '');
-  };
-
-  const fuzzyMatchModName = (searchName: string, modName: string): number => {
-    // Simple fuzzy matching score (0-1)
-    const searchLower = searchName.toLowerCase().trim();
-    const modLower = modName.toLowerCase().trim();
-
-    // Exact match
-    if (modLower === searchLower) return 1.0;
-
-    // Contains match
-    if (modLower.includes(searchLower) || searchLower.includes(modLower)) {
-      return 0.8;
-    }
-
-    // Word-based matching
-    const searchWords = searchLower.split(/\s+/);
-    const modWords = modLower.split(/\s+/);
-    let matchedWords = 0;
-
-    for (const searchWord of searchWords) {
-      if (modWords.some(modWord => modWord.includes(searchWord) || searchWord.includes(modWord))) {
-        matchedWords++;
-      }
-    }
-
-    if (matchedWords > 0) {
-      return matchedWords / Math.max(searchWords.length, modWords.length) * 0.6;
-    }
-
-    return 0;
-  };
-
-  const detectModSource = async (fileName: string): Promise<{
-    source: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
-    sourceUrl?: string;
-    modName?: string;
-    author?: string;
-    sourceId?: string;
-    sourceVersion?: string;
-  }> => {
-    const fileNameLower = fileName.toLowerCase();
-
-    // Check for Thunderstore indicators
-    // Thunderstore mods often have specific naming patterns or contain manifest.json
-    if (fileNameLower.includes('thunderstore') ||
-        fileNameLower.includes('thunder') ||
-        fileNameLower.match(/^[a-z0-9_-]+-[a-z0-9_-]+-\d+\.\d+\.\d+\.zip$/i)) {
-      // Try to extract mod info from filename (format: modname-version.zip)
-      const match = fileName.match(/^(.+?)-(\d+\.\d+\.\d+)/);
-      if (match) {
-        return {
-          source: 'thunderstore',
-          modName: match[1],
-          sourceVersion: match[2],
-  };
-}
-      return { source: 'thunderstore' };
-    }
-
-    // Check for Nexus Mods indicators
-    // Nexus mods often have numeric IDs in filename or specific patterns
-    if (fileNameLower.includes('nexus') ||
-        fileNameLower.match(/^\d+-\d+/) || // Pattern like "12345-67890" (modId-fileId)
-        fileNameLower.includes('nexusmods')) {
-      // Try to extract mod ID from filename
-      const match = fileName.match(/(\d+)-(\d+)/);
-      if (match) {
-        return {
-          source: 'nexusmods',
-          sourceId: match[1],
-          sourceUrl: `https://www.nexusmods.com/schedule1/mods/${match[1]}`,
+    const handleManualDownloadResult = async (event: Event) => {
+      const detail = (event as CustomEvent<{
+        success: boolean;
+        result?: {
+          kind?: 'library' | 'install';
+          environmentId?: string;
         };
-      }
-      return { source: 'nexusmods' };
-    }
+        error?: string;
+      }>).detail;
 
-    // If not clearly Thunderstore or Nexus, try searching Nexus Mods
-    // Extract a clean mod name from the filename
-    const cleanModName = extractModNameFromFileName(fileName);
-
-    // Only search if we have a reasonable mod name (at least 3 characters)
-    if (cleanModName.length >= 3) {
-      try {
-        // Search Nexus Mods for this mod name (search works without login)
-        const searchResults = await ApiService.searchNexusMods('schedule1', cleanModName);
-
-        if (searchResults.mods && searchResults.mods.length > 0) {
-          // Find the best matching mod using fuzzy matching
-          let bestMatch: NexusMod | null = null;
-          let bestScore = 0;
-
-          for (const mod of searchResults.mods) {
-            const score = fuzzyMatchModName(cleanModName, mod.name);
-            if (score > bestScore && score >= 0.6) { // Require at least 60% match
-              bestScore = score;
-              bestMatch = mod;
-            }
-          }
-
-          if (bestMatch) {
-            return {
-              source: 'nexusmods',
-              sourceId: bestMatch.mod_id.toString(),
-              sourceUrl: `https://www.nexusmods.com/schedule1/mods/${bestMatch.mod_id}`,
-              modName: bestMatch.name,
-              author: bestMatch.author,
-              sourceVersion: bestMatch.version,
-            };
-          }
-        }
-      } catch (err) {
-        // If search fails, silently fall through to unknown
-        console.warn('Failed to search Nexus Mods for mod:', cleanModName, err);
-      }
-    }
-
-    // Default to unknown for manual uploads
-    return { source: 'unknown' };
-  };
-
-  const handleUploadClick = async () => {
-    if (!environment) {
-      setError('Environment not loaded');
-      return;
-    }
-
-    setUploading(true);
-    setError(null);
-
-    try {
-      // Use Tauri dialog to select file
-      const selected = await open({
-        multiple: false,
-        filters: [{
-          name: 'Mod Files',
-          extensions: ['dll', 'zip', 'rar']
-        }],
-        title: 'Select Mod File',
-      }) as string | { path: string; name?: string } | null;
-
-      if (!selected) {
-        // User cancelled
-        setUploading(false);
+      if (detail?.result?.kind !== 'install' && !installingNexusMod) {
         return;
       }
 
-      // Handle both string path and FileEntry object
-      let filePath: string;
-      let fileName: string;
-
-      if (typeof selected === 'string') {
-        filePath = selected;
-        fileName = selected.split(/[/\\]/).pop() || 'unknown';
-      } else {
-        filePath = selected.path;
-        fileName = selected.name || filePath.split(/[/\\]/).pop() || 'unknown';
-      }
-
-      // Detect source
-      const sourceInfo = await detectModSource(fileName);
-
-      // Detect runtime from filename
-      const detectedRuntime = detectRuntimeFromFileName(fileName);
-
-      if (!detectedRuntime) {
-        // Couldn't detect runtime - ask user to select
-        setPendingRuntimeSelection({ filePath, fileName, sourceInfo });
-        setUploading(false);
+      if (detail?.result?.kind === 'install' && detail.result.environmentId && detail.result.environmentId !== environmentId) {
         return;
       }
 
-      // Proceed with upload using detected runtime
-      await performUpload(filePath, fileName, detectedRuntime, sourceInfo);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload mod');
-      setUploading(false);
-    }
-  };
+      clearNexusManualTimeout();
+      setInstallingNexusMod(null);
 
-  const detectRuntimeFromFileName = (fileName: string): 'IL2CPP' | 'Mono' | null => {
-    const lower = fileName.toLowerCase();
-    if (lower.includes('mono')) return 'Mono';
-    if (lower.includes('il2cpp')) return 'IL2CPP';
-    return null;
-  };
-
-  const performUpload = async (filePath: string, fileName: string, runtime: 'IL2CPP' | 'Mono', sourceInfo: any) => {
-    setUploading(true);
-    setError(null);
-
-    try {
-      // Include detected runtime in metadata so backend knows
-      const metadataWithRuntime = {
-        ...sourceInfo,
-        detectedRuntime: runtime,
-      };
-
-      // Call upload with file path and metadata
-      const result = await ApiService.uploadMod(
-        environmentId,
-        filePath,
-        fileName,
-        environment!.runtime,
-        metadataWithRuntime
-      );
-
-      if (result.success) {
-        // Check for runtime mismatch
-        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-          // Store the mismatch info to show confirmation dialog
-          setPendingUpload({
-            file: null as any, // Not needed anymore since we use file path
-            runtimeMismatch: result.runtimeMismatch
-          });
-        } else {
-          // No mismatch - proceed with success handling
-          await handleUploadSuccess();
-        }
-      } else {
-        setError(result.error || 'Failed to upload mod');
-        setUploading(false);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload mod');
-      setUploading(false);
-    }
-  };
-
-  const handleRuntimeSelectionConfirm = async (selectedRuntime: 'IL2CPP' | 'Mono') => {
-    if (!pendingRuntimeSelection) return;
-    const { filePath, fileName, sourceInfo } = pendingRuntimeSelection;
-    setPendingRuntimeSelection(null);
-    await performUpload(filePath, fileName, selectedRuntime, sourceInfo);
-  };
-
-  const handleRuntimeSelectionCancel = () => {
-    setPendingRuntimeSelection(null);
-    setUploading(false);
-  };
-
-  const handleUploadSuccess = async () => {
-    // Reload mods list after successful upload
-    await loadInstalledMods(false, true);
-    await loadDownloadedLibrary();
-    await loadCachedModUpdates();
-    // Notify parent that mods changed
-    if (onModsChanged) {
-      onModsChanged();
-    }
-    setUploading(false);
-    setPendingUpload(null);
-  };
-
-  const handleRuntimeMismatchConfirm = async () => {
-    // Mod is already installed, just acknowledge and continue
-    setPendingUpload(null);
-    await handleUploadSuccess();
-  };
-
-  const handleRuntimeMismatchCancel = () => {
-    // Mod is already installed, but user canceled acknowledgment
-    // Still reload mods since it was installed
-    setPendingUpload(null);
-    handleUploadSuccess();
-  };
-
-  // Filter mods to ensure they are for Schedule I, match the runtime, and match the search query
-  const filterModsForScheduleI = (
-    packages: ThunderstorePackage[],
-    runtime: 'IL2CPP' | 'Mono',
-    searchQuery: string
-  ): ThunderstorePackage[] => {
-    const runtimeLower = runtime.toLowerCase();
-    const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
-    const searchLower = searchQuery.toLowerCase().trim();
-
-    return packages.filter((pkg) => {
-      // 1. Check if it's for Schedule I - verify package URL contains schedule-i
-      // Since we're using the Schedule I endpoint, all results should be for Schedule I,
-      // but we verify this client-side as requested
-      const packageUrl = (pkg.package_url || '').toLowerCase();
-      const isScheduleI =
-        packageUrl.includes('schedule-i') ||
-        packageUrl.includes('c/schedule-i') ||
-        packageUrl.includes('/schedule-i/');
-
-      if (!isScheduleI) {
-        // If no URL available, we can't verify, so exclude to be safe
-        // (though in practice, if the API endpoint is correct, all results should have the URL)
-        return false;
-      }
-
-      // 2. Check runtime compatibility
-      const name = (pkg.name || '').toLowerCase();
-      const fullName = (pkg.full_name || '').toLowerCase();
-      const categories = (pkg.categories || []).map(c => c.toLowerCase());
-
-      // Check categories for runtime tags
-      const hasTargetRuntimeCategory = categories.some(c => c === runtimeLower);
-      const hasOtherRuntimeCategory = categories.some(c => c === otherRuntime);
-
-      // If it has the target runtime category, include it (even if it also has the other)
-      if (hasTargetRuntimeCategory) {
-        // Package supports this runtime, continue to search query check
-      } else if (hasOtherRuntimeCategory) {
-        // Has only the other runtime category, exclude
-        return false;
-      }
-
-      // For name-based checking (when no categories match)
-      // Check if explicitly mentions the other runtime in name (exclude)
-      const mentionsOtherRuntimeInName =
-        name.includes(otherRuntime) ||
-        fullName.includes(otherRuntime);
-
-      if (mentionsOtherRuntimeInName && !hasTargetRuntimeCategory) {
-        return false;
-      }
-
-      // Check if it mentions the target runtime in name or has no runtime specified (assume compatible)
-      const mentionsTargetRuntime =
-        name.includes(runtimeLower) ||
-        fullName.includes(runtimeLower) ||
-        hasTargetRuntimeCategory;
-
-      const noRuntimeSpecified =
-        !name.includes('il2cpp') &&
-        !name.includes('mono') &&
-        !fullName.includes('il2cpp') &&
-        !fullName.includes('mono') &&
-        !categories.some(c => c.includes('il2cpp') || c.includes('mono'));
-
-      // Must either mention target runtime or have no runtime specified
-      if (!mentionsTargetRuntime && !noRuntimeSpecified) {
-        return false;
-      }
-
-      // 3. Check if it matches the search query
-      if (searchLower) {
-        const matchesSearch =
-          name.includes(searchLower) ||
-          fullName.includes(searchLower) ||
-          (pkg.versions?.[0]?.description || '').toLowerCase().includes(searchLower) ||
-          (pkg.owner || '').toLowerCase().includes(searchLower);
-
-        if (!matchesSearch) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-  };
-
-  const handleSearch = async () => {
-    if (!searchQuery.trim() || !environment) {
-      return;
-    }
-
-    // Use hardcoded game ID for Schedule I
-    const gameId = 'schedule-i';
-
-    setSearching(true);
-    setError(null);
-    setShowSearchResults(false);
-    try {
-      const result = await ApiService.searchThunderstore(
-        gameId,
-        searchQuery.trim(),
-        environment.runtime
-      );
-
-      // Apply client-side filtering to ensure only Schedule I mods for the correct runtime are shown
-      const filteredResults = filterModsForScheduleI(
-        result.packages || [],
-        environment.runtime,
-        searchQuery.trim()
-      );
-
-      setSearchResults(filteredResults);
-      setShowSearchResults(true);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to search Thunderstore';
-      setError(errorMessage);
-      setSearchResults([]);
-      setShowSearchResults(false);
-      console.error('Error searching Thunderstore:', err);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleInstallThunderstoreMod = async (pkg: ThunderstorePackage) => {
-    if (!environment) return;
-
-    setInstallingPackage(pkg.uuid4);
-    setError(null);
-    try {
-      console.log(`Installing Thunderstore mod: ${pkg.name} (${pkg.uuid4})`);
-      const result = await ApiService.installThunderstoreMod(environmentId, pkg.uuid4);
-
-      if (result.success) {
-        // Check for runtime mismatch
-        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-          setConfirmDialog({
-            title: 'Runtime Mismatch Warning',
-            message: result.runtimeMismatch.warning,
-            confirmText: 'Continue Anyway',
-            cancelText: 'Cancel',
-            onConfirm: async () => {
-              console.log(`Successfully installed mod: ${pkg.name}`);
-
-              // Reload mods after installation
-              await loadInstalledMods(false, true);
-              await loadDownloadedLibrary();
-              await loadCachedModUpdates();
-              if (onModsChanged) {
-                onModsChanged();
-              }
-
-              // Close search results
-              setShowSearchResults(false);
-              setSearchQuery('');
-            }
-          });
-          return;
-        }
-
-        console.log(`Successfully installed mod: ${pkg.name}`);
-
-        // Reload mods after installation
+      if (detail?.success) {
+        setError(null);
         await loadInstalledMods(false, true);
         await loadDownloadedLibrary();
         await loadCachedModUpdates();
         if (onModsChanged) {
           onModsChanged();
         }
-
-        // Close search results
-        setShowSearchResults(false);
-        setSearchQuery('');
-      } else {
-        const errorMsg = result.error || 'Failed to install mod';
-        console.error(`Failed to install mod ${pkg.name}:`, errorMsg);
-        setError(errorMsg);
+        setShowNexusModsResults(false);
+        setNexusModsSearchQuery('');
+        return;
       }
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to install mod';
-      console.error(`Error installing mod ${pkg.name}:`, err);
-      setError(errorMsg);
-    } finally {
-      setInstallingPackage(null);
-    }
-  };
 
-  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      if (searchSource === 'thunderstore') {
-        handleSearch();
-      } else {
-        handleSearchNexusMods();
+      if (detail?.error) {
+        setError(detail.error);
       }
-    }
+    };
+
+    window.addEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
+    return () => {
+      clearNexusManualTimeout();
+      window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
+    };
+  }, [environmentId, installingNexusMod, loadCachedModUpdates, loadDownloadedLibrary, loadInstalledMods, onModsChanged]);
+
+  const handleRuntimeMismatchCancel = () => {
+    setPendingUpload(null);
   };
 
-  const handleSearchNexusMods = async () => {
-    if (!nexusModsSearchQuery.trim() || !environment) {
-      return;
-    }
-
-    const gameId = 'schedule1';
-    await refreshNexusDownloadAccess();
-
-    setSearchingNexusMods(true);
-    setError(null);
-    setShowNexusModsResults(false);
-    try {
-      const result = await ApiService.searchNexusMods(
-        gameId,
-        nexusModsSearchQuery.trim()
-      );
-
-      setNexusModsSearchResults(result.mods || []);
-      setShowNexusModsResults(true);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to search NexusMods';
-      setError(errorMessage);
-      setNexusModsSearchResults([]);
-      setShowNexusModsResults(false);
-      console.error('Error searching NexusMods:', err);
-    } finally {
-      setSearchingNexusMods(false);
-    }
+  const handleRuntimeMismatchConfirm = async () => {
+    setPendingUpload(null);
   };
 
-  const handleLoadNexusModFiles = async (modId: number) => {
-    if (nexusModsFiles.has(modId)) {
-      return; // Already loaded
-    }
+  const handleConfirmDialog = async () => {
+    const currentDialog = confirmDialog;
+    setConfirmDialog(null);
 
-    try {
-      const files = await ApiService.getNexusModsModFiles('schedule1', modId);
-      setNexusModsFiles(prev => new Map(prev).set(modId, files));
-    } catch (err) {
-      console.error('Failed to load NexusMods mod files:', err);
+    if (currentDialog?.onConfirm) {
+      await currentDialog.onConfirm();
     }
   };
 
   const handleInstallNexusModsMod = async (modId: number, fileId?: number) => {
-    if (!environment) return;
+    if (!environment) {
+      setError('Environment not loaded');
+      return;
+    }
 
-    const hasKey = await ApiService.hasNexusModsApiKey();
-    setHasNexusDownloadAccess(hasKey);
-    if (!hasKey) {
+    const status = applyNexusAccessModeOverride(await ApiService.getNexusOAuthStatus());
+    const isConnected = !!status.connected;
+    const canDirectDownload = isConnected && !!status.account?.canDirectDownload;
+    const requiresSiteConfirmation = isConnected && !!status.account?.requiresSiteConfirmation;
+
+    setHasNexusDownloadAccess(isConnected);
+    setNexusRequiresSiteConfirmation(requiresSiteConfirmation);
+
+    if (!isConnected) {
       setShowNexusKeyRequiredModal(true);
       return;
     }
@@ -1247,6 +359,20 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setInstallingNexusMod({ modId, fileId: targetFile.file_id });
     setError(null);
     try {
+      if (!canDirectDownload && requiresSiteConfirmation) {
+        await ApiService.beginNexusManualDownloadSession({
+          kind: 'install',
+          modId,
+          fileId: targetFile.file_id,
+          gameId: 'schedule1',
+          environmentId,
+          runtime: environment.runtime,
+        });
+        startNexusManualTimeout();
+        setError('Confirm the Mod Manager download on Nexus. SIMM will continue when the nxm link returns.');
+        return;
+      }
+
       console.log(`Installing NexusMods mod: ${modId} file: ${targetFile.file_id}`);
       const result = await ApiService.installNexusModsMod(environmentId, modId, targetFile.file_id);
 
@@ -1291,6 +417,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         setShowNexusModsResults(false);
         setNexusModsSearchQuery('');
       } else {
+        if (result.requiresManualDownload && result.modUrl) {
+          window.open(result.modUrl, '_blank', 'noopener,noreferrer');
+          setError('This Nexus account requires website confirmation. Opened the mod page in your browser.');
+          return;
+        }
         const errorMsg = result.error || 'Failed to install mod';
         console.error(`Failed to install mod ${modId}:`, errorMsg);
         setError(errorMsg);
@@ -1305,7 +436,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       console.error(`Extracted error message:`, errorMsg);
       setError(errorMsg);
     } finally {
-      setInstallingNexusMod(null);
+      if (canDirectDownload) {
+        setInstallingNexusMod(null);
+      }
     }
   };
 
@@ -1504,7 +637,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
           }
         }}
         title="Nexus Login Required"
-        message="Downloading from NexusMods requires Nexus Login. Open Accounts to add your Nexus credentials and continue."
+        message={nexusRequiresSiteConfirmation ? "This Nexus account must confirm downloads on NexusMods website for each file. Open Accounts for details." : "Downloading from NexusMods requires Nexus Login. Open Accounts to continue."}
         confirmText="Open Accounts"
         cancelText="Not Now"
         isNested
@@ -2041,11 +1174,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             <button
                               onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
                               className={`${isAlreadyInstalled ? 'btn btn-secondary' : 'btn btn-primary'} btn-small mod-card-action-button`}
-                              disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled || !hasNexusDownloadAccess}
+                              disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled}
                               title={isAlreadyInstalled
                                 ? 'This mod is already installed'
                                 : !hasNexusDownloadAccess
                                   ? 'Requires Nexus Login to download'
+                                  : nexusRequiresSiteConfirmation
+                                    ? 'Open NexusMods website to confirm and download this mod'
                                   : bestFile
                                     ? `Install ${bestFile.file_name || bestFile.name || 'mod'}`
                                     : 'Loading files...'}
@@ -2054,7 +1189,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                 ? 'Installing...'
                                 : isAlreadyInstalled
                                   ? 'Installed'
-                                  : 'Install'}
+                                  : nexusRequiresSiteConfirmation
+                                    ? 'Open Page'
+                                    : 'Install'}
                             </button>
                           </div>
                         </div>
@@ -2592,4 +1729,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     </>
   );
 }
+
+
+
+
+
+
+
+
+
 

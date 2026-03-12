@@ -13,17 +13,32 @@ mod test_helpers;
 mod types;
 mod utils;
 
-use tauri::Manager;
+use sqlx::SqlitePool;
+use std::sync::Arc;
+use tauri::{Emitter, Manager, RunEvent};
+use tauri_plugin_deep_link::DeepLinkExt;
 
 fn main() {
     // Initialize global logger FIRST to capture all output
     crate::utils::global_logger::init_global_logger();
     log::info!("Initializing Tauri application...");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit("single-instance-args", serde_json::json!({
+                "args": argv,
+                "cwd": cwd,
+            }));
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             log::info!("Tauri app starting - running setup");
 
@@ -43,6 +58,36 @@ fn main() {
                 })?;
 
             app.manage(db_pool.clone());
+
+            if let Err(error) = tauri::async_runtime::block_on(
+                crate::commands::nexus_mods::cleanup_stale_nxm_runtime_registration(db_pool.clone()),
+            ) {
+                log::warn!("Failed to clean up stale runtime nxm registration: {}", error);
+            }
+
+            if let Err(error) = tauri::async_runtime::block_on(
+                crate::commands::nexus_mods::ensure_nxm_runtime_registration(db_pool.clone()),
+            ) {
+                log::warn!("Failed to claim nxm protocol handler for app lifetime: {}", error);
+            }
+
+            #[cfg(windows)]
+            {
+                let should_register_runtime_scheme = cfg!(debug_assertions)
+                    || std::env::current_exe()
+                        .ok()
+                        .map(|path| {
+                            path.components()
+                                .any(|component| component.as_os_str().to_string_lossy().eq_ignore_ascii_case("target"))
+                        })
+                        .unwrap_or(false);
+
+                if should_register_runtime_scheme {
+                    if let Err(error) = app.deep_link().register_all() {
+                        log::warn!("Failed to register deep-link scheme at runtime: {}", error);
+                    }
+                }
+            }
 
             // Store flag in app state so frontend can check it
             app.manage(tauri::async_runtime::Mutex::new(simm_was_created));
@@ -164,10 +209,14 @@ fn main() {
             commands::github_releases::get_all_s1api_releases,
             commands::github_releases::get_latest_mlvscan_release,
             commands::github_releases::get_all_mlvscan_releases,
-            commands::github_releases::get_release_api_health,
-            // NexusMods
-            commands::nexus_mods::validate_nexus_mods_api_key,
-            commands::nexus_mods::get_nexus_mods_rate_limits,
+            commands::github_releases::get_release_api_health,            // NexusMods
+            commands::nexus_mods::begin_nexus_oauth_login,
+            commands::nexus_mods::complete_nexus_oauth_callback,
+            commands::nexus_mods::get_nexus_oauth_status,
+            commands::nexus_mods::logout_nexus_oauth,
+            commands::nexus_mods::begin_nexus_manual_download_session,
+            commands::nexus_mods::complete_nexus_manual_download_session,
+            commands::nexus_mods::cancel_nexus_manual_download_session,
             commands::nexus_mods::get_nexus_mods_games,
             commands::nexus_mods::search_nexus_mods_mods,
             commands::nexus_mods::get_nexus_mods_latest_added,
@@ -224,9 +273,26 @@ fn main() {
             commands::discord_rpc::discord_initialize,
             commands::discord_rpc::discord_shutdown,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
-            eprintln!("Failed to run Tauri application: {}", e);
+            eprintln!("Failed to build Tauri application: {}", e);
             std::process::exit(1);
         });
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            if let Some(pool) = app_handle.try_state::<Arc<SqlitePool>>() {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    crate::commands::nexus_mods::cleanup_nxm_runtime_registration(pool.inner().clone()),
+                ) {
+                    log::warn!("Failed to restore nxm protocol handler on exit: {}", error);
+                }
+            }
+        }
+    });
 }
+
+
+
+
+

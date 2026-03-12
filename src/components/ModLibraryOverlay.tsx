@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiService } from '../services/api';
+import { applyNexusAccessModeOverride } from '../services/nexusAccessMode';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus } from '../services/events';
@@ -172,6 +173,57 @@ const areVersionsEquivalent = (a?: string, b?: string): boolean => {
   return compareVersionTokensDesc(normalizedA, normalizedB) === 0;
 };
 
+const getSourceBadgeLabel = (source?: ModLibraryEntry['source']): string => {
+  switch (source) {
+    case 'thunderstore':
+      return 'Thunderstore';
+    case 'nexusmods':
+      return 'Nexus Mods';
+    case 'github':
+      return 'GitHub';
+    case 'local':
+      return 'Local';
+    case 'unknown':
+      return 'Unknown';
+    default:
+      return 'External';
+  }
+};
+
+const getSourceBadgeStyle = (source?: ModLibraryEntry['source']): { backgroundColor: string; color: string; border?: string } => {
+  switch (source) {
+    case 'thunderstore':
+      return {
+        backgroundColor: '#7c3aed22',
+        color: '#c4b5fd',
+        border: '1px solid #7c3aed55',
+      };
+    case 'nexusmods':
+      return {
+        backgroundColor: '#ea433522',
+        color: '#ffb4ac',
+        border: '1px solid #ea433555',
+      };
+    case 'github':
+      return {
+        backgroundColor: '#2ea44f22',
+        color: '#95f0ad',
+        border: '1px solid #2ea44f55',
+      };
+    case 'local':
+      return {
+        backgroundColor: '#2563eb22',
+        color: '#93c5fd',
+        border: '1px solid #2563eb55',
+      };
+    default:
+      return {
+        backgroundColor: '#6c757d',
+        color: '#fff',
+      };
+  }
+};
+
 const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGroup[] => {
   const groups = new Map<string, {
     key: string;
@@ -323,6 +375,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const libraryScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
+  const nexusManualTimeoutRef = useRef<number | null>(null);
+  const pendingNexusManualActionRef = useRef<null | {
+    onSuccess: () => Promise<void>;
+    onErrorTitle?: string;
+  }>(null);
 
   const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
     tag_name: string;
@@ -546,6 +603,70 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     setLibrary(data);
   }, []);
 
+  const closeConfirmOverlay = useCallback(() => {
+    setConfirmOverlay({ isOpen: false, title: '', message: '', onConfirm: () => {} });
+  }, []);
+
+  const showLibraryNotice = useCallback((title: string, message: string) => {
+    setConfirmOverlay({
+      isOpen: true,
+      title,
+      message,
+      onConfirm: () => {
+        closeConfirmOverlay();
+      },
+    });
+  }, [closeConfirmOverlay]);
+
+  const clearNexusManualTimeout = useCallback(() => {
+    if (nexusManualTimeoutRef.current !== null) {
+      window.clearTimeout(nexusManualTimeoutRef.current);
+      nexusManualTimeoutRef.current = null;
+    }
+  }, []);
+
+  const startNexusManualTimeout = useCallback(() => {
+    clearNexusManualTimeout();
+    nexusManualTimeoutRef.current = window.setTimeout(() => {
+      pendingNexusManualActionRef.current = null;
+      setDownloading(null);
+      setUpdatingGroup(null);
+      showLibraryNotice('Nexus Download Timed Out', 'The Nexus manual download session timed out. Start the download again from the Files page.');
+    }, 5 * 60 * 1000);
+  }, [clearNexusManualTimeout, showLibraryNotice]);
+
+  const getEffectiveNexusDownloadAccess = useCallback(async () => {
+    const status = applyNexusAccessModeOverride(await ApiService.getNexusOAuthStatus());
+    return {
+      connected: !!status.connected,
+      canDirectDownload: !!status.connected && !!status.account?.canDirectDownload,
+      requiresSiteConfirmation: !!status.connected && !!status.account?.requiresSiteConfirmation,
+    };
+  }, []);
+
+  const beginManualNexusLibraryDownload = useCallback(async (
+    modId: number,
+    fileId: number,
+    runtime: 'IL2CPP' | 'Mono',
+    onSuccess: () => Promise<void>,
+    onErrorTitle?: string,
+  ) => {
+    pendingNexusManualActionRef.current = { onSuccess, onErrorTitle };
+    try {
+      await ApiService.beginNexusManualDownloadSession({
+        kind: 'library',
+        modId,
+        fileId,
+        gameId: 'schedule1',
+        runtime,
+      });
+      startNexusManualTimeout();
+    } catch (error) {
+      pendingNexusManualActionRef.current = null;
+      throw error;
+    }
+  }, [startNexusManualTimeout]);
+
   /** Notify ModsOverlay (and other views) that the library was updated - e.g. after download */
   const notifyLibraryUpdated = useCallback(() => {
     sessionStorage.setItem('library-needs-refresh', '1');
@@ -555,6 +676,49 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
   const notifyModUpdateStateChanged = useCallback(() => {
     window.dispatchEvent(new CustomEvent('mod-updates-checked'));
   }, []);
+
+  useEffect(() => {
+    const handleManualDownloadResult = async (event: Event) => {
+      const detail = (event as CustomEvent<{
+        success: boolean;
+        result?: {
+          kind?: 'library' | 'install';
+        };
+        error?: string;
+      }>).detail;
+      const pendingAction = pendingNexusManualActionRef.current;
+      const isLibraryResult = detail?.result?.kind === 'library';
+
+      if (pendingAction) {
+        clearNexusManualTimeout();
+        pendingNexusManualActionRef.current = null;
+        setDownloading(null);
+        setUpdatingGroup(null);
+
+        if (detail?.success) {
+          await pendingAction.onSuccess();
+          return;
+        }
+
+        showLibraryNotice(
+          pendingAction.onErrorTitle || 'Nexus Download Failed',
+          detail?.error || 'Failed to complete the Nexus manual download.',
+        );
+        return;
+      }
+
+      if (detail?.success && isLibraryResult && isOpen) {
+        await refreshLibrary();
+        notifyLibraryUpdated();
+      }
+    };
+
+    window.addEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
+    return () => {
+      clearNexusManualTimeout();
+      window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
+    };
+  }, [clearNexusManualTimeout, isOpen, notifyLibraryUpdated, refreshLibrary, showLibraryNotice]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -851,6 +1015,7 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
       : (group.availableRuntimes.length > 0 ? [...group.availableRuntimes] : ['IL2CPP']);
 
     setUpdatingGroup(group.key);
+    let keepPendingUpdate = false;
     try {
       const downloadedStorageByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>> = {};
 
@@ -875,7 +1040,80 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
           throw new Error('Missing NexusMods mod id for update');
         }
 
+        const access = await getEffectiveNexusDownloadAccess();
+        if (!access.connected) {
+          throw new Error('Nexus login is required to download Nexus mods.');
+        }
+
         const files = await ApiService.getNexusModsModFiles('schedule1', modId);
+
+        if (!access.canDirectDownload && access.requiresSiteConfirmation) {
+          const beginManualUpdateForRuntime = async (runtime: 'IL2CPP' | 'Mono') => {
+            const file = pickNexusFileForVersionAndRuntime(files, runtime, group.remoteVersion);
+            if (!file?.file_id) {
+              throw new Error(`No Nexus file found for ${runtime}.`);
+            }
+
+            await beginManualNexusLibraryDownload(
+              modId,
+              file.file_id,
+              runtime,
+              async () => {
+                await refreshLibrary();
+                notifyLibraryUpdated();
+
+                if (runtimesToUpdate.length > 1) {
+                  showLibraryNotice(
+                    'One Runtime Updated',
+                    'Downloaded one runtime for this Nexus mod. Repeat the update for the other runtime before re-activating the version across all environments.',
+                  );
+                  return;
+                }
+
+                const nextLibrary = await ApiService.getModLibrary();
+                setLibrary(nextLibrary);
+                notifyLibraryUpdated();
+
+                const refreshedGroup = buildDownloadedGroups(nextLibrary.downloaded).find(item => item.key === group.key);
+                const selectedEntry = refreshedGroup?.entries.find(entry => {
+                  return group.remoteVersion && areVersionsEquivalent(getEntryVersionLabel(entry), group.remoteVersion);
+                }) || refreshedGroup?.entries[0];
+
+                if (refreshedGroup && selectedEntry) {
+                  await activateGroupEntry(refreshedGroup, selectedEntry);
+                }
+              },
+              'Nexus Update Failed',
+            );
+            keepPendingUpdate = true;
+          };
+
+          if (runtimesToUpdate.length > 1) {
+            setRuntimePrompt({
+              title: 'Select Runtime',
+              message: 'Free Nexus downloads must be confirmed one file at a time. Choose the runtime to update now.',
+              onSelect: (runtime) => {
+                if (runtime === 'Both') {
+                  return;
+                }
+                setRuntimePrompt(null);
+                setUpdatingGroup(group.key);
+                void beginManualUpdateForRuntime(runtime).catch((error) => {
+                  setUpdatingGroup(null);
+                  showLibraryNotice(
+                    'Nexus Update Failed',
+                    error instanceof Error ? error.message : 'Failed to start the Nexus manual update.',
+                  );
+                });
+              },
+            });
+            return;
+          }
+
+          await beginManualUpdateForRuntime(runtimesToUpdate[0]);
+          return;
+        }
+
         for (const runtime of runtimesToUpdate) {
           const file = pickNexusFileForVersionAndRuntime(files, runtime, group.remoteVersion);
           if (!file?.file_id) {
@@ -905,9 +1143,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     } catch (err) {
       console.error('Failed to update and activate mod version:', err);
     } finally {
-      setUpdatingGroup(null);
+      if (!keepPendingUpdate) {
+        setUpdatingGroup(null);
+      }
     }
-  }, [activateGroupEntry, findThunderstorePackageForRuntime, getEntryVersionLabel, notifyLibraryUpdated, pickNexusFileForVersionAndRuntime]);
+  }, [activateGroupEntry, beginManualNexusLibraryDownload, findThunderstorePackageForRuntime, getEffectiveNexusDownloadAccess, getEntryVersionLabel, notifyLibraryUpdated, pickNexusFileForVersionAndRuntime, refreshLibrary, showLibraryNotice]);
 
   const handleSelectVersion = useCallback(async (group: DownloadedModGroup, storageId: string) => {
     setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: storageId }));
@@ -1177,9 +1417,39 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
     const hasIl2cpp = fileNames.some(name => name.includes('il2cpp'));
     const hasMono = fileNames.some(name => name.includes('mono'));
 
+    const access = await getEffectiveNexusDownloadAccess();
+    if (!access.connected) {
+      showLibraryNotice('Nexus Login Required', 'Log into Nexus in Accounts before downloading Nexus mods.');
+      return;
+    }
+
     const runDownload = async (runtime: 'IL2CPP' | 'Mono' | 'Both') => {
       setDownloading(`nexus-${modId}`);
+      let keepPendingDownload = false;
       try {
+        if (!access.canDirectDownload && access.requiresSiteConfirmation) {
+          if (runtime === 'Both') {
+            throw new Error('Manual Nexus download flow requires a single runtime selection.');
+          }
+
+          const targetFile = selectNexusFileForRuntime(files, runtime);
+          if (!targetFile?.file_id) {
+            throw new Error(`No Nexus file found for ${runtime}.`);
+          }
+
+          await beginManualNexusLibraryDownload(
+            modId,
+            targetFile.file_id,
+            runtime,
+            async () => {
+              await refreshLibrary();
+              notifyLibraryUpdated();
+            },
+          );
+          keepPendingDownload = true;
+          return;
+        }
+
         if (runtime === 'Both') {
           const il2cppFile = selectNexusFileForRuntime(files, 'IL2CPP');
           const monoFile = selectNexusFileForRuntime(files, 'Mono');
@@ -1198,8 +1468,11 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         notifyLibraryUpdated();
       } catch (err) {
         console.error('Failed to download Nexus mod:', err);
+        showLibraryNotice('Nexus Download Failed', err instanceof Error ? err.message : 'Failed to download Nexus mod.');
       } finally {
-        setDownloading(null);
+        if (!keepPendingDownload) {
+          setDownloading(null);
+        }
       }
     };
 
@@ -1208,6 +1481,21 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
         title: 'Select Runtime',
         message: 'Select the runtime for this Nexus mod download.',
         onSelect: runDownload,
+      });
+      return;
+    }
+
+    if (!access.canDirectDownload && access.requiresSiteConfirmation && hasIl2cpp && hasMono) {
+      setRuntimePrompt({
+        title: 'Select Runtime',
+        message: 'Free Nexus downloads must be confirmed one file at a time. Choose the runtime to download now.',
+        onSelect: (runtime) => {
+          if (runtime === 'Both') {
+            return;
+          }
+          setRuntimePrompt(null);
+          void runDownload(runtime);
+        },
       });
       return;
     }
@@ -2037,16 +2325,19 @@ export function ModLibraryOverlay({ isOpen, onClose }: Props) {
                             'rail',
                           )}
                           <div className="mod-card-main-column" style={{ flex: 1, minWidth: 0, display: 'grid', gap: '0.3rem', alignContent: 'start' }}>
-                            <div className="mod-card-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                              <strong className="mod-card-title-text" style={{ fontSize: '0.94rem' }}>{group.displayName}</strong>
+                            <div className="mod-card-title-row">
+                              <strong className="mod-card-title-text" style={{ fontSize: '0.94rem' }} title={group.displayName}>
+                                {group.displayName}
+                              </strong>
+                            </div>
+                            <div className="mod-card-meta-row" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
                               <span style={{
                                 fontSize: '0.64rem',
                                 padding: '0.1rem 0.35rem',
                                 borderRadius: '999px',
-                                backgroundColor: group.managed ? '#28a745' : '#6c757d',
-                                color: '#fff'
+                                ...getSourceBadgeStyle(activeEntry?.source),
                               }}>
-                                {group.managed ? 'Managed' : 'External'}
+                                {getSourceBadgeLabel(activeEntry?.source)}
                               </span>
                               <span style={{
                                 fontSize: '0.64rem',

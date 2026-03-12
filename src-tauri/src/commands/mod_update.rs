@@ -4,7 +4,7 @@ use crate::services::environment::EnvironmentService;
 use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::github_releases::GitHubReleasesService;
-use crate::services::settings::SettingsService;
+use crate::commands::nexus_mods::get_valid_nexus_access_token;
 use crate::types::ModSource;
 use crate::events;
 use sqlx::SqlitePool;
@@ -47,27 +47,12 @@ async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStor
 }
 
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
-    let nexus_service = {
-        let mut service = NEXUS_MODS_SERVICE.lock().await;
-        if service.is_none() {
-            *service = Some(Arc::new(NexusModsService::new()));
-        }
-        service.as_ref().unwrap().clone()
-    };
-    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-    match settings_service.get_nexus_mods_api_key().await {
-        Ok(Some(api_key)) => {
-            nexus_service.set_api_key(api_key).await;
-        }
-        Ok(None) => {
-            nexus_service.clear_api_key().await;
-        }
-        Err(e) => {
-            log::warn!("Failed to get Nexus Mods API key: {:?}", e);
-            nexus_service.clear_api_key().await;
-        }
+    let _ = db;
+    let mut service = NEXUS_MODS_SERVICE.lock().await;
+    if service.is_none() {
+        *service = Some(Arc::new(NexusModsService::new()));
     }
-    Ok(nexus_service)
+    Ok(service.as_ref().unwrap().clone())
 }
 
 async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
@@ -144,6 +129,7 @@ pub async fn update_mod(
     let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
+    let nexus_access_token = get_valid_nexus_access_token(db.inner().clone()).await.ok();
 
     mod_update_service
         .update_mod(
@@ -153,6 +139,7 @@ pub async fn update_mod(
             &mods_service,
             &thunderstore_service,
             &nexus_mods_service,
+            nexus_access_token.as_deref(),
             &github_service,
         )
         .await

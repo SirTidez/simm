@@ -390,6 +390,8 @@ export class ApiService {
     installedFiles?: string[];
     source?: string;
     error?: string;
+    requiresManualDownload?: boolean;
+    modUrl?: string;
     runtimeMismatch?: {
       detected: 'IL2CPP' | 'Mono' | 'unknown';
       environment: 'IL2CPP' | 'Mono';
@@ -482,6 +484,8 @@ export class ApiService {
     installedFiles?: string[];
     source?: string;
     error?: string;
+    requiresManualDownload?: boolean;
+    modUrl?: string;
     runtimeMismatch?: {
       detected: 'IL2CPP' | 'Mono' | 'unknown';
       environment: 'IL2CPP' | 'Mono';
@@ -637,41 +641,101 @@ export class ApiService {
     return invoke('extract_game_version_from_path', { gameDir });
   }
 
-  static async saveNexusModsApiKey(apiKey: string): Promise<{
+  static async beginNexusOAuthLogin(preferLocalhost: boolean = false): Promise<{
+    authorizeUrl: string;
+    state: string;
+    redirectUri: string;
+  }> {
+    return invoke('begin_nexus_oauth_login', { preferLocalhost });
+  }
+
+  static async completeNexusOAuthCallback(callbackUrl?: string): Promise<{
     success: boolean;
-    message?: string;
+    status: {
+      connected: boolean;
+      expiresAt?: number;
+      account?: {
+        name?: string;
+        memberId?: number;
+        isPremium?: boolean;
+        isSupporter?: boolean;
+        canDirectDownload?: boolean;
+        requiresSiteConfirmation?: boolean;
+      };
+    };
   }> {
-    // Save API key via encrypted storage
-    await invoke('save_nexus_mods_api_key', { apiKey });
-    return { success: true };
+    return invoke('complete_nexus_oauth_callback', { callbackUrl: callbackUrl ?? null });
   }
 
-  static async validateNexusModsApiKey(apiKey: string): Promise<{
+  static async getNexusOAuthStatus(): Promise<{
+    connected: boolean;
+    expiresAt?: number;
+    account?: {
+      name?: string;
+      memberId?: number;
+      isPremium?: boolean;
+      isSupporter?: boolean;
+      canDirectDownload?: boolean;
+      requiresSiteConfirmation?: boolean;
+    };
+  }> {
+    return invoke('get_nexus_oauth_status');
+  }
+
+  static async logoutNexusOAuth(): Promise<{ success: boolean }> {
+    return invoke('logout_nexus_oauth');
+  }
+
+  static async beginNexusManualDownloadSession(params: {
+    kind: 'library' | 'install';
+    modId: number;
+    fileId: number;
+    gameId?: string;
+    environmentId?: string;
+    runtime?: 'IL2CPP' | 'Mono';
+  }): Promise<{
     success: boolean;
-    rateLimits?: { daily: number; hourly: number };
-    user?: { name: string; isPremium: boolean; isSupporter: boolean };
-    error?: string;
+    kind: 'library' | 'install';
+    filesPageUrl: string;
+    modId: number;
+    fileId: number;
+    gameId: string;
   }> {
-    return invoke('validate_nexus_mods_api_key', { apiKey });
+    return invoke('begin_nexus_manual_download_session', {
+      kind: params.kind,
+      modId: params.modId,
+      fileId: params.fileId,
+      gameId: params.gameId ?? null,
+      environmentId: params.environmentId ?? null,
+      runtime: params.runtime ?? null,
+    });
   }
 
-  static async getNexusModsApiKey(): Promise<string | null> {
-    return invoke('get_nexus_mods_api_key');
-  }
-
-  static async hasNexusModsApiKey(): Promise<boolean> {
-    return invoke('has_nexus_mods_api_key');
-  }
-
-  static async removeNexusModsApiKey(): Promise<void> {
-    return invoke('clear_nexus_mods_api_key');
-  }
-
-  static async getNexusModsRateLimits(): Promise<{
-    daily: number;
-    hourly: number;
+  static async completeNexusManualDownloadSession(
+    nxmUrl: string,
+    runtimeOverride?: 'IL2CPP' | 'Mono' | 'Both'
+  ): Promise<{
+    success: boolean;
+    kind?: 'library' | 'install';
+    environmentId?: string;
+    storageId?: string;
+    modId?: number;
+    fileId?: number;
+    requestedKind?: 'library' | 'install';
+    usedFallback?: boolean;
+    runtimeSelectionRequired?: boolean;
+    modName?: string;
+    fileName?: string;
+    version?: string;
   }> {
-    return invoke('get_nexus_mods_rate_limits');
+    return invoke('complete_nexus_manual_download_session', {
+      nxmUrl,
+      runtimeOverride: runtimeOverride ?? null,
+    });
+  }
+
+  static async cancelNexusManualDownloadSession(): Promise<{ success: boolean }> {
+    return invoke('cancel_nexus_manual_download_session');
   }
 
   static async searchNexusMods(
@@ -720,6 +784,8 @@ export class ApiService {
     installedFiles?: string[];
     source?: string;
     error?: string;
+    requiresManualDownload?: boolean;
+    modUrl?: string;
     runtimeMismatch?: {
       detected: 'IL2CPP' | 'Mono' | 'unknown';
       environment: 'IL2CPP' | 'Mono';
@@ -1023,6 +1089,8 @@ export class ApiService {
     source?: string;
     error?: string;
     alreadyInstalled?: boolean;
+    requiresManualDownload?: boolean;
+    modUrl?: string;
     runtimeMismatch?: {
       detected: 'IL2CPP' | 'Mono' | 'unknown';
       environment: 'IL2CPP' | 'Mono';
@@ -1300,3 +1368,5 @@ export class ApiService {
     return invoke('update_config', { filePath, updates });
   }
 }
+
+

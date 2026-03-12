@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { EnvironmentList, type WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
@@ -19,16 +21,33 @@ import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
 import { SettingsStoreProvider } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
+import { ApiService } from '../services/api';
 import { interceptConsole } from '../utils/logger';
 import { ErrorBoundary } from './ErrorBoundary';
 
 function AppContent() {
+  type PendingNexusRuntimeSelection = {
+    nxmUrl: string;
+    kind: 'library' | 'install';
+    modId?: number;
+    fileId?: number;
+    modName?: string;
+    fileName?: string;
+    version?: string;
+  };
+
   const appWindow = getCurrentWindow();
   const { environments } = useEnvironmentStore();
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceRoute>({ view: 'home' });
   const [showStartupSplash, setShowStartupSplash] = useState(true);
   const [isMaximized, setIsMaximized] = useState(false);
   const [lastEnvironmentWorkspaceView, setLastEnvironmentWorkspaceView] = useState<'mods' | 'plugins' | 'userLibs' | 'logs' | 'config'>('mods');
+  const completedNexusCallbackRef = useRef<string | null>(null);
+  const inFlightNexusCallbackRef = useRef<string | null>(null);
+  const completedNxmCallbackRef = useRef(new Set<string>());
+  const inFlightNxmCallbackRef = useRef<string | null>(null);
+  const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
+  const [appNotice, setAppNotice] = useState<string | null>(null);
 
   const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
     setActiveWorkspace(workspace);
@@ -127,6 +146,227 @@ function AppContent() {
       }
     };
   }, [appWindow]);
+
+  const dispatchNexusOAuthResult = useCallback((detail: { success: boolean; error?: string }) => {
+    window.dispatchEvent(new CustomEvent('nexus-oauth-result', { detail }));
+  }, []);
+
+  const dispatchNexusManualDownloadResult = useCallback((detail: {
+    success: boolean;
+    result?: {
+      kind?: 'library' | 'install';
+      environmentId?: string;
+      storageId?: string;
+      modId?: number;
+      fileId?: number;
+    };
+    error?: string;
+    nxmUrl?: string;
+  }) => {
+    window.dispatchEvent(new CustomEvent('nexus-manual-download-result', { detail }));
+  }, []);
+
+  useEffect(() => {
+    if (!appNotice) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setAppNotice(null);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [appNotice]);
+
+  const handleNexusOAuthCallback = useCallback(async (callbackUrl: string) => {
+    if (!callbackUrl.startsWith('simm://oauth/nexus/callback')) {
+      return;
+    }
+
+    if (
+      completedNexusCallbackRef.current === callbackUrl ||
+      inFlightNexusCallbackRef.current === callbackUrl
+    ) {
+      return;
+    }
+    inFlightNexusCallbackRef.current = callbackUrl;
+
+    setActiveWorkspace({ view: 'accounts' });
+
+    try {
+      await ApiService.completeNexusOAuthCallback(callbackUrl);
+      completedNexusCallbackRef.current = callbackUrl;
+      dispatchNexusOAuthResult({ success: true });
+    } catch (error) {
+      inFlightNexusCallbackRef.current = null;
+      dispatchNexusOAuthResult({
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login',
+      });
+      return;
+    }
+    inFlightNexusCallbackRef.current = null;
+  }, [dispatchNexusOAuthResult]);
+
+  const handleNexusManualDownloadCallback = useCallback(async (nxmUrl: string) => {
+    if (!nxmUrl.startsWith('nxm://')) {
+      return;
+    }
+
+    if (
+      completedNxmCallbackRef.current.has(nxmUrl) ||
+      inFlightNxmCallbackRef.current === nxmUrl
+    ) {
+      return;
+    }
+
+    inFlightNxmCallbackRef.current = nxmUrl;
+
+    try {
+      const result = await ApiService.completeNexusManualDownloadSession(nxmUrl);
+      if (result.runtimeSelectionRequired) {
+        setPendingNexusRuntimeSelection({
+          nxmUrl,
+          kind: result.kind || 'library',
+          modId: result.modId,
+          fileId: result.fileId,
+          modName: result.modName,
+          fileName: result.fileName,
+          version: result.version,
+        });
+        return;
+      }
+      completedNxmCallbackRef.current.add(nxmUrl);
+      dispatchNexusManualDownloadResult({
+        success: true,
+        result,
+        nxmUrl,
+      });
+    } catch (error) {
+      console.error('Failed to complete Nexus manual download callback:', nxmUrl, error);
+      const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      if (message.includes('Close SIMM to download Nexus mods for other games')) {
+        setAppNotice(message);
+      }
+      dispatchNexusManualDownloadResult({
+        success: false,
+        error: message,
+        nxmUrl,
+      });
+      return;
+    } finally {
+      inFlightNxmCallbackRef.current = null;
+    }
+  }, [dispatchNexusManualDownloadResult]);
+
+  const handleNexusRuntimeSelection = useCallback(async (runtime: 'IL2CPP' | 'Mono' | 'Both') => {
+    const pending = pendingNexusRuntimeSelection;
+    if (!pending) {
+      return;
+    }
+
+    setPendingNexusRuntimeSelection(null);
+    inFlightNxmCallbackRef.current = pending.nxmUrl;
+
+    try {
+      const result = await ApiService.completeNexusManualDownloadSession(pending.nxmUrl, runtime);
+      completedNxmCallbackRef.current.add(pending.nxmUrl);
+      dispatchNexusManualDownloadResult({
+        success: true,
+        result,
+        nxmUrl: pending.nxmUrl,
+      });
+    } catch (error) {
+      console.error('Failed to complete Nexus manual download after runtime selection:', pending.nxmUrl, error);
+      const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      if (message.includes('Close SIMM to download Nexus mods for other games')) {
+        setAppNotice(message);
+      }
+      dispatchNexusManualDownloadResult({
+        success: false,
+        error: message,
+        nxmUrl: pending.nxmUrl,
+      });
+    } finally {
+      inFlightNxmCallbackRef.current = null;
+    }
+  }, [dispatchNexusManualDownloadResult, pendingNexusRuntimeSelection]);
+
+  const handleCancelNexusRuntimeSelection = useCallback(async () => {
+    setPendingNexusRuntimeSelection(null);
+    try {
+      await ApiService.cancelNexusManualDownloadSession();
+    } catch (error) {
+      console.error('Failed to cancel Nexus manual download session:', error);
+    }
+  }, []);
+
+  const handleExternalProtocolUrl = useCallback(async (url: string) => {
+    if (url.startsWith('simm://oauth/nexus/callback')) {
+      await handleNexusOAuthCallback(url);
+      return;
+    }
+
+    if (url.startsWith('nxm://')) {
+      await handleNexusManualDownloadCallback(url);
+    }
+  }, [handleNexusManualDownloadCallback, handleNexusOAuthCallback]);
+
+  useEffect(() => {
+    let unlistenDeepLink: (() => void) | null = null;
+    let unlistenSingleInstance: (() => void) | null = null;
+    let cancelled = false;
+
+    const processPendingDeepLinks = async () => {
+      const currentUrls = await getCurrentDeepLink();
+      if (!cancelled && currentUrls?.length) {
+        for (const url of currentUrls) {
+          void handleExternalProtocolUrl(url);
+        }
+      }
+    };
+
+    const initDeepLinkHandling = async () => {
+      try {
+        await processPendingDeepLinks();
+
+        unlistenDeepLink = await onOpenUrl((urls) => {
+          for (const url of urls) {
+            void handleExternalProtocolUrl(url);
+          }
+        });
+
+        unlistenSingleInstance = await listen<{ args?: string[] }>('single-instance-args', (event) => {
+          const args = event.payload?.args || [];
+          for (const arg of args) {
+            if (typeof arg === 'string' && (arg.startsWith('simm://') || arg.startsWith('nxm://'))) {
+              void handleExternalProtocolUrl(arg);
+            }
+          }
+        });
+      } catch (error) {
+        console.error('Failed to initialize deep-link handling:', error);
+        dispatchNexusOAuthResult({
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to initialize deep-link handling',
+        });
+      }
+    };
+
+    void initDeepLinkHandling();
+
+    const handleWindowFocus = () => {
+      void processPendingDeepLinks().catch((error) => {
+        console.error('Failed to re-check deep links after focus:', error);
+      });
+    };
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', handleWindowFocus);
+      unlistenDeepLink?.();
+      unlistenSingleInstance?.();
+    };
+  }, [dispatchNexusOAuthResult, handleExternalProtocolUrl]);
 
   const handleMinimize = async () => {
     try {
@@ -338,6 +578,81 @@ function AppContent() {
 
         <Footer />
       </div>
+
+      {appNotice && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '4.75rem',
+            right: '1.25rem',
+            zIndex: 4200,
+            maxWidth: '30rem',
+            background: 'rgba(120, 32, 32, 0.96)',
+            border: '1px solid rgba(255, 140, 140, 0.4)',
+            color: '#fff5f5',
+            borderRadius: '0.85rem',
+            boxShadow: '0 18px 48px rgba(0, 0, 0, 0.35)',
+            padding: '0.9rem 1rem',
+            display: 'grid',
+            gap: '0.5rem',
+          }}
+          role="alert"
+          aria-live="assertive"
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start' }}>
+            <strong style={{ fontSize: '0.95rem' }}>Nexus Download Blocked</strong>
+            <button
+              type="button"
+              className="window-control-btn"
+              onClick={() => setAppNotice(null)}
+              style={{ width: '1.75rem', height: '1.75rem', borderRadius: '999px' }}
+              aria-label="Dismiss notice"
+            >
+              <i className="fas fa-times"></i>
+            </button>
+          </div>
+          <span style={{ color: '#ffe4e4', lineHeight: 1.45 }}>{appNotice}</span>
+        </div>
+      )}
+
+      {pendingNexusRuntimeSelection && (
+        <div className="modal-overlay" onClick={() => void handleCancelNexusRuntimeSelection()}>
+          <div className="modal-content" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Select Runtime</h2>
+              <button className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()}>×</button>
+            </div>
+            <div style={{ padding: '1.5rem', display: 'grid', gap: '1rem' }}>
+              <p style={{ margin: 0, color: '#cccccc' }}>
+                SIMM could not determine the runtime for this Nexus download. Choose the runtime before it is added to the library or installed.
+              </p>
+              <div style={{ color: '#9aa4b2', fontSize: '0.95rem', display: 'grid', gap: '0.35rem' }}>
+                <span><strong style={{ color: '#ffffff' }}>Mod:</strong> {pendingNexusRuntimeSelection.modName || 'Unknown Mod'}</span>
+                <span><strong style={{ color: '#ffffff' }}>File:</strong> {pendingNexusRuntimeSelection.fileName || 'Unknown File'}</span>
+                {pendingNexusRuntimeSelection.version && (
+                  <span><strong style={{ color: '#ffffff' }}>Version:</strong> {pendingNexusRuntimeSelection.version}</span>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                <button className="btn btn-secondary" onClick={() => void handleCancelNexusRuntimeSelection()}>
+                  Cancel
+                </button>
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Mono')}>
+                    Use Mono
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Both')}>
+                    Use Both
+                  </button>
+                  <button className="btn btn-primary" onClick={() => void handleNexusRuntimeSelection('IL2CPP')}>
+                    Use IL2CPP
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showStartupSplash && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 4000 }}>
