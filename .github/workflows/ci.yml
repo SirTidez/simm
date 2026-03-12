@@ -17,13 +17,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
 
       - name: Install dependencies
         run: |
           npm config set fetch-retries 5
           npm config set fetch-retry-maxtimeout 120000
-          npm ci --no-audit --prefer-offline
+          npm install --no-audit --prefer-offline
 
       - name: Type check frontend
         run: npx tsc --noEmit
@@ -44,13 +43,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
 
       - name: Install frontend dependencies (required by build.rs)
         run: |
           npm config set fetch-retries 5
           npm config set fetch-retry-maxtimeout 120000
-          npm ci --no-audit --prefer-offline
+          npm install --no-audit --prefer-offline
 
       - name: Install Linux system dependencies (Tauri)
         run: |
@@ -83,13 +81,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
 
       - name: Install frontend dependencies (required by build.rs)
         run: |
           npm config set fetch-retries 5
           npm config set fetch-retry-maxtimeout 120000
-          npm ci --no-audit --prefer-offline
+          npm install --no-audit --prefer-offline
 
       - name: Install Linux system dependencies (Tauri)
         run: |

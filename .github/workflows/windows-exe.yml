@@ -17,7 +17,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +30,7 @@ jobs:
         run: |
           npm config set fetch-retries 5
           npm config set fetch-retry-maxtimeout 120000
-          npm ci --no-audit --prefer-offline
+          npm install --no-audit --prefer-offline
 
       - name: Build Windows installer
         run: npm run tauri build -- --bundles nsis
