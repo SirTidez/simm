@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
@@ -487,6 +487,7 @@ pub async fn store_mod_archive(
 #[tauri::command]
 pub async fn install_s1api(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     environment_id: String,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
@@ -602,6 +603,15 @@ pub async fn install_s1api(
         }
     };
 
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("s1api"),
+        crate::types::TrackedDownloadKind::Framework,
+        format!("S1API-{}.zip", version_tag),
+        env.name.clone(),
+        Some("Downloading framework".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
     // Download the ZIP file
     eprintln!("[install_s1api] Downloading ZIP asset...");
     let zip_bytes = match github_service.download_release_asset(&zip_url).await {
@@ -609,7 +619,18 @@ pub async fn install_s1api(
             eprintln!("[install_s1api] Downloaded {} bytes", bytes.len());
             bytes
         }
-        Err(e) => return error_json(format!("Failed to download S1API: {}", e)),
+        Err(e) => {
+            let message = format!("Failed to download S1API: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            return error_json(message);
+        }
     };
 
     // Save to temp file
@@ -622,8 +643,24 @@ pub async fn install_s1api(
     let temp_zip_path = temp_dir.join(format!("s1api-{}.zip", sanitized_tag));
 
     if let Err(e) = tokio::fs::write(&temp_zip_path, zip_bytes).await {
-        return error_json(format!("Failed to save downloaded file: {}", e));
+        let message = format!("Failed to save downloaded file: {}", e);
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::fail_file_download(
+                &tracked_download,
+                message.clone(),
+                Some("Download failed".to_string()),
+            ),
+        );
+        return error_json(message);
     }
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Framework downloaded".to_string()),
+        ),
+    );
 
     // Install from the temp file
     let mods_service = ModsService::new(db.inner().clone());
@@ -652,6 +689,7 @@ pub async fn install_s1api(
 #[tauri::command]
 pub async fn download_s1api_to_library(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
@@ -688,10 +726,30 @@ pub async fn download_s1api_to_library(
         }
     };
 
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("s1api-library"),
+        crate::types::TrackedDownloadKind::Framework,
+        format!("S1API-{}.zip", version_tag),
+        "Library",
+        Some("Downloading framework archive".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
     let zip_bytes = github_service
         .download_release_asset(&zip_url)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let message = e.to_string();
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
 
     let temp_dir = std::env::temp_dir();
     let sanitized_tag = version_tag
@@ -701,7 +759,25 @@ pub async fn download_s1api_to_library(
     let temp_zip_path = temp_dir.join(format!("s1api-{}.zip", sanitized_tag));
     tokio::fs::write(&temp_zip_path, zip_bytes)
         .await
-        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+        .map_err(|e| {
+            let message = format!("Failed to save downloaded file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Framework archive downloaded".to_string()),
+        ),
+    );
 
     let metadata = build_s1api_library_metadata(&version_tag);
 
@@ -724,6 +800,7 @@ pub async fn download_s1api_to_library(
 #[tauri::command]
 pub async fn download_mlvscan_to_library(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
@@ -806,10 +883,30 @@ pub async fn download_mlvscan_to_library(
         ));
     };
 
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("mlvscan-library"),
+        crate::types::TrackedDownloadKind::Plugin,
+        asset_name.clone(),
+        "Library",
+        Some("Downloading plugin archive".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
     let bytes = github_service
         .download_release_asset(&asset_url)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let message = e.to_string();
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
 
     let temp_dir = std::env::temp_dir();
     let sanitized_tag = version_tag
@@ -819,7 +916,25 @@ pub async fn download_mlvscan_to_library(
     let temp_path = temp_dir.join(format!("mlvscan-{}-{}", sanitized_tag, asset_name));
     tokio::fs::write(&temp_path, bytes)
         .await
-        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+        .map_err(|e| {
+            let message = format!("Failed to save downloaded file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Plugin archive downloaded".to_string()),
+        ),
+    );
 
     let metadata = build_mlvscan_library_metadata(&version_tag);
 

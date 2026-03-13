@@ -119,6 +119,7 @@ pub async fn check_mod_updates(
 
 #[tauri::command]
 pub async fn update_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     mod_file_name: String,
@@ -133,6 +134,7 @@ pub async fn update_mod(
 
     mod_update_service
         .update_mod(
+            &app,
             &environment_id,
             &mod_file_name,
             &env_service,

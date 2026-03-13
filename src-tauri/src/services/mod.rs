@@ -19,5 +19,6 @@ pub mod plugins;
 pub mod settings;
 pub mod steam;
 pub mod thunderstore;
+pub mod tracked_downloads;
 pub mod update_check;
 pub mod userlibs;

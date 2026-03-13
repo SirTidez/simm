@@ -1,5 +1,4 @@
-use crate::types::DownloadProgress;
-use crate::types::UpdateCheckResult;
+use crate::types::{DownloadProgress, TrackedDownload, UpdateCheckResult};
 use tauri::{AppHandle, Emitter, Runtime};
 
 pub fn emit_progress<R: Runtime>(
@@ -209,4 +208,11 @@ pub fn emit_mod_metadata_refresh_status<R: Runtime>(
             "running": active_count > 0
         }),
     )
+}
+
+pub fn emit_tracked_download_updated<R: Runtime>(
+    app: &AppHandle<R>,
+    download: TrackedDownload,
+) -> Result<(), tauri::Error> {
+    app.emit("tracked_download_updated", download)
 }

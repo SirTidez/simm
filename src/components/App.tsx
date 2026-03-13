@@ -19,11 +19,13 @@ import { LogsOverlay } from './LogsOverlay';
 import { ConfigurationOverlay } from './ConfigurationOverlay';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
+import { DownloadStatusStoreProvider } from '../stores/downloadStatusStore';
 import { SettingsStoreProvider } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { interceptConsole } from '../utils/logger';
 import { ErrorBoundary } from './ErrorBoundary';
+import { DownloadsPanel } from './DownloadsPanel';
 
 function AppContent() {
   type PendingNexusRuntimeSelection = {
@@ -647,6 +649,7 @@ function AppContent() {
                     activeWorkspace={activeWorkspace}
                     onSelectEnvironment={handleWorkspaceEnvironmentSelect}
                   />
+                  <DownloadsPanel />
                 </aside>
                 <main className="app-main workspace-main" style={{ position: 'relative' }}>
                   {renderWorkspacePanel()}
@@ -759,7 +762,9 @@ export function App() {
     <ErrorBoundary>
       <SettingsStoreProvider>
         <EnvironmentStoreProvider>
-          <AppContent />
+          <DownloadStatusStoreProvider>
+            <AppContent />
+          </DownloadStatusStoreProvider>
         </EnvironmentStoreProvider>
       </SettingsStoreProvider>
     </ErrorBoundary>

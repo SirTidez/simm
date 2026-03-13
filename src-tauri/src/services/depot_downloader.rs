@@ -547,7 +547,11 @@ impl DepotDownloaderService {
         Ok(())
     }
 
-    pub async fn cancel_download(&self, download_id: &str) -> Result<bool> {
+    pub async fn cancel_download<R: Runtime>(
+        &self,
+        download_id: &str,
+        app: &AppHandle<R>,
+    ) -> Result<bool> {
         let mut map = self.active_downloads.write().await;
         if let Some(mut child) = map.remove(download_id) {
             child.kill().await?;
@@ -555,6 +559,8 @@ impl DepotDownloaderService {
             let mut progress_map = self.download_progress.write().await;
             if let Some(progress) = progress_map.get_mut(download_id) {
                 progress.status = DownloadStatus::Cancelled;
+                progress.message = Some("Download cancelled".to_string());
+                let _ = crate::events::emit_progress(app, progress.clone());
             }
 
             Ok(true)
@@ -681,7 +687,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_download_returns_false_when_missing() -> Result<()> {
         let service = DepotDownloaderService::new();
-        let cancelled = service.cancel_download("missing").await?;
+        let app = mock_app();
+        let cancelled = service.cancel_download("missing", &app.handle()).await?;
         assert!(!cancelled);
         Ok(())
     }

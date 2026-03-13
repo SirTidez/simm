@@ -4,8 +4,7 @@ use crate::types::{DepotDownloadOptions, DownloadProgress};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tauri::AppHandle;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
 static DOWNLOAD_SERVICE: Lazy<AsyncMutex<Option<Arc<DepotDownloaderService>>>> =
@@ -81,10 +80,10 @@ pub async fn start_download(
 }
 
 #[tauri::command]
-pub async fn cancel_download(download_id: String) -> Result<bool, String> {
+pub async fn cancel_download(download_id: String, app: AppHandle) -> Result<bool, String> {
     let download_service = get_download_service().await?;
     download_service
-        .cancel_download(&download_id)
+        .cancel_download(&download_id, &app)
         .await
         .map_err(|e| e.to_string())
 }

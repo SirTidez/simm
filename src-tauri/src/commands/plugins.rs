@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
@@ -268,6 +268,7 @@ pub async fn get_mlvscan_installation_status(
 #[tauri::command]
 pub async fn install_mlvscan(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     environment_id: String,
     version_tag: String,
 ) -> Result<serde_json::Value, String> {
@@ -336,7 +337,7 @@ pub async fn install_mlvscan(
 
     // Get the asset URL - support both DLL and ZIP files
     eprintln!("[install_mlvscan] Getting asset URL...");
-    let (asset_url, is_zip) = match release.get("assets").and_then(|a| a.as_array()) {
+    let (asset_url, is_zip, asset_label) = match release.get("assets").and_then(|a| a.as_array()) {
         Some(assets) => {
             // First, try to find MLVScan DLL files (could be MLVScan.dll, MLVScan.MelonLoader.dll, etc.)
             if let Some(dll_asset) = assets.iter().find(|asset| {
@@ -356,7 +357,15 @@ pub async fn install_mlvscan(
                     if let Some(name) = dll_asset.get("name").and_then(|n| n.as_str()) {
                         eprintln!("[install_mlvscan] Found MLVScan DLL asset: {}", name);
                     }
-                    (url.to_string(), false)
+                    (
+                        url.to_string(),
+                        false,
+                        dll_asset
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("MLVScan.dll")
+                            .to_string(),
+                    )
                 } else {
                     // Fallback: log available assets for debugging
                     eprintln!("[install_mlvscan] Available assets:");
@@ -388,7 +397,15 @@ pub async fn install_mlvscan(
                             "[install_mlvscan] Found ZIP asset: {:?}",
                             zip_asset.get("name")
                         );
-                        (url.to_string(), true)
+                        (
+                            url.to_string(),
+                            true,
+                            zip_asset
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("MLVScan.zip")
+                                .to_string(),
+                        )
                     } else {
                         // Fallback: log available assets for debugging
                         eprintln!("[install_mlvscan] Available assets:");
@@ -419,6 +436,15 @@ pub async fn install_mlvscan(
         }
     };
 
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("mlvscan"),
+        crate::types::TrackedDownloadKind::Plugin,
+        asset_label.clone(),
+        env.name.clone(),
+        Some("Downloading plugin asset".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
     // Download the asset
     eprintln!("[install_mlvscan] Downloading asset...");
     let asset_bytes = match github_service.download_release_asset(&asset_url).await {
@@ -426,7 +452,18 @@ pub async fn install_mlvscan(
             eprintln!("[install_mlvscan] Downloaded {} bytes", bytes.len());
             bytes
         }
-        Err(e) => return error_json(format!("Failed to download MLVScan: {}", e)),
+        Err(e) => {
+            let message = format!("Failed to download MLVScan: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            return error_json(message);
+        }
     };
 
     // Save to temp file
@@ -442,8 +479,24 @@ pub async fn install_mlvscan(
         // Extract MLVScan.dll from ZIP
         let temp_zip_path = temp_dir.join(format!("mlvscan-{}.zip", sanitized_tag));
         if let Err(e) = tokio::fs::write(&temp_zip_path, asset_bytes).await {
-            return error_json(format!("Failed to save downloaded ZIP file: {}", e));
+            let message = format!("Failed to save downloaded ZIP file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            return error_json(message);
         }
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::complete_file_download(
+                &tracked_download,
+                Some("Plugin archive downloaded".to_string()),
+            ),
+        );
 
         // Extract MLVScan.dll from the ZIP - read all data synchronously before any await
         use std::fs::File;
@@ -556,8 +609,24 @@ pub async fn install_mlvscan(
         let temp_dll_path = temp_dir.join(format!("mlvscan-{}.dll", sanitized_tag));
 
         if let Err(e) = tokio::fs::write(&temp_dll_path, asset_bytes).await {
-            return error_json(format!("Failed to save downloaded file: {}", e));
+            let message = format!("Failed to save downloaded file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            return error_json(message);
         }
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::complete_file_download(
+                &tracked_download,
+                Some("Plugin asset downloaded".to_string()),
+            ),
+        );
 
         // Install from the temp file
         let install_result = plugins_service

@@ -7,6 +7,7 @@ use crate::services::github_releases::GitHubReleasesService;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use serde_json::Value;
+use tauri::{AppHandle, Runtime};
 
 #[derive(Clone)]
 pub struct ModUpdateService;
@@ -564,8 +565,9 @@ impl ModUpdateService {
             .or_else(|| files.first().cloned())
     }
 
-    pub async fn update_mod(
+    pub async fn update_mod<R: Runtime>(
         &self,
+        app: &AppHandle<R>,
         environment_id: &str,
         mod_file_name: &str,
         env_service: &EnvironmentService,
@@ -630,14 +632,53 @@ impl ModUpdateService {
                     }));
                 }
 
+                let tracked_download = crate::services::tracked_downloads::start_file_download(
+                    crate::services::tracked_downloads::new_download_id("mod-update-thunderstore"),
+                    crate::types::TrackedDownloadKind::Mod,
+                    format!("{}.zip", package_uuid),
+                    format!("Update -> {}", env.name),
+                    Some("Downloading update".to_string()),
+                );
+                let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
+
                 let bytes = thunderstore_service
                     .download_package(&package_uuid, Some("schedule-i"))
                     .await
-                    .context("Failed to download Thunderstore update")?;
+                    .map_err(|error| {
+                        let message = format!("Failed to download Thunderstore update: {}", error);
+                        let _ = crate::services::tracked_downloads::emit(
+                            app,
+                            crate::services::tracked_downloads::fail_file_download(
+                                &tracked_download,
+                                message.clone(),
+                                Some("Download failed".to_string()),
+                            ),
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
                 let temp_path = std::env::temp_dir().join(format!("{}.zip", temp_file_name));
                 tokio::fs::write(&temp_path, bytes)
                     .await
-                    .context("Failed to write Thunderstore update archive")?;
+                    .map_err(|error| {
+                        let message =
+                            format!("Failed to write Thunderstore update archive: {}", error);
+                        let _ = crate::services::tracked_downloads::emit(
+                            app,
+                            crate::services::tracked_downloads::fail_file_download(
+                                &tracked_download,
+                                message.clone(),
+                                Some("Download failed".to_string()),
+                            ),
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
+                let _ = crate::services::tracked_downloads::emit(
+                    app,
+                    crate::services::tracked_downloads::complete_file_download(
+                        &tracked_download,
+                        Some("Update archive downloaded".to_string()),
+                    ),
+                );
 
                 let owner = package.get("owner").and_then(|v| v.as_str()).unwrap_or("");
                 let name = package.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -741,16 +782,35 @@ impl ModUpdateService {
 
                 let access_token = nexus_access_token
                     .ok_or_else(|| anyhow::anyhow!("Nexus OAuth login required to download updates"))?;
-
-                let bytes = nexus_mods_service
-                    .download_mod_file(access_token, "schedule1", mod_id, file_id)
-                    .await
-                    .context("Failed to download Nexus update")?;
                 let original_file_name = target_file
                     .get("file_name")
                     .or_else(|| target_file.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("nexus-update.zip");
+                let tracked_download = crate::services::tracked_downloads::start_file_download(
+                    crate::services::tracked_downloads::new_download_id("mod-update-nexus"),
+                    crate::types::TrackedDownloadKind::Mod,
+                    original_file_name.to_string(),
+                    format!("Update -> {}", env.name),
+                    Some("Downloading update".to_string()),
+                );
+                let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
+
+                let bytes = nexus_mods_service
+                    .download_mod_file(access_token, "schedule1", mod_id, file_id)
+                    .await
+                    .map_err(|error| {
+                        let message = format!("Failed to download Nexus update: {}", error);
+                        let _ = crate::services::tracked_downloads::emit(
+                            app,
+                            crate::services::tracked_downloads::fail_file_download(
+                                &tracked_download,
+                                message.clone(),
+                                Some("Download failed".to_string()),
+                            ),
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
                 let extension = Path::new(original_file_name)
                     .extension()
                     .and_then(|v| v.to_str())
@@ -758,7 +818,25 @@ impl ModUpdateService {
                 let temp_path = std::env::temp_dir().join(format!("{}.{}", temp_file_name, extension));
                 tokio::fs::write(&temp_path, bytes)
                     .await
-                    .context("Failed to write Nexus update file")?;
+                    .map_err(|error| {
+                        let message = format!("Failed to write Nexus update file: {}", error);
+                        let _ = crate::services::tracked_downloads::emit(
+                            app,
+                            crate::services::tracked_downloads::fail_file_download(
+                                &tracked_download,
+                                message.clone(),
+                                Some("Download failed".to_string()),
+                            ),
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
+                let _ = crate::services::tracked_downloads::emit(
+                    app,
+                    crate::services::tracked_downloads::complete_file_download(
+                        &tracked_download,
+                        Some("Update file downloaded".to_string()),
+                    ),
+                );
 
                 let mod_info = nexus_mods_service
                     .get_mod("schedule1", mod_id)
@@ -827,14 +905,54 @@ impl ModUpdateService {
                 let asset_url = github_service
                     .get_zip_asset_url(&release)
                     .ok_or_else(|| anyhow::anyhow!("No ZIP asset found for latest GitHub release"))?;
+                let tracked_download = crate::services::tracked_downloads::start_file_download(
+                    crate::services::tracked_downloads::new_download_id("mod-update-github"),
+                    crate::types::TrackedDownloadKind::Mod,
+                    "github-update.zip",
+                    format!("Update -> {}", env.name),
+                    Some("Downloading update".to_string()),
+                );
+                let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
+
                 let bytes = github_service
                     .download_release_asset(&asset_url)
                     .await
-                    .context("Failed to download GitHub release asset")?;
+                    .map_err(|error| {
+                        let message =
+                            format!("Failed to download GitHub release asset: {}", error);
+                        let _ = crate::services::tracked_downloads::emit(
+                            app,
+                            crate::services::tracked_downloads::fail_file_download(
+                                &tracked_download,
+                                message.clone(),
+                                Some("Download failed".to_string()),
+                            ),
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
                 let temp_path = std::env::temp_dir().join(format!("{}.zip", temp_file_name));
                 tokio::fs::write(&temp_path, bytes)
                     .await
-                    .context("Failed to write GitHub update archive")?;
+                    .map_err(|error| {
+                        let message =
+                            format!("Failed to write GitHub update archive: {}", error);
+                        let _ = crate::services::tracked_downloads::emit(
+                            app,
+                            crate::services::tracked_downloads::fail_file_download(
+                                &tracked_download,
+                                message.clone(),
+                                Some("Download failed".to_string()),
+                            ),
+                        );
+                        anyhow::anyhow!(message)
+                    })?;
+                let _ = crate::services::tracked_downloads::emit(
+                    app,
+                    crate::services::tracked_downloads::complete_file_download(
+                        &tracked_download,
+                        Some("Update archive downloaded".to_string()),
+                    ),
+                );
 
                 let metadata_json = serde_json::json!({
                     "source": "github",
@@ -896,6 +1014,7 @@ mod tests {
     use crate::types::{schedule_i_config, ModMetadata, ModSource};
     use crate::services::github_releases::GitHubReleasesService;
     use serial_test::serial;
+    use tauri::test::mock_app;
     use tempfile::tempdir;
 
     struct EnvVarGuard {
@@ -974,10 +1093,12 @@ mod tests {
         let thunderstore_service = ThunderStoreService::new();
         let nexus_mods_service = NexusModsService::new();
         let github_service = GitHubReleasesService::new();
+        let app = mock_app();
 
         let service = ModUpdateService::new();
         let err = service
             .update_mod(
+                &app.handle(),
                 "missing-env",
                 "missing.dll",
                 &env_service,

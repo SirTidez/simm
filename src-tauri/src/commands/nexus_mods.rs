@@ -1045,6 +1045,7 @@ fn build_nexus_mod_metadata(mod_info: &Value, game_id: &str, mod_id: u32, versio
 }
 
 async fn complete_pending_nxm_download(
+    app: &AppHandle,
     db: Arc<SqlitePool>,
     pending: Option<&PendingNexusManualDownload>,
     nxm: &ParsedNxmUrl,
@@ -1147,9 +1148,45 @@ async fn complete_pending_nxm_download(
     .next()
     .ok_or_else(|| "No Nexus manual download links returned".to_string())?;
 
+    let context_label = if let Some(environment_id) = install_target.as_ref() {
+        if let Ok(service) = EnvironmentService::new(db.clone()) {
+            service
+                .get_environment(environment_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|env| env.name)
+                .unwrap_or_else(|| "Nexus Mods".to_string())
+        } else {
+            "Nexus Mods".to_string()
+        }
+    } else {
+        "Nexus Mods".to_string()
+    };
+
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("nexus-manual"),
+        crate::types::TrackedDownloadKind::Mod,
+        original_filename.to_string(),
+        context_label,
+        Some("Downloading archive".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
+
     let downloaded = nexus_api::download_from_url(&first_url, None)
         .await
-        .map_err(|e| format!("Failed to download Nexus file from manual link: {}", e))?;
+        .map_err(|e| {
+            let message = format!("Failed to download Nexus file from manual link: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
 
     let default_filename = format!("nexusmods-{}-{}.zip", nxm.mod_id, nxm.file_id);
     let original_filename = if original_filename.is_empty() {
@@ -1163,7 +1200,25 @@ async fn complete_pending_nxm_download(
     ));
     tokio::fs::write(&archive_path, downloaded.bytes)
         .await
-        .map_err(|e| format!("Failed to save manually downloaded Nexus file: {}", e))?;
+        .map_err(|e| {
+            let message = format!("Failed to save manually downloaded Nexus file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+    let _ = crate::services::tracked_downloads::emit(
+        app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Archive downloaded".to_string()),
+        ),
+    );
 
     let store_result = mods_service
         .store_mod_archive(
@@ -1492,6 +1547,7 @@ pub async fn begin_nexus_manual_download_session(
 
 #[tauri::command]
 pub async fn complete_nexus_manual_download_session(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     nxm_url: String,
     runtime_override: Option<String>,
@@ -1512,6 +1568,7 @@ pub async fn complete_nexus_manual_download_session(
         );
     }
     let result = complete_pending_nxm_download(
+        &app,
         db.inner().clone(),
         pending.as_ref(),
         &nxm,
@@ -1633,23 +1690,78 @@ pub async fn get_nexus_mods_mod_files(
 
 #[tauri::command]
 pub async fn download_nexus_mods_mod_file(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     game_id: String,
     mod_id: u32,
     file_id: u32,
 ) -> Result<String, String> {
-    let token = get_valid_nexus_access_token(db.inner().clone()).await?;
     let service = get_nexus_mods_service().await?;
+    let file_label = service
+        .get_mod_files(&game_id, mod_id)
+        .await
+        .ok()
+        .and_then(|files| {
+            files
+                .into_iter()
+                .find(|f| f.get("file_id").and_then(|id| id.as_u64()) == Some(file_id as u64))
+                .and_then(|file| {
+                    file.get("file_name")
+                        .or_else(|| file.get("name"))
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string())
+                })
+        })
+        .unwrap_or_else(|| format!("nexusmods-{}-{}.zip", mod_id, file_id));
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("nexus"),
+        crate::types::TrackedDownloadKind::Mod,
+        file_label,
+        "Nexus Mods",
+        Some("Downloading archive".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
+    let token = get_valid_nexus_access_token(db.inner().clone()).await?;
     let bytes = service
         .download_mod_file(&token, &game_id, mod_id, file_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let message = e.to_string();
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
 
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("nexusmods-{}-{}.zip", mod_id, file_id));
     tokio::fs::write(&temp_file, bytes)
         .await
-        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+        .map_err(|e| {
+            let message = format!("Failed to save downloaded file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Archive downloaded".to_string()),
+        ),
+    );
 
     Ok(temp_file.to_string_lossy().to_string())
 }
@@ -1685,6 +1797,7 @@ pub async fn check_nexus_mods_for_updates(
 
 #[tauri::command]
 pub async fn install_nexus_mods_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     game_id_param: Option<String>,
@@ -1785,22 +1898,58 @@ pub async fn install_nexus_mods_mod(
         .first()
         .ok_or_else(|| "No Nexus download links returned".to_string())?
         .clone();
-
-    let downloaded = nexus_api::download_from_url(&first_url, None)
-        .await
-        .map_err(|e| format!("Failed to download file {} from mod {}: {}", file_id, mod_id, e))?;
-
     let default_filename = format!("nexusmods-{}-{}.zip", mod_id, file_id);
     let original_filename = file_info
         .get("file_name")
         .and_then(|f| f.as_str())
         .unwrap_or(&default_filename);
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("nexus-install"),
+        crate::types::TrackedDownloadKind::Mod,
+        original_filename.to_string(),
+        env.name.clone(),
+        Some("Downloading archive".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
+    let downloaded = nexus_api::download_from_url(&first_url, None)
+        .await
+        .map_err(|e| {
+            let message = format!("Failed to download file {} from mod {}: {}", file_id, mod_id, e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
 
     let temp_dir = std::env::temp_dir();
     let archive_path = temp_dir.join(format!("nexusmods-{}-{}-{}", mod_id, file_id, original_filename));
     tokio::fs::write(&archive_path, downloaded.bytes)
         .await
-        .map_err(|e| format!("Failed to save downloaded file: {}", e))?;
+        .map_err(|e| {
+            let message = format!("Failed to save downloaded file: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Archive downloaded".to_string()),
+        ),
+    );
 
     let zip_path_str = archive_path.to_string_lossy().to_string();
 

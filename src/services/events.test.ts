@@ -15,7 +15,9 @@ import {
   onPluginsChanged,
   onUserLibsChanged,
   onModUpdatesChecked,
+  onTrackedDownloadUpdated,
   type ProgressEvent,
+  type TrackedDownloadUpdatedEvent,
   type UpdateAvailableEvent,
 } from './events';
 import { listen } from '@tauri-apps/api/event';
@@ -100,6 +102,7 @@ describe('events', () => {
     ['onPluginsChanged', onPluginsChanged, 'plugins_changed', { environmentId: 'env-1' }],
     ['onUserLibsChanged', onUserLibsChanged, 'userlibs_changed', { environmentId: 'env-1' }],
     ['onModUpdatesChecked', onModUpdatesChecked, 'mod_updates_checked', { environmentId: 'env-1', count: 1, updates: [] }],
+    ['onTrackedDownloadUpdated', onTrackedDownloadUpdated, 'tracked_download_updated', { id: 'download-1', kind: 'mod', label: 'Example.zip', contextLabel: 'Thunderstore', status: 'downloading', progress: 0, startedAt: Date.now() }],
   ])('%s wires %s and forwards payload', async (_name, subscribe, eventName, payload) => {
     const handler = vi.fn();
     const unlisten = vi.fn();
@@ -113,5 +116,37 @@ describe('events', () => {
     const callback = listenMock.mock.calls[0]?.[1] as (event: { payload: unknown }) => void;
     callback({ payload });
     expect(handler).toHaveBeenCalledWith(payload);
+  });
+
+  it('onTrackedDownloadUpdated forwards payload', async () => {
+    const handler = vi.fn();
+    const unlisten = vi.fn();
+    listenMock.mockResolvedValueOnce(unlisten);
+
+    await onTrackedDownloadUpdated(handler);
+    expect(listenMock).toHaveBeenCalledWith('tracked_download_updated', expect.any(Function));
+
+    const callback = listenMock.mock.calls[0]?.[1] as (event: { payload: TrackedDownloadUpdatedEvent }) => void;
+    callback({
+      payload: {
+        id: 'download-1',
+        kind: 'framework',
+        label: 'MelonLoader.zip',
+        contextLabel: 'Test Env',
+        status: 'completed',
+        progress: 100,
+        downloadedFiles: 1,
+        totalFiles: 1,
+        startedAt: Date.now() - 1000,
+        finishedAt: Date.now(),
+      },
+    });
+
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'download-1',
+        kind: 'framework',
+      })
+    );
   });
 });

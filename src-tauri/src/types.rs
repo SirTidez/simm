@@ -51,6 +51,34 @@ pub enum DownloadStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackedDownloadKind {
+    Game,
+    Mod,
+    Plugin,
+    Framework,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackedDownload {
+    pub id: String,
+    pub kind: TrackedDownloadKind,
+    pub label: String,
+    pub context_label: String,
+    pub status: DownloadStatus,
+    pub progress: f64,
+    pub downloaded_files: Option<u64>,
+    pub total_files: Option<u64>,
+    pub message: Option<String>,
+    pub error: Option<String>,
+    #[serde(with = "chrono::serde::ts_milliseconds")]
+    pub started_at: DateTime<Utc>,
+    #[serde(with = "chrono::serde::ts_milliseconds_option")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
     pub id: String,
@@ -435,5 +463,32 @@ mod tests {
         assert!(json.get("sourceId").is_some());
         assert!(json.get("availableRuntimes").is_some());
         assert!(json.get("storage_ids_by_runtime").is_none());
+    }
+
+    #[test]
+    fn tracked_download_serializes_camel_case_fields() {
+        let started_at = Utc::now();
+        let entry = TrackedDownload {
+            id: "download-1".to_string(),
+            kind: TrackedDownloadKind::Mod,
+            label: "ExampleMod.zip".to_string(),
+            context_label: "Thunderstore".to_string(),
+            status: DownloadStatus::Downloading,
+            progress: 0.0,
+            downloaded_files: Some(0),
+            total_files: Some(1),
+            message: Some("Downloading archive".to_string()),
+            error: None,
+            started_at,
+            finished_at: None,
+        };
+
+        let json = serde_json::to_value(entry).expect("serialize");
+        assert!(json.get("contextLabel").is_some());
+        assert!(json.get("downloadedFiles").is_some());
+        assert!(json.get("totalFiles").is_some());
+        assert!(json.get("startedAt").is_some());
+        assert!(json.get("finishedAt").is_some());
+        assert!(json.get("context_label").is_none());
     }
 }

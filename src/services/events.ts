@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import type { DownloadProgress, UpdateCheckResult } from '../types';
+import type { DownloadProgress, TrackedDownload, UpdateCheckResult } from '../types';
 
 export interface ProgressEvent {
   downloadId: string;
@@ -104,6 +104,8 @@ export interface ModMetadataRefreshStatusEvent {
   running: boolean;
 }
 
+export type TrackedDownloadUpdatedEvent = TrackedDownload;
+
 export async function onProgress(handler: (data: DownloadProgress) => void): Promise<() => void> {
   return await listen<ProgressEvent>('download_progress', (event) => {
     handler(event.payload.progress);
@@ -204,6 +206,14 @@ export async function onModMetadataRefreshStatus(
   handler: (data: ModMetadataRefreshStatusEvent) => void
 ): Promise<() => void> {
   return await listen<ModMetadataRefreshStatusEvent>('mod_metadata_refresh_status', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onTrackedDownloadUpdated(
+  handler: (data: TrackedDownloadUpdatedEvent) => void
+): Promise<() => void> {
+  return await listen<TrackedDownloadUpdatedEvent>('tracked_download_updated', (event) => {
     handler(event.payload);
   });
 }

@@ -4,6 +4,7 @@ import { App } from './App';
 import type { ReactNode } from 'react';
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
 const deepLinkMocks = vi.hoisted(() => ({
   getCurrent: vi.fn(),
   onOpenUrl: vi.fn(),
@@ -14,6 +15,10 @@ const environmentStoreMocks = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
+}));
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: listenMock,
 }));
 
 vi.mock('@tauri-apps/plugin-deep-link', () => ({
@@ -36,6 +41,10 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('../stores/environmentStore', () => ({
   EnvironmentStoreProvider: ({ children }: { children: ReactNode }) => children,
   useEnvironmentStore: environmentStoreMocks.useEnvironmentStore,
+}));
+
+vi.mock('../stores/downloadStatusStore', () => ({
+  DownloadStatusStoreProvider: ({ children }: { children: ReactNode }) => children,
 }));
 
 vi.mock('../stores/settingsStore', () => ({
@@ -111,6 +120,10 @@ vi.mock('./Settings', () => ({
 
 vi.mock('./Footer', () => ({
   Footer: () => <div>Footer</div>,
+}));
+
+vi.mock('./DownloadsPanel', () => ({
+  DownloadsPanel: () => <div>Downloads Panel</div>,
 }));
 
 describe('App', () => {

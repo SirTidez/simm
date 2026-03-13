@@ -160,6 +160,15 @@ pub async fn install_melon_loader(
         }
     };
 
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("melonloader"),
+        crate::types::TrackedDownloadKind::Framework,
+        format!("MelonLoader-{}.zip", version_tag),
+        env.name.clone(),
+        Some("Downloading framework".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
     // Download the ZIP file
     eprintln!("[install_melon_loader] Downloading ZIP asset...");
     let zip_bytes = match github_service.download_release_asset(&zip_url).await {
@@ -167,7 +176,18 @@ pub async fn install_melon_loader(
             eprintln!("[install_melon_loader] Downloaded {} bytes", bytes.len());
             bytes
         }
-        Err(e) => return error_json(format!("Failed to download MelonLoader: {}", e)),
+        Err(e) => {
+            let message = format!("Failed to download MelonLoader: {}", e);
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            return error_json(message);
+        }
     };
 
     // Save to temp file
@@ -180,8 +200,24 @@ pub async fn install_melon_loader(
     let temp_zip_path = temp_dir.join(format!("melonloader-{}.zip", sanitized_tag));
 
     if let Err(e) = tokio::fs::write(&temp_zip_path, zip_bytes).await {
-        return error_json(format!("Failed to save downloaded file: {}", e));
+        let message = format!("Failed to save downloaded file: {}", e);
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::fail_file_download(
+                &tracked_download,
+                message.clone(),
+                Some("Download failed".to_string()),
+            ),
+        );
+        return error_json(message);
     }
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Framework downloaded".to_string()),
+        ),
+    );
 
     // Install from the temp file
     let melon_loader_service = match get_melon_loader_service().await {

@@ -17,6 +17,23 @@ export interface DownloadProgress {
   error?: string;
 }
 
+export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework';
+
+export interface TrackedDownload {
+  id: string;
+  kind: TrackedDownloadKind;
+  label: string;
+  contextLabel: string;
+  status: 'queued' | 'downloading' | 'validating' | 'completed' | 'error' | 'cancelled';
+  progress: number;
+  downloadedFiles?: number;
+  totalFiles?: number;
+  message?: string;
+  error?: string;
+  startedAt: number;
+  finishedAt?: number | null;
+}
+
 export interface Environment {
   id: string;
   name: string;
