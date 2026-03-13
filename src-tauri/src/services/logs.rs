@@ -40,6 +40,7 @@ pub struct LogsService {
     watching: Arc<RwLock<bool>>,
     last_position: Arc<RwLock<u64>>,
     last_line_count: Arc<RwLock<usize>>,
+    watch_session_id: Arc<RwLock<u64>>,
 }
 
 impl LogsService {
@@ -48,6 +49,7 @@ impl LogsService {
             watching: Arc::new(RwLock::new(false)),
             last_position: Arc::new(RwLock::new(0)),
             last_line_count: Arc::new(RwLock::new(0)),
+            watch_session_id: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -523,6 +525,11 @@ impl LogsService {
 
         // Set watching flag
         *self.watching.write().await = true;
+        let current_session = {
+            let mut session = self.watch_session_id.write().await;
+            *session += 1;
+            *session
+        };
 
         // Get initial file size and line count
         let metadata = fs::metadata(&path).await?;
@@ -534,9 +541,10 @@ impl LogsService {
         let watching = Arc::clone(&self.watching);
         let last_position = Arc::clone(&self.last_position);
         let last_line_count = Arc::clone(&self.last_line_count);
+        let watch_session_id = Arc::clone(&self.watch_session_id);
 
         // Watch loop
-        while *watching.read().await {
+        while *watching.read().await && *watch_session_id.read().await == current_session {
             sleep(Duration::from_millis(500)).await;
 
             let metadata = match fs::metadata(&path).await {
@@ -606,6 +614,8 @@ impl LogsService {
         *self.watching.write().await = false;
         *self.last_position.write().await = 0;
         *self.last_line_count.write().await = 0;
+        let mut session = self.watch_session_id.write().await;
+        *session += 1;
     }
 }
 

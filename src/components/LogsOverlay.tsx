@@ -90,6 +90,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
   const [isWatching, setIsWatching] = useState(false);
   const [watchedPath, setWatchedPath] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const [timePeriod, setTimePeriod] = useState<TimePeriod>('all');
   const [customTimeStart, setCustomTimeStart] = useState<string>('');
   const [customTimeEnd, setCustomTimeEnd] = useState<string>('');
@@ -98,6 +99,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [openingModView, setOpeningModView] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const previousLineCountRef = useRef(0);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 
@@ -200,12 +202,16 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
       setSelectedModTag(null);
       setShowModCard(false);
       setWatchedPath(null);
+      setIsAtBottom(true);
+      previousLineCountRef.current = 0;
     }
   }, [isOpen, environmentId]);
 
   useEffect(() => {
     if (selectedLogFile) {
       loadLogFile(selectedLogFile.path);
+      previousLineCountRef.current = 0;
+      setIsAtBottom(true);
 
       const shouldWatch = isLiveLogFile(selectedLogFile);
       if (shouldWatch) {
@@ -214,7 +220,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
         stopWatching();
       }
     }
-  }, [selectedLogFile, isWatching, watchedPath]);
+  }, [selectedLogFile]);
   // Listen for log updates
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -239,10 +245,20 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
 
   // Auto-scroll logic
   useEffect(() => {
-    if (autoScroll && logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    const container = logContainerRef.current;
+    if (!container) {
+      previousLineCountRef.current = logLines.length;
+      return;
     }
-  }, [logLines, autoScroll]);
+
+    const isLive = isLiveLogFile(selectedLogFile);
+
+    if (autoScroll && (isAtBottom || !isLive)) {
+      container.scrollTop = container.scrollHeight;
+    }
+
+    previousLineCountRef.current = logLines.length;
+  }, [autoScroll, isAtBottom, logLines, selectedLogFile]);
 
   const loadLogFiles = async () => {
     try {
@@ -314,11 +330,25 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
     if (logContainerRef.current) {
       const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
       const isAtBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 10;
+      setIsAtBottom(isAtBottom);
 
-      if (isAtBottom !== autoScroll) {
+      if (isLiveLogFile(selectedLogFile) && isAtBottom !== autoScroll) {
         setAutoScroll(isAtBottom);
       }
+
+      if (isAtBottom) {
+      }
     }
+  };
+
+  const jumpToCurrent = () => {
+    if (!logContainerRef.current) return;
+    logContainerRef.current.scrollTo({
+      top: logContainerRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
+    setIsAtBottom(true);
+    setAutoScroll(true);
   };
 
   const handleExport = async () => {
@@ -847,106 +877,134 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
             </div>
 
             {/* Log Content Display */}
-            <div
-              ref={logContainerRef}
-              onScroll={handleScroll}
-              style={{ flex: 1, overflow: 'auto', padding: '1rem', fontFamily: 'monospace', fontSize: '0.875rem', lineHeight: '1.5', backgroundColor: '#1a1a1a' }}
-            >
-              {error ? (
-                <div style={{ color: '#ff4444', padding: '1rem' }}>
-                  <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem' }}></i>
-                  {error}
-                </div>
-              ) : loading && logLines.length === 0 ? (
-                <div style={{ color: '#888', padding: '1rem', textAlign: 'center' }}>
-                  <i className="fas fa-spinner fa-spin"></i> Loading log file...
-                </div>
-              ) : filteredLines.length === 0 ? (
-                <div style={{ color: '#888', padding: '1rem', textAlign: 'center' }}>
-                  {logLines.length === 0 ? 'No log content' : 'No lines match the current filters'}
-                </div>
-              ) : (
-                <div>
-                  {filteredLines.map((line, idx) => (
-                    <div
-                      key={`${line.lineNumber}-${idx}`}
-                      style={{
-                        padding: '0.25rem 0',
-                        borderBottom: '1px solid #2a2a2a',
-                        display: 'flex',
-                        gap: '0.75rem',
-                        alignItems: 'flex-start',
-                      }}
-                    >
-                      <span style={{ color: '#666', minWidth: '50px', fontSize: '0.75rem' }}>
-                        {line.lineNumber}
-                      </span>
-
-                      {line.timestamp && (
-                        <span style={{ color: '#888', minWidth: '100px', fontSize: '0.75rem', fontFamily: 'monospace' }}>
-                          {line.timestamp}
-                        </span>
-                      )}
-
-                      <i
-                        className={`fas ${getCategoryIcon(line.category)}`}
-                        style={{ color: '#666', fontSize: '0.75rem', marginTop: '0.2rem' }}
-                        title={line.category}
-                      ></i>
-
-                      {line.modTag && (
-                        <button
-                          onClick={() => handleModTagClick(line.modTag!)}
-                          style={{
-                            padding: '0.1rem 0.4rem',
-                            backgroundColor: 'transparent',
-                            border: `1px solid ${getModColor(line.modTag)}`,
-                            borderRadius: '3px',
-                            color: getModColor(line.modTag),
-                            fontSize: '0.75rem',
-                            cursor: 'pointer',
-                            fontFamily: 'monospace',
-                            transition: 'all 0.2s',
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.backgroundColor = getModColor(line.modTag!);
-                            e.currentTarget.style.color = '#000';
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.backgroundColor = 'transparent';
-                            e.currentTarget.style.color = getModColor(line.modTag!);
-                          }}
-                        >
-                          [{line.modTag}]
-                        </button>
-                      )}
-
-                      {line.level && (
-                        <span
-                          style={{
-                            color: getLevelColor(line.level),
-                            minWidth: '60px',
-                            fontWeight: 'bold',
-                            fontSize: '0.75rem',
-                          }}
-                        >
-                          [{line.level}]
-                        </span>
-                      )}
-
-                      <span
+            <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+              <div
+                ref={logContainerRef}
+                onScroll={handleScroll}
+                style={{ height: '100%', overflow: 'auto', padding: '1rem', fontFamily: 'monospace', fontSize: '0.875rem', lineHeight: '1.5', backgroundColor: '#1a1a1a' }}
+              >
+                {error ? (
+                  <div style={{ color: '#ff4444', padding: '1rem' }}>
+                    <i className="fas fa-exclamation-circle" style={{ marginRight: '0.5rem' }}></i>
+                    {error}
+                  </div>
+                ) : loading && logLines.length === 0 ? (
+                  <div style={{ color: '#888', padding: '1rem', textAlign: 'center' }}>
+                    <i className="fas fa-spinner fa-spin"></i> Loading log file...
+                  </div>
+                ) : filteredLines.length === 0 ? (
+                  <div style={{ color: '#888', padding: '1rem', textAlign: 'center' }}>
+                    {logLines.length === 0 ? 'No log content' : 'No lines match the current filters'}
+                  </div>
+                ) : (
+                  <div>
+                    {filteredLines.map((line, idx) => (
+                      <div
+                        key={`${line.lineNumber}-${idx}`}
                         style={{
-                          color: '#fff',
-                          flex: 1,
-                          wordBreak: 'break-word',
-                          whiteSpace: 'pre-wrap',
+                          padding: '0.25rem 0',
+                          borderBottom: '1px solid #2a2a2a',
+                          display: 'flex',
+                          gap: '0.75rem',
+                          alignItems: 'flex-start',
                         }}
                       >
-                        {highlightText(line.content, searchQuery)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                        <span style={{ color: '#666', minWidth: '50px', fontSize: '0.75rem' }}>
+                          {line.lineNumber}
+                        </span>
+
+                        {line.timestamp && (
+                          <span style={{ color: '#888', minWidth: '100px', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                            {line.timestamp}
+                          </span>
+                        )}
+
+                        <i
+                          className={`fas ${getCategoryIcon(line.category)}`}
+                          style={{ color: '#666', fontSize: '0.75rem', marginTop: '0.2rem' }}
+                          title={line.category}
+                        ></i>
+
+                        {line.modTag && (
+                          <button
+                            onClick={() => handleModTagClick(line.modTag!)}
+                            style={{
+                              padding: '0.1rem 0.4rem',
+                              backgroundColor: 'transparent',
+                              border: `1px solid ${getModColor(line.modTag)}`,
+                              borderRadius: '3px',
+                              color: getModColor(line.modTag),
+                              fontSize: '0.75rem',
+                              cursor: 'pointer',
+                              fontFamily: 'monospace',
+                              transition: 'all 0.2s',
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.backgroundColor = getModColor(line.modTag!);
+                              e.currentTarget.style.color = '#000';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.backgroundColor = 'transparent';
+                              e.currentTarget.style.color = getModColor(line.modTag!);
+                            }}
+                          >
+                            [{line.modTag}]
+                          </button>
+                        )}
+
+                        {line.level && (
+                          <span
+                            style={{
+                              color: getLevelColor(line.level),
+                              minWidth: '60px',
+                              fontWeight: 'bold',
+                              fontSize: '0.75rem',
+                            }}
+                          >
+                            [{line.level}]
+                          </span>
+                        )}
+
+                        <span
+                          style={{
+                            color: '#fff',
+                            flex: 1,
+                            wordBreak: 'break-word',
+                            whiteSpace: 'pre-wrap',
+                          }}
+                        >
+                          {highlightText(line.content, searchQuery)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {!isAtBottom && (
+                <button
+                  onClick={jumpToCurrent}
+                  title="Jump to current"
+                  style={{
+                    position: 'absolute',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    bottom: '0.75rem',
+                    width: '2.25rem',
+                    height: '2.25rem',
+                    borderRadius: '999px',
+                    border: '1px solid rgba(28, 28, 28, 0.9)',
+                    backgroundColor: 'rgba(52, 52, 52, 0.72)',
+                    color: '#fff',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backdropFilter: 'blur(2px)',
+                    zIndex: 5,
+                  }}
+                >
+                  <i className="fas fa-arrow-down"></i>
+                </button>
               )}
             </div>
 
