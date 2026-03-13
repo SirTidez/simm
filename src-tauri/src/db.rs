@@ -449,6 +449,11 @@ mod tests {
             theme: Theme::Light,
             melon_loader_version: Some("0.6.0".to_string()),
             auto_install_melon_loader: Some(true),
+            enable_security_scanner: Some(true),
+            auto_install_security_scanner: Some(true),
+            block_critical_scans: Some(true),
+            prompt_on_high_scans: Some(true),
+            show_security_scan_badges: Some(true),
             update_check_interval: Some(30),
             auto_check_updates: Some(true),
             log_level: Some(LogLevel::Info),
@@ -515,6 +520,7 @@ mod tests {
             runtime_match: Some(true),
             mod_storage_id: Some("storage-1".to_string()),
             symlink_paths: Some(vec!["C:\\mods\\sample".to_string()]),
+            security_scan: None,
         }
     }
 

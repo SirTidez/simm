@@ -3,7 +3,16 @@ import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus } from '../services/events';
-import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
+import { useSettingsStore } from '../stores/settingsStore';
+import { SecurityScanReportOverlay } from './SecurityScanReportOverlay';
+import type {
+  ModLibraryEntry,
+  ModLibraryResult,
+  NexusMod,
+  NexusModFile,
+  SecurityScanReport,
+  SecurityScanSummary,
+} from '../types';
 
 interface ThunderstorePackage {
   uuid4: string;
@@ -64,6 +73,7 @@ type DownloadedFilter = 'all' | 'updates' | 'managed' | 'external' | 'installed'
 
 interface LibraryModViewState {
   id: string;
+  storageId?: string;
   name: string;
   source: string;
   author?: string;
@@ -79,6 +89,7 @@ interface LibraryModViewState {
   latestVersion?: string;
   addedAt?: number;
   installedAt?: number;
+  securityScan?: SecurityScanSummary;
   kind: 'downloaded' | 'thunderstore' | 'nexusmods';
 }
 
@@ -170,6 +181,61 @@ const areVersionsEquivalent = (a?: string, b?: string): boolean => {
     return false;
   }
   return compareVersionTokensDesc(normalizedA, normalizedB) === 0;
+};
+
+const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
+  return !!value && typeof value === 'object' && 'summary' in (value as Record<string, unknown>) && Array.isArray((value as { files?: unknown[] }).files);
+};
+
+const getSecurityBadgeConfig = (summary?: SecurityScanSummary) => {
+  if (!summary) {
+    return null;
+  }
+
+  if (summary.state === 'verified') {
+    return {
+      label: 'Scanned for Viruses',
+      icon: 'fa-shield-check',
+      background: 'rgba(31, 105, 72, 0.24)',
+      border: '#3cc79055',
+      color: '#bdf3d8',
+    };
+  }
+
+  if (summary.state === 'review') {
+    const severityLabel = summary.highestSeverity 
+      ? `${summary.highestSeverity} Risk`
+      : 'Needs Review';
+    return {
+      label: severityLabel,
+      icon: 'fa-shield-exclamation',
+      background: 'rgba(104, 72, 27, 0.28)',
+      border: '#f0b35e55',
+      color: '#ffd9aa',
+    };
+  }
+
+  if (summary.state === 'unavailable') {
+    return {
+      label: 'Scan Unavailable',
+      icon: 'fa-circle-question',
+      background: 'rgba(48, 67, 96, 0.32)',
+      border: '#7fa1c855',
+      color: '#d2e3fa',
+    };
+  }
+
+  if (summary.state === 'skipped') {
+    return {
+      label: 'Scan Not Applicable',
+      icon: 'fa-file-circle-question',
+      background: 'rgba(48, 67, 96, 0.24)',
+      border: '#7fa1c833',
+      color: '#c7d8ef',
+    };
+  }
+
+  return null;
 };
 
 const getSourceBadgeLabel = (source?: ModLibraryEntry['source']): string => {
@@ -340,6 +406,7 @@ interface RuntimePromptState {
 }
 
 export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusRequestId, focusModTag }: Props) {
+  const { settings } = useSettingsStore();
   const [library, setLibrary] = useState<ModLibraryResult | null>(null);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [selectedModIds, setSelectedModIds] = useState<Set<string>>(new Set());
@@ -374,6 +441,13 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
   const [downloadedSearch, setDownloadedSearch] = useState('');
   const [activeModView, setActiveModView] = useState<LibraryModViewState | null>(null);
+  const [activeSecurityReport, setActiveSecurityReport] = useState<{
+    title: string;
+    report: SecurityScanReport;
+    confirmLabel?: string;
+    onConfirm?: (() => Promise<void>) | null;
+  } | null>(null);
+  const [securityActionBusy, setSecurityActionBusy] = useState(false);
   const [openedFromLogs, setOpenedFromLogs] = useState<{ active: boolean; modTag: string | null }>({
     active: false,
     modTag: null,
@@ -630,6 +704,73 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       },
     });
   }, [closeConfirmOverlay]);
+
+  const closeSecurityReport = useCallback(() => {
+    if (securityActionBusy) {
+      return;
+    }
+
+    setActiveSecurityReport(null);
+  }, [securityActionBusy]);
+
+  const handleSecurityReportConfirm = useCallback(async () => {
+    if (!activeSecurityReport?.onConfirm) {
+      return;
+    }
+
+    setSecurityActionBusy(true);
+    try {
+      await activeSecurityReport.onConfirm();
+      setActiveSecurityReport(null);
+    } catch (err) {
+      console.error('Security action failed:', err);
+      showLibraryNotice('MLVScan Action Failed', err instanceof Error ? err.message : 'Unable to continue with this download.');
+    } finally {
+      setSecurityActionBusy(false);
+    }
+  }, [activeSecurityReport, showLibraryNotice]);
+
+  const openStoredSecurityReport = useCallback(async (storageId: string, title: string) => {
+    try {
+      const report = await ApiService.getModSecurityScanReport(storageId);
+      if (!report) {
+        showLibraryNotice('No Security Report', 'This library entry does not have a stored MLVScan report yet.');
+        return;
+      }
+
+      setActiveSecurityReport({ title, report, onConfirm: null });
+    } catch (err) {
+      console.error('Failed to load security report:', err);
+      showLibraryNotice('Security Report Error', err instanceof Error ? err.message : 'Failed to load the MLVScan report.');
+    }
+  }, [showLibraryNotice]);
+
+  const handleSecurityGateResult = useCallback((
+    title: string,
+    result: { success: boolean; securityScan?: SecurityScanSummary | SecurityScanReport; securityScanConfirmationRequired?: boolean; securityScanBlocked?: boolean; error?: string },
+    onConfirm: () => Promise<void>,
+  ): boolean => {
+    if (!result.securityScan || !isSecurityScanReport(result.securityScan)) {
+      return true;
+    }
+
+    if (result.securityScanBlocked) {
+      setActiveSecurityReport({ title, report: result.securityScan, onConfirm: null });
+      return false;
+    }
+
+    if (result.securityScanConfirmationRequired) {
+      setActiveSecurityReport({
+        title,
+        report: result.securityScan,
+        confirmLabel: 'Continue Download',
+        onConfirm,
+      });
+      return false;
+    }
+
+    return true;
+  }, []);
 
   const clearNexusManualTimeout = useCallback(() => {
     if (nexusManualTimeoutRef.current !== null) {
@@ -903,6 +1044,63 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     return entry.sourceVersion || entry.installedVersion || 'unknown';
   }, []);
 
+  const downloadThunderstoreWithSecurity = useCallback(async (
+    packageUuid: string,
+    runtime?: 'IL2CPP' | 'Mono',
+    title = 'Security Findings',
+  ): Promise<Awaited<ReturnType<typeof ApiService.downloadThunderstoreToLibrary>> | null> => {
+    const result = await ApiService.downloadThunderstoreToLibrary(packageUuid, runtime);
+    if (!result.success) {
+      const handled = handleSecurityGateResult(title, result, async () => {
+        const retry = await ApiService.downloadThunderstoreToLibrary(packageUuid, runtime, true);
+        if (!retry.success) {
+          throw new Error(retry.error || 'Failed to continue the download after confirming the MLVScan findings.');
+        }
+        await refreshLibrary();
+        notifyLibraryUpdated();
+      });
+
+      if (!handled) {
+        return null;
+      }
+
+      throw new Error(result.error || 'Failed to download the selected Thunderstore package.');
+    }
+
+    await refreshLibrary();
+    notifyLibraryUpdated();
+    return result;
+  }, [handleSecurityGateResult, notifyLibraryUpdated, refreshLibrary]);
+
+  const downloadNexusWithSecurity = useCallback(async (
+    modId: number,
+    fileId: number,
+    runtime?: 'IL2CPP' | 'Mono',
+    title = 'Security Findings',
+  ): Promise<Awaited<ReturnType<typeof ApiService.downloadNexusModToLibrary>> | null> => {
+    const result = await ApiService.downloadNexusModToLibrary(modId, fileId, runtime);
+    if (!result.success) {
+      const handled = handleSecurityGateResult(title, result, async () => {
+        const retry = await ApiService.downloadNexusModToLibrary(modId, fileId, runtime, true);
+        if (!retry.success) {
+          throw new Error(retry.error || 'Failed to continue the download after confirming the MLVScan findings.');
+        }
+        await refreshLibrary();
+        notifyLibraryUpdated();
+      });
+
+      if (!handled) {
+        return null;
+      }
+
+      throw new Error(result.error || 'Failed to download the selected Nexus mod.');
+    }
+
+    await refreshLibrary();
+    notifyLibraryUpdated();
+    return result;
+  }, [handleSecurityGateResult, notifyLibraryUpdated, refreshLibrary]);
+
   const activateGroupEntry = useCallback(async (group: DownloadedModGroup, targetEntry: ModLibraryEntry) => {
     if (group.installedIn.length === 0) {
       return;
@@ -1052,8 +1250,8 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           if (!pkg) {
             continue;
           }
-          const result = await ApiService.downloadThunderstoreToLibrary(pkg.uuid4, runtime);
-          if (result.storageId) {
+          const result = await downloadThunderstoreWithSecurity(pkg.uuid4, runtime, `Security Findings - ${group.displayName}`);
+          if (result?.storageId) {
             downloadedStorageByRuntime[runtime] = result.storageId;
           }
         }
@@ -1145,8 +1343,8 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           if (!file?.file_id) {
             continue;
           }
-          const result = await ApiService.downloadNexusModToLibrary(modId, file.file_id, runtime);
-          if (result.storageId) {
+          const result = await downloadNexusWithSecurity(modId, file.file_id, runtime, 'Security Findings - Nexus Update');
+          if (result?.storageId) {
             downloadedStorageByRuntime[runtime] = result.storageId;
           }
         }
@@ -1177,7 +1375,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         setUpdatingGroup(null);
       }
     }
-  }, [activateGroupEntry, beginManualNexusLibraryDownload, findThunderstorePackageForRuntime, getEffectiveNexusDownloadAccess, getEntryVersionLabel, notifyLibraryUpdated, pickNexusFileForVersionAndRuntime, refreshLibrary, showLibraryNotice]);
+  }, [activateGroupEntry, beginManualNexusLibraryDownload, downloadNexusWithSecurity, downloadThunderstoreWithSecurity, findThunderstorePackageForRuntime, getEffectiveNexusDownloadAccess, getEntryVersionLabel, notifyLibraryUpdated, pickNexusFileForVersionAndRuntime, refreshLibrary, showLibraryNotice]);
 
   const handleSelectVersion = useCallback(async (group: DownloadedModGroup, storageId: string) => {
     setSelectedStorageByGroup(prev => ({ ...prev, [group.key]: storageId }));
@@ -1278,10 +1476,26 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     setShowS1APIVersionSelector(false);
     setDownloadingS1API(true);
     try {
-      await ApiService.downloadS1APIToLibrary(selectedS1APIVersion);
+      const result = await ApiService.downloadS1APIToLibrary(selectedS1APIVersion);
+      if (!result.success) {
+        const handled = handleSecurityGateResult('Security Findings - S1API', result, async () => {
+          const retry = await ApiService.downloadS1APIToLibrary(selectedS1APIVersion, true);
+          if (!retry.success) {
+            throw new Error(retry.error || 'Failed to continue the S1API download after confirming the MLVScan findings.');
+          }
+          await refreshLibrary();
+        });
+        if (!handled) {
+          return;
+        }
+
+        throw new Error(result.error || 'Failed to download S1API.');
+      }
+
       await refreshLibrary();
     } catch (err) {
       console.error('Failed to download S1API:', err);
+      showLibraryNotice('S1API Download Failed', err instanceof Error ? err.message : 'Failed to download S1API.');
     } finally {
       setDownloadingS1API(false);
       setSelectedS1APIVersion('');
@@ -1295,10 +1509,26 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     setShowMlvscanVersionSelector(false);
     setDownloadingMlvscan(true);
     try {
-      await ApiService.downloadMLVScanToLibrary(selectedMlvscanVersion);
+      const result = await ApiService.downloadMLVScanToLibrary(selectedMlvscanVersion);
+      if (!result.success) {
+        const handled = handleSecurityGateResult('Security Findings - MLVScan', result, async () => {
+          const retry = await ApiService.downloadMLVScanToLibrary(selectedMlvscanVersion, true);
+          if (!retry.success) {
+            throw new Error(retry.error || 'Failed to continue the MLVScan download after confirming the MLVScan findings.');
+          }
+          await refreshLibrary();
+        });
+        if (!handled) {
+          return;
+        }
+
+        throw new Error(result.error || 'Failed to download MLVScan.');
+      }
+
       await refreshLibrary();
     } catch (err) {
       console.error('Failed to download MLVScan:', err);
+      showLibraryNotice('MLVScan Download Failed', err instanceof Error ? err.message : 'Failed to download MLVScan.');
     } finally {
       setDownloadingMlvscan(false);
       setSelectedMlvscanVersion('');
@@ -1382,16 +1612,14 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       try {
         if (runtime === 'Both') {
           if (pkg.packagesByRuntime.IL2CPP) {
-            await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.IL2CPP.uuid4, 'IL2CPP');
+            await downloadThunderstoreWithSecurity(pkg.packagesByRuntime.IL2CPP.uuid4, 'IL2CPP', `Security Findings - ${pkg.name}`);
           }
           if (pkg.packagesByRuntime.Mono) {
-            await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.Mono.uuid4, 'Mono');
+            await downloadThunderstoreWithSecurity(pkg.packagesByRuntime.Mono.uuid4, 'Mono', `Security Findings - ${pkg.name}`);
           }
         } else if (pkg.packagesByRuntime[runtime]) {
-          await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime);
+          await downloadThunderstoreWithSecurity(pkg.packagesByRuntime[runtime]!.uuid4, runtime, `Security Findings - ${pkg.name}`);
         }
-        await refreshLibrary();
-        notifyLibraryUpdated();
       } catch (err) {
         console.error('Failed to download Thunderstore mod:', err);
       } finally {
@@ -1484,18 +1712,16 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           const il2cppFile = selectNexusFileForRuntime(files, 'IL2CPP');
           const monoFile = selectNexusFileForRuntime(files, 'Mono');
           if (il2cppFile?.file_id) {
-            await ApiService.downloadNexusModToLibrary(modId, il2cppFile.file_id, 'IL2CPP');
+            await downloadNexusWithSecurity(modId, il2cppFile.file_id, 'IL2CPP', 'Security Findings - Nexus Download');
           }
           if (monoFile?.file_id && monoFile?.file_id !== il2cppFile?.file_id) {
-            await ApiService.downloadNexusModToLibrary(modId, monoFile.file_id, 'Mono');
+            await downloadNexusWithSecurity(modId, monoFile.file_id, 'Mono', 'Security Findings - Nexus Download');
           }
         } else {
           const targetFile = selectNexusFileForRuntime(files, runtime);
           if (!targetFile?.file_id) return;
-          await ApiService.downloadNexusModToLibrary(modId, targetFile.file_id, runtime);
+          await downloadNexusWithSecurity(modId, targetFile.file_id, runtime, 'Security Findings - Nexus Download');
         }
-        await refreshLibrary();
-        notifyLibraryUpdated();
       } catch (err) {
         console.error('Failed to download Nexus mod:', err);
         showLibraryNotice('Nexus Download Failed', err instanceof Error ? err.message : 'Failed to download Nexus mod.');
@@ -1555,6 +1781,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     const activeEntry = preferredEntry || getActiveEntryForGroup(group) || group.entries[0];
     openModView({
       id: group.key,
+      storageId: activeEntry?.storageId,
       name: group.displayName,
       source: activeEntry?.source || 'unknown',
       author: group.author,
@@ -1570,6 +1797,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       latestVersion: group.remoteVersion,
       addedAt: activeEntry?.libraryAddedAt,
       installedAt: activeEntry?.installedAt,
+      securityScan: activeEntry?.securityScan,
       kind: 'downloaded',
     });
   }, [getActiveEntryForGroup, openModView]);
@@ -1698,6 +1926,15 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         title={confirmOverlay.title}
         message={confirmOverlay.message}
         isNested
+      />
+      <SecurityScanReportOverlay
+        isOpen={!!activeSecurityReport}
+        title={activeSecurityReport?.title || 'Security Findings'}
+        report={activeSecurityReport?.report || null}
+        onClose={closeSecurityReport}
+        onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
+        confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Download'}
+        busy={securityActionBusy}
       />
       {runtimePrompt && (
         <div className="modal-overlay modal-overlay-nested" onClick={() => setRuntimePrompt(null)}>
@@ -2369,6 +2606,9 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                   {filteredDownloadedGroups.map(group => {
                     const sortedEntries = getSortedGroupEntries(group);
                     const activeEntry = getActiveEntryForGroup(group);
+                    const securityBadge = settings?.showSecurityScanBadges !== false
+                      ? getSecurityBadgeConfig(activeEntry?.securityScan)
+                      : null;
                     const groupHasUpdate = isGroupUpdateAvailable(group);
                     const activeVersionLabel = activeEntry ? getEntryVersionLabel(activeEntry) : 'unknown';
                     const activeIndex = activeEntry
@@ -2434,6 +2674,34 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                               <p className="mod-card-summary" title={activeEntry.summary}>
                                 {activeEntry.summary}
                               </p>
+                            )}
+                            {securityBadge && activeEntry?.storageId && (
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void openStoredSecurityReport(activeEntry.storageId!, `Security Findings - ${group.displayName}`);
+                                }}
+                                style={{
+                                  alignSelf: 'start',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '0.35rem',
+                                  marginTop: '0.1rem',
+                                  borderRadius: '4px',
+                                  border: `1px solid ${securityBadge.border}`,
+                                  background: securityBadge.background,
+                                  color: securityBadge.color,
+                                  padding: '0.15rem 0.4rem',
+                                  fontSize: '0.7rem',
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap',
+                                  lineHeight: 1,
+                                }}
+                              >
+                                <i className={`fas ${securityBadge.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                                {securityBadge.label}
+                              </button>
                             )}
                           </div>
                         </div>
@@ -2706,6 +2974,28 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                     <div style={{ marginTop: '0.35rem', color: '#9ab0cb', fontSize: '0.85rem' }}>
                       Source: {activeModView.source} {activeModView.author ? `• ${activeModView.author}` : ''}
                     </div>
+                    {settings?.showSecurityScanBadges !== false && getSecurityBadgeConfig(activeModView.securityScan) && (
+                      <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                            borderRadius: '999px',
+                            border: `1px solid ${getSecurityBadgeConfig(activeModView.securityScan)?.border}`,
+                            background: getSecurityBadgeConfig(activeModView.securityScan)?.background,
+                            color: getSecurityBadgeConfig(activeModView.securityScan)?.color,
+                            padding: '0.1rem 0.4rem',
+                            fontSize: '0.72rem',
+                            whiteSpace: 'nowrap',
+                            lineHeight: 1,
+                          }}
+                        >
+                          <i className={`fas ${getSecurityBadgeConfig(activeModView.securityScan)?.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                          {getSecurityBadgeConfig(activeModView.securityScan)?.label}
+                        </span>
+                      </div>
+                    )}
                     {activeModView.summary && (
                       <p style={{ margin: '0.65rem 0 0', color: '#d5dfec', lineHeight: 1.55 }}>
                         {activeModView.summary}
@@ -2743,6 +3033,15 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                   </div>
                 )}
                 <div className="mod-view-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  {activeModView.storageId && activeModView.securityScan && (
+                    <button
+                      className="btn btn-secondary btn-small"
+                      onClick={() => void openStoredSecurityReport(activeModView.storageId!, `Security Findings - ${activeModView.name}`)}
+                    >
+                      <i className="fas fa-shield-alt" style={{ marginRight: '0.45rem' }}></i>
+                      Security Report
+                    </button>
+                  )}
                   {safeExternalUrl(activeModView.sourceUrl) && (
                     <a
                       href={safeExternalUrl(activeModView.sourceUrl)}

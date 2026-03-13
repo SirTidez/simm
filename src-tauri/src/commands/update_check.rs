@@ -471,6 +471,7 @@ pub async fn check_all_updates(
                 runtime_match: None,
                 mod_storage_id: Some(storage_id.clone()),
                 symlink_paths: None,
+                security_scan: None,
             };
 
             if let Err(error) = mods_service

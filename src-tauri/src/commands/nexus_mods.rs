@@ -99,7 +99,10 @@ fn build_nexus_oauth_status_value(session: &Value) -> Value {
         session.get("userinfo"),
         session.get("account"),
     );
-    let expires_at = session.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    let expires_at = session
+        .get("expiresAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
 
     json!({
         "connected": true,
@@ -121,14 +124,20 @@ fn should_require_manual_nexus_download(error: &str) -> bool {
 
 fn oauth_redirect_uri(prefer_localhost: bool) -> String {
     if prefer_localhost {
-        env_or_default("NEXUS_OAUTH_REDIRECT_URI_LOCALHOST", "http://127.0.0.1:8089/callback")
+        env_or_default(
+            "NEXUS_OAUTH_REDIRECT_URI_LOCALHOST",
+            "http://127.0.0.1:8089/callback",
+        )
     } else {
         env_or_default("NEXUS_OAUTH_REDIRECT_URI", "simm://oauth/nexus/callback")
     }
 }
 
 fn build_nexus_files_page_url(game_id: &str, mod_id: u32, _file_id: u32) -> String {
-    format!("https://www.nexusmods.com/{}/mods/{}?tab=files", game_id, mod_id)
+    format!(
+        "https://www.nexusmods.com/{}/mods/{}?tab=files",
+        game_id, mod_id
+    )
 }
 
 fn parse_runtime_label(value: Option<&str>) -> Option<crate::types::Runtime> {
@@ -177,7 +186,11 @@ fn parse_nxm_callback_url(url: &str) -> Result<ParsedNxmUrl, String> {
         })
         .unwrap_or_default();
 
-    let segment_offset = if segments.first().map(|value| value.eq_ignore_ascii_case(&game_id)).unwrap_or(false) {
+    let segment_offset = if segments
+        .first()
+        .map(|value| value.eq_ignore_ascii_case(&game_id))
+        .unwrap_or(false)
+    {
         1
     } else {
         0
@@ -185,13 +198,23 @@ fn parse_nxm_callback_url(url: &str) -> Result<ParsedNxmUrl, String> {
 
     let mod_id = segments
         .get(segment_offset + 1)
-        .filter(|_| segments.get(segment_offset).map(|value| value.eq_ignore_ascii_case("mods")).unwrap_or(false))
+        .filter(|_| {
+            segments
+                .get(segment_offset)
+                .map(|value| value.eq_ignore_ascii_case("mods"))
+                .unwrap_or(false)
+        })
         .and_then(|value| value.parse::<u32>().ok())
         .ok_or_else(|| "nxm URL is missing a valid mod ID".to_string())?;
 
     let file_id = segments
         .get(segment_offset + 3)
-        .filter(|_| segments.get(segment_offset + 2).map(|value| value.eq_ignore_ascii_case("files")).unwrap_or(false))
+        .filter(|_| {
+            segments
+                .get(segment_offset + 2)
+                .map(|value| value.eq_ignore_ascii_case("files"))
+                .unwrap_or(false)
+        })
         .and_then(|value| value.parse::<u32>().ok())
         .ok_or_else(|| "nxm URL is missing a valid file ID".to_string())?;
 
@@ -278,7 +301,11 @@ async fn get_nxm_download_links(
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|item| item.get("URI").or_else(|| item.get("uri")).and_then(|v| v.as_str()))
+        .filter_map(|item| {
+            item.get("URI")
+                .or_else(|| item.get("uri"))
+                .and_then(|v| v.as_str())
+        })
         .map(|uri| uri.to_string())
         .collect::<Vec<_>>();
 
@@ -432,8 +459,9 @@ fn restore_windows_protocol_handler(
         }
         _ => {
             if hkcu.open_subkey(&path).is_ok() {
-                hkcu.delete_subkey_all(&path)
-                    .map_err(|e| format!("Failed to remove temporary protocol registration: {}", e))?;
+                hkcu.delete_subkey_all(&path).map_err(|e| {
+                    format!("Failed to remove temporary protocol registration: {}", e)
+                })?;
             }
         }
     }
@@ -477,7 +505,17 @@ fn build_authorize_url(
     )
 }
 
-fn parse_callback_url(callback: &str) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), String> {
+fn parse_callback_url(
+    callback: &str,
+) -> Result<
+    (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+> {
     let query = callback
         .split_once('?')
         .map(|(_, q)| q)
@@ -490,7 +528,9 @@ fn parse_callback_url(callback: &str) -> Result<(Option<String>, Option<String>,
 
     for pair in query.split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let decoded = urlencoding::decode(v).map_err(|e| e.to_string())?.to_string();
+        let decoded = urlencoding::decode(v)
+            .map_err(|e| e.to_string())?
+            .to_string();
         match k {
             "code" => code = Some(decoded),
             "state" => state = Some(decoded),
@@ -535,13 +575,20 @@ async fn oauth_exchange_code_local(
         .await
         .map_err(|e| format!("Invalid OAuth token response: {}", e))?;
     if !status.is_success() {
-        return Err(format!("OAuth token exchange failed ({}): {}", status, value));
+        return Err(format!(
+            "OAuth token exchange failed ({}): {}",
+            status, value
+        ));
     }
 
     Ok(value)
 }
 
-async fn oauth_refresh_token_local(client_id: &str, refresh_token: &str, scope: &str) -> Result<Value, String> {
+async fn oauth_refresh_token_local(
+    client_id: &str,
+    refresh_token: &str,
+    scope: &str,
+) -> Result<Value, String> {
     let mut form: Vec<(&str, String)> = vec![
         ("grant_type", "refresh_token".to_string()),
         ("client_id", client_id.to_string()),
@@ -565,7 +612,10 @@ async fn oauth_refresh_token_local(client_id: &str, refresh_token: &str, scope: 
         .await
         .map_err(|e| format!("Invalid OAuth refresh response: {}", e))?;
     if !status.is_success() {
-        return Err(format!("OAuth token refresh failed ({}): {}", status, value));
+        return Err(format!(
+            "OAuth token refresh failed ({}): {}",
+            status, value
+        ));
     }
 
     Ok(value)
@@ -613,9 +663,11 @@ fn extract_boolish(value: Option<&Value>, needle: &str) -> bool {
         Some(Value::String(v)) => v.to_ascii_lowercase().contains(&needle_l),
         Some(Value::Array(arr)) => arr.iter().any(|item| match item {
             Value::String(s) => s.to_ascii_lowercase().contains(&needle_l),
-            Value::Object(map) => map
-                .values()
-                .any(|v| v.as_str().map(|s| s.to_ascii_lowercase().contains(&needle_l)).unwrap_or(false)),
+            Value::Object(map) => map.values().any(|v| {
+                v.as_str()
+                    .map(|s| s.to_ascii_lowercase().contains(&needle_l))
+                    .unwrap_or(false)
+            }),
             _ => false,
         }),
         _ => false,
@@ -671,13 +723,15 @@ fn derive_account_flags_from_token(access_token: &str) -> Result<Option<(bool, b
         || role_matches(membership_roles, "lifetimepremium")
         || role_matches(roles, "premium")
         || role_matches(roles, "lifetimepremium");
-    let is_supporter = role_matches(membership_roles, "supporter")
-        || role_matches(roles, "supporter");
+    let is_supporter =
+        role_matches(membership_roles, "supporter") || role_matches(roles, "supporter");
 
     Ok(Some((is_premium, is_supporter)))
 }
 
-fn extract_account_identity_from_token(access_token: &str) -> Result<Option<(String, Option<i64>)>, String> {
+fn extract_account_identity_from_token(
+    access_token: &str,
+) -> Result<Option<(String, Option<i64>)>, String> {
     let payload = decode_jwt_payload(access_token)?;
     let user = match payload.get("user") {
         Some(Value::Object(_)) => payload.get("user"),
@@ -727,8 +781,10 @@ fn derive_account_summary(
     userinfo: Option<&Value>,
     existing_account: Option<&Value>,
 ) -> Value {
-    let token_identity = access_token.and_then(|token| extract_account_identity_from_token(token).ok().flatten());
-    let flags_from_token = access_token.and_then(|token| derive_account_flags_from_token(token).ok().flatten());
+    let token_identity =
+        access_token.and_then(|token| extract_account_identity_from_token(token).ok().flatten());
+    let flags_from_token =
+        access_token.and_then(|token| derive_account_flags_from_token(token).ok().flatten());
 
     let flags = if let Some((is_premium, is_supporter)) = flags_from_token {
         (is_premium, is_supporter)
@@ -868,12 +924,19 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
     db: Arc<SqlitePool>,
 ) -> Result<Option<Value>, String> {
     let settings = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
-    let mut session = match settings.get_nexus_oauth_session().await.map_err(|e| e.to_string())? {
+    let mut session = match settings
+        .get_nexus_oauth_session()
+        .await
+        .map_err(|e| e.to_string())?
+    {
         Some(s) => s,
         None => return Ok(None),
     };
 
-    let expires_at = session.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    let expires_at = session
+        .get("expiresAt")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let now = now_epoch_seconds();
     if expires_at > now + 30 {
         return Ok(Some(session));
@@ -897,8 +960,14 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .unwrap_or(refresh_token.as_str());
-    let next_scope = token.get("scope").and_then(|v| v.as_str()).unwrap_or(&scope);
-    let expires_in = token.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
+    let next_scope = token
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&scope);
+    let expires_in = token
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
 
     session["accessToken"] = json!(next_access);
     session["refreshToken"] = json!(next_refresh);
@@ -916,7 +985,11 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
 pub(crate) async fn get_valid_nexus_access_token(db: Arc<SqlitePool>) -> Result<String, String> {
     let session = refresh_nexus_oauth_token_if_needed_inner(db).await?;
     session
-        .and_then(|s| s.get("accessToken").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|s| {
+            s.get("accessToken")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .ok_or_else(|| "Nexus OAuth login required".to_string())
 }
 
@@ -966,7 +1039,9 @@ pub(crate) async fn cleanup_nxm_runtime_registration(db: Arc<SqlitePool>) -> Res
             .get_nexus_nxm_protocol_backup()
             .await
             .map_err(|e| e.to_string())?
-            .map(|value| serde_json::from_value::<WindowsProtocolBackup>(value).map_err(|e| e.to_string()))
+            .map(|value| {
+                serde_json::from_value::<WindowsProtocolBackup>(value).map_err(|e| e.to_string())
+            })
             .transpose()?;
 
         restore_windows_protocol_handler(NXM_PROTOCOL, backup.as_ref())?;
@@ -981,7 +1056,9 @@ pub(crate) async fn cleanup_nxm_runtime_registration(db: Arc<SqlitePool>) -> Res
     Ok(())
 }
 
-pub(crate) async fn cleanup_stale_nxm_runtime_registration(db: Arc<SqlitePool>) -> Result<(), String> {
+pub(crate) async fn cleanup_stale_nxm_runtime_registration(
+    db: Arc<SqlitePool>,
+) -> Result<(), String> {
     cleanup_nxm_runtime_registration(db).await
 }
 
@@ -994,35 +1071,40 @@ fn build_nexus_mod_metadata(mod_info: &Value, game_id: &str, mod_id: u32, versio
     metadata_obj.insert("sourceUrl".to_string(), json!(source_url));
     metadata_obj.insert(
         "modName".to_string(),
-        json!(mod_info.get("name").and_then(|n| n.as_str()).unwrap_or("Unknown Mod")),
+        json!(mod_info
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("Unknown Mod")),
     );
     metadata_obj.insert(
         "author".to_string(),
-        json!(mod_info.get("author").and_then(|a| a.as_str()).unwrap_or("Unknown")),
+        json!(mod_info
+            .get("author")
+            .and_then(|a| a.as_str())
+            .unwrap_or("Unknown")),
     );
     metadata_obj.insert(
         "summary".to_string(),
-        json!(mod_info.get("summary").and_then(|v| v.as_str()).unwrap_or_default()),
+        json!(mod_info
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()),
     );
     metadata_obj.insert(
         "iconUrl".to_string(),
-        json!(
-            mod_info
-                .get("picture_url")
-                .or_else(|| mod_info.get("pictureUrl"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-        ),
+        json!(mod_info
+            .get("picture_url")
+            .or_else(|| mod_info.get("pictureUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()),
     );
     metadata_obj.insert(
         "updatedAt".to_string(),
-        json!(
-            mod_info
-                .get("updated_at")
-                .or_else(|| mod_info.get("updatedAt"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-        ),
+        json!(mod_info
+            .get("updated_at")
+            .or_else(|| mod_info.get("updatedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()),
     );
 
     if let Some(downloads) = mod_info
@@ -1036,7 +1118,10 @@ fn build_nexus_mod_metadata(mod_info: &Value, game_id: &str, mod_id: u32, versio
     if let Some(endorsements) = mod_info
         .get("endorsement_count")
         .or_else(|| mod_info.get("endorsements"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+        })
     {
         metadata_obj.insert("likesOrEndorsements".to_string(), json!(endorsements));
     }
@@ -1110,7 +1195,11 @@ async fn complete_pending_nxm_download(
 
     if install_target.is_some() {
         if let Some(existing_mod_id) = mods_service
-            .find_existing_mod_storage_by_source_version(&nxm.mod_id.to_string(), &version, runtime.clone())
+            .find_existing_mod_storage_by_source_version(
+                &nxm.mod_id.to_string(),
+                &version,
+                runtime.clone(),
+            )
             .await
             .map_err(|e| e.to_string())?
         {
@@ -1225,7 +1314,12 @@ async fn complete_pending_nxm_download(
             &archive_path.to_string_lossy(),
             original_filename,
             runtime.clone(),
-            Some(build_nexus_mod_metadata(&mod_info, &nxm.game_id, nxm.mod_id, &version)),
+            Some(build_nexus_mod_metadata(
+                &mod_info,
+                &nxm.game_id,
+                nxm.mod_id,
+                &version,
+            )),
             None,
         )
         .await
@@ -1293,7 +1387,8 @@ pub async fn begin_nexus_oauth_login(
     let state = uuid::Uuid::new_v4().to_string();
     let (code_verifier, code_challenge) = generate_pkce_pair();
 
-    let authorize_url = build_authorize_url(&client_id, &redirect_uri, &scope, &state, &code_challenge);
+    let authorize_url =
+        build_authorize_url(&client_id, &redirect_uri, &scope, &state, &code_challenge);
 
     let settings = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     settings
@@ -1364,7 +1459,10 @@ pub async fn complete_nexus_oauth_callback(
 
     if let Some(err) = error_opt {
         let description = error_description_opt.unwrap_or_default();
-        return Err(format!("Nexus OAuth authorization failed: {} {}", err, description));
+        return Err(format!(
+            "Nexus OAuth authorization failed: {} {}",
+            err, description
+        ));
     }
 
     let code = code_opt.ok_or_else(|| "OAuth callback missing authorization code".to_string())?;
@@ -1376,7 +1474,8 @@ pub async fn complete_nexus_oauth_callback(
 
     let client_id = oauth_client_id()?;
     let scope = oauth_scope();
-    let token = oauth_exchange_code_local(&client_id, redirect_uri, &code, code_verifier, &scope).await?;
+    let token =
+        oauth_exchange_code_local(&client_id, redirect_uri, &code, code_verifier, &scope).await?;
 
     let access_token = token
         .get("access_token")
@@ -1480,7 +1579,12 @@ pub async fn begin_nexus_manual_download_session(
         return Err("Unsupported Nexus manual download session kind".to_string());
     }
 
-    if kind == "install" && environment_id.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true) {
+    if kind == "install"
+        && environment_id
+            .as_deref()
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    {
         return Err("Nexus manual install requires an environment id".to_string());
     }
 
@@ -1502,7 +1606,9 @@ pub async fn begin_nexus_manual_download_session(
     };
 
     settings
-        .save_nexus_nxm_pending_download(&serde_json::to_value(&pending).map_err(|e| e.to_string())?)
+        .save_nexus_nxm_pending_download(
+            &serde_json::to_value(&pending).map_err(|e| e.to_string())?,
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1519,7 +1625,8 @@ pub async fn begin_nexus_manual_download_session(
         let Some(current) = current else {
             return;
         };
-        let Ok(current_pending) = serde_json::from_value::<PendingNexusManualDownload>(current) else {
+        let Ok(current_pending) = serde_json::from_value::<PendingNexusManualDownload>(current)
+        else {
             let _ = clear_nxm_pending_download(db_for_cleanup.clone()).await;
             return;
         };
@@ -1557,8 +1664,10 @@ pub async fn complete_nexus_manual_download_session(
         .get_nexus_nxm_pending_download()
         .await
         .map_err(|e| e.to_string())?
-        .map(|value| serde_json::from_value::<PendingNexusManualDownload>(value)
-            .map_err(|e| format!("Invalid pending Nexus manual download session: {}", e)))
+        .map(|value| {
+            serde_json::from_value::<PendingNexusManualDownload>(value)
+                .map_err(|e| format!("Invalid pending Nexus manual download session: {}", e))
+        })
         .transpose()?;
     let nxm = parse_nxm_callback_url(&nxm_url)?;
     if normalize_nexus_game_id(Some(&nxm.game_id)) != SUPPORTED_NEXUS_GAME_ID {
@@ -1584,7 +1693,8 @@ pub async fn complete_nexus_manual_download_session(
 
     let cleanup_result = if requires_runtime_selection {
         Ok(())
-    } else if matches!(&result, Ok(value) if value.get("success").and_then(|item| item.as_bool()) == Some(true)) {
+    } else if matches!(&result, Ok(value) if value.get("success").and_then(|item| item.as_bool()) == Some(true))
+    {
         clear_nxm_pending_download(db.inner().clone()).await
     } else {
         Ok(())
@@ -1598,7 +1708,9 @@ pub async fn complete_nexus_manual_download_session(
             "requestedKind": pending.as_ref().map(|value| value.kind.clone()),
         })),
         (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(error), Err(cleanup_error)) => Err(format!("{}; cleanup failed: {}", error, cleanup_error)),
+        (Err(error), Err(cleanup_error)) => {
+            Err(format!("{}; cleanup failed: {}", error, cleanup_error))
+        }
     }
 }
 
@@ -1624,7 +1736,10 @@ pub async fn search_nexus_mods_mods(
 ) -> Result<Vec<Value>, String> {
     let _ = db;
     let service = get_nexus_mods_service().await?;
-    service.search_mods(&game_id, &query).await.map_err(|e| e.to_string())
+    service
+        .search_mods(&game_id, &query)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1660,7 +1775,10 @@ pub async fn get_nexus_mods_trending(
 ) -> Result<Vec<Value>, String> {
     let _ = db;
     let service = get_nexus_mods_service().await?;
-    service.get_trending_mods(&game_id).await.map_err(|e| e.to_string())
+    service
+        .get_trending_mods(&game_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1671,7 +1789,10 @@ pub async fn get_nexus_mods_mod(
 ) -> Result<Value, String> {
     let _ = db;
     let service = get_nexus_mods_service().await?;
-    service.get_mod(&game_id, mod_id).await.map_err(|e| e.to_string())
+    service
+        .get_mod(&game_id, mod_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1741,20 +1862,18 @@ pub async fn download_nexus_mods_mod_file(
 
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("nexusmods-{}-{}.zip", mod_id, file_id));
-    tokio::fs::write(&temp_file, bytes)
-        .await
-        .map_err(|e| {
-            let message = format!("Failed to save downloaded file: {}", e);
-            let _ = crate::services::tracked_downloads::emit(
-                &app,
-                crate::services::tracked_downloads::fail_file_download(
-                    &tracked_download,
-                    message.clone(),
-                    Some("Download failed".to_string()),
-                ),
-            );
-            message
-        })?;
+    tokio::fs::write(&temp_file, bytes).await.map_err(|e| {
+        let message = format!("Failed to save downloaded file: {}", e);
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::fail_file_download(
+                &tracked_download,
+                message.clone(),
+                Some("Download failed".to_string()),
+            ),
+        );
+        message
+    })?;
     let _ = crate::services::tracked_downloads::emit(
         &app,
         crate::services::tracked_downloads::complete_file_download(
@@ -1803,6 +1922,7 @@ pub async fn install_nexus_mods_mod(
     game_id_param: Option<String>,
     mod_id: u32,
     file_id: u32,
+    security_override: Option<bool>,
 ) -> Result<Value, String> {
     use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
@@ -1813,8 +1933,12 @@ pub async fn install_nexus_mods_mod(
     let game_id = if let Some(ref id) = game_id_param {
         normalize_nexus_game_id(Some(id))
     } else {
-        let mut settings_service = SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
-        let settings = settings_service.load_settings().await.map_err(|e| e.to_string())?;
+        let mut settings_service =
+            SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
+        let settings = settings_service
+            .load_settings()
+            .await
+            .map_err(|e| e.to_string())?;
         normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
     };
 
@@ -1859,7 +1983,11 @@ pub async fn install_nexus_mods_mod(
 
     let mods_service = ModsService::new(db_pool.clone());
     if let Ok(Some(existing_mod_id)) = mods_service
-        .find_existing_mod_storage_by_source_version(&mod_id.to_string(), &version, Some(env.runtime.clone()))
+        .find_existing_mod_storage_by_source_version(
+            &mod_id.to_string(),
+            &version,
+            Some(env.runtime.clone()),
+        )
         .await
     {
         let install_result = mods_service
@@ -1915,7 +2043,10 @@ pub async fn install_nexus_mods_mod(
     let downloaded = nexus_api::download_from_url(&first_url, None)
         .await
         .map_err(|e| {
-            let message = format!("Failed to download file {} from mod {}: {}", file_id, mod_id, e);
+            let message = format!(
+                "Failed to download file {} from mod {}: {}",
+                file_id, mod_id, e
+            );
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1928,7 +2059,10 @@ pub async fn install_nexus_mods_mod(
         })?;
 
     let temp_dir = std::env::temp_dir();
-    let archive_path = temp_dir.join(format!("nexusmods-{}-{}-{}", mod_id, file_id, original_filename));
+    let archive_path = temp_dir.join(format!(
+        "nexusmods-{}-{}-{}",
+        mod_id, file_id, original_filename
+    ));
     tokio::fs::write(&archive_path, downloaded.bytes)
         .await
         .map_err(|e| {
@@ -1974,27 +2108,26 @@ pub async fn install_nexus_mods_mod(
     metadata_obj.insert("author".to_string(), json!(author));
     metadata_obj.insert(
         "summary".to_string(),
-        json!(mod_info.get("summary").and_then(|v| v.as_str()).unwrap_or_default()),
+        json!(mod_info
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()),
     );
     metadata_obj.insert(
         "iconUrl".to_string(),
-        json!(
-            mod_info
-                .get("picture_url")
-                .or_else(|| mod_info.get("pictureUrl"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-        ),
+        json!(mod_info
+            .get("picture_url")
+            .or_else(|| mod_info.get("pictureUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()),
     );
     metadata_obj.insert(
         "updatedAt".to_string(),
-        json!(
-            mod_info
-                .get("updated_at")
-                .or_else(|| mod_info.get("updatedAt"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-        ),
+        json!(mod_info
+            .get("updated_at")
+            .or_else(|| mod_info.get("updatedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()),
     );
 
     if let Some(downloads) = mod_info
@@ -2008,12 +2141,33 @@ pub async fn install_nexus_mods_mod(
     if let Some(endorsements) = mod_info
         .get("endorsement_count")
         .or_else(|| mod_info.get("endorsements"))
-        .and_then(|v| v.as_i64().or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+        })
     {
         metadata_obj.insert("likesOrEndorsements".to_string(), json!(endorsements));
     }
 
     let metadata = Value::Object(metadata_obj);
+
+    let security_scan = crate::commands::mods::prepare_security_scan(
+        db_pool.clone(),
+        &zip_path_str,
+        Some(metadata),
+        security_override.unwrap_or(false),
+    )
+    .await?;
+
+    let (metadata, security_report) = match security_scan {
+        crate::commands::mods::SecurityGateResult::Continue { metadata, report } => {
+            (metadata, report)
+        }
+        crate::commands::mods::SecurityGateResult::EarlyResponse(response) => {
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            return Ok(response);
+        }
+    };
 
     let result = mods_service
         .install_zip_mod(
@@ -2022,14 +2176,20 @@ pub async fn install_nexus_mods_mod(
             original_filename,
             runtime_str,
             &env.branch,
-            Some(metadata),
+            metadata,
         )
         .await
         .map_err(|e| format!("Failed to install mod {} file {}: {}", mod_id, file_id, e))?;
 
     let _ = tokio::fs::remove_file(&archive_path).await;
 
-    Ok(result)
+    crate::commands::mods::persist_security_scan_report(
+        &mods_service,
+        &result,
+        security_report.as_ref(),
+    )
+    .await?;
+    crate::commands::mods::attach_security_scan_summary(result, security_report.as_ref())
 }
 
 #[cfg(test)]
@@ -2042,8 +2202,7 @@ mod tests {
 
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(payload.to_string());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
 
         format!("{}.{}.signature", header, payload)
     }
@@ -2100,5 +2259,3 @@ mod tests {
         assert!(is_supporter);
     }
 }
-
-

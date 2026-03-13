@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { SecurityScanReportOverlay } from './SecurityScanReportOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
-import type { Environment, ModLibraryEntry, NexusMod, NexusModFile } from '../types';
+import type { Environment, ModLibraryEntry, NexusMod, NexusModFile, SecurityScanReport, SecurityScanSummary } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 
 interface ModInfo {
@@ -62,6 +63,10 @@ interface ConfirmDialog {
   onConfirm: () => Promise<void> | void;
   readyAt?: number;
 }
+
+const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
+  return !!value && typeof value === 'object' && 'summary' in (value as Record<string, unknown>) && Array.isArray((value as { files?: unknown[] }).files);
+};
 
 interface ThunderstorePackage {
   uuid4: string;
@@ -129,6 +134,57 @@ function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] 
   return merged;
 }
 
+const getSecurityBadgeConfig = (summary?: SecurityScanSummary) => {
+  if (!summary) {
+    return null;
+  }
+
+  if (summary.state === 'verified') {
+    return {
+      label: 'Scanned for Viruses',
+      icon: 'fa-shield-check',
+      background: 'rgba(31, 105, 72, 0.24)',
+      border: '#3cc79055',
+      color: '#bdf3d8',
+    };
+  }
+
+  if (summary.state === 'review') {
+    const severityLabel = summary.highestSeverity 
+      ? `${summary.highestSeverity} Risk`
+      : 'Needs Review';
+    return {
+      label: severityLabel,
+      icon: 'fa-shield-exclamation',
+      background: 'rgba(104, 72, 27, 0.28)',
+      border: '#f0b35e55',
+      color: '#ffd9aa',
+    };
+  }
+
+  if (summary.state === 'unavailable') {
+    return {
+      label: 'Scan Unavailable',
+      icon: 'fa-circle-question',
+      background: 'rgba(48, 67, 96, 0.32)',
+      border: '#7fa1c855',
+      color: '#d2e3fa',
+    };
+  }
+
+  if (summary.state === 'skipped') {
+    return {
+      label: 'Scan Not Applicable',
+      icon: 'fa-file-circle-question',
+      background: 'rgba(48, 67, 96, 0.24)',
+      border: '#7fa1c833',
+      color: '#c7d8ef',
+    };
+  }
+
+  return null;
+};
+
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked, onOpenAccounts }: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
 
@@ -145,6 +201,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<{ filePath: string; fileName: string; sourceInfo: any } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [installingDownloaded, setInstallingDownloaded] = useState<string | null>(null);
+  const [activeSecurityReport, setActiveSecurityReport] = useState<{
+    title: string;
+    report: SecurityScanReport;
+    confirmLabel?: string;
+    onConfirm?: (() => Promise<void>) | null;
+  } | null>(null);
+  const [securityActionBusy, setSecurityActionBusy] = useState(false);
 
   // Search state
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -221,6 +284,57 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       window.clearTimeout(nexusManualTimeoutRef.current);
       nexusManualTimeoutRef.current = null;
     }
+  };
+
+  const closeSecurityReport = () => {
+    if (securityActionBusy) {
+      return;
+    }
+
+    setActiveSecurityReport(null);
+  };
+
+  const handleSecurityReportConfirm = async () => {
+    if (!activeSecurityReport?.onConfirm) {
+      return;
+    }
+
+    setSecurityActionBusy(true);
+    try {
+      await activeSecurityReport.onConfirm();
+      setActiveSecurityReport(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to continue after reviewing the MLVScan findings.');
+    } finally {
+      setSecurityActionBusy(false);
+    }
+  };
+
+  const handleSecurityGateResponse = (
+    title: string,
+    result: { securityScan?: SecurityScanReport | SecurityScanSummary; securityScanBlocked?: boolean; securityScanConfirmationRequired?: boolean },
+    onConfirm: () => Promise<void>,
+  ): boolean => {
+    if (!result.securityScan || !isSecurityScanReport(result.securityScan)) {
+      return false;
+    }
+
+    if (result.securityScanBlocked) {
+      setActiveSecurityReport({ title, report: result.securityScan, onConfirm: null });
+      return true;
+    }
+
+    if (result.securityScanConfirmationRequired) {
+      setActiveSecurityReport({
+        title,
+        report: result.securityScan,
+        confirmLabel: 'Continue Install',
+        onConfirm,
+      });
+      return true;
+    }
+
+    return false;
   };
 
   const startNexusManualTimeout = () => {
@@ -728,6 +842,33 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
   };
 
+  const handleViewSecurityReport = async (entry: ModLibraryEntry) => {
+    const runtime = environment?.runtime;
+    const storageId = runtime
+      ? entry.storageIdsByRuntime?.[runtime] || entry.storageId
+      : entry.storageId;
+
+    if (!storageId) {
+      setError('No storage ID available for security report');
+      return;
+    }
+
+    try {
+      const report = await ApiService.getModSecurityScanReport(storageId);
+      if (report) {
+        setActiveSecurityReport({
+          title: `Security Report - ${entry.displayName}`,
+          report,
+          onConfirm: null,
+        });
+      } else {
+        setError('No security report available for this mod');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load security report');
+    }
+  };
+
   const handleConfirmDialog = () => {
     if (!confirmDialog) return;
     if (confirmDialog.readyAt && Date.now() < confirmDialog.readyAt) {
@@ -946,7 +1087,13 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     return null;
   };
 
-  const performUpload = async (filePath: string, fileName: string, runtime: 'IL2CPP' | 'Mono', sourceInfo: any) => {
+  const performUpload = async (
+    filePath: string,
+    fileName: string,
+    runtime: 'IL2CPP' | 'Mono',
+    sourceInfo: any,
+    securityOverride = false,
+  ) => {
     setUploading(true);
     setError(null);
 
@@ -963,24 +1110,34 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         filePath,
         fileName,
         environment!.runtime,
-        metadataWithRuntime
+        metadataWithRuntime,
+        securityOverride,
       );
 
-      if (result.success) {
-        // Check for runtime mismatch
-        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-          // Store the mismatch info to show confirmation dialog
-          setPendingUpload({
-            file: null as any, // Not needed anymore since we use file path
-            runtimeMismatch: result.runtimeMismatch
-          });
-        } else {
-          // No mismatch - proceed with success handling
-          await handleUploadSuccess();
+      if (!result.success) {
+        const handled = handleSecurityGateResponse(`Security Findings - ${fileName}`, result, async () => {
+          await performUpload(filePath, fileName, runtime, sourceInfo, true);
+        });
+        if (handled) {
+          setUploading(false);
+          return;
         }
-      } else {
+
         setError(result.error || 'Failed to upload mod');
         setUploading(false);
+        return;
+      }
+
+      // Check for runtime mismatch
+      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
+        // Store the mismatch info to show confirmation dialog
+        setPendingUpload({
+          file: null as any,
+          runtimeMismatch: result.runtimeMismatch,
+        });
+      } else {
+        // No mismatch - proceed with success handling
+        await handleUploadSuccess();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload mod');
@@ -1152,60 +1309,64 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
   };
 
-  const handleInstallThunderstoreMod = async (pkg: ThunderstorePackage) => {
+  const handleInstallThunderstoreMod = async (pkg: ThunderstorePackage, securityOverride = false) => {
     if (!environment) return;
 
     setInstallingPackage(pkg.uuid4);
     setError(null);
     try {
       console.log(`Installing Thunderstore mod: ${pkg.name} (${pkg.uuid4})`);
-      const result = await ApiService.installThunderstoreMod(environmentId, pkg.uuid4);
+      const result = await ApiService.installThunderstoreMod(environmentId, pkg.uuid4, securityOverride);
 
-      if (result.success) {
-        // Check for runtime mismatch
-        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-          setConfirmDialog({
-            title: 'Runtime Mismatch Warning',
-            message: result.runtimeMismatch.warning,
-            confirmText: 'Continue Anyway',
-            cancelText: 'Cancel',
-            onConfirm: async () => {
-              console.log(`Successfully installed mod: ${pkg.name}`);
-
-              // Reload mods after installation
-              await loadInstalledMods(false, true);
-              await loadDownloadedLibrary();
-              await loadCachedModUpdates();
-              if (onModsChanged) {
-                onModsChanged();
-              }
-
-              // Close search results
-              setShowSearchResults(false);
-              setSearchQuery('');
-            }
-          });
+      if (!result.success) {
+        const handled = handleSecurityGateResponse(`Security Findings - ${pkg.name}`, result, async () => {
+          await handleInstallThunderstoreMod(pkg, true);
+        });
+        if (handled) {
           return;
         }
 
-        console.log(`Successfully installed mod: ${pkg.name}`);
-
-        // Reload mods after installation
-        await loadInstalledMods(false, true);
-        await loadDownloadedLibrary();
-        await loadCachedModUpdates();
-        if (onModsChanged) {
-          onModsChanged();
-        }
-
-        // Close search results
-        setShowSearchResults(false);
-        setSearchQuery('');
-      } else {
         const errorMsg = result.error || 'Failed to install mod';
         console.error(`Failed to install mod ${pkg.name}:`, errorMsg);
         setError(errorMsg);
+        return;
       }
+
+      // Check for runtime mismatch
+      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
+        setConfirmDialog({
+          title: 'Runtime Mismatch Warning',
+          message: result.runtimeMismatch.warning,
+          confirmText: 'Continue Anyway',
+          cancelText: 'Cancel',
+          onConfirm: async () => {
+            console.log(`Successfully installed mod: ${pkg.name}`);
+
+            await loadInstalledMods(false, true);
+            await loadDownloadedLibrary();
+            await loadCachedModUpdates();
+            if (onModsChanged) {
+              onModsChanged();
+            }
+
+            setShowSearchResults(false);
+            setSearchQuery('');
+          }
+        });
+        return;
+      }
+
+      console.log(`Successfully installed mod: ${pkg.name}`);
+
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
+      if (onModsChanged) {
+        onModsChanged();
+      }
+
+      setShowSearchResults(false);
+      setSearchQuery('');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to install mod';
       console.error(`Error installing mod ${pkg.name}:`, err);
@@ -1268,7 +1429,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
   };
 
-  const handleInstallNexusModsMod = async (modId: number, fileId?: number) => {
+  const handleInstallNexusModsMod = async (modId: number, fileId?: number, securityOverride = false) => {
     if (!environment) {
       setError('Environment not loaded');
       return;
@@ -1347,58 +1508,62 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       }
 
       console.log(`Installing NexusMods mod: ${modId} file: ${targetFile.file_id}`);
-      const result = await ApiService.installNexusModsMod(environmentId, modId, targetFile.file_id);
+      const result = await ApiService.installNexusModsMod(environmentId, modId, targetFile.file_id, undefined, securityOverride);
 
-      if (result.success) {
-        // Check for runtime mismatch
-        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-          setConfirmDialog({
-            title: 'Runtime Mismatch Warning',
-            message: result.runtimeMismatch.warning,
-            confirmText: 'Continue Anyway',
-            cancelText: 'Cancel',
-            onConfirm: async () => {
-              console.log(`Successfully installed mod: ${modId}`);
-
-              // Reload mods after installation
-              await loadInstalledMods(false, true);
-              await loadDownloadedLibrary();
-              await loadCachedModUpdates();
-              if (onModsChanged) {
-                onModsChanged();
-              }
-
-              // Close search results
-              setShowNexusModsResults(false);
-              setNexusModsSearchQuery('');
-            }
-          });
-          return;
-        }
-
-        console.log(`Successfully installed mod: ${modId}`);
-
-        // Reload mods after installation
-        await loadInstalledMods(false, true);
-        await loadDownloadedLibrary();
-        await loadCachedModUpdates();
-        if (onModsChanged) {
-          onModsChanged();
-        }
-
-        // Close search results
-        setShowNexusModsResults(false);
-        setNexusModsSearchQuery('');
-      } else {
+      if (!result.success) {
         if (result.requiresManualDownload && result.modUrl) {
           window.open(result.modUrl, '_blank', 'noopener,noreferrer');
           setError('This Nexus account requires website confirmation. Opened the mod page in your browser.');
           return;
         }
+
+        const handled = handleSecurityGateResponse(`Security Findings - Nexus Mod ${modId}`, result, async () => {
+          await handleInstallNexusModsMod(modId, targetFile.file_id, true);
+        });
+        if (handled) {
+          return;
+        }
+
         const errorMsg = result.error || 'Failed to install mod';
         console.error(`Failed to install mod ${modId}:`, errorMsg);
         setError(errorMsg);
+        return;
       }
+
+      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
+        setConfirmDialog({
+          title: 'Runtime Mismatch Warning',
+          message: result.runtimeMismatch.warning,
+          confirmText: 'Continue Anyway',
+          cancelText: 'Cancel',
+          onConfirm: async () => {
+            console.log(`Successfully installed mod: ${modId}`);
+
+            await loadInstalledMods(false, true);
+            await loadDownloadedLibrary();
+            await loadCachedModUpdates();
+            if (onModsChanged) {
+              onModsChanged();
+            }
+
+            setShowNexusModsResults(false);
+            setNexusModsSearchQuery('');
+          }
+        });
+        return;
+      }
+
+      console.log(`Successfully installed mod: ${modId}`);
+
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
+      if (onModsChanged) {
+        onModsChanged();
+      }
+
+      setShowNexusModsResults(false);
+      setNexusModsSearchQuery('');
     } catch (err) {
       // Log the full error object to see its structure
       console.error(`Error installing mod ${modId} - Full error object:`, err);
@@ -1636,6 +1801,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         confirmText={confirmDialog?.confirmText}
         cancelText={confirmDialog?.cancelText}
         isNested
+      />
+      <SecurityScanReportOverlay
+        isOpen={!!activeSecurityReport}
+        title={activeSecurityReport?.title || 'Security Findings'}
+        report={activeSecurityReport?.report || null}
+        onClose={closeSecurityReport}
+        onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
+        confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}
+        busy={securityActionBusy}
       />
       {pendingRuntimeSelection && (
         <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
@@ -2279,7 +2453,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                   {entry.managed ? 'Managed' : 'External'}
                                 </span>
                               </div>
-                              <div className="mod-card-meta-row" style={{ fontSize: '0.74rem', color: '#8d9bb0', marginTop: '0.2rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                              <div className="mod-card-meta-row" style={{ fontSize: '0.74rem', color: '#8d9bb0', marginTop: '0.2rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
                                 <span>{entry.files.length} file(s)</span>
                                 {entry.availableRuntimes?.map(runtime => (
                                   <span key={`${entry.storageId}-${runtime}`} style={{
@@ -2293,6 +2467,31 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                                     {runtime}
                                   </span>
                                 ))}
+                                {getSecurityBadgeConfig(entry.securityScan) && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleViewSecurityReport(entry);
+                                    }}
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      padding: '0.1rem 0.38rem',
+                                      borderRadius: '999px',
+                                      border: `1px solid ${getSecurityBadgeConfig(entry.securityScan)?.border}`,
+                                      background: getSecurityBadgeConfig(entry.securityScan)?.background,
+                                      color: getSecurityBadgeConfig(entry.securityScan)?.color,
+                                      fontSize: '0.64rem',
+                                      cursor: 'pointer',
+                                      whiteSpace: 'nowrap',
+                                      lineHeight: 1,
+                                    }}
+                                    title="Click to view security report"
+                                  >
+                                    <i className={`fas ${getSecurityBadgeConfig(entry.securityScan)?.icon}`} style={{ marginRight: '0.15rem', fontSize: '0.64rem' }}></i>
+                                    {getSecurityBadgeConfig(entry.securityScan)?.label}
+                                  </button>
+                                )}
                               </div>
                               {entry.summary && (
                                 <p className="mod-card-summary" title={entry.summary}>

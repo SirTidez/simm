@@ -1,23 +1,27 @@
+use crate::commands::nexus_mods::get_valid_nexus_access_token;
+use crate::events;
+use crate::services::environment::EnvironmentService;
+use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
-use crate::services::environment::EnvironmentService;
-use crate::services::thunderstore::ThunderStoreService;
 use crate::services::nexus_mods::NexusModsService;
-use crate::services::github_releases::GitHubReleasesService;
-use crate::commands::nexus_mods::get_valid_nexus_access_token;
+use crate::services::thunderstore::ThunderStoreService;
 use crate::types::ModSource;
-use crate::events;
+use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
-use once_cell::sync::Lazy;
 
-static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
-static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 fn map_mod_source(source: Option<ModSource>) -> &'static str {
     match source {
@@ -87,7 +91,12 @@ pub async fn check_mod_updates(
                 .list_mods(&env.output_dir)
                 .await
                 .ok()
-                .and_then(|value| value.get("mods").and_then(|mods| mods.as_array()).map(|mods| mods.len()))
+                .and_then(|value| {
+                    value
+                        .get("mods")
+                        .and_then(|mods| mods.as_array())
+                        .map(|mods| mods.len())
+                })
                 .unwrap_or(0);
         }
     }
@@ -110,7 +119,10 @@ pub async fn check_mod_updates(
         .backfill_missing_thunderstore_library_icons(&mods_service, &thunderstore_service)
         .await
     {
-        log::warn!("Failed to backfill Thunderstore library icons after mod update check: {}", error);
+        log::warn!(
+            "Failed to backfill Thunderstore library icons after mod update check: {}",
+            error
+        );
     }
 
     let _ = events::emit_mod_metadata_refresh_status(&app, 0);
@@ -252,8 +264,8 @@ pub async fn get_all_mod_updates_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::map_mod_source;
     use super::get_github_service;
+    use super::map_mod_source;
     use crate::db::initialize_pool;
     use crate::types::ModSource;
     use serial_test::serial;
@@ -285,7 +297,10 @@ mod tests {
 
     #[test]
     fn map_mod_source_includes_all_supported_sources() {
-        assert_eq!(map_mod_source(Some(ModSource::Thunderstore)), "thunderstore");
+        assert_eq!(
+            map_mod_source(Some(ModSource::Thunderstore)),
+            "thunderstore"
+        );
         assert_eq!(map_mod_source(Some(ModSource::Nexusmods)), "nexusmods");
         assert_eq!(map_mod_source(Some(ModSource::Github)), "github");
         assert_eq!(map_mod_source(Some(ModSource::Local)), "local");
@@ -298,13 +313,17 @@ mod tests {
     async fn get_github_service_returns_singleton_instance() {
         let temp = tempdir().expect("temp dir");
         let data_dir = temp.path().join("simmrust");
-        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
 
         let pool = initialize_pool().await.expect("pool");
-        let first = get_github_service(pool.clone()).await.expect("first service");
-        let second = get_github_service(pool.clone()).await.expect("second service");
+        let first = get_github_service(pool.clone())
+            .await
+            .expect("first service");
+        let second = get_github_service(pool.clone())
+            .await
+            .expect("second service");
 
         assert!(Arc::ptr_eq(&first, &second));
     }
 }
-
