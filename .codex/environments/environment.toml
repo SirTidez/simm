@@ -8,4 +8,4 @@ script = "npm install"
 [[actions]]
 name = "Run Development Server"
 icon = "run"
-command = "bun run dev"
+command = "npm run tauri dev"

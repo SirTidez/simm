@@ -11,7 +11,7 @@ const apiMocks = vi.hoisted(() => ({
   checkModUpdates: vi.fn(),
   getModUpdatesSummary: vi.fn(),
   installDownloadedMod: vi.fn(),
-  hasNexusModsApiKey: vi.fn(),
+  getNexusOAuthStatus: vi.fn(),
   searchThunderstore: vi.fn(),
   searchNexusMods: vi.fn(),
   uploadMod: vi.fn(),
@@ -51,13 +51,14 @@ const baseEnvironment: Environment = {
 
 describe('ModsOverlay', () => {
   beforeEach(() => {
+    window.localStorage.clear();
     apiMocks.getEnvironment.mockReset();
     apiMocks.getMods.mockReset();
     apiMocks.getModLibrary.mockReset();
     apiMocks.checkModUpdates.mockReset();
     apiMocks.getModUpdatesSummary.mockReset();
     apiMocks.installDownloadedMod.mockReset();
-    apiMocks.hasNexusModsApiKey.mockReset();
+    apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.searchThunderstore.mockReset();
     apiMocks.searchNexusMods.mockReset();
     apiMocks.uploadMod.mockReset();
@@ -76,7 +77,7 @@ describe('ModsOverlay', () => {
     apiMocks.checkModUpdates.mockResolvedValue([]);
     apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 0, updates: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
-    apiMocks.hasNexusModsApiKey.mockResolvedValue(false);
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({ connected: false, account: { canDirectDownload: false, requiresSiteConfirmation: true } });
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
     apiMocks.uploadMod.mockResolvedValue({ success: false, error: 'test' });
@@ -86,6 +87,7 @@ describe('ModsOverlay', () => {
   });
 
   afterEach(() => {
+    window.localStorage.clear();
     cleanup();
   });
 
@@ -384,3 +386,4 @@ describe('ModsOverlay', () => {
     expect(screen.queryByText('Mod View')).toBeNull();
   });
 });
+

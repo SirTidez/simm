@@ -1,28 +1,23 @@
-use crate::events;
-use crate::services::environment::EnvironmentService;
-use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
-use crate::services::nexus_mods::NexusModsService;
-use crate::services::settings::SettingsService;
+use crate::services::environment::EnvironmentService;
 use crate::services::thunderstore::ThunderStoreService;
+use crate::services::nexus_mods::NexusModsService;
+use crate::services::github_releases::GitHubReleasesService;
+use crate::commands::nexus_mods::get_valid_nexus_access_token;
 use crate::types::ModSource;
-use once_cell::sync::Lazy;
+use crate::events;
 use sqlx::SqlitePool;
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
+use once_cell::sync::Lazy;
 
-static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> =
-    Lazy::new(|| AsyncMutex::new(None));
-static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> =
-    Lazy::new(|| AsyncMutex::new(None));
-static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
-    Lazy::new(|| AsyncMutex::new(None));
-static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
-    Lazy::new(|| AsyncMutex::new(None));
+static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> = Lazy::new(|| AsyncMutex::new(None));
+static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 fn map_mod_source(source: Option<ModSource>) -> &'static str {
     match source {
@@ -32,22 +27,6 @@ fn map_mod_source(source: Option<ModSource>) -> &'static str {
         Some(ModSource::Local) => "local",
         Some(ModSource::Unknown) | None => "unknown",
     }
-}
-
-async fn installed_mod_file_names(mods_service: &ModsService, output_dir: &str) -> HashSet<String> {
-    let mut installed = HashSet::new();
-
-    if let Ok(value) = mods_service.list_mods(output_dir).await {
-        if let Some(items) = value.get("mods").and_then(|mods| mods.as_array()) {
-            for item in items {
-                if let Some(file_name) = item.get("fileName").and_then(|name| name.as_str()) {
-                    installed.insert(file_name.to_string());
-                }
-            }
-        }
-    }
-
-    installed
 }
 
 async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
@@ -68,27 +47,12 @@ async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStor
 }
 
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {
-    let nexus_service = {
-        let mut service = NEXUS_MODS_SERVICE.lock().await;
-        if service.is_none() {
-            *service = Some(Arc::new(NexusModsService::new()));
-        }
-        service.as_ref().unwrap().clone()
-    };
-    let settings_service = SettingsService::new(db).map_err(|e| e.to_string())?;
-    match settings_service.get_nexus_mods_api_key().await {
-        Ok(Some(api_key)) => {
-            nexus_service.set_api_key(api_key).await;
-        }
-        Ok(None) => {
-            nexus_service.clear_api_key().await;
-        }
-        Err(e) => {
-            log::warn!("Failed to get Nexus Mods API key: {:?}", e);
-            nexus_service.clear_api_key().await;
-        }
+    let _ = db;
+    let mut service = NEXUS_MODS_SERVICE.lock().await;
+    if service.is_none() {
+        *service = Some(Arc::new(NexusModsService::new()));
     }
-    Ok(nexus_service)
+    Ok(service.as_ref().unwrap().clone())
 }
 
 async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesService>, String> {
@@ -123,12 +87,7 @@ pub async fn check_mod_updates(
                 .list_mods(&env.output_dir)
                 .await
                 .ok()
-                .and_then(|value| {
-                    value
-                        .get("mods")
-                        .and_then(|mods| mods.as_array())
-                        .map(|mods| mods.len())
-                })
+                .and_then(|value| value.get("mods").and_then(|mods| mods.as_array()).map(|mods| mods.len()))
                 .unwrap_or(0);
         }
     }
@@ -151,10 +110,7 @@ pub async fn check_mod_updates(
         .backfill_missing_thunderstore_library_icons(&mods_service, &thunderstore_service)
         .await
     {
-        log::warn!(
-            "Failed to backfill Thunderstore library icons after mod update check: {}",
-            error
-        );
+        log::warn!("Failed to backfill Thunderstore library icons after mod update check: {}", error);
     }
 
     let _ = events::emit_mod_metadata_refresh_status(&app, 0);
@@ -173,6 +129,7 @@ pub async fn update_mod(
     let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
+    let nexus_access_token = get_valid_nexus_access_token(db.inner().clone()).await.ok();
 
     mod_update_service
         .update_mod(
@@ -182,6 +139,7 @@ pub async fn update_mod(
             &mods_service,
             &thunderstore_service,
             &nexus_mods_service,
+            nexus_access_token.as_deref(),
             &github_service,
         )
         .await
@@ -211,11 +169,9 @@ pub async fn get_mod_updates_summary(
         .await
         .map_err(|e| e.to_string())?;
 
-    let installed_mods = installed_mod_file_names(&mods_service, &env.output_dir).await;
-
     let updates: Vec<serde_json::Value> = metadata
         .into_iter()
-        .filter(|(file_name, meta)| meta.update_available == Some(true) && installed_mods.contains(file_name))
+        .filter(|(_, meta)| meta.update_available == Some(true))
         .map(|(file_name, meta)| {
             serde_json::json!({
                 "modFileName": file_name,
@@ -266,11 +222,9 @@ pub async fn get_all_mod_updates_summary(
             .await
             .unwrap_or_default();
 
-        let installed_mods = installed_mod_file_names(&mods_service, &env.output_dir).await;
-
         let updates: Vec<serde_json::Value> = metadata
             .into_iter()
-            .filter(|(file_name, meta)| meta.update_available == Some(true) && installed_mods.contains(file_name))
+            .filter(|(_, meta)| meta.update_available == Some(true))
             .map(|(file_name, meta)| {
                 serde_json::json!({
                     "modFileName": file_name,
@@ -296,8 +250,8 @@ pub async fn get_all_mod_updates_summary(
 
 #[cfg(test)]
 mod tests {
-    use super::get_github_service;
     use super::map_mod_source;
+    use super::get_github_service;
     use crate::db::initialize_pool;
     use crate::types::ModSource;
     use serial_test::serial;
@@ -329,10 +283,7 @@ mod tests {
 
     #[test]
     fn map_mod_source_includes_all_supported_sources() {
-        assert_eq!(
-            map_mod_source(Some(ModSource::Thunderstore)),
-            "thunderstore"
-        );
+        assert_eq!(map_mod_source(Some(ModSource::Thunderstore)), "thunderstore");
         assert_eq!(map_mod_source(Some(ModSource::Nexusmods)), "nexusmods");
         assert_eq!(map_mod_source(Some(ModSource::Github)), "github");
         assert_eq!(map_mod_source(Some(ModSource::Local)), "local");
@@ -345,17 +296,13 @@ mod tests {
     async fn get_github_service_returns_singleton_instance() {
         let temp = tempdir().expect("temp dir");
         let data_dir = temp.path().join("simmrust");
-        let _data_guard =
-            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _data_guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
 
         let pool = initialize_pool().await.expect("pool");
-        let first = get_github_service(pool.clone())
-            .await
-            .expect("first service");
-        let second = get_github_service(pool.clone())
-            .await
-            .expect("second service");
+        let first = get_github_service(pool.clone()).await.expect("first service");
+        let second = get_github_service(pool.clone()).await.expect("second service");
 
         assert!(Arc::ptr_eq(&first, &second));
     }
 }
+
