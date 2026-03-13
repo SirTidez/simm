@@ -4,6 +4,7 @@ import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
 import { CustomThemeEditor } from './CustomThemeEditor';
+import type { SecurityScannerStatus } from '../types';
 
 type SettingsProps = {
   isOpen: boolean;
@@ -40,6 +41,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue' | 'custom',
     melonLoaderVersion: '',
     autoInstallMelonLoader: false,
+    enableSecurityScanner: true,
+    autoInstallSecurityScanner: true,
+    blockCriticalScans: true,
+    promptOnHighScans: true,
+    showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
     logLevel: 'info' as 'debug' | 'info' | 'warn' | 'error',
@@ -52,6 +58,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [browsing, setBrowsing] = useState(false);
   const [melonLoaderVersions, setMelonLoaderVersions] = useState<Array<{ tag: string; name: string }>>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
+  const [securityScannerStatus, setSecurityScannerStatus] = useState<SecurityScannerStatus | null>(null);
+  const [loadingSecurityScannerStatus, setLoadingSecurityScannerStatus] = useState(false);
+  const [installingSecurityScanner, setInstallingSecurityScanner] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep escape close behavior predictable in docked mode
@@ -88,6 +97,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         theme: (settings.theme as 'light' | 'dark' | 'modern-blue' | 'custom') || 'modern-blue',
         melonLoaderVersion: settings.melonLoaderVersion || '',
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
+        enableSecurityScanner: settings.enableSecurityScanner !== false,
+        autoInstallSecurityScanner: settings.autoInstallSecurityScanner !== false,
+        blockCriticalScans: settings.blockCriticalScans !== false,
+        promptOnHighScans: settings.promptOnHighScans !== false,
+        showSecurityScanBadges: settings.showSecurityScanBadges !== false,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
         logLevel: (settings.logLevel as 'debug' | 'info' | 'warn' | 'error') || 'info',
@@ -113,6 +127,25 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         });
     }
   }, [isOpen, melonLoaderVersions.length]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    setLoadingSecurityScannerStatus(true);
+    ApiService.getSecurityScannerStatus()
+      .then((status) => {
+        setSecurityScannerStatus(status);
+      })
+      .catch((err) => {
+        console.error('Failed to load security scanner status:', err);
+        setSecurityScannerStatus(null);
+      })
+      .finally(() => {
+        setLoadingSecurityScannerStatus(false);
+      });
+  }, [isOpen]);
 
   // Auto-save with debouncing
   useEffect(() => {
@@ -342,6 +375,111 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     />
                     Automatically install MelonLoader after download completion
                   </label>
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <h3>MLVScan Security Scanner</h3>
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={formData.enableSecurityScanner}
+                      onChange={(e) => setFormData({ ...formData, enableSecurityScanner: e.target.checked })}
+                    />
+                    Enable download-time security scanning
+                  </label>
+                </div>
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={formData.autoInstallSecurityScanner}
+                      onChange={(e) => setFormData({ ...formData, autoInstallSecurityScanner: e.target.checked })}
+                    />
+                    Automatically install the scanner when needed
+                  </label>
+                </div>
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={formData.blockCriticalScans}
+                      onChange={(e) => setFormData({ ...formData, blockCriticalScans: e.target.checked })}
+                    />
+                    Block critical findings by default
+                  </label>
+                </div>
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={formData.promptOnHighScans}
+                      onChange={(e) => setFormData({ ...formData, promptOnHighScans: e.target.checked })}
+                    />
+                    Prompt before continuing on high-risk findings
+                  </label>
+                </div>
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={formData.showSecurityScanBadges}
+                      onChange={(e) => setFormData({ ...formData, showSecurityScanBadges: e.target.checked })}
+                    />
+                    Show MLVScan badges on verified and reviewed downloads
+                  </label>
+                </div>
+                <div className="info-box" style={{ display: 'grid', gap: '0.45rem' }}>
+                  <p style={{ margin: 0 }}><strong>Status:</strong> {loadingSecurityScannerStatus ? 'Checking...' : securityScannerStatus?.installed ? 'Installed' : 'Not installed'}</p>
+                  <p style={{ margin: 0 }}><strong>Install Method:</strong> {securityScannerStatus?.installMethod || 'None'}</p>
+                  <p style={{ margin: 0 }}><strong>Installed Version:</strong> {securityScannerStatus?.installedVersion || 'None'}</p>
+                  <p style={{ margin: 0 }}><strong>Latest Version:</strong> {securityScannerStatus?.latestVersion || 'Unknown'}</p>
+                  <p style={{ margin: 0 }}><strong>Schema Version:</strong> {securityScannerStatus?.schemaVersion || 'Unknown'}</p>
+                  {securityScannerStatus?.executablePath && (
+                    <p style={{ margin: 0 }}><strong>Path:</strong> <span title={securityScannerStatus.executablePath} style={{ wordBreak: 'break-all' }}>{securityScannerStatus.executablePath}</span></p>
+                  )}
+                  {securityScannerStatus?.lastError && (
+                    <p style={{ margin: 0, color: '#ffb3b3' }}><strong>Last Error:</strong> {securityScannerStatus.lastError}</p>
+                  )}
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.25rem' }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-small"
+                      disabled={loadingSecurityScannerStatus || installingSecurityScanner}
+                      onClick={async () => {
+                        setLoadingSecurityScannerStatus(true);
+                        try {
+                          const status = await ApiService.getSecurityScannerStatus();
+                          setSecurityScannerStatus(status);
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'Failed to refresh the security scanner status');
+                        } finally {
+                          setLoadingSecurityScannerStatus(false);
+                        }
+                      }}
+                    >
+                      {loadingSecurityScannerStatus ? 'Refreshing...' : 'Refresh'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-small"
+                      disabled={installingSecurityScanner}
+                      onClick={async () => {
+                        setInstallingSecurityScanner(true);
+                        try {
+                          const status = await ApiService.installSecurityScanner();
+                          setSecurityScannerStatus(status);
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'Failed to install the security scanner');
+                        } finally {
+                          setInstallingSecurityScanner(false);
+                        }
+                      }}
+                    >
+                      {installingSecurityScanner ? 'Installing...' : securityScannerStatus?.installed ? 'Repair / Update' : 'Install Scanner'}
+                    </button>
+                  </div>
                 </div>
               </div>
 

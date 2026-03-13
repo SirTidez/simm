@@ -1,5 +1,7 @@
 use crate::services::settings::SettingsService;
-use crate::types::{Environment, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource};
+use crate::types::{
+    Environment, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, SecurityScanReport,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use once_cell::sync::Lazy;
@@ -21,6 +23,7 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
+const STORAGE_SECURITY_SCAN_FILE: &str = ".security-scan.json";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
@@ -457,6 +460,11 @@ impl ModsService {
                 &["modStorageId", "mod_storage_id", "storageId", "storage_id"],
             ),
             symlink_paths: Self::metadata_tags_from_keys(value, &["symlinkPaths", "symlink_paths"]),
+            security_scan: value
+                .get("securityScan")
+                .cloned()
+                .or_else(|| value.get("security_scan").cloned())
+                .and_then(|scan| serde_json::from_value(scan).ok()),
         })
     }
 
@@ -486,6 +494,7 @@ impl ModsService {
             runtime_match: None,
             mod_storage_id: Some(storage_id),
             symlink_paths: None,
+            security_scan: None,
         }
     }
 
@@ -1061,6 +1070,49 @@ impl ModsService {
         Ok(())
     }
 
+    fn storage_security_scan_path(&self, storage_path: &Path) -> PathBuf {
+        storage_path.join(STORAGE_SECURITY_SCAN_FILE)
+    }
+
+    pub async fn save_security_scan_report(
+        &self,
+        storage_id: &str,
+        report: &SecurityScanReport,
+    ) -> Result<()> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_path = storage_root.join(storage_id);
+        fs::create_dir_all(&storage_path)
+            .await
+            .context("Failed to create storage directory for security scan report")?;
+
+        let report_path = self.storage_security_scan_path(&storage_path);
+        let serialized =
+            serde_json::to_string(report).context("Failed to serialize security scan report")?;
+        fs::write(&report_path, serialized)
+            .await
+            .context("Failed to write security scan report")?;
+        Ok(())
+    }
+
+    pub async fn get_security_scan_report(
+        &self,
+        storage_id: &str,
+    ) -> Result<Option<SecurityScanReport>> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_path = storage_root.join(storage_id);
+        let report_path = self.storage_security_scan_path(&storage_path);
+        if !report_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&report_path)
+            .await
+            .context("Failed to read security scan report")?;
+        let report = serde_json::from_str::<SecurityScanReport>(&content)
+            .context("Failed to parse security scan report")?;
+        Ok(Some(report))
+    }
+
     pub async fn upsert_storage_metadata_by_id(
         &self,
         storage_id: &str,
@@ -1154,6 +1206,9 @@ impl ModsService {
         }
         if primary.symlink_paths.is_none() {
             primary.symlink_paths = fallback.symlink_paths;
+        }
+        if primary.security_scan.is_none() {
+            primary.security_scan = fallback.security_scan;
         }
         primary
     }
@@ -1412,6 +1467,7 @@ impl ModsService {
                     runtime_match: None,
                     mod_storage_id: None,
                     symlink_paths: None,
+                    security_scan: None,
                 });
 
             if let Some(storage_meta_file) = self.load_storage_metadata(&entry_path).await? {
@@ -1500,18 +1556,23 @@ impl ModsService {
         tokio::task::spawn_blocking(move || {
             #[cfg(target_os = "windows")]
             {
-                std::os::windows::fs::symlink_file(&src_owned, &dst_owned).context(format!(
-                    "Failed to create file symlink from {:?} to {:?}",
-                    src_owned, dst_owned
-                ))?;
+                std::os::windows::fs::symlink_file(&src_owned, &dst_owned).map_err(|e| {
+                    eprintln!("[create_symlink_file] Failed to create file symlink from {:?} to {:?}: {:?}", 
+                             src_owned, dst_owned, e);
+                    anyhow::anyhow!("Failed to create file symlink from {:?} to {:?}: {}", 
+                                   src_owned, dst_owned, e)
+                })?;
             }
             #[cfg(target_os = "linux")]
             {
-                std::os::unix::fs::symlink(&src_owned, &dst_owned).context(format!(
-                    "Failed to create file symlink from {:?} to {:?}",
-                    src_owned, dst_owned
-                ))?;
+                std::os::unix::fs::symlink(&src_owned, &dst_owned).map_err(|e| {
+                    eprintln!("[create_symlink_file] Failed to create file symlink from {:?} to {:?}: {:?}", 
+                             src_owned, dst_owned, e);
+                    anyhow::anyhow!("Failed to create file symlink from {:?} to {:?}: {}", 
+                                   src_owned, dst_owned, e)
+                })?;
             }
+            eprintln!("[create_symlink_file] Successfully created symlink from {:?} to {:?}", src_owned, dst_owned);
             Ok(())
         })
         .await?
@@ -2266,6 +2327,7 @@ impl ModsService {
                             runtime_match: None,
                             mod_storage_id: None,
                             symlink_paths: None,
+                            security_scan: None,
                         },
                         Vec::new(),
                     )
@@ -2365,6 +2427,7 @@ impl ModsService {
                 storage_ids_by_runtime: storage_ids_by_runtime.clone(),
                 installed_in_by_runtime: installed_in_by_runtime.clone(),
                 files_by_runtime: files_by_runtime.clone(),
+                security_scan: template_meta.security_scan.clone(),
             });
 
             if entry.summary.is_none() {
@@ -2393,6 +2456,9 @@ impl ModsService {
             }
             if entry.installed_at.is_none() {
                 entry.installed_at = template_meta.installed_at;
+            }
+            if entry.security_scan.is_none() {
+                entry.security_scan = template_meta.security_scan.clone();
             }
 
             let mut file_set: HashSet<String> = entry.files.iter().cloned().collect();
@@ -2634,6 +2700,10 @@ impl ModsService {
             runtime_match: None,
             mod_storage_id: Some(mod_id.clone()),
             symlink_paths: None,
+            security_scan: metadata_ref
+                .and_then(|m| m.get("securityScan"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
         };
 
         self.save_storage_metadata(&mod_storage_base, &storage_metadata)
@@ -2659,13 +2729,16 @@ impl ModsService {
         env_runtime: &crate::types::Runtime,
     ) -> Result<()> {
         if !source_dir.exists() {
+            eprintln!("[install_storage_entries] Source dir does not exist: {}", source_dir.display());
             return Ok(());
         }
 
+        let mut file_count = 0usize;
         let mut storage_entries = fs::read_dir(source_dir)
             .await
             .context("Failed to read storage directory")?;
         while let Some(entry) = storage_entries.next_entry().await? {
+            file_count += 1;
             let path = entry.path();
             let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
             if file_name.is_empty() {
@@ -2678,7 +2751,11 @@ impl ModsService {
             }
 
             let file_runtime = self.detect_mod_runtime_from_name(file_name);
+            eprintln!("[install_storage_entries] Processing file: {}, detected runtime: {}, target runtime: {}", 
+                     file_name, file_runtime, runtime_label);
             if file_runtime != "unknown" && file_runtime != runtime_label {
+                eprintln!("[install_storage_entries] Skipping file {} due to runtime mismatch (file: {}, env: {})", 
+                         file_name, file_runtime, runtime_label);
                 continue;
             }
 
@@ -2695,12 +2772,28 @@ impl ModsService {
             }
 
             if metadata.is_dir() {
-                self.create_symlink_dir(&path, &dest_path).await?;
+                eprintln!("[install_storage_entries] Creating directory symlink: {} -> {}", path.display(), dest_path.display());
+                match self.create_symlink_dir(&path, &dest_path).await {
+                    Ok(_) => {
+                        installed_files.push(file_name.to_string());
+                        eprintln!("[install_storage_entries] Successfully created directory symlink and added {} to installed_files", file_name);
+                    }
+                    Err(e) => {
+                        eprintln!("[install_storage_entries] ERROR: Failed to create directory symlink for {}: {}", file_name, e);
+                    }
+                }
             } else {
-                self.create_symlink_file(&path, &dest_path).await?;
+                eprintln!("[install_storage_entries] Creating file symlink: {} -> {}", path.display(), dest_path.display());
+                match self.create_symlink_file(&path, &dest_path).await {
+                    Ok(_) => {
+                        installed_files.push(file_name.to_string());
+                        eprintln!("[install_storage_entries] Successfully created file symlink and added {} to installed_files", file_name);
+                    }
+                    Err(e) => {
+                        eprintln!("[install_storage_entries] ERROR: Failed to create file symlink for {}: {}", file_name, e);
+                    }
+                }
             }
-
-            installed_files.push(file_name.to_string());
 
             let detected_runtime = match file_runtime {
                 RUNTIME_IL2CPP => Some(crate::types::Runtime::Il2cpp),
@@ -2744,6 +2837,7 @@ impl ModsService {
                 runtime_match: None,
                 mod_storage_id: None,
                 symlink_paths: None,
+                security_scan: template_meta.as_ref().and_then(|t| t.security_scan.clone()),
             });
 
             if let Some(template) = template_meta.as_ref() {
@@ -2762,6 +2856,7 @@ impl ModsService {
                 meta.tags = template.tags.clone();
                 meta.library_added_at = template.library_added_at;
                 meta.metadata_last_refreshed = template.metadata_last_refreshed;
+                meta.security_scan = template.security_scan.clone();
             }
             meta.installed_version = template_meta
                 .as_ref()
@@ -2775,6 +2870,8 @@ impl ModsService {
             metadata_map.insert(file_name.to_string(), meta);
         }
 
+        eprintln!("[install_storage_entries] Processed {} entries from {}, installed {} files", file_count, source_dir.display(), installed_files.len());
+
         Ok(())
     }
 
@@ -2786,12 +2883,18 @@ impl ModsService {
         let storage_dir = self.get_mods_storage_dir().await?;
         let storage_base = storage_dir.join(storage_id);
         if !storage_base.exists() {
-            return Err(anyhow::anyhow!("Mod storage not found"));
+            return Err(anyhow::anyhow!("Mod storage not found at: {}", storage_base.display()));
         }
 
         let storage_mods = storage_base.join("Mods");
         let storage_plugins = storage_base.join("Plugins");
         let storage_userlibs = storage_base.join("UserLibs");
+
+        // Debug logging to help diagnose issues
+        eprintln!("[install_storage_mod_to_envs] Storage base: {}", storage_base.display());
+        eprintln!("[install_storage_mod_to_envs] Mods dir exists: {}, path: {}", storage_mods.exists(), storage_mods.display());
+        eprintln!("[install_storage_mod_to_envs] Plugins dir exists: {}, path: {}", storage_plugins.exists(), storage_plugins.display());
+        eprintln!("[install_storage_mod_to_envs] UserLibs dir exists: {}, path: {}", storage_userlibs.exists(), storage_userlibs.display());
 
         let template_meta = self
             .find_metadata_template_for_storage_id(storage_id)
@@ -2860,8 +2963,16 @@ impl ModsService {
             .await?;
 
             if installed_files.is_empty() {
-                return Err(anyhow::anyhow!("No mod files found in storage"));
+                return Err(anyhow::anyhow!(
+                    "No mod files found in storage {}. Checked: Mods(exists={}), Plugins(exists={}), UserLibs(exists={}). This usually means the mod archive was empty or contained no .dll files.",
+                    storage_id,
+                    storage_mods.exists(),
+                    storage_plugins.exists(),
+                    storage_userlibs.exists()
+                ));
             }
+
+            eprintln!("[install_storage_mod_to_envs] Installed {} files for env {}", installed_files.len(), env_id);
 
             self.save_mod_metadata(&mods_dir, &metadata_map).await?;
             results.push(serde_json::json!({
@@ -3411,6 +3522,9 @@ impl ModsService {
                                 runtime_match: template_meta.as_ref().and_then(|t| t.runtime_match),
                                 mod_storage_id: None,
                                 symlink_paths: None,
+                                security_scan: template_meta
+                                    .as_ref()
+                                    .and_then(|t| t.security_scan.clone()),
                             });
 
                         if let Some(template) = template_meta.as_ref() {
@@ -3431,6 +3545,7 @@ impl ModsService {
                             meta.metadata_last_refreshed = template.metadata_last_refreshed;
                             meta.detected_runtime = template.detected_runtime.clone();
                             meta.runtime_match = template.runtime_match;
+                            meta.security_scan = template.security_scan.clone();
                         }
 
                         meta.installed_version = template_meta
@@ -3452,7 +3567,8 @@ impl ModsService {
             return Ok(serde_json::json!({
                 "success": true,
                 "message": "Mod already installed, symlinks verified",
-                "alreadyInstalled": true
+                "alreadyInstalled": true,
+                "storageId": existing_id
             }));
         }
 
@@ -3846,6 +3962,11 @@ impl ModsService {
                 // Update storage info
                 meta.mod_storage_id = Some(mod_id.clone());
                 meta.symlink_paths = Some(symlink_paths.clone());
+                meta.security_scan = metadata_ref
+                    .and_then(|m| m.get("securityScan"))
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .or(meta.security_scan.clone());
                 if meta.library_added_at.is_none() {
                     meta.library_added_at = Some(Utc::now());
                 }
@@ -3880,6 +4001,10 @@ impl ModsService {
                     runtime_match,
                     mod_storage_id: Some(mod_id.clone()),
                     symlink_paths: Some(symlink_paths.clone()),
+                    security_scan: metadata_ref
+                        .and_then(|m| m.get("securityScan"))
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
                 };
                 mod_metadata.insert(file_name.clone(), new_meta);
             }
@@ -3912,7 +4037,8 @@ impl ModsService {
         Ok(serde_json::json!({
             "success": true,
             "installedFiles": installed_files,
-            "source": response_source
+            "source": response_source,
+            "storageId": mod_id
         }))
     }
 
@@ -4610,6 +4736,10 @@ impl ModsService {
                 runtime_match,
                 mod_storage_id: Some(mod_id.clone()),
                 symlink_paths: Some(vec![symlink_path.to_string_lossy().to_string()]),
+                security_scan: metadata_ref
+                    .and_then(|m| m.get("securityScan"))
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
             },
         );
 
@@ -4624,7 +4754,8 @@ impl ModsService {
 
         Ok(serde_json::json!({
             "success": true,
-            "fileName": file_name
+            "fileName": file_name,
+            "storageId": mod_id
         }))
     }
 
@@ -5045,6 +5176,7 @@ mod tests {
             runtime_match: None,
             mod_storage_id: storage_id.map(|s| s.to_string()),
             symlink_paths: None,
+            security_scan: None,
         }
     }
 

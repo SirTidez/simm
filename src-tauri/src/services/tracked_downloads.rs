@@ -64,7 +64,10 @@ pub fn fail_file_download(
 }
 
 #[allow(dead_code)]
-pub fn cancelled_file_download(download: &TrackedDownload, message: Option<String>) -> TrackedDownload {
+pub fn cancelled_file_download(
+    download: &TrackedDownload,
+    message: Option<String>,
+) -> TrackedDownload {
     TrackedDownload {
         status: DownloadStatus::Cancelled,
         progress: download.progress,
@@ -77,10 +80,7 @@ pub fn cancelled_file_download(download: &TrackedDownload, message: Option<Strin
     }
 }
 
-pub fn emit<R: Runtime>(
-    app: &AppHandle<R>,
-    download: TrackedDownload,
-) -> Result<(), tauri::Error> {
+pub fn emit<R: Runtime>(app: &AppHandle<R>, download: TrackedDownload) -> Result<(), tauri::Error> {
     crate::events::emit_tracked_download_updated(app, download)
 }
 

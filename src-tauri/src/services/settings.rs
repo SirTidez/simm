@@ -114,6 +114,11 @@ impl SettingsService {
             theme: crate::types::Theme::ModernBlue,
             melon_loader_version: None,
             auto_install_melon_loader: Some(false),
+            enable_security_scanner: Some(true),
+            auto_install_security_scanner: Some(true),
+            block_critical_scans: Some(true),
+            prompt_on_high_scans: Some(true),
+            show_security_scan_badges: Some(true),
             update_check_interval: Some(60),
             auto_check_updates: Some(true),
             log_level: Some(crate::types::LogLevel::Info),
@@ -321,7 +326,8 @@ impl SettingsService {
 
     pub async fn save_nexus_oauth_last_callback_url(&self, callback_url: &str) -> Result<()> {
         let encrypted = Self::encrypt_credentials(callback_url).await?;
-        self.set_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY, &encrypted).await
+        self.set_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY, &encrypted)
+            .await
     }
 
     pub async fn get_nexus_oauth_last_callback_url(&self) -> Result<Option<String>> {
@@ -360,7 +366,8 @@ impl SettingsService {
 
     pub async fn save_nexus_nxm_pending_download(&self, pending: &serde_json::Value) -> Result<()> {
         let encrypted = Self::encrypt_credentials(&pending.to_string()).await?;
-        self.set_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted).await
+        self.set_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted)
+            .await
     }
 
     pub async fn clear_nexus_nxm_pending_download(&self) -> Result<()> {
@@ -385,7 +392,8 @@ impl SettingsService {
 
     pub async fn save_nexus_nxm_protocol_backup(&self, backup: &serde_json::Value) -> Result<()> {
         let encrypted = Self::encrypt_credentials(&backup.to_string()).await?;
-        self.set_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted).await
+        self.set_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted)
+            .await
     }
 
     pub async fn clear_nexus_nxm_protocol_backup(&self) -> Result<()> {
@@ -538,7 +546,3 @@ mod tests {
         Ok(())
     }
 }
-
-
-
-

@@ -30,10 +30,13 @@ fn main() {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-            let _ = app.emit("single-instance-args", serde_json::json!({
-                "args": argv,
-                "cwd": cwd,
-            }));
+            let _ = app.emit(
+                "single-instance-args",
+                serde_json::json!({
+                    "args": argv,
+                    "cwd": cwd,
+                }),
+            );
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -60,15 +63,23 @@ fn main() {
             app.manage(db_pool.clone());
 
             if let Err(error) = tauri::async_runtime::block_on(
-                crate::commands::nexus_mods::cleanup_stale_nxm_runtime_registration(db_pool.clone()),
+                crate::commands::nexus_mods::cleanup_stale_nxm_runtime_registration(
+                    db_pool.clone(),
+                ),
             ) {
-                log::warn!("Failed to clean up stale runtime nxm registration: {}", error);
+                log::warn!(
+                    "Failed to clean up stale runtime nxm registration: {}",
+                    error
+                );
             }
 
             if let Err(error) = tauri::async_runtime::block_on(
                 crate::commands::nexus_mods::ensure_nxm_runtime_registration(db_pool.clone()),
             ) {
-                log::warn!("Failed to claim nxm protocol handler for app lifetime: {}", error);
+                log::warn!(
+                    "Failed to claim nxm protocol handler for app lifetime: {}",
+                    error
+                );
             }
 
             #[cfg(windows)]
@@ -77,8 +88,12 @@ fn main() {
                     || std::env::current_exe()
                         .ok()
                         .map(|path| {
-                            path.components()
-                                .any(|component| component.as_os_str().to_string_lossy().eq_ignore_ascii_case("target"))
+                            path.components().any(|component| {
+                                component
+                                    .as_os_str()
+                                    .to_string_lossy()
+                                    .eq_ignore_ascii_case("target")
+                            })
                         })
                         .unwrap_or(false);
 
@@ -140,6 +155,9 @@ fn main() {
             commands::settings::get_nexus_mods_api_key,
             commands::settings::has_nexus_mods_api_key,
             commands::settings::clear_nexus_mods_api_key,
+            commands::security_scanner::get_security_scanner_status,
+            commands::security_scanner::install_security_scanner,
+            commands::security_scanner::get_mod_security_scan_report,
             // Environments
             commands::environments::get_environments,
             commands::environments::get_environment,
@@ -209,7 +227,7 @@ fn main() {
             commands::github_releases::get_all_s1api_releases,
             commands::github_releases::get_latest_mlvscan_release,
             commands::github_releases::get_all_mlvscan_releases,
-            commands::github_releases::get_release_api_health,            // NexusMods
+            commands::github_releases::get_release_api_health, // NexusMods
             commands::nexus_mods::begin_nexus_oauth_login,
             commands::nexus_mods::complete_nexus_oauth_callback,
             commands::nexus_mods::get_nexus_oauth_status,
@@ -283,7 +301,9 @@ fn main() {
         if let RunEvent::Exit = event {
             if let Some(pool) = app_handle.try_state::<Arc<SqlitePool>>() {
                 if let Err(error) = tauri::async_runtime::block_on(
-                    crate::commands::nexus_mods::cleanup_nxm_runtime_registration(pool.inner().clone()),
+                    crate::commands::nexus_mods::cleanup_nxm_runtime_registration(
+                        pool.inner().clone(),
+                    ),
                 ) {
                     log::warn!("Failed to restore nxm protocol handler on exit: {}", error);
                 }
@@ -291,8 +311,3 @@ fn main() {
         }
     });
 }
-
-
-
-
-

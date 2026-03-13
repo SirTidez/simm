@@ -529,6 +529,7 @@ impl PluginsService {
                     runtime_match: None,
                     mod_storage_id: None,
                     symlink_paths: None,
+                    security_scan: None,
                 },
             );
         }
@@ -864,6 +865,7 @@ impl PluginsService {
                 runtime_match: None,
                 mod_storage_id: None,
                 symlink_paths: None,
+                security_scan: None,
             },
         );
 
@@ -938,6 +940,7 @@ impl PluginsService {
             runtime_match: None,
             mod_storage_id: None,
             symlink_paths: None,
+            security_scan: None,
         };
 
         metadata.insert("MLVScan.dll".to_string(), mlvscan_metadata);
