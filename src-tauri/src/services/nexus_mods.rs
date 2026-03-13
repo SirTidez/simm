@@ -7,67 +7,25 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct NexusModsService {
     api_key: Arc<RwLock<Option<String>>>,
-    validation_result: Arc<RwLock<Option<Value>>>,
 }
 
 impl NexusModsService {
     pub fn new() -> Self {
         Self {
             api_key: Arc::new(RwLock::new(None)),
-            validation_result: Arc::new(RwLock::new(None)),
         }
     }
 
     pub async fn set_api_key(&self, api_key: String) {
         *self.api_key.write().await = Some(api_key);
-        // Clear validation result when API key changes
-        *self.validation_result.write().await = None;
     }
 
     pub async fn clear_api_key(&self) {
         *self.api_key.write().await = None;
-        *self.validation_result.write().await = None;
     }
 
     pub async fn get_api_key_optional(&self) -> Option<String> {
         self.api_key.read().await.clone()
-    }
-
-    pub async fn validate_api_key(&self) -> Result<Value> {
-        let api_key = self.api_key.read().await.clone()
-            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
-
-        let detailed = nexus_api::validate_api_key_detailed(&api_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to validate API key via nexus-api crate: {}", e))?;
-
-        let validation = serde_json::json!({
-            "name": detailed.name,
-            "member_id": detailed.member_id,
-            "is_premium": detailed.is_premium,
-            "is_supporter": detailed.is_supporter,
-        });
-
-        // Store validation result
-        *self.validation_result.write().await = Some(validation.clone());
-
-        Ok(validation)
-    }
-
-    pub async fn get_rate_limits(&self) -> Result<Value> {
-        let api_key = self.api_key.read().await.clone()
-            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
-
-        let detailed = nexus_api::validate_api_key_detailed(&api_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch Nexus rate limits via crate: {}", e))?;
-
-        Ok(Self::map_rate_limits_to_legacy(detailed.rate_limits))
-    }
-
-    #[allow(dead_code)]
-    pub async fn get_validation_result(&self) -> Option<Value> {
-        self.validation_result.read().await.clone()
     }
 
     async fn graphql_request(&self, query: &str, variables: Value) -> Result<Value> {
@@ -77,24 +35,6 @@ impl NexusModsService {
             .map_err(|e| anyhow::anyhow!("Nexus GraphQL crate request failed: {}", e))?;
 
         Ok(response.data.unwrap_or_else(|| serde_json::json!({})))
-    }
-
-    fn map_rate_limits_to_legacy(rate_limits: Option<nexus_api::RateLimits>) -> Value {
-        let daily = rate_limits.as_ref().and_then(|r| r.daily_limit).unwrap_or(0);
-        let hourly = rate_limits.as_ref().and_then(|r| r.hourly_limit).unwrap_or(0);
-        let daily_remaining = rate_limits.as_ref().and_then(|r| r.daily_remaining).unwrap_or(0);
-        let hourly_remaining = rate_limits.as_ref().and_then(|r| r.hourly_remaining).unwrap_or(0);
-        let daily_used = daily.saturating_sub(daily_remaining);
-        let hourly_used = hourly.saturating_sub(hourly_remaining);
-
-        serde_json::json!({
-            "daily": daily,
-            "hourly": hourly,
-            "dailyRemaining": daily_remaining,
-            "hourlyRemaining": hourly_remaining,
-            "dailyUsed": daily_used,
-            "hourlyUsed": hourly_used
-        })
     }
 
     async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
@@ -668,86 +608,6 @@ impl Default for NexusModsService {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Context;
-    use crate::db::get_database_path;
-    use crate::services::settings::SettingsService;
-    use serial_test::serial;
-    use sqlx::sqlite::SqliteConnectOptions;
-    use sqlx::SqlitePool;
-    use std::str::FromStr;
-    use std::sync::Arc;
-
-    #[test]
-    fn map_rate_limits_to_legacy_maps_expected_fields() {
-        let mapped = NexusModsService::map_rate_limits_to_legacy(Some(nexus_api::RateLimits {
-            hourly_limit: Some(120),
-            hourly_remaining: Some(100),
-            hourly_reset: Some(1700000000),
-            daily_limit: Some(1000),
-            daily_remaining: Some(950),
-            daily_reset: Some(1700000001),
-        }));
-
-        assert_eq!(mapped.get("daily").and_then(|v| v.as_u64()), Some(1000));
-        assert_eq!(mapped.get("hourly").and_then(|v| v.as_u64()), Some(120));
-        assert_eq!(mapped.get("dailyRemaining").and_then(|v| v.as_u64()), Some(950));
-        assert_eq!(mapped.get("hourlyRemaining").and_then(|v| v.as_u64()), Some(100));
-        assert_eq!(mapped.get("dailyUsed").and_then(|v| v.as_u64()), Some(50));
-        assert_eq!(mapped.get("hourlyUsed").and_then(|v| v.as_u64()), Some(20));
-    }
-
-    async fn resolve_api_key() -> Result<Option<String>> {
-        if let Ok(key) = std::env::var("NEXUSMODS_API_KEY") {
-            if !key.trim().is_empty() {
-                return Ok(Some(key));
-            }
-        }
-
-        let db_path = match get_database_path() {
-            Ok(path) => path,
-            Err(_) => return Ok(None),
-        };
-        if !db_path.exists() {
-            return Ok(None);
-        }
-
-        let db_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
-        let options = SqliteConnectOptions::from_str(&db_url)
-            .context("Failed to build sqlite options")?
-            .read_only(true);
-        let pool = SqlitePool::connect_with(options)
-            .await
-            .context("Failed to open settings database")?;
-        let service = SettingsService::new(Arc::new(pool))?;
-
-        match service.get_nexus_mods_api_key().await {
-            Ok(Some(key)) if !key.trim().is_empty() => Ok(Some(key)),
-            Ok(_) => Ok(None),
-            Err(_) => Ok(None),
-        }
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn live_validate_api_key_via_crate() -> Result<()> {
-        let api_key = match resolve_api_key().await? {
-            Some(key) => key,
-            None => return Ok(()),
-        };
-
-        let service = NexusModsService::new();
-        service.set_api_key(api_key).await;
-
-        let validation = service.validate_api_key().await?;
-        assert!(validation.get("name").and_then(|v| v.as_str()).is_some());
-        assert!(validation.get("member_id").is_some());
-
-        Ok(())
-    }
-}
 
 
 
