@@ -43,7 +43,14 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
 // This is exported so Footer can update it when doing manual checks
 export const lastUpdateCheckTimeRef = { current: null as number | null };
 export const batchUpdateCheckRef = { current: false };
+export const batchUpdateCheckEventName = 'simm:batch-update-check-started';
 const LAST_ENV_KEY = 'simm:lastEnvId';
+
+export function notifyBatchUpdateCheckStarted(environmentIds: string[]) {
+  window.dispatchEvent(new CustomEvent(batchUpdateCheckEventName, {
+    detail: { environmentIds }
+  }));
+}
 
 interface EnvironmentListProps {
   onInitialDetectionComplete?: () => void;
@@ -232,8 +239,21 @@ export function EnvironmentList({
     console.log(`[EnvironmentList] ${isManual ? 'Manual' : 'Automatic'} update check starting for ${completedEnvironments.length} environment(s)`);
     lastUpdateCheckTimeRef.current = now;
 
+    const dueEnvironmentIds = completedEnvironments
+      .filter(env => {
+        if (isManual || !env.lastUpdateCheck) return true;
+
+        const lastCheckMs = typeof env.lastUpdateCheck === 'number'
+          ? env.lastUpdateCheck * 1000
+          : new Date(env.lastUpdateCheck).getTime();
+
+        return Number.isNaN(lastCheckMs) || now - lastCheckMs >= checkInterval;
+      })
+      .map(env => env.id);
+
     try {
       batchUpdateCheckRef.current = true;
+      notifyBatchUpdateCheckStarted(dueEnvironmentIds);
       await checkAllUpdates(false);
       console.log(`[EnvironmentList] Update check completed successfully`);
     } catch (err) {
@@ -316,6 +336,15 @@ export function EnvironmentList({
     let unlistenModUpdatesChecked: (() => void) | null = null;
     let unlistenPluginsChanged: (() => void) | null = null;
     let unlistenUserLibsChanged: (() => void) | null = null;
+
+    const handleBatchUpdateCheckStarted = (event: Event) => {
+      const customEvent = event as CustomEvent<{ environmentIds?: string[] }>;
+      const environmentIds = customEvent.detail?.environmentIds ?? [];
+      setCheckingEnvironments(new Set(environmentIds));
+      checkInProgressRef.current = environmentIds.length > 0;
+    };
+
+    window.addEventListener(batchUpdateCheckEventName, handleBatchUpdateCheckStarted as EventListener);
 
     const setupListeners = async () => {
       try {
@@ -595,6 +624,7 @@ export function EnvironmentList({
     document.addEventListener('mousedown', handleClickOutside);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener(batchUpdateCheckEventName, handleBatchUpdateCheckStarted as EventListener);
       if (unlistenWaiting) unlistenWaiting();
       if (unlistenSuccess) unlistenSuccess();
       if (unlistenError) unlistenError();
@@ -660,17 +690,38 @@ export function EnvironmentList({
     await handleStartDownload(env);
   };
 
-  const handleManualUpdateCheck = async (env: Environment) => {
+  const handleUpdateAction = async (env: Environment) => {
     if (checkingEnvironments.has(env.id)) {
       return;
     }
+
     rememberEnvironment(env.id);
+
+    if (env.updateAvailable) {
+      await handleUpdate(env);
+      return;
+    }
+
+    if (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) {
+      alert('Steam manages updates for this installation. Please update through Steam.');
+      return;
+    }
+
     batchUpdateCheckRef.current = false;
     setCheckingEnvironments(prev => new Set(prev).add(env.id));
+
     try {
       await checkUpdate(env.id, true);
+
+      const refreshedEnv = environmentsRef.current.find(candidate => candidate.id === env.id);
+      if (refreshedEnv?.updateAvailable) {
+        await handleUpdate(refreshedEnv);
+        return;
+      }
+
+      alert('No update is currently available for this environment.');
     } catch (err) {
-      console.error(`Failed to check for updates for ${env.id}:`, err);
+      console.error(`Failed to update ${env.id}:`, err);
     } finally {
       setCheckingEnvironments(prev => {
         const next = new Set(prev);
@@ -1607,6 +1658,7 @@ export function EnvironmentList({
           const prog = progress.get(env.id);
           const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
           const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+          const isCheckingUpdate = checkingEnvironments.has(env.id);
 
           return (
             <div key={env.id} className="environment-card">
@@ -1730,10 +1782,10 @@ export function EnvironmentList({
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', justifySelf: 'end' }}>
                     {env.status === 'completed' && env.currentGameVersion && (
                       <span
-                        className={`badge ${env.updateAvailable === false ? 'badge-green' : env.updateAvailable === true ? 'badge-yellow' : 'badge-gray'}`}
+                        className={`badge ${isCheckingUpdate ? 'badge-gray' : env.updateAvailable === false ? 'badge-green' : env.updateAvailable === true ? 'badge-yellow' : 'badge-gray'}`}
                         style={{
                           display: 'inline-block',
-                          fontWeight: env.updateAvailable === false ? 'bold' : 'normal'
+                          fontWeight: !isCheckingUpdate && env.updateAvailable === false ? 'bold' : 'normal'
                         }}
                       >
                         {env.currentGameVersion}
@@ -2071,13 +2123,13 @@ export function EnvironmentList({
                          )}
                        </div>
                       <button
-                        onClick={() => handleManualUpdateCheck(env)}
-                        className="btn btn-secondary"
+                        onClick={() => handleUpdateAction(env)}
+                        className={`btn ${env.updateAvailable && !isSteam ? 'btn-primary' : 'btn-secondary'}`}
                         disabled={checkingEnvironments.has(env.id)}
-                        title="Check for updates"
+                        title={isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
                       >
-                        <i className={`fas ${checkingEnvironments.has(env.id) ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
-                        <span>Check Updates</span>
+                        <i className={checkingEnvironments.has(env.id) ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-arrow-up'}></i>
+                        <span>{checkingEnvironments.has(env.id) ? 'Checking...' : 'Update'}</span>
                       </button>
                       {!isSteam ? (
                         <button onClick={() => handleDelete(env)} className="btn btn-danger">
@@ -2088,28 +2140,6 @@ export function EnvironmentList({
                         <div />
                       )}
                     </div>
-                    {env.updateAvailable && !isSteam && (
-                      <button
-                        onClick={() => handleUpdate(env)}
-                        className="btn btn-primary"
-                        title="Update to the latest branch version"
-                        style={{ width: '100%' }}
-                      >
-                        <i className="fas fa-arrow-up"></i>
-                        <span>Update</span>
-                      </button>
-                    )}
-                    {env.updateAvailable && isSteam && (
-                      <button
-                        className="btn btn-secondary"
-                        disabled
-                        title="Steam manages updates for this installation"
-                        style={{ width: '100%' }}
-                      >
-                        <i className="fab fa-steam" style={{ marginRight: '0.25rem' }}></i>
-                        <span>Steam Updates</span>
-                      </button>
-                    )}
                   </>
                 )}
                 {env.status !== 'completed' && !isSteam && (

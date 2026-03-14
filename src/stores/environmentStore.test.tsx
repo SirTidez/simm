@@ -37,6 +37,8 @@ const baseEnv: Environment = {
   outputDir: 'C:/env',
   runtime: 'IL2CPP',
   status: 'completed',
+  updateAvailable: true,
+  remoteManifestId: '122',
 };
 
 function Consumer() {
@@ -191,6 +193,50 @@ describe('EnvironmentStore', () => {
       expect.objectContaining({
         status: 'completed',
         lastManifestId: '123',
+        remoteManifestId: '123',
+        updateAvailable: false,
+      })
+    );
+  });
+
+  it('backfills manifest baseline after completion when manifest event payload is missing', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+    apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
+      ...baseEnv,
+      id,
+      ...updates,
+    }));
+    apiMocks.extractGameVersion.mockResolvedValueOnce('2.0.0');
+    apiMocks.checkUpdate.mockResolvedValueOnce({
+      updateAvailable: false,
+      remoteManifestId: '789',
+      branch: 'main',
+      appId: '3164500',
+      checkedAt: 'now',
+    });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    completeHandler?.({ downloadId: 'env-1' });
+
+    await waitFor(() => {
+      expect(apiMocks.checkUpdate).toHaveBeenCalledWith('env-1', true);
+    });
+
+    expect(apiMocks.updateEnvironment).toHaveBeenCalledWith(
+      'env-1',
+      expect.objectContaining({
+        lastManifestId: '789',
+        remoteManifestId: '789',
+        updateAvailable: false,
       })
     );
   });

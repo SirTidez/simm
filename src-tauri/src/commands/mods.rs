@@ -914,20 +914,18 @@ pub async fn download_mlvscan_to_library(
         .replace('\\', "_")
         .replace(':', "_");
     let temp_path = temp_dir.join(format!("mlvscan-{}-{}", sanitized_tag, asset_name));
-    tokio::fs::write(&temp_path, bytes)
-        .await
-        .map_err(|e| {
-            let message = format!("Failed to save downloaded file: {}", e);
-            let _ = crate::services::tracked_downloads::emit(
-                &app,
-                crate::services::tracked_downloads::fail_file_download(
-                    &tracked_download,
-                    message.clone(),
-                    Some("Download failed".to_string()),
-                ),
-            );
-            message
-        })?;
+    tokio::fs::write(&temp_path, bytes).await.map_err(|e| {
+        let message = format!("Failed to save downloaded file: {}", e);
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::fail_file_download(
+                &tracked_download,
+                message.clone(),
+                Some("Download failed".to_string()),
+            ),
+        );
+        message
+    })?;
     let _ = crate::services::tracked_downloads::emit(
         &app,
         crate::services::tracked_downloads::complete_file_download(

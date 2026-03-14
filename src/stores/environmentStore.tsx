@@ -136,6 +136,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       const result = await ApiService.checkUpdate(environmentId, manual);
       await updateEnvironment(environmentId, {
         lastUpdateCheck: result.checkedAt,
+        ...(result.currentManifestId ? { lastManifestId: result.currentManifestId } : {}),
         updateAvailable: result.updateAvailable,
         remoteManifestId: result.remoteManifestId,
         remoteBuildId: result.remoteBuildId,
@@ -174,6 +175,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             return {
               ...env,
               lastUpdateCheck: result.checkedAt,
+              ...(result.currentManifestId ? { lastManifestId: result.currentManifestId } : {}),
               updateAvailable: result.updateAvailable,
               remoteManifestId: result.remoteManifestId,
               remoteBuildId: result.remoteBuildId,
@@ -206,6 +208,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       return {
         ...env,
         lastUpdateCheck: updateResult.checkedAt,
+        ...(updateResult.currentManifestId ? { lastManifestId: updateResult.currentManifestId } : {}),
         updateAvailable: updateResult.updateAvailable,
         remoteManifestId: updateResult.remoteManifestId,
         remoteBuildId: updateResult.remoteBuildId,
@@ -250,9 +253,14 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         });
 
         unlistenComplete = await onComplete(async ({ downloadId, manifestId }: { downloadId: string; manifestId?: string }) => {
-          const updates: any = { status: 'completed', lastUpdated: new Date().toISOString() };
+          const updates: any = {
+            status: 'completed',
+            lastUpdated: new Date().toISOString(),
+            updateAvailable: false
+          };
           if (manifestId) {
             updates.lastManifestId = manifestId;
+            updates.remoteManifestId = manifestId;
           }
           await updateEnvironment(downloadId, updates);
           setProgress(prev => {
@@ -270,6 +278,21 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           } catch (err) {
             // Silently fail - version extraction can be done manually later
             console.warn('Failed to auto-extract game version:', err);
+          }
+
+          if (!manifestId) {
+            try {
+              const updateResult = await ApiService.checkUpdate(downloadId, true);
+              if (updateResult.remoteManifestId) {
+                await updateEnvironment(downloadId, {
+                  lastManifestId: updateResult.remoteManifestId,
+                  remoteManifestId: updateResult.remoteManifestId,
+                  updateAvailable: false
+                });
+              }
+            } catch (err) {
+              console.warn('Failed to backfill manifest after download completion:', err);
+            }
           }
         });
 

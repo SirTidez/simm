@@ -91,20 +91,18 @@ pub async fn download_thunderstore_package(
     // Save to temp file
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("thunderstore-{}.zip", package_uuid));
-    tokio::fs::write(&temp_file, bytes)
-        .await
-        .map_err(|e| {
-            let message = format!("Failed to save downloaded file: {}", e);
-            let _ = crate::services::tracked_downloads::emit(
-                &app,
-                crate::services::tracked_downloads::fail_file_download(
-                    &tracked_download,
-                    message.clone(),
-                    Some("Download failed".to_string()),
-                ),
-            );
-            message
-        })?;
+    tokio::fs::write(&temp_file, bytes).await.map_err(|e| {
+        let message = format!("Failed to save downloaded file: {}", e);
+        let _ = crate::services::tracked_downloads::emit(
+            &app,
+            crate::services::tracked_downloads::fail_file_download(
+                &tracked_download,
+                message.clone(),
+                Some("Download failed".to_string()),
+            ),
+        );
+        message
+    })?;
     let _ = crate::services::tracked_downloads::emit(
         &app,
         crate::services::tracked_downloads::complete_file_download(

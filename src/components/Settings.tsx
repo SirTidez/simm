@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
-import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
+import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
 import { CustomThemeEditor } from './CustomThemeEditor';
 
 type SettingsProps = {
@@ -29,7 +29,7 @@ export function normalizeModIconCacheLimitMb(value: unknown): number {
 
 export function Settings({ isOpen, onClose }: SettingsProps) {
   const { settings, depotDownloader, loading, updateSettings, refreshDepotDownloader } = useSettingsStore();
-  const { checkAllUpdates } = useEnvironmentStore();
+  const { environments, checkAllUpdates } = useEnvironmentStore();
   const [checkingAllUpdates, setCheckingAllUpdates] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const [formData, setFormData] = useState({
@@ -394,6 +394,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         setCheckingAllUpdates(true);
                         lastUpdateCheckTimeRef.current = Date.now();
                         batchUpdateCheckRef.current = true;
+                        notifyBatchUpdateCheckStarted(
+                          environments
+                            .filter(env => env.status === 'completed')
+                            .map(env => env.id)
+                        );
                         await checkAllUpdates(true);
                         alert('Update check complete!');
                       } catch (err) {

@@ -11,6 +11,10 @@ const apiMocks = vi.hoisted(() => ({
   getMLVScanReleases: vi.fn(),
   downloadS1APIToLibrary: vi.fn(),
   downloadMLVScanToLibrary: vi.fn(),
+  searchThunderstore: vi.fn(),
+  downloadThunderstoreToLibrary: vi.fn(),
+  uninstallDownloadedMod: vi.fn(),
+  installDownloadedMod: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -50,12 +54,20 @@ describe('ModLibraryOverlay', () => {
     apiMocks.getMLVScanReleases.mockReset();
     apiMocks.downloadS1APIToLibrary.mockReset();
     apiMocks.downloadMLVScanToLibrary.mockReset();
+    apiMocks.searchThunderstore.mockReset();
+    apiMocks.downloadThunderstoreToLibrary.mockReset();
+    apiMocks.uninstallDownloadedMod.mockReset();
+    apiMocks.installDownloadedMod.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
 
     apiMocks.getS1APIReleases.mockResolvedValue([]);
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
+    apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
+    apiMocks.downloadThunderstoreToLibrary.mockResolvedValue({ success: true });
+    apiMocks.uninstallDownloadedMod.mockResolvedValue({ results: [] });
+    apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
     apiMocks.getMLVScanLatestRelease.mockResolvedValue({
       tag_name: 'v1.0.0',
@@ -186,5 +198,73 @@ describe('ModLibraryOverlay', () => {
 
     expect(await screen.findByText('Mod View')).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Open Source Page' })).toBeNull();
+  });
+
+  it('shows an error when a Thunderstore library update cannot resolve a package', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Cartel Enforcer',
+          source: 'thunderstore',
+          sourceId: 'XO_WithSauce/Cartel_Enforcer_MONO',
+          sourceVersion: '1.8.3',
+          remoteVersion: '1.8.4',
+          updateAvailable: true,
+          availableRuntimes: ['Mono'],
+          installedIn: ['env-1'],
+          installedInByRuntime: { Mono: ['env-1'] },
+          storageIdsByRuntime: { Mono: 'storage-1' },
+          filesByRuntime: { Mono: ['CartelEnforcer.dll'] },
+        }),
+      ],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+    apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+
+    expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
+    expect(await screen.findByText(/Could not resolve the latest Thunderstore package/i)).toBeTruthy();
+  });
+
+  it('shows an error when a downloaded mod is missing update source metadata', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Broken Managed Mod',
+          source: 'local',
+          sourceVersion: '1.0.0',
+          updateAvailable: true,
+          remoteVersion: undefined,
+          availableRuntimes: ['Mono'],
+          installedIn: ['env-1'],
+          installedInByRuntime: { Mono: ['env-1'] },
+          storageIdsByRuntime: { Mono: 'storage-1' },
+          filesByRuntime: { Mono: ['BrokenManagedMod.dll'] },
+        }),
+      ],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+
+    expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
+    expect(await screen.findByText(/missing Thunderstore or Nexus source metadata/i)).toBeTruthy();
   });
 });

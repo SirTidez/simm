@@ -302,7 +302,9 @@ const buildDownloadedGroups = (downloaded: ModLibraryEntry[]): DownloadedModGrou
         return areVersionsEquivalent(entry.sourceVersion || entry.installedVersion, remoteVersion);
       });
       const hasFlaggedUpdate = group.updateAvailable;
-      const updateAvailable = hasFlaggedUpdate || (hasRemoteVersion && !hasRemoteDownloaded);
+      const updateAvailable = hasRemoteVersion
+        ? !hasRemoteDownloaded
+        : hasFlaggedUpdate;
 
       return {
         key: group.key,
@@ -1026,7 +1028,33 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
   const handleUpdateAndActivateGroup = useCallback(async (group: DownloadedModGroup) => {
     const sourceEntry = group.entries.find(entry => entry.source === 'thunderstore' || entry.source === 'nexusmods');
     if (!sourceEntry || !sourceEntry.source) {
-      console.warn('No supported source found for group update');
+      showLibraryNotice(
+        'Mod Update Failed',
+        'This downloaded mod is missing Thunderstore or Nexus source metadata, so SIMM cannot fetch an update for it.',
+      );
+      return;
+    }
+
+    const existingLatestEntry = group.remoteVersion
+      ? group.entries.find(entry => areVersionsEquivalent(getEntryVersionLabel(entry), group.remoteVersion))
+      : undefined;
+
+    if (existingLatestEntry) {
+      const latestAlreadyActive = group.installedIn.length > 0 && group.entries.every(entry => {
+        const hasInstallations = entry.installedIn.length > 0;
+        if (!hasInstallations) {
+          return true;
+        }
+        return entry.storageId === existingLatestEntry.storageId;
+      });
+
+      await activateGroupEntry(group, existingLatestEntry);
+      if (latestAlreadyActive) {
+        showLibraryNotice(
+          'Already Updated',
+          `The latest version ${formatVersionTag(group.remoteVersion)} is already downloaded and active for this mod.`,
+        );
+      }
       return;
     }
 
@@ -1041,6 +1069,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     let keepPendingUpdate = false;
     try {
       const downloadedStorageByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>> = {};
+      const thunderstoreMissingRuntimes: Array<'IL2CPP' | 'Mono'> = [];
 
       if (sourceEntry.source === 'thunderstore') {
         if (!sourceEntry.sourceId) {
@@ -1050,12 +1079,20 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         for (const runtime of runtimesToUpdate) {
           const pkg = await findThunderstorePackageForRuntime(sourceEntry.sourceId, runtime);
           if (!pkg) {
+            thunderstoreMissingRuntimes.push(runtime);
             continue;
           }
           const result = await ApiService.downloadThunderstoreToLibrary(pkg.uuid4, runtime);
           if (result.storageId) {
             downloadedStorageByRuntime[runtime] = result.storageId;
           }
+        }
+
+        if (Object.keys(downloadedStorageByRuntime).length === 0) {
+          if (thunderstoreMissingRuntimes.length > 0) {
+            throw new Error(`Could not resolve the latest Thunderstore package for ${thunderstoreMissingRuntimes.join('/')} runtime.`);
+          }
+          throw new Error('Thunderstore update did not produce a downloadable library entry.');
         }
       } else if (sourceEntry.source === 'nexusmods') {
         const modId = Number(sourceEntry.sourceId || '0');
@@ -1163,9 +1200,19 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       })
         || refreshedGroup?.entries[0];
 
-      if (refreshedGroup && selectedEntry) {
-        await activateGroupEntry(refreshedGroup, selectedEntry);
+      if (!refreshedGroup) {
+        throw new Error('Updated mod entry was not found in the library after download.');
       }
+
+      if (!selectedEntry) {
+        throw new Error('Updated mod version could not be selected after download.');
+      }
+
+      if (group.remoteVersion && !areVersionsEquivalent(getEntryVersionLabel(selectedEntry), group.remoteVersion)) {
+        throw new Error(`Downloaded library entry did not match the expected latest version ${formatVersionTag(group.remoteVersion)}.`);
+      }
+
+      await activateGroupEntry(refreshedGroup, selectedEntry);
     } catch (err) {
       console.error('Failed to update and activate mod version:', err);
       showLibraryNotice(
@@ -1380,20 +1427,31 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     const runDownload = async (runtime: 'IL2CPP' | 'Mono' | 'Both') => {
       setDownloading(pkg.key);
       try {
+        const results: Array<{ success: boolean; storageId?: string; alreadyStored?: boolean }> = [];
         if (runtime === 'Both') {
           if (pkg.packagesByRuntime.IL2CPP) {
-            await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.IL2CPP.uuid4, 'IL2CPP');
+            results.push(await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.IL2CPP.uuid4, 'IL2CPP'));
           }
           if (pkg.packagesByRuntime.Mono) {
-            await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.Mono.uuid4, 'Mono');
+            results.push(await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime.Mono.uuid4, 'Mono'));
           }
         } else if (pkg.packagesByRuntime[runtime]) {
-          await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime);
+          results.push(await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime));
         }
         await refreshLibrary();
         notifyLibraryUpdated();
+        if (results.length > 0 && results.every(result => result.alreadyStored)) {
+          showLibraryNotice(
+            'Already Downloaded',
+            `The latest version of ${pkg.name} is already in your mod library.`,
+          );
+        }
       } catch (err) {
         console.error('Failed to download Thunderstore mod:', err);
+        showLibraryNotice(
+          'Thunderstore Download Failed',
+          err instanceof Error ? err.message : 'Failed to download this Thunderstore mod.',
+        );
       } finally {
         setDownloading(null);
       }

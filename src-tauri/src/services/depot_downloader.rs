@@ -250,21 +250,17 @@ impl DepotDownloaderService {
             progress.speed = Some(format!("{} {}", &caps[1], &caps[2]));
         }
 
-        // Parse manifest ID from output
-        // DepotDownloader outputs manifest IDs in various formats:
-        // - "Manifest: 1234567890"
-        // - "Manifest ID: 1234567890"
-        // - "Using manifest 1234567890"
-        if progress.manifest_id.is_none() {
-            let manifest_pattern =
-                Regex::new(r"(?i)(?:manifest|manifestid)[:\s]+(\d{10,})").unwrap();
-            if let Some(caps) = manifest_pattern.captures(line) {
-                if let Some(manifest_id) = caps.get(1) {
-                    progress.manifest_id = Some(manifest_id.as_str().to_string());
-                    eprintln!(
-                        "[DepotDownloader] Captured manifest ID: {}",
-                        manifest_id.as_str()
-                    );
+        // Parse manifest ID from output. Keep the most recent match because an
+        // update run can mention the currently installed manifest before the
+        // newly resolved target manifest later in the output.
+        let manifest_pattern =
+            Regex::new(r"(?i)(?:manifest|manifestid)[:\s]+(\d{10,})").unwrap();
+        if let Some(caps) = manifest_pattern.captures(line) {
+            if let Some(manifest_id) = caps.get(1) {
+                let manifest_id = manifest_id.as_str().to_string();
+                if progress.manifest_id.as_ref() != Some(&manifest_id) {
+                    progress.manifest_id = Some(manifest_id.clone());
+                    eprintln!("[DepotDownloader] Captured manifest ID: {}", manifest_id);
                 }
             }
         }
@@ -864,6 +860,32 @@ mod tests {
             .await
             .expect("progress set");
         assert!(matches!(progress.status, DownloadStatus::Validating));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parse_progress_keeps_latest_manifest_id() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+
+        service
+            .parse_progress(
+                "Got manifest request code for depot 3164501 from app 3164500, manifest 5603394666660587467, result: 123",
+                "download-8",
+                &handle,
+            )
+            .await?;
+        service
+            .parse_progress("Manifest 3177164058227208309 (03/14/2026 02:10:46)", "download-8", &handle)
+            .await?;
+
+        let progress = service
+            .get_progress("download-8")
+            .await
+            .expect("progress set");
+        assert_eq!(progress.manifest_id.as_deref(), Some("3177164058227208309"));
 
         Ok(())
     }
