@@ -1,10 +1,13 @@
-name: Build EXE
+name: Publish Release
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-tauri-windows:
+  publish-release:
     runs-on: windows-latest
 
     steps:
@@ -29,46 +32,30 @@ jobs:
           npm config set fetch-retry-maxtimeout 120000
           npm install --no-audit --prefer-offline
 
-      - name: Build Windows installer
-        run: npm run tauri build -- --bundles nsis
-
-      - name: Resolve build version
+      - name: Resolve app version and release tag
         id: version
         shell: pwsh
         run: |
-          $version = ''
-
-          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v')) {
-            $version = $env:GITHUB_REF_NAME.Substring(1)
-          }
-
+          $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = $config.version
           if (-not $version) {
-            $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
-            $version = $config.version
+            throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
           }
 
-          if (-not $version) {
-            throw 'Unable to determine build version.'
-          }
+          $tag = "v${version}"
+          $assetName = "SIMM_${version}_Setup.exe"
 
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Resolved version: $version"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Inspect build outputs
+      - name: Build Windows installer
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Prepare installer asset
+        id: asset
         shell: pwsh
         run: |
-          Write-Host "Listing target/release contents"
-          if (Test-Path 'target/release') {
-            Get-ChildItem -Path 'target/release' -Recurse | Select-Object FullName
-          } else {
-            Write-Host 'target/release does not exist'
-          }
-
-      - name: Prepare Windows installer artifact
-        id: renamed
-        shell: pwsh
-        run: |
-          $version = '${{ steps.version.outputs.version }}'
           New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
 
           $setupSource = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe' | Select-Object -First 1
@@ -76,16 +63,31 @@ jobs:
             throw 'Setup executable not found in target/release/bundle/nsis.'
           }
 
-          $setupTarget = "artifacts/SIMM_${version}_Setup.exe"
-
+          $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
 
           "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Upload Windows installer artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: SIMM_${{ steps.version.outputs.version }}_Setup
-          path: ${{ steps.renamed.outputs.setup_file }}
+          path: ${{ steps.asset.outputs.setup_file }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $assetPath = '${{ steps.asset.outputs.setup_file }}'
+          $assetName = '${{ steps.version.outputs.asset_name }}'
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "$assetPath#$assetName" --clobber
+          } else {
+            gh release create $tag "$assetPath#$assetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
+          }

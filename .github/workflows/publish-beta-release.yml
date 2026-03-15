@@ -1,0 +1,93 @@
+name: Publish Beta Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-beta-release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-maxtimeout 120000
+          npm install --no-audit --prefer-offline
+
+      - name: Resolve app version and beta tag
+        id: version
+        shell: pwsh
+        run: |
+          $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = $config.version
+          if (-not $version) {
+            throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
+          }
+
+          $tag = "v${version}-beta"
+          $assetName = "SIMM_${version}_Setup.exe"
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build Windows installer
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Prepare installer asset
+        id: asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
+
+          $setupSource = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe' | Select-Object -First 1
+          if (-not $setupSource) {
+            throw 'Setup executable not found in target/release/bundle/nsis.'
+          }
+
+          $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
+          Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
+
+          "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMM_${{ steps.version.outputs.version }}_Setup
+          path: ${{ steps.asset.outputs.setup_file }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish beta GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $assetPath = '${{ steps.asset.outputs.setup_file }}'
+          $assetName = '${{ steps.version.outputs.asset_name }}'
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "$assetPath#$assetName" --clobber
+          } else {
+            gh release create $tag "$assetPath#$assetName" --title $tag --generate-notes --prerelease --target $env:GITHUB_SHA
+          }
