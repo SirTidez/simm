@@ -177,9 +177,60 @@ describe('ModsOverlay', () => {
         'C:/mods/Example.dll',
         'Example.dll',
         'IL2CPP',
-        expect.objectContaining({ detectedRuntime: 'Mono' })
+        expect.objectContaining({ detectedRuntime: 'Mono', source: 'unknown' }),
+        false,
       );
     });
+  });
+
+  it('shows only the active managed library version for the same mod family', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        {
+          storageId: 'storage-old',
+          displayName: 'Grouped Mod',
+          files: ['GroupedMod.dll'],
+          source: 'thunderstore',
+          sourceId: 'Author/GroupedMod',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          managed: true,
+          installedIn: ['env-2'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'storage-old' },
+          installedInByRuntime: { IL2CPP: ['env-2'] },
+          filesByRuntime: { IL2CPP: ['GroupedMod.dll'] },
+        },
+        {
+          storageId: 'storage-new',
+          displayName: 'Grouped Mod',
+          files: ['GroupedMod.dll'],
+          source: 'thunderstore',
+          sourceId: 'Author/GroupedMod',
+          sourceVersion: '1.1.0',
+          installedVersion: '1.1.0',
+          managed: true,
+          installedIn: [],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'storage-new' },
+          installedInByRuntime: { IL2CPP: [] },
+          filesByRuntime: { IL2CPP: ['GroupedMod.dll'] },
+        },
+      ],
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    expect(await screen.findByText('Grouped Mod')).toBeTruthy();
+    expect(screen.getAllByText('Grouped Mod')).toHaveLength(1);
+    expect(screen.getByText('1.0.0')).toBeTruthy();
+    expect(screen.queryByText('1.1.0')).toBeNull();
   });
 
   it('renders the environment grid layout and no list-mode container', async () => {

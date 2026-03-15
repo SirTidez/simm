@@ -1225,6 +1225,10 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     const sourceEntry = group.entries.find(entry => entry.source === 'thunderstore' || entry.source === 'nexusmods');
     if (!sourceEntry || !sourceEntry.source) {
       console.warn('No supported source found for group update');
+      showLibraryNotice(
+        'Mod Update Failed',
+        'This mod is missing Thunderstore or Nexus source metadata and cannot be updated automatically.',
+      );
       return;
     }
 
@@ -1239,6 +1243,8 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     let keepPendingUpdate = false;
     try {
       const downloadedStorageByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>> = {};
+      let resolvedPackage = false;
+      let downloadedUpdatedRuntime = false;
 
       if (sourceEntry.source === 'thunderstore') {
         if (!sourceEntry.sourceId) {
@@ -1250,10 +1256,16 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           if (!pkg) {
             continue;
           }
+          resolvedPackage = true;
           const result = await downloadThunderstoreWithSecurity(pkg.uuid4, runtime, `Security Findings - ${group.displayName}`);
           if (result?.storageId) {
             downloadedStorageByRuntime[runtime] = result.storageId;
+            downloadedUpdatedRuntime = true;
           }
+        }
+
+        if (!resolvedPackage) {
+          throw new Error('Could not resolve the latest Thunderstore package for the target runtime.');
         }
       } else if (sourceEntry.source === 'nexusmods') {
         const modId = Number(sourceEntry.sourceId || '0');
@@ -1346,8 +1358,13 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           const result = await downloadNexusWithSecurity(modId, file.file_id, runtime, 'Security Findings - Nexus Update');
           if (result?.storageId) {
             downloadedStorageByRuntime[runtime] = result.storageId;
+            downloadedUpdatedRuntime = true;
           }
         }
+      }
+
+      if (!downloadedUpdatedRuntime) {
+        throw new Error('No updated mod package could be downloaded for the selected runtime.');
       }
 
       const nextLibrary = await ApiService.getModLibrary();
@@ -2742,9 +2759,13 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                               {deleting === group.key ? 'Deleting...' : 'Delete Files'}
                             </button>
                           </div>
-                          <div className="mod-card-version-row" style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }} onClick={(e) => e.stopPropagation()}>
+                          <div
+                            className="mod-card-version-row"
+                            data-version-switcher
+                            style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             <div
-                              data-version-switcher
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
