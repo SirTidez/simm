@@ -267,4 +267,56 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
     expect(await screen.findByText(/missing Thunderstore or Nexus source metadata/i)).toBeTruthy();
   });
+
+  it('switches versions from the dropdown menu', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: 'storage-new',
+          displayName: 'Switcher Mod',
+          source: 'thunderstore',
+          sourceId: 'Author/SwitcherMod',
+          sourceVersion: '1.1.0',
+          installedVersion: '1.1.0',
+          availableRuntimes: ['Mono'],
+          installedIn: ['env-1'],
+          installedInByRuntime: { Mono: ['env-1'] },
+          storageIdsByRuntime: { Mono: 'storage-new' },
+          filesByRuntime: { Mono: ['SwitcherMod.dll'] },
+        }),
+        makeEntry({
+          storageId: 'storage-old',
+          displayName: 'Switcher Mod',
+          source: 'thunderstore',
+          sourceId: 'Author/SwitcherMod',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          availableRuntimes: ['Mono'],
+          installedIn: [],
+          installedInByRuntime: { Mono: [] },
+          storageIdsByRuntime: { Mono: 'storage-old' },
+          filesByRuntime: { Mono: ['SwitcherMod.dll'] },
+        }),
+      ],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /v1\.1\.0/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /v1\.0\.0/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.uninstallDownloadedMod).toHaveBeenCalledWith('storage-new', ['env-1']);
+    });
+    await waitFor(() => {
+      expect(apiMocks.installDownloadedMod).toHaveBeenCalledWith('storage-old', ['env-1']);
+    });
+  });
 });

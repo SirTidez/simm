@@ -93,13 +93,125 @@ interface ThunderstorePackage {
   icon_url?: string;
 }
 
+const runtimeSuffixPatterns = [
+  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
+  /\s*[_-]\s*(mono|il2cpp)\s*$/i,
+  /\s+(mono|il2cpp)\s*$/i,
+];
+
 function normalizeModNameKey(name: string): string {
-  return name
-    .replace(/\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i, '')
-    .replace(/\s*[_-]\s*(mono|il2cpp)\s*$/i, '')
-    .replace(/\s+(mono|il2cpp)\s*$/i, '')
-    .trim()
-    .toLowerCase();
+  let normalized = name;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of runtimeSuffixPatterns) {
+      const next = normalized.replace(pattern, '').trim();
+      if (next !== normalized) {
+        normalized = next;
+        changed = true;
+      }
+    }
+  }
+  return normalized.toLowerCase();
+}
+
+function normalizeVersionToken(value?: string): string {
+  let normalized = (value || '').trim();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of runtimeSuffixPatterns) {
+      const next = normalized.replace(pattern, '').trim();
+      if (next !== normalized) {
+        normalized = next;
+        changed = true;
+      }
+    }
+  }
+  if (/^v/i.test(normalized)) {
+    normalized = normalized.slice(1);
+  }
+  return normalized.toLowerCase();
+}
+
+function compareVersionTokensDesc(a?: string, b?: string): number {
+  const normalizedA = normalizeVersionToken(a);
+  const normalizedB = normalizeVersionToken(b);
+  if (normalizedA === normalizedB) {
+    return 0;
+  }
+
+  const tokensA = normalizedA.split(/[^a-z0-9]+/i).filter(Boolean);
+  const tokensB = normalizedB.split(/[^a-z0-9]+/i).filter(Boolean);
+  const max = Math.max(tokensA.length, tokensB.length);
+
+  for (let index = 0; index < max; index += 1) {
+    const tokenA = tokensA[index] || '';
+    const tokenB = tokensB[index] || '';
+    const numericA = /^\d+$/.test(tokenA);
+    const numericB = /^\d+$/.test(tokenB);
+
+    if (numericA && numericB) {
+      const numberA = Number(tokenA);
+      const numberB = Number(tokenB);
+      if (numberA !== numberB) {
+        return numberB - numberA;
+      }
+      continue;
+    }
+
+    const compare = tokenB.localeCompare(tokenA, undefined, { sensitivity: 'base' });
+    if (compare !== 0) {
+      return compare;
+    }
+  }
+
+  return normalizedB.localeCompare(normalizedA, undefined, { sensitivity: 'base' });
+}
+
+function getLibraryEntryGroupKey(entry: ModLibraryEntry): string {
+  if (entry.source === 'thunderstore') {
+    const [, ...rest] = (entry.sourceId || '').split('/');
+    const thunderstoreName = rest.join('/');
+    return `thunderstore::${normalizeModNameKey(thunderstoreName || entry.displayName || '')}`;
+  }
+
+  if ((entry.source === 'nexusmods' || entry.source === 'github') && entry.sourceId) {
+    return `${entry.source}::${entry.sourceId.toLowerCase()}`;
+  }
+
+  if (entry.managed) {
+    return `managed::${normalizeModNameKey(entry.displayName || '')}`;
+  }
+
+  return entry.storageId;
+}
+
+function pickVisibleLibraryEntry(entries: ModLibraryEntry[], environmentId: string): ModLibraryEntry {
+  const sorted = [...entries].sort((a, b) =>
+    compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion)
+  );
+
+  return sorted.find(entry => entry.installedIn?.includes(environmentId))
+    || sorted.find(entry => (entry.installedIn?.length || 0) > 0)
+    || sorted[0];
+}
+
+function buildVisibleLibraryEntries(downloaded: ModLibraryEntry[], environmentId: string): ModLibraryEntry[] {
+  const groups = new Map<string, ModLibraryEntry[]>();
+  for (const entry of downloaded) {
+    const key = getLibraryEntryGroupKey(entry);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      groups.set(key, [entry]);
+    }
+  }
+
+  return Array.from(groups.values())
+    .map(entries => pickVisibleLibraryEntry(entries, environmentId))
+    .sort((a, b) => (a.displayName || '').localeCompare(b.displayName || '', undefined, { sensitivity: 'base' }));
 }
 
 function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] {
@@ -191,6 +303,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
     return counts;
   }, [downloadedMods]);
+
+  const visibleDownloadedMods = useMemo(() => {
+    return buildVisibleLibraryEntries(downloadedMods, environmentId);
+  }, [downloadedMods, environmentId]);
 
   const loadEnvironment = async () => {
     try {
@@ -1448,7 +1564,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   if (!isOpen) return null;
 
   const envRuntime = environment?.runtime;
-  const downloadedNotInstalled = downloadedMods.filter(entry => {
+  const downloadedNotInstalled = visibleDownloadedMods.filter(entry => {
     const installedIn = envRuntime ? entry.installedInByRuntime?.[envRuntime] || entry.installedIn : entry.installedIn;
     if (installedIn?.includes(environmentId)) return false;
     // Exclude mods that have declared runtimes but none match the current environment runtime

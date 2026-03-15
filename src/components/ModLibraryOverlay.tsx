@@ -2532,9 +2532,13 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                               {deleting === group.key ? 'Deleting...' : 'Delete Files'}
                             </button>
                           </div>
-                          <div className="mod-card-version-row" style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }} onClick={(e) => e.stopPropagation()}>
+                          <div
+                            className="mod-card-version-row"
+                            data-version-switcher
+                            style={{ position: 'relative', zIndex: openVersionMenuGroup === group.key ? 100 : 'auto' }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             <div
-                              data-version-switcher
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',

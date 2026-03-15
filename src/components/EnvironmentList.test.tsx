@@ -159,7 +159,7 @@ describe('EnvironmentList', () => {
 
     render(<EnvironmentList />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Check Updates' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
 
     await waitFor(() => {
       expect(checkUpdate).toHaveBeenCalledWith('env-1', true);
