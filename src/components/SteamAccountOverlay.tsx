@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
@@ -19,9 +19,6 @@ interface NexusOAuthStatus {
 export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const { settings, refreshSettings } = useSettingsStore();
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [releaseApiHealth, setReleaseApiHealth] = useState<Record<string, unknown> | null>(null);
-  const [releaseApiError, setReleaseApiError] = useState<string | null>(null);
-  const [checkingReleaseApi, setCheckingReleaseApi] = useState(false);
   const [nexusStatus, setNexusStatus] = useState<NexusOAuthStatus>({ connected: false });
   const [nexusBusy, setNexusBusy] = useState(false);
   const [nexusError, setNexusError] = useState<string | null>(null);
@@ -53,27 +50,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       }
     };
 
-    loadNexusStatus();
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const loadReleaseApiHealth = async () => {
-      setCheckingReleaseApi(true);
-      setReleaseApiError(null);
-      try {
-        const health = await ApiService.getReleaseApiHealth();
-        setReleaseApiHealth(health);
-      } catch (err) {
-        setReleaseApiHealth(null);
-        setReleaseApiError(err instanceof Error ? err.message : 'Release API is unavailable');
-      } finally {
-        setCheckingReleaseApi(false);
-      }
-    };
-
-    loadReleaseApiHealth();
+    void loadNexusStatus();
   }, [isOpen]);
 
   useEffect(() => {
@@ -84,36 +61,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       }
     };
   }, []);
-
-  const extractReleaseApiLastUpdated = (health: Record<string, unknown> | null): string | null => {
-    if (!health) return null;
-
-    const candidates = [
-      health.lastUpdated,
-      health.last_updated,
-      health.updatedAt,
-      health.updated_at,
-      health.timestamp,
-      (health as any).data?.lastUpdated,
-      (health as any).data?.last_updated,
-      (health as any).data?.updatedAt,
-      (health as any).data?.updated_at,
-    ];
-
-    for (const candidate of candidates) {
-      if (typeof candidate === 'string' && candidate.trim().length > 0) {
-        const parsed = new Date(candidate);
-        if (!Number.isNaN(parsed.getTime())) {
-          return parsed.toLocaleString();
-        }
-        return candidate;
-      }
-    }
-
-    return null;
-  };
-
-  const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
 
   const tierLabel = !nexusStatus.connected
     ? 'Unauthenticated'
@@ -128,6 +75,15 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     : nexusStatus.account?.canDirectDownload
       ? 'Direct manager downloads'
       : 'Website confirmation required';
+
+  const steamConnected = Boolean(settings?.steamUsername);
+  const steamSummary = steamConnected
+    ? 'Protected Steam branches are ready to authenticate when SIMM needs depot access.'
+    : 'No Steam account is connected yet. Connect Steam to access protected branches and refresh branch auth when downloads require it.';
+  const nexusExpiry = nexusStatus.connected && nexusStatus.expiresAt
+    ? new Date(nexusStatus.expiresAt * 1000).toLocaleString()
+    : null;
+  const nexusIdentity = nexusStatus.account?.name || 'Connected account';
 
   const loadNexusStatus = async () => {
     const status = await ApiService.getNexusOAuthStatus();
@@ -213,7 +169,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   return (
     <>
       <section
-        className="modal-content steam-account-overlay workspace-panel"
+        className="modal-content workspace-panel accounts-panel"
         style={{
           width: '100%',
           height: '100%',
@@ -230,183 +186,166 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
           <button className="modal-close" onClick={onClose} aria-label="Close accounts panel">×</button>
         </div>
 
-        <div className="steam-account-content" style={{ flex: 1, overflowY: 'auto' }}>
-          {settings?.steamUsername ? (
-            <div className="steam-account-info">
-              <div className="steam-account-avatar">
-                <i className="fas fa-user-circle"></i>
+        <div className="accounts-pane">
+          <div className="accounts-overview">
+            <div className="accounts-overview__copy">
+              <span className="accounts-eyebrow">Connected Services</span>
+              <h3>Manage Steam and Nexus access for protected downloads.</h3>
+              <p>Keep account links healthy, verify what capabilities are available, and understand how SIMM stores credentials on this machine.</p>
+            </div>
+            <div className="accounts-overview__stats">
+              <div className="accounts-stat-card">
+                <span>Steam</span>
+                <strong>{steamConnected ? 'Connected' : 'Needs login'}</strong>
               </div>
-              <div className="steam-account-details">
-                <div className="steam-account-username">
-                  <strong>Account:</strong>
-                  <span>{settings.steamUsername}</span>
-                </div>
-                <div className="steam-account-status">
-                  <i className="fas fa-check-circle" style={{ color: '#4caf50', marginRight: '0.5rem' }}></i>
-                  <span>Connected</span>
-                </div>
+              <div className="accounts-stat-card">
+                <span>Nexus</span>
+                <strong>{nexusStatus.connected ? tierLabel : 'Disconnected'}</strong>
+              </div>
+              <div className="accounts-stat-card">
+                <span>Download mode</span>
+                <strong>{nexusStatus.account?.canDirectDownload ? 'Direct' : 'Confirm on site'}</strong>
               </div>
             </div>
-          ) : (
-            <div className="steam-account-not-authenticated">
-              <i className="fas fa-exclamation-triangle" style={{ fontSize: '2rem', color: '#ffaa00', marginBottom: '1rem' }}></i>
-              <p>No Steam account connected</p>
-              <p style={{ color: '#888', fontSize: '0.9rem', marginTop: '0.5rem' }}>
-                Connect Steam to download protected branches.
-              </p>
-            </div>
-          )}
-
-          <div className="steam-account-actions">
-            <button
-              onClick={() => setShowAuthModal(true)}
-              className="btn btn-primary"
-              style={{ width: '100%' }}
-            >
-              {settings?.steamUsername ? (
-                <>
-                  <i className="fas fa-sync-alt" style={{ marginRight: '0.5rem' }}></i>
-                  Reconnect Steam
-                </>
-              ) : (
-                <>
-                  <i className="fas fa-sign-in-alt" style={{ marginRight: '0.5rem' }}></i>
-                  Connect Steam
-                </>
-              )}
-            </button>
           </div>
 
-          <div className="steam-account-note">
-            <p>
-              <i className="fas fa-info-circle" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Credentials are encrypted and kept local. They are only used for Steam branch access.
-            </p>
-          </div>
-
-          <div style={{
-            marginTop: '1.5rem',
-            paddingTop: '1.5rem',
-            borderTop: '1px solid #3a3a3a'
-          }}>
-            <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <i className="fab fa-github"></i>
-              GitHub API Status
-            </h3>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
-              <span
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '0.4rem',
-                  padding: '0.28rem 0.6rem',
-                  borderRadius: '999px',
-                  fontSize: '0.78rem',
-                  fontWeight: 600,
-                  border: checkingReleaseApi ? '1px solid #2a4d7d' : releaseApiError ? '1px solid #5a2a2a' : '1px solid #2a5a2a',
-                  backgroundColor: checkingReleaseApi ? '#1f2d46' : releaseApiError ? '#3a1a1a' : '#1a3a1a',
-                  color: checkingReleaseApi ? '#9cc4ff' : releaseApiError ? '#ff9b9b' : '#9be2a6'
-                }}
-                title={releaseApiError || undefined}
-              >
-                <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
-                {checkingReleaseApi ? 'Checking' : releaseApiError ? 'Offline' : 'Online'}
+          <section className="account-service-card">
+            <div className="account-service-card__header">
+              <div className="account-service-card__identity">
+                <div className="account-service-card__icon">
+                  <i className="fab fa-steam-symbol"></i>
+                </div>
+                <div>
+                  <span className="accounts-eyebrow">Steam Account</span>
+                  <h3>Branch authentication</h3>
+                  <p>{steamSummary}</p>
+                </div>
+              </div>
+              <span className={`account-status-pill account-status-pill--${steamConnected ? 'connected' : 'disconnected'}`}>
+                <i className={steamConnected ? 'fas fa-check-circle' : 'fas fa-exclamation-circle'}></i>
+                {steamConnected ? 'Connected' : 'Not connected'}
               </span>
+            </div>
 
-              {releaseApiLastUpdated && !checkingReleaseApi && (
-                <span style={{ color: '#9aa4b2', fontSize: '0.82rem' }}>
-                  Last updated: {releaseApiLastUpdated}
+            {steamConnected ? (
+              <div className="account-metadata-grid">
+                <div className="account-metadata-card">
+                  <span>Account</span>
+                  <strong>{settings?.steamUsername}</strong>
+                </div>
+                <div className="account-metadata-card">
+                  <span>Credential storage</span>
+                  <strong>Encrypted and local</strong>
+                </div>
+                <div className="account-metadata-card">
+                  <span>Use case</span>
+                  <strong>Steam depot access</strong>
+                </div>
+              </div>
+            ) : (
+              <div className="account-disconnected-note">
+                SIMM only needs Steam when a branch requires authenticated depot access. Connect once here, then refresh the link whenever Steam changes credentials or session requirements.
+              </div>
+            )}
+
+            <div className="account-service-card__actions">
+              <button onClick={() => setShowAuthModal(true)} className="btn btn-primary">
+                <i className={steamConnected ? 'fas fa-sync-alt' : 'fas fa-sign-in-alt'}></i>
+                {steamConnected ? 'Reconnect Steam' : 'Connect Steam'}
+              </button>
+              <span className="account-action-note">Required for protected Steam branch downloads.</span>
+            </div>
+          </section>
+
+          <section className="account-service-card">
+            <div className="account-service-card__header">
+              <div className="account-service-card__identity">
+                <div className="account-service-card__icon">
+                  <i className="fas fa-download"></i>
+                </div>
+                <div>
+                  <span className="accounts-eyebrow">Nexus Mods</span>
+                  <h3>Manager download access</h3>
+                  <p>Nexus browsing works without signing in, but authenticated access unlocks manager downloads and premium features when the account allows them.</p>
+                </div>
+              </div>
+              <div className="account-service-card__pills">
+                <span className={`account-status-pill account-status-pill--${nexusStatus.connected ? 'connected' : 'disconnected'}`}>
+                  <i className={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'}></i>
+                  {tierLabel}
                 </span>
-              )}
-            </div>
-          </div>
-
-          <div style={{
-            marginTop: '1.5rem',
-            paddingTop: '1.5rem',
-            borderTop: '1px solid #3a3a3a'
-          }}>
-            <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <i className="fas fa-download"></i>
-              NexusMods Access
-            </h3>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
-              <span style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-                padding: '0.28rem 0.6rem',
-                borderRadius: '999px',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                border: '1px solid #2a5a2a',
-                backgroundColor: nexusStatus.connected ? '#1a3a1a' : '#3a1a1a',
-                color: nexusStatus.connected ? '#9be2a6' : '#ff9b9b'
-              }}>
-                <i className={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'}></i>
-                {tierLabel}
-              </span>
-              <span style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-                padding: '0.28rem 0.6rem',
-                borderRadius: '999px',
-                fontSize: '0.78rem',
-                fontWeight: 600,
-                border: '1px solid #3a3a3a',
-                backgroundColor: '#1f232c',
-                color: '#cbd5e1'
-              }}>
-                <i className={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'}></i>
-                {capabilityLabel}
-              </span>
+                <span className="account-capability-pill">
+                  <i className={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'}></i>
+                  {capabilityLabel}
+                </span>
+              </div>
             </div>
 
             {nexusStatus.connected ? (
-              <div style={{ padding: '0.75rem', backgroundColor: '#1a3a1a', borderRadius: '4px', border: '1px solid #2a5a2a', marginBottom: '1rem' }}>
-                <div style={{ fontSize: '0.85rem', color: '#ccc', marginBottom: '0.65rem' }}>
-                  <div><strong>User:</strong> {nexusStatus.account?.name || 'Connected'}</div>
+              <div className="account-metadata-grid">
+                <div className="account-metadata-card">
+                  <span>Account</span>
+                  <strong>{nexusIdentity}</strong>
                 </div>
-                <button onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy} style={{ width: '100%' }}>
-                  {nexusBusy ? 'Working...' : 'Logout from Nexus'}
-                </button>
+                <div className="account-metadata-card">
+                  <span>Membership</span>
+                  <strong>{tierLabel}</strong>
+                </div>
+                <div className="account-metadata-card">
+                  <span>Manager downloads</span>
+                  <strong>{nexusStatus.account?.canDirectDownload ? 'Enabled' : 'Requires site confirmation'}</strong>
+                </div>
+                {typeof nexusStatus.account?.memberId === 'number' && (
+                  <div className="account-metadata-card">
+                    <span>Member ID</span>
+                    <strong>{nexusStatus.account.memberId}</strong>
+                  </div>
+                )}
+                {nexusExpiry && (
+                  <div className="account-metadata-card">
+                    <span>Session expires</span>
+                    <strong>{nexusExpiry}</strong>
+                  </div>
+                )}
+                <div className="account-metadata-card">
+                  <span>Website confirmation</span>
+                  <strong>{nexusStatus.account?.requiresSiteConfirmation ? 'Required for free-tier downloads' : 'Not required for current account'}</strong>
+                </div>
               </div>
             ) : (
-              <button onClick={handleNexusLogin} className="btn btn-primary" disabled={nexusBusy} style={{ width: '100%' }}>
-                {nexusBusy ? (
-                  <>
-                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                    Waiting for Nexus authorization...
-                  </>
-                ) : (
-                  <>
-                    <i className="fas fa-sign-in-alt" style={{ marginRight: '0.5rem' }}></i>
-                    Login with Nexus
-                  </>
-                )}
-              </button>
-            )}
-
-            {nexusError && (
-              <div style={{
-                color: '#ff6b6b',
-                fontSize: '0.75rem',
-                marginTop: '0.75rem',
-                padding: '0.4rem 0.6rem',
-                backgroundColor: '#3a1a1a',
-                borderRadius: '4px'
-              }}>
-                {nexusError}
+              <div className="account-disconnected-note">
+                You can still browse and search Nexus content without linking an account. Sign in here when you want manager downloads or need SIMM to handle the site authorization flow for you.
               </div>
             )}
 
-            <p style={{ color: '#888', fontSize: '0.85rem', marginTop: '0.5rem', lineHeight: '1.4' }}>
-              Nexus browsing/search works without login. Nexus login is required for downloads. Free accounts require website confirmation per download.
-            </p>
-          </div>
+            {nexusError && <div className="account-service-error">{nexusError}</div>}
+
+            <div className="account-service-card__actions">
+              {nexusStatus.connected ? (
+                <button onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy}>
+                  <i className={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-out-alt'}></i>
+                  {nexusBusy ? 'Working...' : 'Logout from Nexus'}
+                </button>
+              ) : (
+                <button onClick={handleNexusLogin} className="btn btn-primary" disabled={nexusBusy}>
+                  <i className={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-in-alt'}></i>
+                  {nexusBusy ? 'Waiting for Nexus authorization...' : 'Login with Nexus'}
+                </button>
+              )}
+              <span className="account-action-note">Free accounts confirm each download on the website. Premium accounts can use direct manager downloads when available.</span>
+            </div>
+          </section>
+
+          <section className="account-note-card">
+            <div className="account-note-card__icon">
+              <i className="fas fa-shield-alt"></i>
+            </div>
+            <div className="account-note-card__content">
+              <span className="accounts-eyebrow">Security & Storage</span>
+              <h3>Credentials stay on this machine</h3>
+              <p>SIMM stores linked-account credentials locally and encrypted. Steam credentials are only used for branch access, and Nexus tokens are only used for authenticated download flows.</p>
+            </div>
+          </section>
         </div>
       </section>
 

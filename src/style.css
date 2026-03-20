@@ -925,9 +925,12 @@ body::before {
 }
 
 
-/* Steam Account Overlay */
-.steam-account-overlay {
-  max-width: clamp(20rem, 40vw, 28rem);
+/* Accounts */
+.accounts-panel {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
 }
 
 .mods-overlay {
@@ -945,163 +948,495 @@ body::before {
   overflow: auto;
 }
 
-.steam-account-content {
-  padding: clamp(1rem, 2.5vw, 1.5rem);
-}
-
-.steam-account-info {
-  display: flex;
-  align-items: flex-start;
-  gap: clamp(1rem, 2vw, 1.25rem);
-  padding: clamp(1rem, 2vw, 1.25rem);
-  background-color: var(--card-bg-color, #2a2a2a);
-  border: 1px solid var(--card-border-color, #3a3a3a);
-  border-radius: clamp(0.375rem, 0.75vw, 0.5rem);
-  margin-bottom: clamp(1rem, 2.5vw, 1.5rem);
-}
-
-.steam-account-avatar {
-  font-size: clamp(2.5rem, 5vw, 3.5rem);
-  color: #646cff;
-  flex-shrink: 0;
-}
-
-.steam-account-details {
+.accounts-pane {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  padding: 1rem 1.15rem 1.15rem;
+}
+
+.accounts-overview {
   display: flex;
-  flex-direction: column;
-  gap: clamp(0.5rem, 1vw, 0.75rem);
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
 }
 
-.steam-account-username {
-  display: flex;
-  flex-direction: column;
-  gap: clamp(0.25rem, 0.5vw, 0.375rem);
+.accounts-overview__copy {
+  display: grid;
+  gap: 0.45rem;
+  max-width: 52rem;
 }
 
-.steam-account-username strong {
-  font-size: clamp(0.75rem, 1.5vw, 0.8rem);
-  color: var(--text-secondary, #cccccc);
-  font-weight: 500;
+.accounts-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93add0;
 }
 
-.steam-account-username span {
-  font-size: clamp(1rem, 2vw, 1.1rem);
-  font-weight: 600;
-  color: var(--app-text-color, #ffffff);
-  word-break: break-word;
-}
-
-.steam-account-status {
-  display: flex;
-  align-items: center;
-  font-size: clamp(0.8rem, 1.5vw, 0.85rem);
-  color: var(--text-secondary, #cccccc);
-}
-
-.steam-account-not-authenticated {
-  text-align: center;
-  padding: clamp(1.5rem, 3vw, 2rem);
-  background-color: var(--card-bg-color, #2a2a2a);
-  border: 1px solid var(--card-border-color, #3a3a3a);
-  border-radius: clamp(0.375rem, 0.75vw, 0.5rem);
-  margin-bottom: clamp(1rem, 2.5vw, 1.5rem);
-}
-
-.steam-account-not-authenticated p {
+.accounts-overview__copy h3 {
   margin: 0;
-  font-size: clamp(0.9rem, 1.8vw, 1rem);
+  font-size: 1.18rem;
+  font-weight: 650;
+  color: #eef5ff;
 }
 
-.steam-account-actions {
-  margin-bottom: clamp(1rem, 2.5vw, 1.5rem);
+.accounts-overview__copy p {
+  margin: 0;
+  color: #9fb5d2;
+  line-height: 1.55;
 }
 
-.steam-account-note {
-  padding: clamp(0.75rem, 1.5vw, 1rem);
-  background-color: var(--info-box-bg, #1e3a5f);
-  border: 1px solid var(--info-box-border, #2a4a6f);
-  border-radius: clamp(0.375rem, 0.75vw, 0.5rem);
-  font-size: clamp(0.75rem, 1.5vw, 0.8rem);
-  color: var(--text-secondary, #cccccc);
+.accounts-overview__stats {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-content: flex-start;
+}
+
+.accounts-stat-card {
+  min-width: 128px;
+  padding: 0.72rem 0.84rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(100, 132, 173, 0.24);
+  background: linear-gradient(180deg, rgba(20, 31, 46, 0.92), rgba(15, 24, 37, 0.92));
+}
+
+.accounts-stat-card span {
+  display: block;
+  font-size: 0.72rem;
+  color: #8ea6c5;
+  margin-bottom: 0.16rem;
+}
+
+.accounts-stat-card strong {
+  color: #eef5ff;
+}
+
+.account-service-card,
+.account-note-card {
+  display: grid;
+  gap: 0.95rem;
+  padding: 1rem 1.05rem;
+  border-radius: var(--workspace-card-radius);
+  border: 1px solid var(--workspace-stroke);
+  background: linear-gradient(180deg, rgba(23, 34, 49, 0.82), rgba(18, 28, 41, 0.82));
+  box-shadow: 0 8px 18px rgba(4, 10, 19, 0.18);
+}
+
+.account-service-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.account-service-card__identity {
+  display: flex;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.account-service-card__identity > div:last-child {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.account-service-card__identity h3,
+.account-note-card__content h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #eef5ff;
+}
+
+.account-service-card__identity p,
+.account-note-card__content p {
+  margin: 0;
+  color: #9db4d0;
+  line-height: 1.52;
+}
+
+.account-service-card__icon,
+.account-note-card__icon {
+  width: 2.9rem;
+  height: 2.9rem;
+  border-radius: 0.82rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 1.2rem;
+  color: #eef5ff;
+  background: linear-gradient(180deg, rgba(73, 128, 201, 0.8), rgba(47, 87, 149, 0.8));
+  border: 1px solid rgba(124, 172, 232, 0.36);
+  box-shadow: inset 0 1px 0 rgba(223, 237, 255, 0.12);
+}
+
+.account-note-card {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+
+.account-note-card__content {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.account-service-card__pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.account-status-pill,
+.account-capability-pill,
+.settings-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.34rem 0.68rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.account-status-pill--connected,
+.settings-status-pill--online {
+  color: #a4efb7;
+  border: 1px solid rgba(80, 192, 116, 0.34);
+  background: rgba(18, 67, 42, 0.7);
+}
+
+.account-status-pill--disconnected,
+.settings-status-pill--offline {
+  color: #ffb1b1;
+  border: 1px solid rgba(198, 84, 84, 0.34);
+  background: rgba(73, 24, 29, 0.7);
+}
+
+.settings-status-pill--checking {
+  color: #9cc4ff;
+  border: 1px solid rgba(70, 112, 179, 0.34);
+  background: rgba(24, 43, 72, 0.7);
+}
+
+.account-capability-pill {
+  color: #d7e7fb;
+  border: 1px solid rgba(97, 128, 168, 0.24);
+  background: rgba(14, 23, 35, 0.72);
+}
+
+.account-metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.account-metadata-card {
+  padding: 0.78rem 0.82rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(98, 129, 169, 0.22);
+  background: rgba(14, 23, 35, 0.62);
+}
+
+.account-metadata-card span {
+  display: block;
+  font-size: 0.72rem;
+  color: #8da4c2;
+  margin-bottom: 0.16rem;
+}
+
+.account-metadata-card strong {
+  color: #eef5ff;
+  overflow-wrap: anywhere;
+}
+
+.account-disconnected-note,
+.account-service-error {
+  padding: 0.78rem 0.9rem;
+  border-radius: 0.78rem;
   line-height: 1.5;
 }
 
-.steam-account-note p {
-  margin: 0;
+.account-disconnected-note {
+  color: #c9d7e9;
+  border: 1px solid rgba(97, 128, 168, 0.2);
+  background: rgba(15, 25, 38, 0.62);
+}
+
+.account-service-error,
+.settings-service-health__error {
+  color: #ffcbcb;
+  border: 1px solid rgba(198, 84, 84, 0.28);
+  background: rgba(73, 24, 29, 0.56);
+}
+
+.account-service-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.account-service-card__actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.account-action-note {
+  color: #93a9c6;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  max-width: 38rem;
 }
 
 /* Help Overlay */
 .help-overlay {
-  width: min(100%, 50rem);
-  max-width: clamp(20rem, 88vw, 50rem);
-  max-height: 90vh;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  min-height: 0;
 }
 
-.help-content {
-  padding: clamp(1rem, 2.5vw, 1.5rem);
+.help-pane {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  word-break: break-word;
+  padding: 1rem 1.15rem 1.15rem;
+  display: grid;
+  gap: 1rem;
+  align-content: start;
 }
 
-.help-section {
-  margin-bottom: clamp(1.5rem, 3vw, 2rem);
+.help-overview {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
 }
 
-.help-section:last-child {
-  margin-bottom: 0;
+.help-overview__copy {
+  display: grid;
+  gap: 0.45rem;
+  max-width: 52rem;
 }
 
-.help-section h3 {
-  margin-top: 0;
-  margin-bottom: clamp(0.75rem, 1.5vw, 1rem);
-  font-size: clamp(1rem, 2vw, 1.1rem);
-  font-weight: 600;
-  color: var(--app-text-color, #ffffff);
+.help-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93add0;
+}
+
+.help-overview__copy h3 {
+  margin: 0;
+  font-size: 1.18rem;
+  font-weight: 650;
+  color: #eef5ff;
+}
+
+.help-overview__copy p {
+  margin: 0;
+  color: #9fb5d2;
+  line-height: 1.55;
+}
+
+.help-overview__stats {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-content: flex-start;
+}
+
+.help-stat-card {
+  min-width: 128px;
+  padding: 0.72rem 0.84rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(100, 132, 173, 0.24);
+  background: linear-gradient(180deg, rgba(20, 31, 46, 0.92), rgba(15, 24, 37, 0.92));
+}
+
+.help-stat-card span {
+  display: block;
+  font-size: 0.72rem;
+  color: #8ea6c5;
+  margin-bottom: 0.16rem;
+}
+
+.help-stat-card strong {
+  color: #eef5ff;
+}
+
+.help-hero-card,
+.help-task-card,
+.help-reference-card,
+.help-callout-card {
+  display: grid;
+  gap: 0.95rem;
+  padding: 1rem 1.05rem;
+  border-radius: var(--workspace-card-radius);
+  border: 1px solid var(--workspace-stroke);
+  background: linear-gradient(180deg, rgba(23, 34, 49, 0.82), rgba(18, 28, 41, 0.82));
+  box-shadow: 0 8px 18px rgba(4, 10, 19, 0.18);
+}
+
+.help-card-header,
+.help-task-card__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+}
+
+.help-card-header__icon {
+  width: 2.85rem;
+  height: 2.85rem;
+  border-radius: 0.82rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 1.15rem;
+  color: #eef5ff;
+  background: linear-gradient(180deg, rgba(73, 128, 201, 0.8), rgba(47, 87, 149, 0.8));
+  border: 1px solid rgba(124, 172, 232, 0.36);
+  box-shadow: inset 0 1px 0 rgba(223, 237, 255, 0.12);
+}
+
+.help-card-header > div:last-child,
+.help-task-card__header > div:last-child {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.help-card-header h3,
+.help-section-group__header h3,
+.help-task-card h4,
+.help-reference-card h4 {
+  margin: 0;
+  color: #eef5ff;
+}
+
+.help-card-header p,
+.help-task-card p,
+.help-section-group__header p {
+  margin: 0;
+  color: #9db4d0;
+  line-height: 1.52;
+}
+
+.help-step-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.help-step-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.8rem 0.85rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(98, 129, 169, 0.22);
+  background: rgba(14, 23, 35, 0.62);
+}
+
+.help-step-card__index {
+  width: 1.95rem;
+  height: 1.95rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #eef5ff;
+  background: linear-gradient(180deg, #4f92de, #3b6faf);
+}
+
+.help-step-card__body {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.help-step-card__body h4 {
+  margin: 0;
   display: flex;
   align-items: center;
+  gap: 0.5rem;
+  color: #eef5ff;
 }
 
-.help-section p {
-  margin: 0 0 clamp(0.75rem, 1.5vw, 1rem) 0;
-  line-height: 1.6;
-  color: var(--text-secondary, #cccccc);
-  font-size: clamp(0.85rem, 1.8vw, 0.9rem);
+.help-step-card__body p {
+  margin: 0;
+  color: #9db4d0;
+  line-height: 1.48;
 }
 
-.help-section ul,
-.help-section ol {
-  margin: 0 0 clamp(0.75rem, 1.5vw, 1rem) 0;
-  padding-left: clamp(1.25rem, 2.5vw, 1.5rem);
-  color: var(--text-secondary, #cccccc);
-  font-size: clamp(0.85rem, 1.8vw, 0.9rem);
-  line-height: 1.6;
+.help-section-group {
+  display: grid;
+  gap: 0.8rem;
 }
 
-.help-section li {
-  margin-bottom: clamp(0.5rem, 1vw, 0.75rem);
+.help-section-group__header {
+  display: grid;
+  gap: 0.22rem;
 }
 
-.help-section li:last-child {
-  margin-bottom: 0;
+.help-task-grid,
+.help-reference-grid {
+  display: grid;
+  gap: 0.85rem;
 }
 
-.help-section strong {
-  color: var(--app-text-color, #ffffff);
-  font-weight: 600;
+.help-task-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.help-section code {
-  background-color: rgba(0, 0, 0, 0.3);
-  padding: 0.2rem 0.4rem;
-  border-radius: 4px;
-  font-family: 'Courier New', monospace;
-  font-size: 0.85em;
-  color: #646cff;
-  white-space: normal;
+.help-reference-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.help-reference-card__header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: #eef5ff;
+}
+
+.help-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: #cbd7e7;
+  line-height: 1.56;
+}
+
+.help-list li + li {
+  margin-top: 0.45rem;
+}
+
+.help-list--compact {
+  font-size: 0.84rem;
+}
+
+.help-callout-card code {
+  display: block;
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.7rem;
+  background: rgba(8, 14, 22, 0.55);
+  color: #dce9fb;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  font-family: 'Courier New', monospace;
 }
 
 /* Wizard */
@@ -1246,6 +1581,107 @@ body::before {
 /* Settings */
 .settings-content {
   padding: 1rem 1.25rem;
+  min-height: 0;
+}
+
+.settings-content--desktop {
+  display: grid;
+  gap: 1rem;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: start;
+}
+
+.settings-error-banner {
+  margin: 0.85rem 1.15rem 0;
+  padding: 0.8rem 0.95rem;
+  border-radius: 0.72rem;
+  border: 1px solid rgba(220, 82, 82, 0.38);
+  background: rgba(96, 28, 35, 0.72);
+  color: #ffd7d7;
+}
+
+.settings-overview {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.25rem 0 0;
+}
+
+.settings-overview__copy {
+  display: grid;
+  gap: 0.45rem;
+  max-width: 52rem;
+}
+
+.settings-eyebrow,
+.settings-section__eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93add0;
+}
+
+.settings-overview__copy h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 650;
+  color: #eef5ff;
+}
+
+.settings-overview__copy p {
+  margin: 0;
+  color: #9fb5d2;
+  line-height: 1.55;
+}
+
+.settings-overview__stats {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-content: flex-start;
+}
+
+.settings-stat-card {
+  min-width: 120px;
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(100, 132, 173, 0.24);
+  background: linear-gradient(180deg, rgba(20, 31, 46, 0.92), rgba(15, 24, 37, 0.92));
+}
+
+.settings-stat-card span {
+  display: block;
+  font-size: 0.72rem;
+  color: #8ea6c5;
+  margin-bottom: 0.18rem;
+}
+
+.settings-stat-card strong {
+  color: #eef5ff;
+}
+
+.settings-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 1rem;
+  min-height: 0;
+  align-items: start;
+}
+
+.settings-primary {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.settings-section--desktop {
+  margin-bottom: 0;
+  display: grid;
+  gap: 0.95rem;
+  padding: 1rem 1.05rem;
 }
 
 .settings-section {
@@ -1266,6 +1702,259 @@ body::before {
   font-size: clamp(0.95rem, 2vw, 1rem);
   font-weight: 600;
   color: var(--app-text-color, #ffffff);
+}
+
+.settings-section__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.settings-section__header h3 {
+  margin: 0.15rem 0 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 1rem;
+}
+
+.settings-section__header p {
+  margin: 0;
+  max-width: 28rem;
+  color: #93a9c6;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.settings-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.settings-field {
+  display: grid;
+  gap: 0.42rem;
+  padding: 0.82rem 0.9rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(98, 129, 169, 0.22);
+  background: rgba(14, 23, 35, 0.62);
+  min-width: 0;
+}
+
+.settings-field--span {
+  grid-column: 1 / -1;
+}
+
+.settings-field--compact {
+  align-content: start;
+}
+
+.settings-field label {
+  color: #d9e7f8;
+  font-size: 0.83rem;
+  font-weight: 600;
+}
+
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.58rem 0.75rem;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(95, 128, 170, 0.28);
+  background: rgba(14, 23, 35, 0.92);
+  color: #eef5ff;
+}
+
+.settings-field small,
+.settings-toggle small {
+  color: #91a6c1;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.settings-inline-row {
+  display: flex;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.settings-inline-row .btn {
+  white-space: nowrap;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  min-height: 100%;
+}
+
+.settings-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.settings-toggle span {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.settings-toggle strong {
+  color: #eaf3ff;
+  font-size: 0.86rem;
+}
+
+.settings-toggle__control {
+  position: relative;
+  display: inline-flex;
+  width: 2.45rem;
+  min-width: 2.45rem;
+  height: 1.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(103, 134, 173, 0.34);
+  background: linear-gradient(180deg, rgba(33, 47, 68, 0.92), rgba(21, 33, 49, 0.92));
+  box-shadow:
+    inset 0 1px 0 rgba(197, 219, 245, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.18);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.settings-toggle__control::after {
+  content: '';
+  position: absolute;
+  top: 0.12rem;
+  left: 0.12rem;
+  width: 1.02rem;
+  height: 1.02rem;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #f5fbff, #cad8e9);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+  transition: transform 0.2s ease;
+}
+
+.settings-toggle input:checked + .settings-toggle__control {
+  border-color: rgba(122, 174, 236, 0.82);
+  background: linear-gradient(180deg, #4f92de, #3b6faf);
+}
+
+.settings-toggle input:checked + .settings-toggle__control::after {
+  transform: translateX(0.98rem);
+}
+
+.settings-toggle input:focus-visible + .settings-toggle__control {
+  outline: 2px solid rgba(144, 193, 255, 0.85);
+  outline-offset: 2px;
+}
+
+.settings-callout {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.9rem 0.95rem;
+  border-radius: 0.82rem;
+  border: 1px solid rgba(95, 128, 170, 0.24);
+  background: rgba(16, 24, 36, 0.72);
+}
+
+.settings-callout--success {
+  border-color: rgba(74, 222, 128, 0.25);
+  background: rgba(16, 42, 32, 0.55);
+}
+
+.settings-callout--warning {
+  border-color: rgba(255, 187, 84, 0.3);
+  background: rgba(56, 36, 18, 0.55);
+}
+
+.settings-callout__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.settings-callout p {
+  margin: 0;
+  color: #cfdbeb;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.settings-callout code {
+  display: block;
+  padding: 0.6rem 0.7rem;
+  border-radius: 0.6rem;
+  background: rgba(8, 14, 22, 0.55);
+  color: #dce9fb;
+  overflow-wrap: anywhere;
+}
+
+.settings-sidebar {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.settings-sidecard {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.95rem;
+  border-radius: 0.82rem;
+  border: 1px solid rgba(101, 131, 172, 0.24);
+  background: linear-gradient(180deg, rgba(19, 30, 45, 0.92), rgba(14, 23, 36, 0.92));
+  box-shadow: 0 8px 18px rgba(4, 10, 19, 0.2);
+}
+
+.settings-sidecard h3,
+.settings-sidecard p {
+  margin: 0;
+}
+
+.settings-sidecard p {
+  color: #9fb5d2;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-sidecard__meta {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.settings-sidecard__meta > div {
+  padding: 0.68rem 0.72rem;
+  border-radius: 0.7rem;
+  border: 1px solid rgba(97, 128, 168, 0.2);
+  background: rgba(14, 23, 35, 0.62);
+}
+
+.settings-sidecard__meta span {
+  display: block;
+  font-size: 0.72rem;
+  color: #8da4c2;
+  margin-bottom: 0.12rem;
+}
+
+.settings-sidecard__meta strong {
+  color: #eef5ff;
+}
+
+.settings-service-health {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.settings-service-health__timestamp {
+  color: #9fb5d2;
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .info-box,
@@ -1312,6 +2001,58 @@ body::before {
   margin-top: 0.5rem;
   font-family: 'Courier New', monospace;
   font-size: 0.85rem;
+}
+
+@media (max-width: 1180px) {
+  .settings-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-sidebar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .settings-sidecard {
+    position: static;
+  }
+}
+
+@media (max-width: 900px) {
+  .settings-overview {
+    display: grid;
+  }
+
+  .help-overview,
+  .accounts-overview,
+  .account-service-card__header,
+  .account-service-card__actions,
+  .help-card-header,
+  .help-task-card__header {
+    display: grid;
+  }
+
+  .help-task-grid,
+  .help-reference-grid,
+  .account-service-card__pills {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .account-service-card__pills {
+    justify-content: flex-start;
+  }
+
+  .settings-field-grid,
+  .settings-sidebar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-section__header {
+    display: grid;
+  }
+
+  .settings-inline-row {
+    display: grid;
+  }
 }
 
 /* Utilities */
@@ -2411,8 +3152,8 @@ body {
 .branch-card,
 .settings-section,
 .help-section,
-.steam-account-info,
-.steam-account-not-authenticated,
+.account-service-card,
+.account-note-card,
 .environment-info-panel {
   border-radius: var(--workspace-card-radius);
   border: 1px solid var(--workspace-stroke);
