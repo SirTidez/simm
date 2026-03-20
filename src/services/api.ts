@@ -9,6 +9,7 @@ import type {
   ConfigFile,
   ConfigSection,
   ConfigUpdate,
+  ExtractGameVersionResult,
 } from '../types';
 
 export class ApiService {
@@ -633,7 +634,7 @@ export class ApiService {
     }
   }
 
-  static async extractGameVersion(environmentId: string): Promise<string | null> {
+  static async extractGameVersion(environmentId: string): Promise<ExtractGameVersionResult> {
     return invoke('extract_game_version', { environmentId });
   }
 
@@ -1369,5 +1370,3 @@ export class ApiService {
     return invoke('update_config', { filePath, updates });
   }
 }
-
-

@@ -38,8 +38,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "publisher": "LockWire Labs",
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "headerImage": "windows/assets/installer-header.bmp",
+        "sidebarImage": "windows/assets/installer-sidebar.bmp"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

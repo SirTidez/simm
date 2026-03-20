@@ -77,6 +77,7 @@ describe('EnvironmentStore', () => {
     apiMocks.checkUpdate.mockReset();
     apiMocks.checkAllUpdates.mockReset();
     apiMocks.extractGameVersion.mockReset();
+    apiMocks.extractGameVersion.mockResolvedValue({ version: null });
 
     eventMocks.onProgress.mockReset();
     eventMocks.onComplete.mockReset();
@@ -163,7 +164,10 @@ describe('EnvironmentStore', () => {
       id,
       ...updates,
     }));
-    apiMocks.extractGameVersion.mockResolvedValueOnce('2.0.0');
+    apiMocks.extractGameVersion.mockReset();
+    apiMocks.extractGameVersion
+      .mockResolvedValueOnce({ version: null })
+      .mockResolvedValueOnce({ version: '2.0.0' });
 
     render(
       <EnvironmentStoreProvider>
@@ -206,7 +210,10 @@ describe('EnvironmentStore', () => {
       id,
       ...updates,
     }));
-    apiMocks.extractGameVersion.mockResolvedValueOnce('2.0.0');
+    apiMocks.extractGameVersion.mockReset();
+    apiMocks.extractGameVersion
+      .mockResolvedValueOnce({ version: null })
+      .mockResolvedValueOnce({ version: '2.0.0' });
     apiMocks.checkUpdate.mockResolvedValueOnce({
       updateAvailable: false,
       remoteManifestId: '789',

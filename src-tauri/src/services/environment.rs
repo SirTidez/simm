@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::time::{sleep, Duration};
 
-use crate::types::{schedule_i_config, Environment, Runtime};
+use crate::types::{
+    schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime,
+};
 
 pub struct EnvironmentService {
     pool: Arc<SqlitePool>,
@@ -18,18 +20,31 @@ impl EnvironmentService {
     }
 
     pub fn infer_runtime_from_installation_path(path: &Path) -> Runtime {
-        if path.join("GameAssembly.dll").exists() {
-            Runtime::Il2cpp
-        } else if path
-            .join("Schedule I_Data")
-            .join("Managed")
-            .join("Assembly-CSharp.dll")
-            .exists()
-        {
-            Runtime::Mono
-        } else {
-            Runtime::Il2cpp
+        // Steam branch switches can leave behind stale binaries. Prefer folder-level markers
+        // that reliably indicate the active scripting backend.
+        //
+        // Mono builds ship `Schedule I_Data/MonoBleedingEdge`, while IL2CPP builds ship
+        // `Schedule I_Data/il2cpp_data` and typically `GameAssembly.dll`.
+        let data_dir = path.join("Schedule I_Data");
+        let has_mono_bleeding_edge = data_dir.join("MonoBleedingEdge").exists();
+        let has_il2cpp_data = data_dir.join("il2cpp_data").exists();
+        let has_game_assembly = path.join("GameAssembly.dll").exists();
+        let has_assembly_csharp = data_dir.join("Managed").join("Assembly-CSharp.dll").exists();
+
+        if has_mono_bleeding_edge {
+            return Runtime::Mono;
         }
+
+        if has_il2cpp_data || has_game_assembly {
+            return Runtime::Il2cpp;
+        }
+
+        if has_assembly_csharp {
+            return Runtime::Mono;
+        }
+
+        // Default to IL2CPP because that's the common case for recent builds.
+        Runtime::Il2cpp
     }
 
     pub fn branch_for_runtime(runtime: &Runtime) -> String {
@@ -45,6 +60,63 @@ impl EnvironmentService {
             .into_iter()
             .find(|b| b.name.eq_ignore_ascii_case(branch))
             .map(|b| b.runtime)
+    }
+
+    /// Re-reads Steam appmanifest (`betakey`) and install-folder markers, then updates
+    /// `env.branch` / `env.runtime` and persists when changed. Used before version checks
+    /// and update checks so Steam branch switches outside SIMM are reflected.
+    pub async fn reconcile_steam_env_branch_runtime_from_disk(
+        &self,
+        env: &mut Environment,
+    ) -> Result<bool> {
+        let is_steam = env.environment_type == Some(EnvironmentType::Steam)
+            || env.id.starts_with("steam-");
+        if !is_steam || !matches!(env.status, EnvironmentStatus::Completed) {
+            return Ok(false);
+        }
+        if env.output_dir.is_empty() {
+            return Ok(false);
+        }
+
+        let steam_service = crate::services::steam::SteamService::new();
+        let output_path = Path::new(&env.output_dir);
+        let runtime_from_files = Self::infer_runtime_from_installation_path(output_path);
+
+        let detected_branch = steam_service
+            .detect_installed_branch(output_path)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
+
+        let detected_runtime = Self::runtime_for_branch(&detected_branch).unwrap_or(runtime_from_files);
+
+        let mut changed = false;
+        if env.branch != detected_branch {
+            log::info!(
+                "Reconciling Steam env {} branch: {} -> {}",
+                env.id,
+                env.branch,
+                detected_branch
+            );
+            env.branch = detected_branch;
+            changed = true;
+        }
+        if env.runtime != detected_runtime {
+            log::info!(
+                "Reconciling Steam env {} runtime: {:?} -> {:?}",
+                env.id,
+                env.runtime,
+                detected_runtime
+            );
+            env.runtime = detected_runtime;
+            changed = true;
+        }
+
+        if changed {
+            self.upsert_environment(env).await?;
+        }
+        Ok(changed)
     }
 
     async fn fetch_environments(&self) -> Result<Vec<Environment>> {
@@ -652,6 +724,53 @@ impl EnvironmentService {
         } else {
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_detection_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn infer_runtime_prefers_mono_bleeding_edge_over_stale_gameassembly() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        // Simulate stale IL2CPP binary leftover.
+        std::fs::write(root.join("GameAssembly.dll"), b"stale").expect("write GameAssembly");
+
+        // Simulate Mono backend markers.
+        let mono_dir = root.join("Schedule I_Data").join("MonoBleedingEdge");
+        std::fs::create_dir_all(&mono_dir).expect("create MonoBleedingEdge");
+        std::fs::create_dir_all(root.join("Schedule I_Data").join("Managed"))
+            .expect("create Managed");
+        std::fs::write(
+            root.join("Schedule I_Data")
+                .join("Managed")
+                .join("Assembly-CSharp.dll"),
+            b"mono",
+        )
+        .expect("write Assembly-CSharp");
+
+        assert!(matches!(
+            EnvironmentService::infer_runtime_from_installation_path(root),
+            Runtime::Mono
+        ));
+    }
+
+    #[test]
+    fn infer_runtime_detects_il2cpp_data_folder() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("Schedule I_Data").join("il2cpp_data"))
+            .expect("create il2cpp_data");
+
+        assert!(matches!(
+            EnvironmentService::infer_runtime_from_installation_path(root),
+            Runtime::Il2cpp
+        ));
     }
 }
 

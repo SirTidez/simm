@@ -34,6 +34,13 @@ export interface TrackedDownload {
   finishedAt?: number | null;
 }
 
+/** Result of `extract_game_version` (Steam entries include reconciled branch/runtime). */
+export interface ExtractGameVersionResult {
+  version: string | null;
+  branch?: string;
+  runtime?: 'IL2CPP' | 'Mono';
+}
+
 export interface Environment {
   id: string;
   name: string;

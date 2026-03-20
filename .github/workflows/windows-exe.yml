@@ -1,10 +1,10 @@
-name: Build EXE
+name: Build Setup Wizard
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-tauri-windows:
+  build-setup-wizard:
     runs-on: windows-latest
 
     steps:
@@ -29,7 +29,7 @@ jobs:
           npm config set fetch-retry-maxtimeout 120000
           npm install --no-audit --prefer-offline
 
-      - name: Build Windows installer
+      - name: Build Windows setup wizard
         run: npm run tauri build -- --bundles nsis
 
       - name: Resolve build version
@@ -64,7 +64,7 @@ jobs:
             Write-Host 'target/release does not exist'
           }
 
-      - name: Prepare Windows installer artifact
+      - name: Prepare setup wizard artifact
         id: renamed
         shell: pwsh
         run: |
@@ -82,7 +82,7 @@ jobs:
 
           "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Upload Windows installer artifact
+      - name: Upload setup wizard artifact
         uses: actions/upload-artifact@v4
         with:
           name: SIMM_${{ steps.version.outputs.version }}_Setup

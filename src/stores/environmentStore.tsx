@@ -1,5 +1,19 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import type { Environment, DownloadProgress } from '../types';
+import type { Environment, DownloadProgress, ExtractGameVersionResult } from '../types';
+
+function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partial<Environment> {
+  const out: Partial<Environment> = {};
+  if (res.version) {
+    out.currentGameVersion = res.version;
+  }
+  if (res.branch) {
+    out.branch = res.branch;
+  }
+  if (res.runtime === 'IL2CPP' || res.runtime === 'Mono') {
+    out.runtime = res.runtime;
+  }
+  return out;
+}
 import { ApiService } from '../services/api';
 import { onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete } from '../services/events';
 
@@ -40,11 +54,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       );
 
       if (envsNeedingVersion.length > 0) {
-        const detectedVersions = await Promise.all(
+        const detectedPatches = await Promise.all(
           envsNeedingVersion.map(async (env) => {
             try {
-              const version = await ApiService.extractGameVersion(env.id);
-              return version ? { id: env.id, version } : null;
+              const extracted = await ApiService.extractGameVersion(env.id);
+              const patch = partialEnvFromExtractGameVersion(extracted);
+              return Object.keys(patch).length > 0 ? { id: env.id, patch } : null;
             } catch (err) {
               // Silently fail - version extraction can be done manually later
               console.warn(`Failed to auto-extract version for environment ${env.id}:`, err);
@@ -53,18 +68,16 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           })
         );
 
-        const versionMap = new Map(
-          detectedVersions
-            .filter((entry): entry is { id: string; version: string } => entry !== null)
-            .map(entry => [entry.id, entry.version])
+        const patchMap = new Map(
+          detectedPatches
+            .filter((entry): entry is { id: string; patch: Partial<Environment> } => entry !== null)
+            .map(entry => [entry.id, entry.patch])
         );
 
-        if (versionMap.size > 0) {
+        if (patchMap.size > 0) {
           setEnvironments(prev => prev.map(env => {
-            const detectedVersion = versionMap.get(env.id);
-            return detectedVersion
-              ? { ...env, currentGameVersion: detectedVersion }
-              : env;
+            const patch = patchMap.get(env.id);
+            return patch ? { ...env, ...patch } : env;
           }));
         }
       }
@@ -150,11 +163,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
   const refreshGameVersion = useCallback(async (environmentId: string) => {
     try {
-      const version = await ApiService.extractGameVersion(environmentId);
-      await updateEnvironment(environmentId, {
-        ...(version ? { currentGameVersion: version } : {})
-      });
-      return version;
+      const extracted = await ApiService.extractGameVersion(environmentId);
+      const patch = partialEnvFromExtractGameVersion(extracted);
+      if (Object.keys(patch).length > 0) {
+        await updateEnvironment(environmentId, patch);
+      }
+      return extracted.version ?? null;
     } catch (err) {
       throw err;
     }
@@ -271,9 +285,10 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
           // Automatically extract game version when download completes
           try {
-            const version = await ApiService.extractGameVersion(downloadId);
-            if (version) {
-              await updateEnvironment(downloadId, { currentGameVersion: version });
+            const extracted = await ApiService.extractGameVersion(downloadId);
+            const patch = partialEnvFromExtractGameVersion(extracted);
+            if (Object.keys(patch).length > 0) {
+              await updateEnvironment(downloadId, patch);
             }
           } catch (err) {
             // Silently fail - version extraction can be done manually later

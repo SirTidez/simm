@@ -141,7 +141,7 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
             <ul>
               <li><strong>Download fails:</strong> Recheck Steam auth and network connectivity.</li>
               <li><strong>Game won't launch:</strong> Confirm the executable exists in the install folder.</li>
-              <li><strong>DepotDownloader missing:</strong> Install with <code>winget install --exact --id SteamRE.DepotDownloader</code>.</li>
+              <li><strong>DepotDownloader missing:</strong> Re-run the Windows installer to repair prerequisites, or install it manually with <code>winget install --exact --id SteamRE.DepotDownloader</code>.</li>
               <li><strong>Auth issues:</strong> Re-authenticate in the Steam Account panel.</li>
             </ul>
           </section>

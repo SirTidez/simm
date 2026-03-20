@@ -28,33 +28,47 @@ impl UpdateCheckService {
         &self,
         env: &Environment,
     ) -> Result<UpdateCheckResult> {
+        let mut effective_env = env.clone();
+        let env_service =
+            crate::services::environment::EnvironmentService::new(self.pool.clone())?;
+        if let Err(err) = env_service
+            .reconcile_steam_env_branch_runtime_from_disk(&mut effective_env)
+            .await
+        {
+            log::warn!(
+                "Failed to reconcile Steam env {} before update check: {}",
+                effective_env.id,
+                err
+            );
+        }
+
         log::info!(
             "Checking for updates: {} (branch: {})",
-            env.name,
-            env.branch
+            effective_env.name,
+            effective_env.branch
         );
 
         let mut result = UpdateCheckResult {
             update_available: false,
-            current_manifest_id: env
+            current_manifest_id: effective_env
                 .last_manifest_id
                 .clone()
-                .or_else(|| env.remote_manifest_id.clone()),
+                .or_else(|| effective_env.remote_manifest_id.clone()),
             remote_manifest_id: None,
             remote_build_id: None,
-            branch: env.branch.clone(),
-            app_id: env.app_id.clone(),
+            branch: effective_env.branch.clone(),
+            app_id: effective_env.app_id.clone(),
             checked_at: Utc::now(),
             error: None,
-            current_game_version: env.current_game_version.clone(),
+            current_game_version: effective_env.current_game_version.clone(),
             update_game_version: None,
         };
 
         // Extract current game version if environment is completed (but don't fail if this doesn't work)
-        if matches!(env.status, crate::types::EnvironmentStatus::Completed) {
+        if matches!(effective_env.status, crate::types::EnvironmentStatus::Completed) {
             if let Ok(Some(version)) = self
                 .game_version_service
-                .extract_game_version(&env.output_dir)
+                .extract_game_version(&effective_env.output_dir)
                 .await
             {
                 log::info!("Extracted current game version: {}", version);
@@ -63,12 +77,12 @@ impl UpdateCheckService {
         }
 
         // For Steam environments, skip DepotDownloader and only check version
-        if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
+        if effective_env.environment_type == Some(crate::types::EnvironmentType::Steam) {
             log::info!("Steam environment detected, skipping DepotDownloader update check");
 
             // Still check for remote manifest ID to compare versions, but don't trigger downloads
             match self
-                .get_manifest_id_from_depot_downloader(&env.app_id, &env.branch)
+                .get_manifest_id_from_depot_downloader(&effective_env.app_id, &effective_env.branch)
                 .await
             {
                 Ok(manifest_id) => {
@@ -76,7 +90,7 @@ impl UpdateCheckService {
                     log::info!("Remote manifest ID: {}", manifest_id);
 
                     result.update_available =
-                        Self::compare_manifest_ids(env, &manifest_id, "Steam environment");
+                        Self::compare_manifest_ids(&effective_env, &manifest_id, "Steam environment");
                 }
                 Err(e) => {
                     // For Steam environments, errors in manifest check are not critical
@@ -93,7 +107,7 @@ impl UpdateCheckService {
         } else {
             // For DepotDownloader environments, use existing logic
             match self
-                .get_manifest_id_from_depot_downloader(&env.app_id, &env.branch)
+                .get_manifest_id_from_depot_downloader(&effective_env.app_id, &effective_env.branch)
                 .await
             {
                 Ok(manifest_id) => {
@@ -101,14 +115,14 @@ impl UpdateCheckService {
                     log::info!("Remote manifest ID: {}", manifest_id);
 
                     result.update_available =
-                        Self::compare_manifest_ids(env, &manifest_id, "Environment");
+                        Self::compare_manifest_ids(&effective_env, &manifest_id, "Environment");
                 }
                 Err(e) => {
                     result.error = Some(e.to_string());
                     log::error!(
                         "Failed to get manifest ID for {} (branch: {}): {}",
-                        env.app_id,
-                        env.branch,
+                        effective_env.app_id,
+                        effective_env.branch,
                         e
                     );
                 }

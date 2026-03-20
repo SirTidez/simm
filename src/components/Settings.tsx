@@ -262,7 +262,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                 ) : (
                   <div className="warning-box">
                     <p>DepotDownloader is not installed.</p>
-                    <p>Install with:</p>
+                    <p>Re-run the SIMM installer to repair prerequisites, or install it manually with:</p>
                     <code>winget install --exact --id SteamRE.DepotDownloader</code>
                   </div>
                 )}
