@@ -213,7 +213,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   return (
     <>
       <section
-        className="modal-content steam-account-overlay"
+        className="modal-content steam-account-overlay workspace-panel"
         style={{
           width: '100%',
           height: '100%',

@@ -18,7 +18,7 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
 
   return (
     <section
-      className="modal-content help-overlay"
+      className="modal-content help-overlay workspace-panel"
       style={{
         width: '100%',
         height: '100%',

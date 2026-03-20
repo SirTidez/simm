@@ -2350,6 +2350,11 @@ body {
   overflow: auto;
 }
 
+.workspace-panel {
+  max-height: none;
+  overflow: hidden;
+}
+
 .workspace-main .mods-overlay {
   width: 100%;
   max-width: none;

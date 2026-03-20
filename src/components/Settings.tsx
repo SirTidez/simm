@@ -199,7 +199,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     <>
       {isOpen && (
         <section
-          className="modal-content"
+          className="modal-content workspace-panel settings-panel"
           style={{
             width: '100%',
             height: '100%',
