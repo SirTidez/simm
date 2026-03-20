@@ -10,6 +10,7 @@ import { LogsOverlay } from './LogsOverlay';
 import { ConfigurationOverlay } from './ConfigurationOverlay';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ApiService } from '../services/api';
 import {
   onAuthWaiting,
@@ -131,7 +132,7 @@ export function EnvironmentList({
   const [messageOverlay, setMessageOverlay] = useState<{ isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info' }>({ isOpen: false, title: '', message: '', type: 'info' });
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
-  const [launchDropdownOpen, setLaunchDropdownOpen] = useState<string | null>(null);
+  const [environmentMenu, setEnvironmentMenu] = useState<{ envId: string; x: number; y: number } | null>(null);
   const [preferredLaunchMethod, setPreferredLaunchMethod] = useState<Map<string, 'steam' | 'direct'>>(() => {
     // Load from localStorage on init
     try {
@@ -614,16 +615,7 @@ export function EnvironmentList({
 
     setupListeners();
 
-    // Close dropdown when clicking outside
-    const handleClickOutside = (event: MouseEvent) => {
-      if (launchDropdownOpen && !(event.target as Element).closest('[data-launch-dropdown]')) {
-        setLaunchDropdownOpen(null);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
     return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
       window.removeEventListener(batchUpdateCheckEventName, handleBatchUpdateCheckStarted as EventListener);
       if (unlistenWaiting) unlistenWaiting();
       if (unlistenSuccess) unlistenSuccess();
@@ -648,7 +640,7 @@ export function EnvironmentList({
       pluginsRefreshTimers.current.clear();
       userLibsRefreshTimers.current.clear();
     };
-  }, [authModal.isOpen, authModal.envId, environments, progress, launchDropdownOpen]);
+  }, [authModal.isOpen, authModal.envId, environments, progress]);
 
   const handleCancelDownload = async (env: Environment) => {
     try {
@@ -1191,44 +1183,363 @@ export function EnvironmentList({
     );
   };
 
-  const getStatusBadge = (env: Environment) => {
+  const formatLastChecked = (value: Environment['lastUpdateCheck']) => {
+    if (!value) return 'Never checked';
+    const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Unknown';
+    return date.toLocaleString();
+  };
+
+  const getDominantStatus = (env: Environment) => {
     const prog = progress.get(env.id);
     const status = prog?.status || env.status;
+    const isCheckingUpdate = checkingEnvironments.has(env.id);
 
-    const badges: Record<string, { text: string; className: string }> = {
-      'not_downloaded': { text: 'Not Downloaded', className: 'badge-gray' },
-      'downloading': { text: 'Downloading', className: 'badge-blue' },
-      'validating': { text: 'Validating', className: 'badge-yellow' },
-      'completed': { text: 'Ready', className: 'badge-green' },
-      'unavailable': { text: 'Unavailable', className: 'badge-orange' },
-      'error': { text: 'Error', className: 'badge-red' },
-      'cancelled': { text: 'Cancelled', className: 'badge-gray' }
-    };
-
-    let badge = badges[status] || badges['not_downloaded'];
-
-    // If status is completed and update is available, replace with update badge
-    if (status === 'completed' && env.updateAvailable) {
-      badge = { text: 'Update Available', className: 'badge-orange' };
+    if (isCheckingUpdate) {
+      return { label: 'Checking', tone: 'checking', icon: 'fas fa-spinner fa-spin' };
     }
 
-    const statusBadge = <span className={`badge ${badge.className}`}>{badge.text}</span>;
+    if (status === 'downloading') {
+      return { label: 'Downloading', tone: 'downloading', icon: 'fas fa-arrow-down' };
+    }
 
-    // Check if this is a Steam environment (handle both 'Steam' and 'steam' cases)
+    if (status === 'validating') {
+      return { label: 'Validating', tone: 'checking', icon: 'fas fa-shield-alt' };
+    }
+
+    if (status === 'completed' && env.updateAvailable) {
+      return { label: 'Update Available', tone: 'warning', icon: 'fas fa-arrow-up' };
+    }
+
+    if (status === 'completed') {
+      return { label: 'Healthy', tone: 'healthy', icon: 'fas fa-check-circle' };
+    }
+
+    if (status === 'unavailable') {
+      return { label: 'Unavailable', tone: 'warning', icon: 'fas fa-ban' };
+    }
+
+    if (status === 'error') {
+      return { label: 'Needs Attention', tone: 'danger', icon: 'fas fa-exclamation-triangle' };
+    }
+
+    if (status === 'cancelled') {
+      return { label: 'Cancelled', tone: 'neutral', icon: 'fas fa-pause-circle' };
+    }
+
+    return { label: 'Not Downloaded', tone: 'neutral', icon: 'fas fa-download' };
+  };
+
+  const openEnvironmentMenu = (envId: string, x: number, y: number) => {
+    setEnvironmentMenu({ envId, x, y });
+  };
+
+  const buildEnvironmentMenuItems = (env: Environment): AnchoredContextMenuItem[] => {
+    const currentMethod = preferredLaunchMethod.get(env.id) || 'steam';
     const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
 
-    // Add Steam badge before status badge for Steam environments when completed
-    // Show it regardless of update status (but only when showing Ready or Update Available badges)
-    if (status === 'completed' && isSteam) {
-      return (
-        <>
-          <SteamBadge />
-          {statusBadge}
-        </>
-      );
-    }
+    return [
+      {
+        key: 'rename',
+        label: 'Rename',
+        icon: 'fas fa-edit',
+        onSelect: () => handleStartEditName(env),
+      },
+      {
+        key: 'description',
+        label: env.description ? 'Edit Description' : 'Add Description',
+        icon: 'fas fa-align-left',
+        onSelect: () => handleStartEditDescription(env),
+      },
+      {
+        key: 'launch-steam',
+        label: currentMethod === 'steam' ? 'Prefer Steam Launch' : 'Use Steam Launch',
+        icon: 'fab fa-steam',
+        disabled: currentMethod === 'steam',
+        onSelect: () => {
+          setPreferredLaunchMethod(prev => {
+            const next = new Map(prev);
+            next.set(env.id, 'steam');
+            return next;
+          });
+        },
+      },
+      {
+        key: 'launch-direct',
+        label: currentMethod === 'direct' ? 'Prefer Local Launch' : 'Use Local Launch',
+        icon: 'fas fa-terminal',
+        disabled: currentMethod === 'direct',
+        onSelect: () => {
+          setPreferredLaunchMethod(prev => {
+            const next = new Map(prev);
+            next.set(env.id, 'direct');
+            return next;
+          });
+        },
+      },
+      {
+        key: 'delete',
+        label: isSteam ? 'Delete Unavailable for Steam' : 'Delete Environment',
+        icon: 'fas fa-trash',
+        disabled: isSteam,
+        danger: true,
+        onSelect: () => handleDelete(env),
+      },
+    ];
+  };
 
-    return statusBadge;
+  const renderEnvironmentCard = (env: Environment) => {
+    const prog = progress.get(env.id);
+    const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
+    const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+    const isCheckingUpdate = checkingEnvironments.has(env.id);
+    const isCompleted = env.status === 'completed';
+    const status = getDominantStatus(env);
+    const launchMethod = preferredLaunchMethod.get(env.id) || 'steam';
+    const modCount = modsCounts.get(env.id) ?? 0;
+    const modUpdateCount = modUpdatesCounts.get(env.id) ?? 0;
+    const pluginCount = pluginsCounts.get(env.id) ?? 0;
+    const userLibsCount = userLibsCounts.get(env.id) ?? 0;
+    const mlStatus = melonLoaderStatus.get(env.id);
+    const metrics = [
+      { label: 'Version', value: isCompleted ? (env.currentGameVersion || 'Unknown') : 'Not installed' },
+      { label: 'Mods', value: isCompleted ? `${modCount}${modUpdateCount > 0 ? ` (${modUpdateCount} updates)` : ''}` : 'Unavailable', tone: modUpdateCount > 0 ? 'warning' : undefined },
+      { label: 'Plugins', value: isCompleted ? `${pluginCount}` : 'Unavailable' },
+      { label: 'UserLibs', value: isCompleted ? `${userLibsCount}` : 'Unavailable' },
+      { label: 'MelonLoader', value: isCompleted ? (mlStatus?.installed ? `Installed${mlStatus.version ? ` (${mlStatus.version})` : ''}` : 'Not installed') : 'Unavailable' },
+      { label: 'Last checked', value: isCheckingUpdate ? 'Checking…' : formatLastChecked(env.lastUpdateCheck) },
+    ];
+
+    return (
+      <div
+        key={env.id}
+        className="environment-card environment-card--workspace"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          openEnvironmentMenu(env.id, event.clientX, event.clientY);
+        }}
+      >
+        <div className="environment-card__header">
+          {editingName === env.id ? (
+            <div className="name-editor environment-card__name-editor">
+              <input
+                type="text"
+                value={nameValue}
+                onChange={(e) => setNameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSaveName(env.id);
+                  } else if (e.key === 'Escape') {
+                    handleCancelEditName();
+                  }
+                }}
+                className="name-input"
+                autoFocus
+              />
+              <div className="name-actions">
+                <button onClick={() => handleSaveName(env.id)} className="btn btn-primary btn-small" title="Save name">
+                  <i className="fas fa-check"></i>
+                </button>
+                <button onClick={handleCancelEditName} className="btn btn-secondary btn-small" title="Cancel">
+                  <i className="fas fa-times"></i>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="environment-card__title-row">
+                <div className="name-display environment-card__title-group">
+                  <h3>{env.name}</h3>
+                  <button onClick={() => handleStartEditName(env)} className="btn-edit-name" title="Rename environment">
+                    <i className="fas fa-edit"></i>
+                  </button>
+                </div>
+                <div className="environment-card__header-actions">
+                  <span className={`environment-state-pill environment-state-pill--${status.tone}`}>
+                    <i className={status.icon}></i>
+                    {status.label}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-small environment-card__overflow-button"
+                    onClick={(event) => {
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      openEnvironmentMenu(env.id, rect.right - 8, rect.bottom + 6);
+                    }}
+                    aria-label={`More actions for ${env.name}`}
+                  >
+                    <i className="fas fa-ellipsis-h"></i>
+                  </button>
+                </div>
+              </div>
+              <div className="environment-card__identity-badges">
+                <span className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}>
+                  {env.branch}
+                </span>
+                <span className="badge badge-gray">{env.runtime}</span>
+                {isSteam && <SteamBadge />}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="environment-description environment-card__description">
+          {editingDescription === env.id ? (
+            <div className="description-editor">
+              <textarea
+                value={descriptionValue}
+                onChange={(e) => setDescriptionValue(e.target.value)}
+                placeholder="Describe what this version means..."
+                className="description-input"
+                rows={2}
+                autoFocus
+              />
+              <div className="description-actions">
+                <button onClick={() => handleSaveDescription(env.id)} className="btn btn-primary btn-small" title="Save description">
+                  <i className="fas fa-check"></i>
+                </button>
+                <button onClick={handleCancelEditDescription} className="btn btn-secondary btn-small" title="Cancel">
+                  <i className="fas fa-times"></i>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="description-display environment-card__description-display">
+              <span className="description-text">
+                {env.description || <span className="description-placeholder">No description</span>}
+              </span>
+              <button onClick={() => handleStartEditDescription(env)} className="btn-edit-description" title="Edit description">
+                <i className="fas fa-edit"></i>
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="environment-card__snapshot">
+          {metrics.map((metric) => (
+            <div key={metric.label} className={`environment-metric ${metric.tone ? `environment-metric--${metric.tone}` : ''}`}>
+              <span>{metric.label}</span>
+              <strong title={metric.value}>{metric.value}</strong>
+            </div>
+          ))}
+          {env.updateAvailable && env.updateGameVersion && (
+            <div className="environment-metric environment-metric--warning">
+              <span>Available update</span>
+              <strong>{env.updateGameVersion}</strong>
+            </div>
+          )}
+        </div>
+
+        <div className="environment-card__action-group">
+          {!isDownloading && !isCompleted && (
+            <div className="environment-card__action-row environment-card__action-row--single">
+              <button onClick={() => handleStartDownload(env)} className="btn btn-primary">
+                <i className="fas fa-download"></i>
+                <span>Download</span>
+              </button>
+            </div>
+          )}
+
+          {isDownloading && (
+            <div className="environment-card__action-row environment-card__action-row--single">
+              <button onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
+                <i className="fas fa-ban"></i>
+                <span>Cancel Download</span>
+              </button>
+            </div>
+          )}
+
+          {isCompleted && (
+            <>
+              <div className="environment-card__action-row environment-card__action-row--primary">
+                <button
+                  onClick={() => handleLaunchGame(env, launchMethod)}
+                  className="btn btn-primary"
+                  title={`Launch the game via ${launchMethod === 'direct' ? 'Local Install' : 'Steam'}`}
+                >
+                  <i className="fas fa-play"></i>
+                  <span>Launch</span>
+                </button>
+                <button onClick={() => handleOpenModsOverlay(env.id)} className="btn btn-secondary" title="Open installed mods">
+                  <i className="fas fa-puzzle-piece"></i>
+                  <span>Mods</span>
+                </button>
+                <button onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary" title="Edit mod configuration">
+                  <i className="fas fa-cog"></i>
+                  <span>Config</span>
+                </button>
+                <button onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary" title="View MelonLoader logs">
+                  <i className="fas fa-file-alt"></i>
+                  <span>Logs</span>
+                </button>
+              </div>
+
+              <div className="environment-card__action-row environment-card__action-row--secondary">
+                <button onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary" title="View installed plugins">
+                  <i className="fas fa-plug"></i>
+                  <span>Plugins</span>
+                </button>
+                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary" title="View UserLibs (read-only)">
+                  <i className="fas fa-book"></i>
+                  <span>UserLibs</span>
+                </button>
+                <button onClick={() => handleOpenFolder(env)} className="btn btn-secondary" title="Open folder in file explorer">
+                  <i className="fas fa-folder-open"></i>
+                  <span>Open Folder</span>
+                </button>
+                <button
+                  onClick={() => handleUpdateAction(env)}
+                  className={`btn ${env.updateAvailable && !isSteam ? 'btn-primary' : 'btn-secondary'}`}
+                  disabled={isCheckingUpdate}
+                  title={isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
+                >
+                  <i className={isCheckingUpdate ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-rotate'}></i>
+                  <span>{isCheckingUpdate ? 'Checking…' : 'Update'}</span>
+                </button>
+              </div>
+            </>
+          )}
+
+          {prog && (
+            <div className="progress-info environment-card__progress">
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }} />
+              </div>
+              <p><strong>{Math.round(prog.progress)}%</strong>{prog.message ? ` • ${prog.message}` : ''}</p>
+              {prog.downloadedFiles !== undefined && prog.totalFiles !== undefined && (
+                <p>Files: {prog.downloadedFiles} / {prog.totalFiles}</p>
+              )}
+              {prog.speed && <p>Speed: {prog.speed}</p>}
+            </div>
+          )}
+
+          <div className="environment-card__footer">
+            <div className="environment-card__path" title={env.outputDir}>
+              <i className="fas fa-folder-open"></i>
+              <span>{env.outputDir}</span>
+            </div>
+            {isCompleted && (
+              <div className="environment-card__footer-meta">
+                <span className="environment-footer-chip">
+                  <i className={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'}></i>
+                  {launchMethod === 'direct' ? 'Local launch' : 'Steam launch'}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-small"
+                  onClick={() => handleInstallMelonLoader(env)}
+                  disabled={installingMelonLoader.has(env.id)}
+                  title={mlStatus?.installed ? 'Change MelonLoader version' : 'Install MelonLoader'}
+                >
+                  <i className={installingMelonLoader.has(env.id) ? 'fas fa-spinner fa-spin' : 'fas fa-download'}></i>
+                  <span>{mlStatus?.installed ? 'MelonLoader' : 'Install ML'}</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   if (loading) {
@@ -1649,510 +1960,41 @@ export function EnvironmentList({
         {[...environments].sort((a, b) => {
           const aIsSteam = a.environmentType === 'Steam' || a.environmentType === 'steam' || a.id.startsWith('steam-');
           const bIsSteam = b.environmentType === 'Steam' || b.environmentType === 'steam' || b.id.startsWith('steam-');
-          // Steam environments always come first
           if (aIsSteam && !bIsSteam) return -1;
           if (!aIsSteam && bIsSteam) return 1;
-          // For same type, maintain original order (by creation time/ID)
           return 0;
-        }).map(env => {
-          const prog = progress.get(env.id);
-          const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
-          const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
-          const isCheckingUpdate = checkingEnvironments.has(env.id);
-
-          return (
-            <div key={env.id} className="environment-card">
-              <div className="environment-header">
-                {editingName === env.id ? (
-                  <div className="name-editor">
-                    <input
-                      type="text"
-                      value={nameValue}
-                      onChange={(e) => setNameValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          handleSaveName(env.id);
-                        } else if (e.key === 'Escape') {
-                          handleCancelEditName();
-                        }
-                      }}
-                      className="name-input"
-                      autoFocus
-                    />
-                    <div className="name-actions">
-                      <button
-                        onClick={() => handleSaveName(env.id)}
-                        className="btn btn-primary btn-small"
-                        title="Save name"
-                      >
-                        <i className="fas fa-check"></i>
-                      </button>
-                      <button
-                        onClick={handleCancelEditName}
-                        className="btn btn-secondary btn-small"
-                        title="Cancel"
-                      >
-                        <i className="fas fa-times"></i>
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="name-display">
-                <h3>{env.name}</h3>
-                      <button
-                        onClick={() => handleStartEditName(env)}
-                        className="btn-edit-name"
-                        title="Rename environment"
-                      >
-                        <i className="fas fa-edit"></i>
-                      </button>
-                    </div>
-                <div className="environment-badges">
-                  {getStatusBadge(env)}
-                </div>
-                  </>
-                )}
-              </div>
-              <div className="environment-description">
-                {editingDescription === env.id ? (
-                  <div className="description-editor">
-                    <textarea
-                      value={descriptionValue}
-                      onChange={(e) => setDescriptionValue(e.target.value)}
-                      placeholder="Describe what this version means..."
-                      className="description-input"
-                      rows={2}
-                      autoFocus
-                    />
-                    <div className="description-actions">
-                      <button
-                        onClick={() => handleSaveDescription(env.id)}
-                        className="btn btn-primary btn-small"
-                        title="Save description"
-                      >
-                        <i className="fas fa-check"></i>
-                      </button>
-                      <button
-                        onClick={handleCancelEditDescription}
-                        className="btn btn-secondary btn-small"
-                        title="Cancel"
-                      >
-                        <i className="fas fa-times"></i>
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="description-display">
-                    <span className="description-text">
-                      {env.description || <span className="description-placeholder">No description</span>}
-                    </span>
-                    <button
-                      onClick={() => handleStartEditDescription(env)}
-                      className="btn-edit-description"
-                      title="Edit description"
-                    >
-                      <i className="fas fa-edit"></i>
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="environment-details">
-                <p style={{ marginBottom: '0.75rem', width: '100%' }}><strong>Directory:</strong> <span className="detail-value detail-directory" title={env.outputDir}>{env.outputDir}</span></p>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', width: '100%', alignItems: 'center', marginBottom: '0.75rem', gap: '0.5rem' }}>
-                  <span
-                    className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}
-                    style={{ display: 'inline-block', justifySelf: 'start' }}
-                  >
-                    {env.branch}
-                  </span>
-                  <div style={{ justifySelf: 'center', display: 'flex', alignItems: 'center' }}>
-                    {(modsCounts.get(env.id) ?? 0) > 0 && modUpdatesCounts.has(env.id) && (
-                      (modUpdatesCounts.get(env.id) ?? 0) > 0 ? (
-                        <span className="badge badge-orange" title="Mods with updates available">
-                          {modUpdatesCounts.get(env.id)} update{(modUpdatesCounts.get(env.id) ?? 0) !== 1 ? 's' : ''}
-                        </span>
-                      ) : (
-                        <span className="badge badge-green" title="All mods up to date">
-                          Up to date
-                        </span>
-                      )
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', justifySelf: 'end' }}>
-                    {env.status === 'completed' && env.currentGameVersion && (
-                      <span
-                        className={`badge ${isCheckingUpdate ? 'badge-gray' : env.updateAvailable === false ? 'badge-green' : env.updateAvailable === true ? 'badge-yellow' : 'badge-gray'}`}
-                        style={{
-                          display: 'inline-block',
-                          fontWeight: !isCheckingUpdate && env.updateAvailable === false ? 'bold' : 'normal'
-                        }}
-                      >
-                        {env.currentGameVersion}
-                      </span>
-                    )}
-                    {env.status === 'completed' && !env.currentGameVersion && (
-                      <span className="badge badge-gray" style={{ display: 'inline-block' }}>
-                        Unknown
-                      </span>
-                    )}
-                    {env.updateAvailable && env.updateGameVersion && (
-                      <span className="badge badge-yellow" style={{ display: 'inline-block' }}>
-                        Update: {env.updateGameVersion}
-                      </span>
-                    )}
-                    {env.status === 'completed' && (
-                      <button
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          try {
-                            const version = await refreshGameVersion(env.id);
-                            if (version) {
-                              console.log(`Game version extracted: ${version}`);
-                            } else {
-                              console.log('No game version found');
-                            }
-                          } catch (err) {
-                            console.error('Failed to refresh game version:', err);
-                          }
-                        }}
-                        className="btn btn-secondary"
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          fontSize: '0.75rem',
-                          minWidth: 'auto',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '0.25rem'
-                        }}
-                        title="Refresh game version"
-                      >
-                        <i className="fas fa-sync-alt"></i>
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {env.status === 'completed' && (
-                  <>
-                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
-                      <strong>ML:</strong>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                        {melonLoaderStatus.get(env.id)?.installed ? (
-                          <>
-                            <span className="badge badge-green" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
-                              INSTALLED{melonLoaderStatus.get(env.id)?.version ? (
-                                <span style={{ textTransform: 'none', marginLeft: '0.25rem' }}> ({melonLoaderStatus.get(env.id)?.version})</span>
-                              ) : ''}
-                            </span>
-                            {melonLoaderReleases.get(env.id) && melonLoaderReleases.get(env.id)!.length > 0 && (
-                              <button
-                                onClick={() => handleInstallMelonLoader(env)}
-                                className="btn btn-secondary btn-small"
-                                disabled={installingMelonLoader.has(env.id)}
-                                style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                                title="Update or change MelonLoader version"
-                              >
-                                {installingMelonLoader.has(env.id) ? (
-                                  <i className="fas fa-spinner fa-spin" style={{ fontSize: '0.85rem' }}></i>
-                                ) : (
-                                  <i className="fas fa-download" style={{ fontSize: '0.85rem' }}></i>
-                                )}
-                              </button>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>Not Installed</span>
-                            <button
-                              onClick={() => handleInstallMelonLoader(env)}
-                              className="btn btn-secondary btn-small"
-                              disabled={installingMelonLoader.has(env.id)}
-                              style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                              title="Install MelonLoader"
-                            >
-                              {installingMelonLoader.has(env.id) ? (
-                                <i className="fas fa-spinner fa-spin" style={{ fontSize: '0.85rem' }}></i>
-                              ) : (
-                                <i className="fas fa-download" style={{ fontSize: '0.85rem' }}></i>
-                              )}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
-                      <strong>Mods:</strong>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                        <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
-                          {modsCounts.get(env.id) ?? 0} Mods found
-                        </span>
-                        <button
-                          onClick={() => handleOpenModsOverlay(env.id)}
-                          className="btn btn-secondary btn-small"
-                          style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                          title="View installed mods"
-                        >
-                          <i className="fas fa-list" style={{ fontSize: '0.85rem' }}></i>
-                        </button>
-                      </div>
-                    </div>
-                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
-                      <strong>Plugins:</strong>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                        <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
-                          {pluginsCounts.get(env.id) ?? 0} Plugins found
-                        </span>
-                        <button
-                          onClick={() => handleOpenPluginsOverlay(env.id)}
-                          className="btn btn-secondary btn-small"
-                          style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                          title="View installed plugins"
-                        >
-                          <i className="fas fa-list" style={{ fontSize: '0.85rem' }}></i>
-                        </button>
-                      </div>
-                    </div>
-                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
-                      <strong>UserLibs:</strong>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                        <span className="badge badge-gray" style={{ marginLeft: '1.25rem', width: '8.5rem', display: 'inline-block', textAlign: 'center', boxSizing: 'border-box', padding: '0.15rem 0.5rem' }}>
-                          {userLibsCounts.get(env.id) ?? 0} Libs found
-                        </span>
-                        <button
-                          onClick={() => handleOpenUserLibsOverlay(env.id)}
-                          className="btn btn-secondary btn-small"
-                          style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                          title="View UserLibs (read-only)"
-                        >
-                          <i className="fas fa-list" style={{ fontSize: '0.85rem' }}></i>
-                        </button>
-                      </div>
-                    </div>
-                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
-                      <strong>Logs:</strong>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                        <button
-                          onClick={() => handleOpenLogsOverlay(env.id)}
-                          className="btn btn-secondary btn-small"
-                          style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }}
-                          title="View MelonLoader logs"
-                        >
-                          <i className="fas fa-file-alt" style={{ fontSize: '0.85rem' }}></i>
-                        </button>
-                      </div>
-                    </div>
-                    <div style={{ width: '100%', display: 'flex', alignItems: 'center' }}>
-                      <strong>Configuration:</strong>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                        <button
-                          onClick={() => handleOpenConfigOverlay(env.id)}
-                          className="btn btn-secondary btn-small"
-                          style={{ padding: '0.4rem', fontSize: '0.85rem', width: '2.25rem', height: '2.25rem', boxSizing: 'border-box', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginLeft: 'auto' }}
-                          title="Edit mod configuration"
-                        >
-                          <i className="fas fa-cog" style={{ fontSize: '0.85rem' }}></i>
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
-                {env.status === 'completed' && checkingEnvironments.has(env.id) && (
-                  <div className="environment-info-panel">
-                    <p className="info-panel-text">
-                      <>
-                        <strong>Checking</strong><span className="checking-dots"></span>
-                      </>
-                    </p>
-                  </div>
-                )}
-                {prog && (
-                  <div className="progress-info">
-                    <div className="progress-bar">
-                      <div
-                        className="progress-fill"
-                        style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }}
-                      />
-                    </div>
-                    <p>{Math.round(prog.progress)}% - {prog.message || ''}</p>
-                    {prog.downloadedFiles !== undefined && prog.totalFiles !== undefined && (
-                      <p>Files: {prog.downloadedFiles} / {prog.totalFiles}</p>
-                    )}
-                    {prog.speed && <p>Speed: {prog.speed}</p>}
-                  </div>
-                )}
-              </div>
-              <div className="environment-actions">
-                {!isDownloading && env.status !== 'completed' && (
-                  <button onClick={() => handleStartDownload(env)} className="btn btn-primary">
-                    Download
-                  </button>
-                )}
-                {isDownloading && (
-                  <button onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
-                    Cancel
-                  </button>
-                )}
-                {env.status === 'completed' && (
-                  <>
-                    <div className="environment-actions-grid">
-                       <button
-                         onClick={() => handleOpenFolder(env)}
-                         className="btn btn-secondary"
-                         title="Open folder in file explorer"
-                       >
-                         <i className="fas fa-folder-open"></i>
-                         <span>Open Folder</span>
-                       </button>
-                       <div className="launch-game-cell" data-launch-dropdown>
-                         <button
-                           onClick={() => {
-                             const method = preferredLaunchMethod.get(env.id) || 'steam';
-                             handleLaunchGame(env, method);
-                           }}
-                           className="btn btn-primary"
-                           title={`Launch the game via ${preferredLaunchMethod.get(env.id) === 'direct' ? 'Local Install' : 'Steam'}`}
-                         >
-                           <i className="fas fa-play"></i>
-                           <span>Play</span>
-                         </button>
-                         <button
-                           onClick={(e) => {
-                             e.stopPropagation();
-                             setLaunchDropdownOpen(launchDropdownOpen === env.id ? null : env.id);
-                           }}
-                           className="btn btn-secondary"
-                           title="Choose launch method"
-                           style={{ flex: '0 0 auto', marginLeft: '0.25rem' }}
-                         >
-                           <i className={preferredLaunchMethod.get(env.id) === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'}></i>
-                           <i className={`fas fa-chevron-${launchDropdownOpen === env.id ? 'up' : 'down'}`} style={{ fontSize: '0.65rem', marginLeft: '0.15rem' }}></i>
-                         </button>
-                         {launchDropdownOpen === env.id && (
-                           <div style={{
-                             position: 'absolute',
-                             top: '100%',
-                             left: 0,
-                             marginTop: '0.25rem',
-                             backgroundColor: 'var(--card-bg-color, #2a2a2a)',
-                             border: '1px solid var(--border-color, #3a3a3a)',
-                             borderRadius: '4px',
-                             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
-                             zIndex: 1000,
-                             minWidth: '160px',
-                             overflow: 'hidden'
-                           }}>
-                             {(() => {
-                               const currentMethod = preferredLaunchMethod.get(env.id) || 'steam';
-                               return (
-                                 <>
-                                   <button
-                                      onClick={() => {
-                                        setPreferredLaunchMethod(prev => {
-                                          const next = new Map(prev);
-                                          next.set(env.id, 'steam');
-                                          return next;
-                                        });
-                                        setLaunchDropdownOpen(null);
-                                      }}
-                                      className="btn"
-                                      style={{
-                                        width: '100%',
-                                        textAlign: 'left',
-                                        padding: '0.5rem 1rem',
-                                        background: currentMethod === 'steam' ? 'var(--primary-color, #646cff)' : 'none',
-                                        border: 'none',
-                                        color: 'var(--app-text-color, #ffffff)',
-                                        cursor: 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '0.5rem'
-                                      }}
-                                      onMouseEnter={(e) => {
-                                        if (currentMethod !== 'steam') e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
-                                      }}
-                                      onMouseLeave={(e) => {
-                                        if (currentMethod !== 'steam') e.currentTarget.style.backgroundColor = 'transparent';
-                                      }}
-                                    >
-                                      <i className="fab fa-steam"></i>
-                                      <span>via Steam</span>
-                                      {currentMethod === 'steam' && (
-                                        <i className="fas fa-check" style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.8 }}></i>
-                                      )}
-                                    </button>
-                                    <button
-                                      onClick={() => {
-                                        setPreferredLaunchMethod(prev => {
-                                          const next = new Map(prev);
-                                          next.set(env.id, 'direct');
-                                          return next;
-                                        });
-                                        setLaunchDropdownOpen(null);
-                                      }}
-                                      className="btn"
-                                      style={{
-                                        width: '100%',
-                                        textAlign: 'left',
-                                        padding: '0.5rem 1rem',
-                                        background: currentMethod === 'direct' ? 'var(--primary-color, #646cff)' : 'none',
-                                        border: 'none',
-                                        borderTop: '1px solid var(--border-color, #3a3a3a)',
-                                        color: 'var(--app-text-color, #ffffff)',
-                                        cursor: 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '0.5rem'
-                                      }}
-                                      onMouseEnter={(e) => {
-                                        if (currentMethod !== 'direct') e.currentTarget.style.backgroundColor = 'var(--border-color, #3a3a3a)';
-                                      }}
-                                      onMouseLeave={(e) => {
-                                        if (currentMethod !== 'direct') e.currentTarget.style.backgroundColor = 'transparent';
-                                      }}
-                                    >
-                                      <i className="fas fa-terminal"></i>
-                                      <span>via Local Install</span>
-                                      {currentMethod === 'direct' && (
-                                        <i className="fas fa-check" style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.8 }}></i>
-                                      )}
-                                    </button>
-                                 </>
-                               );
-                             })()}
-                           </div>
-                         )}
-                       </div>
-                      <button
-                        onClick={() => handleUpdateAction(env)}
-                        className={`btn ${env.updateAvailable && !isSteam ? 'btn-primary' : 'btn-secondary'}`}
-                        disabled={checkingEnvironments.has(env.id)}
-                        title={isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
-                      >
-                        <i className={checkingEnvironments.has(env.id) ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-arrow-up'}></i>
-                        <span>{checkingEnvironments.has(env.id) ? 'Checking...' : 'Update'}</span>
-                      </button>
-                      {!isSteam ? (
-                        <button onClick={() => handleDelete(env)} className="btn btn-danger">
-                          <i className="fas fa-trash"></i>
-                          <span>Delete</span>
-                        </button>
-                      ) : (
-                        <div />
-                      )}
-                    </div>
-                  </>
-                )}
-                {env.status !== 'completed' && !isSteam && (
-                  <button onClick={() => handleDelete(env)} className="btn btn-danger">
-                    <i className="fas fa-trash"></i>
-                    <span>Delete</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
+        }).map(renderEnvironmentCard)}
       </div>
+
+      {environmentMenu && (() => {
+        const env = environments.find((item) => item.id === environmentMenu.envId);
+        if (!env) return null;
+
+        const items = [...buildEnvironmentMenuItems(env)];
+        if (env.status === 'completed') {
+          items.splice(4, 0, {
+            key: 'refresh-version',
+            label: 'Refresh Game Version',
+            icon: 'fas fa-sync-alt',
+            onSelect: async () => {
+              try {
+                await refreshGameVersion(env.id);
+              } catch (err) {
+                console.error('Failed to refresh game version:', err);
+              }
+            },
+          });
+        }
+
+        return (
+          <AnchoredContextMenu
+            x={environmentMenu.x}
+            y={environmentMenu.y}
+            items={items}
+            onClose={() => setEnvironmentMenu(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

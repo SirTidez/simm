@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 export interface AnchoredContextMenuItem {
   key: string;
@@ -18,6 +18,28 @@ interface Props {
 
 export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState({ left: x, top: y });
+
+  useEffect(() => {
+    setPosition({ left: x, top: y });
+  }, [x, y]);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+
+    const margin = 10;
+    const rect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+
+    const nextLeft = Math.min(Math.max(x, margin), maxLeft);
+    const nextTop = Math.min(Math.max(y, margin), maxTop);
+
+    if (nextLeft !== position.left || nextTop !== position.top) {
+      setPosition({ left: nextLeft, top: nextTop });
+    }
+  }, [items.length, position.left, position.top, x, y]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -48,7 +70,7 @@ export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
     <div
       ref={menuRef}
       className="workspace-context-menu"
-      style={{ left: x, top: y }}
+      style={{ left: position.left, top: position.top }}
       role="menu"
     >
       {items.map((item) => (
