@@ -477,6 +477,8 @@ function AppContent() {
             onClose={onCloseHandler}
             environmentId={workspace.environmentId}
             onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
+            onOpenModLibrary={() => openWorkspace({ view: 'library' })}
+            onOpenConfig={() => openWorkspace({ view: 'config', environmentId: workspace.environmentId })}
             onModUpdatesChecked={(count) => {
               window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
             }}

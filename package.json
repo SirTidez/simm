@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:playwright": "tauri dev --config src-tauri/tauri.playwright.conf.json",
     "test": "vitest run",
     "test:services": "vitest run src/services/**/*.test.ts",
     "test:components": "vitest run src/components/**/*.test.tsx",

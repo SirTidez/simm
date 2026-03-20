@@ -16,6 +16,8 @@
         "resizable": true,
         "decorations": false,
         "title": "Schedule I Mod Manager",
+        "minWidth": 1024,
+        "minHeight": 600,
         "width": 1270,
         "height": 884
       }

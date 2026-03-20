@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus } from '../services/events';
-import type { ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
+import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
+import { InstallTargetsDialog } from './InstallTargetsDialog';
+import type { Environment, ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile } from '../types';
 
 interface ThunderstorePackage {
   uuid4: string;
@@ -61,6 +63,7 @@ interface DownloadedModGroup {
 }
 
 type DownloadedFilter = 'all' | 'updates' | 'managed' | 'external' | 'installed';
+type LibraryTab = 'discover' | 'library' | 'updates';
 
 interface LibraryModViewState {
   id: string;
@@ -80,6 +83,14 @@ interface LibraryModViewState {
   addedAt?: number;
   installedAt?: number;
   kind: 'downloaded' | 'thunderstore' | 'nexusmods';
+}
+
+interface InstallDialogState {
+  isOpen: boolean;
+  title: string;
+  entry: ModLibraryEntry | null;
+  compatibleEnvironments: Environment[];
+  excludedEnvironments: Environment[];
 }
 
 const runtimeSuffixPatterns = [
@@ -133,6 +144,24 @@ const normalizeVersionToken = (value?: string): string => {
 const formatVersionTag = (value?: string): string => {
   const normalized = normalizeVersionToken(value);
   return normalized ? `v${normalized}` : 'unknown';
+};
+
+const formatCompactNumber = (value?: number): string => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'unknown';
+  }
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+};
+
+const formatInspectorDate = (value?: string): string => {
+  if (!value) {
+    return 'unknown';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'unknown';
+  }
+  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(date);
 };
 
 const compareVersionTokensDesc = (a?: string, b?: string): number => {
@@ -345,12 +374,14 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
   const [library, setLibrary] = useState<ModLibraryResult | null>(null);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [selectedModIds, setSelectedModIds] = useState<Set<string>>(new Set());
+  const [environments, setEnvironments] = useState<Environment[]>([]);
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({
     isOpen: false,
     title: '',
     message: '',
     onConfirm: () => {},
   });
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>('discover');
 
   const [searchSource, setSearchSource] = useState<'thunderstore' | 'nexusmods'>('thunderstore');
   const [searchQuery, setSearchQuery] = useState('');
@@ -376,6 +407,16 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
   const [downloadedFilter, setDownloadedFilter] = useState<DownloadedFilter>('all');
   const [downloadedSearch, setDownloadedSearch] = useState('');
   const [activeModView, setActiveModView] = useState<LibraryModViewState | null>(null);
+  const [installDialog, setInstallDialog] = useState<InstallDialogState>({
+    isOpen: false,
+    title: '',
+    entry: null,
+    compatibleEnvironments: [],
+    excludedEnvironments: [],
+  });
+  const [selectedInstallEnvironmentIds, setSelectedInstallEnvironmentIds] = useState<Set<string>>(new Set());
+  const [installingTargets, setInstallingTargets] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
   const [openedFromLogs, setOpenedFromLogs] = useState<{ active: boolean; modTag: string | null }>({
     active: false,
     modTag: null,
@@ -534,6 +575,19 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     return { total, updates, installed, managed };
   }, [downloadedGroups, isGroupUpdateAvailable]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    if (downloadedGroups.length > 0) {
+      setLibraryTab((current) => (current === 'discover' ? 'library' : current));
+      return;
+    }
+
+    setLibraryTab('discover');
+  }, [downloadedGroups.length, isOpen]);
+
   const filteredDownloadedGroups = useMemo(() => {
     const query = downloadedSearch.trim().toLowerCase();
     return downloadedGroups.filter(group => {
@@ -616,6 +670,16 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
   const refreshLibrary = useCallback(async () => {
     const data = await ApiService.getModLibrary();
     setLibrary(data);
+  }, []);
+
+  const refreshEnvironments = useCallback(async () => {
+    try {
+      const data = await ApiService.getEnvironments();
+      setEnvironments(data);
+    } catch (error) {
+      console.warn('Failed to load environments for install targets:', error);
+      setEnvironments([]);
+    }
   }, []);
 
   const closeConfirmOverlay = useCallback(() => {
@@ -751,6 +815,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       setLoadingLibrary(true);
       try {
         await refreshLibrary();
+        await refreshEnvironments();
       } catch (err) {
         console.error('Failed to load mod library:', err);
         setLibrary({ downloaded: [] });
@@ -759,7 +824,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       }
     };
     loadLibrary();
-  }, [isOpen, refreshLibrary]);
+  }, [isOpen, refreshEnvironments, refreshLibrary]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -1257,6 +1322,111 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       || null;
   }, [getSortedGroupEntries, selectedStorageByGroup]);
 
+  const entrySupportsRuntime = useCallback((entry: ModLibraryEntry, runtime: 'IL2CPP' | 'Mono') => {
+    if (entry.storageIdsByRuntime?.[runtime]) {
+      return true;
+    }
+    if ((entry.availableRuntimes?.length || 0) > 0) {
+      return entry.availableRuntimes.includes(runtime);
+    }
+    return !!entry.storageId;
+  }, []);
+
+  const closeInstallDialog = useCallback(() => {
+    setInstallDialog({
+      isOpen: false,
+      title: '',
+      entry: null,
+      compatibleEnvironments: [],
+      excludedEnvironments: [],
+    });
+    setSelectedInstallEnvironmentIds(new Set());
+  }, []);
+
+  const installEntryToEnvironmentIds = useCallback(async (entry: ModLibraryEntry, environmentIds: string[]) => {
+    const selectedTargets = environments.filter((environment) => environmentIds.includes(environment.id));
+    const runtimeGroups = new Map<'IL2CPP' | 'Mono', string[]>();
+
+    for (const environment of selectedTargets) {
+      if (!entrySupportsRuntime(entry, environment.runtime)) {
+        continue;
+      }
+      const existing = runtimeGroups.get(environment.runtime) || [];
+      existing.push(environment.id);
+      runtimeGroups.set(environment.runtime, existing);
+    }
+
+    for (const [runtime, targetIds] of runtimeGroups.entries()) {
+      const storageId = entry.storageIdsByRuntime?.[runtime] || entry.storageId;
+      if (!storageId || targetIds.length === 0) {
+        continue;
+      }
+      await ApiService.installDownloadedMod(storageId, targetIds);
+    }
+  }, [entrySupportsRuntime, environments]);
+
+  const promptInstallTargets = useCallback(async (entry: ModLibraryEntry, title: string, installMoreOnly: boolean) => {
+    const compatible = environments.filter((environment) => {
+      if (!entrySupportsRuntime(entry, environment.runtime)) {
+        return false;
+      }
+      if (!installMoreOnly) {
+        return true;
+      }
+      const installedIds = entry.installedInByRuntime?.[environment.runtime] || entry.installedIn || [];
+      return !installedIds.includes(environment.id);
+    });
+    const excluded = environments.filter((environment) => !entrySupportsRuntime(entry, environment.runtime));
+
+    if (compatible.length === 0) {
+      showLibraryNotice('No Compatible Environments', 'This mod version is not compatible with any currently configured environments.');
+      return;
+    }
+
+    if (compatible.length === 1) {
+      setInstallingTargets(true);
+      try {
+        await installEntryToEnvironmentIds(entry, [compatible[0].id]);
+        await refreshLibrary();
+        notifyLibraryUpdated();
+        notifyModUpdateStateChanged();
+      } catch (error) {
+        showLibraryNotice('Install Failed', error instanceof Error ? error.message : 'Failed to install this mod.');
+      } finally {
+        setInstallingTargets(false);
+      }
+      return;
+    }
+
+    setSelectedInstallEnvironmentIds(new Set());
+    setInstallDialog({
+      isOpen: true,
+      title,
+      entry,
+      compatibleEnvironments: compatible,
+      excludedEnvironments: excluded,
+    });
+  }, [entrySupportsRuntime, environments, installEntryToEnvironmentIds, notifyLibraryUpdated, notifyModUpdateStateChanged, refreshLibrary, showLibraryNotice]);
+
+  const handleConfirmInstallTargets = useCallback(async () => {
+    if (!installDialog.entry || selectedInstallEnvironmentIds.size === 0) {
+      return;
+    }
+
+    setInstallingTargets(true);
+    try {
+      await installEntryToEnvironmentIds(installDialog.entry, Array.from(selectedInstallEnvironmentIds));
+      await refreshLibrary();
+      notifyLibraryUpdated();
+      notifyModUpdateStateChanged();
+      closeInstallDialog();
+    } catch (error) {
+      showLibraryNotice('Install Failed', error instanceof Error ? error.message : 'Failed to install the selected environments.');
+    } finally {
+      setInstallingTargets(false);
+    }
+  }, [closeInstallDialog, installDialog.entry, installEntryToEnvironmentIds, notifyLibraryUpdated, notifyModUpdateStateChanged, refreshLibrary, selectedInstallEnvironmentIds, showLibraryNotice]);
+
   const handleStepGroupVersion = useCallback(async (group: DownloadedModGroup, direction: 'older' | 'newer') => {
     const sorted = getSortedGroupEntries(group);
     if (sorted.length <= 1) {
@@ -1438,13 +1608,21 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         } else if (pkg.packagesByRuntime[runtime]) {
           results.push(await ApiService.downloadThunderstoreToLibrary(pkg.packagesByRuntime[runtime]!.uuid4, runtime));
         }
-        await refreshLibrary();
+        const nextLibrary = await ApiService.getModLibrary();
+        setLibrary(nextLibrary);
         notifyLibraryUpdated();
         if (results.length > 0 && results.every(result => result.alreadyStored)) {
           showLibraryNotice(
             'Already Downloaded',
             `The latest version of ${pkg.name} is already in your mod library.`,
           );
+        } else {
+          const refreshedGroup = findDownloadedGroupForThunderstorePackage(pkg, nextLibrary);
+          const selectedEntry = refreshedGroup ? getActiveEntryForGroup(refreshedGroup) || refreshedGroup.entries[0] : null;
+          if (selectedEntry) {
+            openDownloadedModView(refreshedGroup!, selectedEntry.storageId);
+            await promptInstallTargets(selectedEntry, `Install ${selectedEntry.displayName}`, false);
+          }
         }
       } catch (err) {
         console.error('Failed to download Thunderstore mod:', err);
@@ -1552,8 +1730,15 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           if (!targetFile?.file_id) return;
           await ApiService.downloadNexusModToLibrary(modId, targetFile.file_id, runtime);
         }
-        await refreshLibrary();
+        const nextLibrary = await ApiService.getModLibrary();
+        setLibrary(nextLibrary);
         notifyLibraryUpdated();
+        const refreshedGroup = findDownloadedGroupForNexusMod(modId, nextLibrary);
+        const selectedEntry = refreshedGroup ? getActiveEntryForGroup(refreshedGroup) || refreshedGroup.entries[0] : null;
+        if (selectedEntry) {
+          openDownloadedModView(refreshedGroup!, selectedEntry.storageId);
+          await promptInstallTargets(selectedEntry, `Install ${selectedEntry.displayName}`, false);
+        }
       } catch (err) {
         console.error('Failed to download Nexus mod:', err);
         showLibraryNotice('Nexus Download Failed', err instanceof Error ? err.message : 'Failed to download Nexus mod.');
@@ -1710,6 +1895,23 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     });
   }, [openModView]);
 
+  const findDownloadedGroupForThunderstorePackage = useCallback((pkg: ThunderstorePackageGroup, sourceLibrary?: ModLibraryResult | null) => {
+    const groups = buildDownloadedGroups(sourceLibrary?.downloaded ?? library?.downloaded ?? []);
+    return groups.find((group) => group.entries.some((entry) => {
+      if (entry.source !== 'thunderstore') {
+        return false;
+      }
+      const parsed = parseThunderstoreSourceId(entry.sourceId);
+      return parsed.owner.toLowerCase() === pkg.owner.toLowerCase()
+        && normalizeThunderstoreName(parsed.name).toLowerCase() === normalizeThunderstoreName(pkg.name).toLowerCase();
+    })) || null;
+  }, [library]);
+
+  const findDownloadedGroupForNexusMod = useCallback((modId: number, sourceLibrary?: ModLibraryResult | null) => {
+    const groups = buildDownloadedGroups(sourceLibrary?.downloaded ?? library?.downloaded ?? []);
+    return groups.find((group) => group.entries.some((entry) => entry.source === 'nexusmods' && Number(entry.sourceId || '0') === modId)) || null;
+  }, [library]);
+
   const renderCardIcon = useCallback((name: string, iconCachePath?: string, iconUrl?: string, variant: 'inline' | 'rail' = 'inline') => {
     const local = resolveImageSource(iconCachePath);
     const remote = resolveImageSource(iconUrl);
@@ -1742,12 +1944,194 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     );
   }, []);
 
+  const displayedDownloadedGroups = useMemo(() => {
+    if (libraryTab === 'updates') {
+      return downloadedGroups.filter((group) => isGroupUpdateAvailable(group));
+    }
+    return filteredDownloadedGroups;
+  }, [downloadedGroups, filteredDownloadedGroups, isGroupUpdateAvailable, libraryTab]);
+
+  const selectedDownloadedGroup = useMemo(() => {
+    if (activeModView?.kind !== 'downloaded') {
+      return null;
+    }
+    return downloadedGroups.find((group) => group.key === activeModView.id) || null;
+  }, [activeModView, downloadedGroups]);
+
+  const selectedDownloadedEntry = useMemo(() => {
+    if (!selectedDownloadedGroup) {
+      return null;
+    }
+    return getActiveEntryForGroup(selectedDownloadedGroup) || selectedDownloadedGroup.entries[0] || null;
+  }, [getActiveEntryForGroup, selectedDownloadedGroup]);
+
+  const selectedDownloadedGroupEntries = useMemo(() => {
+    if (!selectedDownloadedGroup) {
+      return [];
+    }
+    return getSortedGroupEntries(selectedDownloadedGroup);
+  }, [getSortedGroupEntries, selectedDownloadedGroup]);
+
+  const selectedThunderstorePackage = useMemo(() => {
+    if (activeModView?.kind !== 'thunderstore') {
+      return null;
+    }
+    return searchResults.find((pkg) => pkg.key === activeModView.id) || null;
+  }, [activeModView, searchResults]);
+
+  const selectedNexusResult = useMemo(() => {
+    if (activeModView?.kind !== 'nexusmods') {
+      return null;
+    }
+    return nexusModsSearchResults.find((mod) => String(mod.mod_id) === activeModView.id) || null;
+  }, [activeModView, nexusModsSearchResults]);
+
+  const downloadedGroupForSelectedThunderstore = useMemo(() => {
+    if (!selectedThunderstorePackage) {
+      return null;
+    }
+    return findDownloadedGroupForThunderstorePackage(selectedThunderstorePackage);
+  }, [findDownloadedGroupForThunderstorePackage, selectedThunderstorePackage]);
+
+  const downloadedGroupForSelectedNexus = useMemo(() => {
+    if (!selectedNexusResult) {
+      return null;
+    }
+    return findDownloadedGroupForNexusMod(selectedNexusResult.mod_id);
+  }, [findDownloadedGroupForNexusMod, selectedNexusResult]);
+
+  const selectedThunderstoreDownloadedEntry = useMemo(() => {
+    if (!downloadedGroupForSelectedThunderstore) {
+      return null;
+    }
+    return getActiveEntryForGroup(downloadedGroupForSelectedThunderstore) || downloadedGroupForSelectedThunderstore.entries[0] || null;
+  }, [downloadedGroupForSelectedThunderstore, getActiveEntryForGroup]);
+
+  const selectedNexusDownloadedEntry = useMemo(() => {
+    if (!downloadedGroupForSelectedNexus) {
+      return null;
+    }
+    return getActiveEntryForGroup(downloadedGroupForSelectedNexus) || downloadedGroupForSelectedNexus.entries[0] || null;
+  }, [downloadedGroupForSelectedNexus, getActiveEntryForGroup]);
+
+  useEffect(() => {
+    if (!isOpen || openedFromLogs.active) {
+      return;
+    }
+
+    if (libraryTab === 'discover') {
+      if (showSearchResults && searchResults.length > 0) {
+        const stillValid = activeModView?.kind === 'thunderstore' && searchResults.some((pkg) => pkg.key === activeModView.id);
+        if (!stillValid) {
+          openThunderstoreModView(searchResults[0]);
+        }
+        return;
+      }
+
+      if (showNexusModsResults && nexusModsSearchResults.length > 0) {
+        const stillValid = activeModView?.kind === 'nexusmods' && nexusModsSearchResults.some((mod) => String(mod.mod_id) === activeModView.id);
+        if (!stillValid) {
+          openNexusModView(nexusModsSearchResults[0]);
+        }
+        return;
+      }
+
+      return;
+    }
+
+    if (displayedDownloadedGroups.length === 0) {
+      return;
+    }
+
+    const stillValid = activeModView?.kind === 'downloaded'
+      && displayedDownloadedGroups.some((group) => group.key === activeModView.id);
+    if (!stillValid) {
+      openDownloadedModView(displayedDownloadedGroups[0]);
+    }
+  }, [
+    activeModView,
+    displayedDownloadedGroups,
+    isOpen,
+    libraryTab,
+    nexusModsSearchResults,
+    openDownloadedModView,
+    openNexusModView,
+    openThunderstoreModView,
+    openedFromLogs.active,
+    searchResults,
+    showNexusModsResults,
+    showSearchResults,
+  ]);
+
+  const openContextMenu = useCallback((event: ReactMouseEvent, items: AnchoredContextMenuItem[]) => {
+    event.preventDefault();
+    setContextMenu({ x: event.clientX, y: event.clientY, items });
+  }, []);
+
+  const downloadedContextMenuItems = useCallback((group: DownloadedModGroup): AnchoredContextMenuItem[] => {
+    const entry = getActiveEntryForGroup(group) || group.entries[0];
+    return [
+      {
+        key: 'install',
+        label: group.installedIn.length > 0 ? 'Install to more…' : 'Install…',
+        icon: 'fas fa-download',
+        disabled: !entry,
+        onSelect: () => {
+          if (entry) {
+            void promptInstallTargets(entry, `Install ${entry.displayName}`, group.installedIn.length > 0);
+          }
+        },
+      },
+      {
+        key: 'update',
+        label: 'Update',
+        icon: 'fas fa-arrow-up',
+        disabled: !isGroupUpdateAvailable(group),
+        onSelect: () => {
+          void handleUpdateAndActivateGroup(group);
+        },
+      },
+      {
+        key: 'activate',
+        label: 'Activate version',
+        icon: 'fas fa-check',
+        disabled: !entry || group.installedIn.length === 0,
+        onSelect: () => {
+          if (entry) {
+            void handleSelectVersion(group, entry.storageId);
+          }
+        },
+      },
+      {
+        key: 'source',
+        label: 'Open source page',
+        icon: 'fas fa-arrow-up-right-from-square',
+        disabled: !safeExternalUrl(entry?.sourceUrl),
+        onSelect: () => {
+          const url = safeExternalUrl(entry?.sourceUrl);
+          if (url) {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }
+        },
+      },
+      {
+        key: 'delete',
+        label: 'Delete downloaded files',
+        icon: 'fas fa-trash',
+        danger: true,
+        onSelect: () => {
+          void handleDeleteDownloadedGroup(group);
+        },
+      },
+    ];
+  }, [getActiveEntryForGroup, handleDeleteDownloadedGroup, handleSelectVersion, handleUpdateAndActivateGroup, isGroupUpdateAvailable, promptInstallTargets]);
+
   const s1apiActionLabel = s1apiInLibrary ? (s1apiNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
   const mlvscanActionLabel = mlvscanInLibrary ? (mlvscanNeedsUpdate ? 'Update' : 'Downloaded') : 'Download';
 
   if (!isOpen) return null;
 
-  return (
+  const legacyLayout = (
     <>
       <ConfirmOverlay
         isOpen={confirmOverlay.isOpen}
@@ -3002,6 +3386,498 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
             </div>
           </div>
         </div>
+      )}
+    </>
+  );
+
+  void legacyLayout;
+
+  return (
+    <>
+      <ConfirmOverlay
+        isOpen={confirmOverlay.isOpen}
+        onClose={() => setConfirmOverlay({ isOpen: false, title: '', message: '', onConfirm: () => {} })}
+        onConfirm={confirmOverlay.onConfirm}
+        title={confirmOverlay.title}
+        message={confirmOverlay.message}
+        isNested
+      />
+      <InstallTargetsDialog
+        isOpen={installDialog.isOpen}
+        title={installDialog.title}
+        entry={installDialog.entry}
+        compatibleEnvironments={installDialog.compatibleEnvironments}
+        excludedEnvironments={installDialog.excludedEnvironments}
+        selectedEnvironmentIds={selectedInstallEnvironmentIds}
+        onToggleEnvironment={(environmentId) => {
+          setSelectedInstallEnvironmentIds((previous) => {
+            const next = new Set(previous);
+            if (next.has(environmentId)) next.delete(environmentId);
+            else next.add(environmentId);
+            return next;
+          });
+        }}
+        onSelectAllCompatible={() => setSelectedInstallEnvironmentIds(new Set(installDialog.compatibleEnvironments.map((environment) => environment.id)))}
+        onSelectRuntime={(runtime) => setSelectedInstallEnvironmentIds(new Set(
+          installDialog.compatibleEnvironments.filter((environment) => environment.runtime === runtime).map((environment) => environment.id),
+        ))}
+        onClear={() => setSelectedInstallEnvironmentIds(new Set())}
+        onClose={closeInstallDialog}
+        onConfirm={() => void handleConfirmInstallTargets()}
+        installing={installingTargets}
+      />
+      {runtimePrompt && (
+        <div className="modal-overlay modal-overlay-nested" onClick={() => setRuntimePrompt(null)}>
+          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px' }}>
+            <div className="modal-header">
+              <h2>{runtimePrompt.title}</h2>
+              <button className="modal-close" onClick={() => setRuntimePrompt(null)}>×</button>
+            </div>
+            <div style={{ padding: '1rem 1.25rem 1.25rem' }}>
+              <p style={{ marginTop: 0, color: '#ccc' }}>{runtimePrompt.message}</p>
+              <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                <button className="btn btn-secondary" onClick={() => { const handler = runtimePrompt.onSelect; setRuntimePrompt(null); handler('Mono'); }}>Mono</button>
+                <button className="btn btn-secondary" onClick={() => { const handler = runtimePrompt.onSelect; setRuntimePrompt(null); handler('IL2CPP'); }}>IL2CPP</button>
+                <button className="btn btn-primary" onClick={() => { const handler = runtimePrompt.onSelect; setRuntimePrompt(null); handler('Both'); }}>Both</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="mods-overlay mods-overlay--library workspace-collection-shell">
+        <div className="modal-header">
+          <h2>Mod Library</h2>
+          <button className="btn btn-secondary btn-small" onClick={onClose}>
+            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+            Back
+          </button>
+        </div>
+
+        <div className="workspace-collection">
+          <div className="workspace-collection__main">
+            <div className="workspace-collection__header">
+              <div className="workspace-collection__nav">
+                <div className="workspace-collection__rail-group workspace-collection__rail-group--inline">
+                  {([
+                    ['discover', 'Discover', 'fas fa-compass'],
+                    ['library', 'Library', 'fas fa-book-open'],
+                    ['updates', 'Updates', 'fas fa-arrow-up'],
+                  ] as Array<[LibraryTab, string, string]>).map(([tab, label, icon]) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      className={`workspace-collection__rail-button ${libraryTab === tab ? 'workspace-collection__rail-button--active' : ''}`}
+                      onClick={() => setLibraryTab(tab)}
+                    >
+                      <i className={icon}></i>
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="workspace-collection__summary">
+                  <div className="workspace-collection__summary-chip">
+                    <span>Downloaded</span>
+                    <strong>{downloadedSummary.total}</strong>
+                  </div>
+                  <div className="workspace-collection__summary-chip">
+                    <span>Updates</span>
+                    <strong>{downloadedSummary.updates}</strong>
+                  </div>
+                  <div className="workspace-collection__summary-chip">
+                    <span>Installed</span>
+                    <strong>{downloadedSummary.installed}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {(libraryTab === 'library' || libraryTab === 'updates') && (
+                <div className="workspace-collection__rail-group workspace-collection__rail-group--inline workspace-collection__filters-row">
+                  {(['all', 'updates', 'managed', 'external', 'installed'] as DownloadedFilter[]).map((filter) => (
+                    <button
+                      key={filter}
+                      type="button"
+                      className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${downloadedFilter === filter ? 'workspace-collection__rail-button--active' : ''}`}
+                      onClick={() => setDownloadedFilter(filter)}
+                    >
+                      {filter === 'all' ? 'All' : filter === 'updates' ? 'Updates' : filter === 'managed' ? 'Managed' : filter === 'external' ? 'External' : 'Installed'}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="workspace-collection__toolbar">
+                {libraryTab === 'discover' ? (
+                  <>
+                    <div className="workspace-collection__toolbar-group">
+                      <button type="button" className={`btn btn-small ${searchSource === 'thunderstore' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setSearchSource('thunderstore'); setShowSearchResults(false); setShowNexusModsResults(false); }}>Thunderstore</button>
+                      <button type="button" className={`btn btn-small ${searchSource === 'nexusmods' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setSearchSource('nexusmods'); setShowSearchResults(false); setShowNexusModsResults(false); }}>Nexus Mods</button>
+                    </div>
+                    <div className="workspace-collection__toolbar-search">
+                      <input
+                        type="text"
+                        placeholder={searchSource === 'thunderstore' ? 'Search Thunderstore mods...' : 'Search NexusMods mods...'}
+                        value={searchSource === 'thunderstore' ? searchQuery : nexusModsSearchQuery}
+                        onChange={(event) => searchSource === 'thunderstore' ? setSearchQuery(event.target.value) : setNexusModsSearchQuery(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            if (searchSource === 'thunderstore') handleSearch();
+                            else handleSearchNexusMods();
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-small"
+                        onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
+                        disabled={(searchSource === 'thunderstore' ? searching : searchingNexusMods) || !(searchSource === 'thunderstore' ? searchQuery.trim() : nexusModsSearchQuery.trim())}
+                      >
+                        Search
+                      </button>
+                    </div>
+                    <button className="btn btn-secondary btn-small" onClick={refreshLibrary} disabled={loadingLibrary}>
+                      <i className={`fas ${loadingLibrary ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
+                      <span>Refresh</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--summary">
+                      <strong>{libraryTab === 'updates' ? 'Available Updates' : 'Downloaded Library'}</strong>
+                      <span>{displayedDownloadedGroups.length} entries</span>
+                    </div>
+                    <div className="workspace-collection__toolbar-search">
+                      <input type="text" value={downloadedSearch} onChange={(event) => setDownloadedSearch(event.target.value)} placeholder="Filter by mod, author, or version" />
+                    </div>
+                    <button className="btn btn-secondary btn-small" onClick={refreshLibrary} disabled={loadingLibrary}>
+                      <i className={`fas ${loadingLibrary ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></i>
+                      <span>Refresh</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="workspace-collection__content">
+              {libraryTab === 'discover' && !showSearchResults && !showNexusModsResults && (
+                <section className="workspace-collection__section">
+                  <div className="workspace-collection__section-header">
+                    <h3>Featured</h3>
+                    <span>Core tools and recommended downloads</span>
+                  </div>
+                  <div className="workspace-feature-grid">
+                    <button type="button" className="workspace-feature-card" onClick={handleDownloadS1APIClick}>
+                      <div>
+                        <strong>S1API</strong>
+                        <p>Core GitHub release for shared APIs and interoperability.</p>
+                      </div>
+                      <span>{s1apiActionLabel}</span>
+                    </button>
+                    <button type="button" className="workspace-feature-card" onClick={handleDownloadMlvscanClick}>
+                      <div>
+                        <strong>MLVScan</strong>
+                        <p>Library scanning and validation tooling.</p>
+                      </div>
+                      <span>{mlvscanActionLabel}</span>
+                    </button>
+                  </div>
+                </section>
+              )}
+
+              {libraryTab === 'discover' && (showSearchResults || showNexusModsResults) && (
+                <section className="workspace-collection__section">
+                  <div className="workspace-collection__section-header">
+                    <h3>{showSearchResults ? 'Discover Results' : 'Nexus Results'}</h3>
+                    <span>{showSearchResults ? searchResults.length : nexusModsSearchResults.length} result(s)</span>
+                  </div>
+                  <div className="workspace-collection__list">
+                    {showSearchResults && searchResults.map((pkg) => {
+                      const representative = pkg.packagesByRuntime.IL2CPP || pkg.packagesByRuntime.Mono;
+                      const latestVersion = representative?.versions?.[0];
+                      const downloadedGroup = findDownloadedGroupForThunderstorePackage(pkg);
+                      const isSelected = activeModView?.kind === 'thunderstore' && activeModView.id === pkg.key;
+                      return (
+                        <div
+                          key={pkg.key}
+                          className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openThunderstoreModView(pkg)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openThunderstoreModView(pkg))}
+                        >
+                          {renderCardIcon(pkg.name, undefined, latestVersion?.icon || representative?.icon || representative?.icon_url, 'inline')}
+                          <div className="workspace-collection__row-body">
+                            <div className="workspace-collection__row-title">{pkg.name}</div>
+                            <div className="workspace-collection__row-meta">
+                              <span>{pkg.owner}</span>
+                              <span className="workspace-pill workspace-pill--source">Thunderstore</span>
+                              {downloadedGroup && <span className="workspace-pill workspace-pill--success">Downloaded</span>}
+                              {downloadedGroup && isGroupUpdateAvailable(downloadedGroup) && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                            </div>
+                            <p className="workspace-collection__row-summary">{latestVersion?.description || 'No summary provided.'}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {showNexusModsResults && nexusModsSearchResults.map((mod) => {
+                      const downloadedGroup = findDownloadedGroupForNexusMod(mod.mod_id);
+                      const isSelected = activeModView?.kind === 'nexusmods' && activeModView.id === String(mod.mod_id);
+                      return (
+                        <div
+                          key={mod.mod_id}
+                          className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => openNexusModView(mod)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openNexusModView(mod))}
+                        >
+                          {renderCardIcon(mod.name, undefined, mod.picture_url, 'inline')}
+                          <div className="workspace-collection__row-body">
+                            <div className="workspace-collection__row-title">{mod.name}</div>
+                            <div className="workspace-collection__row-meta">
+                              <span>{mod.author}</span>
+                              <span className="workspace-pill workspace-pill--source">Nexus Mods</span>
+                              {downloadedGroup && <span className="workspace-pill workspace-pill--success">Downloaded</span>}
+                              {downloadedGroup && isGroupUpdateAvailable(downloadedGroup) && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                            </div>
+                            <p className="workspace-collection__row-summary">{mod.summary || 'No summary provided.'}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              {(libraryTab === 'library' || libraryTab === 'updates') && (
+                <section className="workspace-collection__section">
+                  <div className="workspace-collection__section-header">
+                    <h3>{libraryTab === 'updates' ? 'Available Updates' : 'Downloaded Library'}</h3>
+                    <span>{displayedDownloadedGroups.length} group(s)</span>
+                  </div>
+                  {loadingLibrary && <div className="workspace-collection__empty">Loading mod library…</div>}
+                  {!loadingLibrary && displayedDownloadedGroups.length === 0 && <div className="workspace-collection__empty">{libraryTab === 'updates' ? 'No downloaded mods currently need updates.' : 'No downloaded mods match this filter.'}</div>}
+                  {!loadingLibrary && displayedDownloadedGroups.length > 0 && (
+                    <div className="workspace-collection__list">
+                      {displayedDownloadedGroups.map((group) => {
+                        const activeEntry = getActiveEntryForGroup(group) || group.entries[0];
+                        const isSelected = activeModView?.kind === 'downloaded' && activeModView.id === group.key;
+                        return (
+                          <div
+                            key={group.key}
+                            className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openDownloadedModView(group)}
+                            onKeyDown={(event) => handleCardActivationKeyDown(event, () => openDownloadedModView(group))}
+                            onContextMenu={(event) => openContextMenu(event, downloadedContextMenuItems(group))}
+                          >
+                            {renderCardIcon(group.displayName, activeEntry?.iconCachePath, activeEntry?.iconUrl, 'inline')}
+                            <div className="workspace-collection__row-body">
+                              <div className="workspace-collection__row-title">{group.displayName}</div>
+                              <div className="workspace-collection__row-meta">
+                                <span className="workspace-pill workspace-pill--source">{getSourceBadgeLabel(activeEntry?.source)}</span>
+                                <span className="workspace-pill">{formatVersionTag(getEntryVersionLabel(activeEntry!))}</span>
+                                <span className="workspace-pill">{`${group.installedIn.length} env${group.installedIn.length === 1 ? '' : 's'}`}</span>
+                                {group.availableRuntimes.map((runtime) => <span key={`${group.key}-${runtime}`} className="workspace-pill">{runtime}</span>)}
+                                {isGroupUpdateAvailable(group) && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                              </div>
+                              <p className="workspace-collection__row-summary">{activeEntry?.summary || 'No summary provided.'}</p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
+            </div>
+          </div>
+
+          <aside className="workspace-collection__inspector">
+            {!activeModView && <div className="workspace-collection__inspector-empty">Select a mod to review details and actions.</div>}
+
+            {selectedDownloadedGroup && selectedDownloadedEntry && (
+              <div className="workspace-inspector-card">
+                <div className="workspace-inspector-card__header">
+                  {renderCardIcon(selectedDownloadedGroup.displayName, selectedDownloadedEntry.iconCachePath, selectedDownloadedEntry.iconUrl, 'rail')}
+                  <div>
+                    <h3>{selectedDownloadedGroup.displayName}</h3>
+                    <div className="workspace-inspector-card__subtle">
+                      {getSourceBadgeLabel(selectedDownloadedEntry.source)}
+                      {selectedDownloadedGroup.author ? ` • ${selectedDownloadedGroup.author}` : ''}
+                      {` • ${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? '' : 's'}`}
+                    </div>
+                  </div>
+                </div>
+                <p className="workspace-inspector-card__summary">{selectedDownloadedEntry.summary || 'No summary provided.'}</p>
+                <div className="workspace-inspector-card__metrics">
+                  <div><span>Installed</span><strong>{selectedDownloadedGroup.installedIn.length}</strong></div>
+                  <div><span>Versions</span><strong>{selectedDownloadedGroupEntries.length}</strong></div>
+                  <div><span>Selected version</span><strong>{formatVersionTag(getEntryVersionLabel(selectedDownloadedEntry))}</strong></div>
+                  <div><span>Latest</span><strong>{selectedDownloadedGroup.remoteVersion ? formatVersionTag(selectedDownloadedGroup.remoteVersion) : 'unknown'}</strong></div>
+                </div>
+                <div className="workspace-inspector-card__field">
+                  <label htmlFor={`mod-library-version-${selectedDownloadedGroup.key}`}>Available versions</label>
+                  <select
+                    id={`mod-library-version-${selectedDownloadedGroup.key}`}
+                    value={selectedDownloadedEntry.storageId}
+                    onChange={(event) => {
+                      const nextStorageId = event.target.value;
+                      setSelectedStorageByGroup((prev) => ({ ...prev, [selectedDownloadedGroup.key]: nextStorageId }));
+                    }}
+                    disabled={selectedDownloadedGroupEntries.length < 2}
+                  >
+                    {selectedDownloadedGroupEntries.map((entry) => (
+                      <option key={entry.storageId} value={entry.storageId}>
+                        {`${formatVersionTag(getEntryVersionLabel(entry))} • ${(entry.availableRuntimes?.length ? entry.availableRuntimes.join('/') : 'Runtime?')}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="workspace-inspector-card__actions">
+                  <button className="btn btn-primary" onClick={() => void promptInstallTargets(selectedDownloadedEntry, `Install ${selectedDownloadedEntry.displayName}`, selectedDownloadedGroup.installedIn.length > 0)}>
+                    {selectedDownloadedGroup.installedIn.length > 0 ? 'Install to more…' : 'Install…'}
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => void handleSelectVersion(selectedDownloadedGroup, selectedDownloadedEntry.storageId)}
+                    disabled={selectedDownloadedGroup.installedIn.length === 0 || selectedDownloadedGroupEntries.length < 2 || activatingGroup === selectedDownloadedGroup.key}
+                  >
+                    {activatingGroup === selectedDownloadedGroup.key ? 'Activating…' : 'Activate selected version'}
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => void handleUpdateAndActivateGroup(selectedDownloadedGroup)} disabled={!isGroupUpdateAvailable(selectedDownloadedGroup)}>Update and activate</button>
+                  <button className="btn btn-danger" onClick={() => void handleDeleteDownloadedGroup(selectedDownloadedGroup)}>Delete downloaded files</button>
+                </div>
+              </div>
+            )}
+
+            {selectedThunderstorePackage && (
+              <div className="workspace-inspector-card">
+                {(() => {
+                  const representativePackage = selectedThunderstorePackage.packagesByRuntime.IL2CPP || selectedThunderstorePackage.packagesByRuntime.Mono;
+                  const latestVersion = representativePackage?.versions?.[0];
+                  const runtimeLabels = (['IL2CPP', 'Mono'] as const).filter((runtime) => !!selectedThunderstorePackage.packagesByRuntime[runtime]);
+                  const categories = representativePackage?.categories || [];
+                  return (
+                    <>
+                      <div className="workspace-inspector-card__header">
+                        {renderCardIcon(
+                          selectedThunderstorePackage.name,
+                          undefined,
+                          latestVersion?.icon || representativePackage?.icon || representativePackage?.icon_url,
+                          'rail',
+                        )}
+                        <div>
+                          <h3>{selectedThunderstorePackage.name}</h3>
+                          <div className="workspace-inspector-card__subtle">
+                            Thunderstore • {selectedThunderstorePackage.owner}
+                            {downloadedGroupForSelectedThunderstore ? ` • ${downloadedGroupForSelectedThunderstore.installedIn.length} env${downloadedGroupForSelectedThunderstore.installedIn.length === 1 ? '' : 's'}` : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <p className="workspace-inspector-card__summary">{latestVersion?.description || 'No description provided for this package.'}</p>
+                      <div className="workspace-inspector-card__metrics">
+                        <div><span>Latest</span><strong>{formatVersionTag(latestVersion?.version_number)}</strong></div>
+                        <div><span>Versions</span><strong>{representativePackage?.versions?.length || 0}</strong></div>
+                        <div><span>Downloads</span><strong>{formatCompactNumber(latestVersion?.downloads)}</strong></div>
+                        <div><span>Updated</span><strong>{formatInspectorDate(representativePackage?.date_updated || latestVersion?.date_updated)}</strong></div>
+                      </div>
+                      <div className="workspace-inspector-card__field">
+                        <label>Runtime support</label>
+                        <div className="workspace-inspector-card__tags">
+                          {runtimeLabels.map((runtime) => <span key={`${selectedThunderstorePackage.key}-${runtime}`} className="workspace-pill">{runtime}</span>)}
+                          {runtimeLabels.length === 0 && <span className="workspace-pill">Unknown runtime</span>}
+                        </div>
+                      </div>
+                      {categories.length > 0 && (
+                        <div className="workspace-inspector-card__field">
+                          <label>Categories</label>
+                          <div className="workspace-inspector-card__tags">
+                            {categories.slice(0, 6).map((category) => (
+                              <span key={`${selectedThunderstorePackage.key}-${category}`} className="workspace-pill">{category}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="workspace-inspector-card__field">
+                        <label>Status</label>
+                        <div className="workspace-inspector-card__tags">
+                          <span className="workspace-pill workspace-pill--source">Thunderstore</span>
+                          {downloadedGroupForSelectedThunderstore && <span className="workspace-pill workspace-pill--success">Downloaded</span>}
+                          {downloadedGroupForSelectedThunderstore && isGroupUpdateAvailable(downloadedGroupForSelectedThunderstore) && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                          {representativePackage?.is_pinned && <span className="workspace-pill">Pinned</span>}
+                          {representativePackage?.is_deprecated && <span className="workspace-pill workspace-pill--danger">Deprecated</span>}
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+                <div className="workspace-inspector-card__actions">
+                  {!downloadedGroupForSelectedThunderstore && <button className="btn btn-primary" onClick={() => void handleDownloadThunderstore(selectedThunderstorePackage)}>Download</button>}
+                  {downloadedGroupForSelectedThunderstore && selectedThunderstoreDownloadedEntry && (
+                    <button className="btn btn-primary" onClick={() => void promptInstallTargets(selectedThunderstoreDownloadedEntry, `Install ${selectedThunderstoreDownloadedEntry.displayName}`, downloadedGroupForSelectedThunderstore.installedIn.length > 0)}>
+                      {downloadedGroupForSelectedThunderstore.installedIn.length > 0 ? 'Install to more…' : 'Install…'}
+                    </button>
+                  )}
+                  {safeExternalUrl(selectedThunderstorePackage.packageUrl) && <a className="btn btn-secondary" href={safeExternalUrl(selectedThunderstorePackage.packageUrl)!} target="_blank" rel="noopener noreferrer">Open source page</a>}
+                </div>
+              </div>
+            )}
+
+            {selectedNexusResult && (
+              <div className="workspace-inspector-card">
+                <div className="workspace-inspector-card__header">
+                  {renderCardIcon(selectedNexusResult.name, undefined, selectedNexusResult.picture_url, 'rail')}
+                  <div>
+                    <h3>{selectedNexusResult.name}</h3>
+                    <div className="workspace-inspector-card__subtle">
+                      Nexus Mods • {selectedNexusResult.author}
+                      {downloadedGroupForSelectedNexus ? ` • ${downloadedGroupForSelectedNexus.installedIn.length} env${downloadedGroupForSelectedNexus.installedIn.length === 1 ? '' : 's'}` : ''}
+                    </div>
+                  </div>
+                </div>
+                <p className="workspace-inspector-card__summary">{selectedNexusResult.description || selectedNexusResult.summary || 'No description provided for this mod.'}</p>
+                <div className="workspace-inspector-card__metrics">
+                  <div><span>Latest</span><strong>{formatVersionTag(selectedNexusResult.version)}</strong></div>
+                  <div><span>Endorsements</span><strong>{formatCompactNumber(selectedNexusResult.endorsement_count)}</strong></div>
+                  <div><span>Downloads</span><strong>{formatCompactNumber(selectedNexusResult.mod_downloads || selectedNexusResult.unique_downloads)}</strong></div>
+                  <div><span>Updated</span><strong>{formatInspectorDate(selectedNexusResult.updated_time || selectedNexusResult.uploaded_time)}</strong></div>
+                </div>
+                <div className="workspace-inspector-card__field">
+                  <label>Status</label>
+                  <div className="workspace-inspector-card__tags">
+                    <span className="workspace-pill workspace-pill--source">Nexus Mods</span>
+                    {downloadedGroupForSelectedNexus && <span className="workspace-pill workspace-pill--success">Downloaded</span>}
+                    {downloadedGroupForSelectedNexus && isGroupUpdateAvailable(downloadedGroupForSelectedNexus) && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                    {selectedNexusResult.contains_adult_content && <span className="workspace-pill workspace-pill--danger">Adult content</span>}
+                    {selectedNexusResult.status && <span className="workspace-pill">{selectedNexusResult.status}</span>}
+                  </div>
+                </div>
+                <div className="workspace-inspector-card__actions">
+                  {!downloadedGroupForSelectedNexus && <button className="btn btn-primary" onClick={() => void handleDownloadNexusMod(selectedNexusResult.mod_id)}>Download</button>}
+                  {downloadedGroupForSelectedNexus && selectedNexusDownloadedEntry && (
+                    <button className="btn btn-primary" onClick={() => void promptInstallTargets(selectedNexusDownloadedEntry, `Install ${selectedNexusDownloadedEntry.displayName}`, downloadedGroupForSelectedNexus.installedIn.length > 0)}>
+                      {downloadedGroupForSelectedNexus.installedIn.length > 0 ? 'Install to more…' : 'Install…'}
+                    </button>
+                  )}
+                  <a className="btn btn-secondary" href={`https://www.nexusmods.com/schedule1/mods/${selectedNexusResult.mod_id}`} target="_blank" rel="noopener noreferrer">Open source page</a>
+                </div>
+              </div>
+            )}
+          </aside>
+        </div>
+      </div>
+
+      {contextMenu && (
+        <AnchoredContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
       )}
     </>
   );
