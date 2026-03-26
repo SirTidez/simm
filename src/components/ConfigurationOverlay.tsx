@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent as ReactWheelEvent } from 'react';
 
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
@@ -6,7 +6,6 @@ import type {
   ConfigDocument,
   ConfigEditOperation,
   ConfigFileSummary,
-  ConfigGroup,
   ConfigSection,
   Environment,
 } from '../types';
@@ -19,6 +18,7 @@ interface Props {
 }
 
 type EditorMode = 'structured' | 'raw';
+const ALL_SECTIONS_TAB = '__all__';
 
 interface EditableEntry {
   id: string;
@@ -228,13 +228,15 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
   const [editorMode, setEditorMode] = useState<EditorMode>('structured');
   const [fileFilter, setFileFilter] = useState('');
   const [sectionFilter, setSectionFilter] = useState('');
-  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+  const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const selectedFilePathRef = useRef<string | null>(null);
+  const sectionTabsRef = useRef<HTMLDivElement | null>(null);
+  const [sectionTabOverflow, setSectionTabOverflow] = useState({ left: false, right: false });
 
   const activeDocument = selectedFilePath ? documentCache[selectedFilePath] ?? null : null;
   const activeDraft = selectedFilePath ? drafts[selectedFilePath] ?? null : null;
@@ -252,7 +254,7 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     setEditorMode('structured');
     setFileFilter('');
     setSectionFilter('');
-    setActiveGroupId(null);
+    setActiveSectionId(null);
     setError(null);
   }, [environmentId, isOpen]);
 
@@ -359,30 +361,84 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     return Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [catalogGroups.other]);
 
+  const sectionTabs = useMemo(() => activeDraft?.sections ?? [], [activeDraft]);
   const visibleSections = useMemo(() => {
     if (!activeDraft) return [];
 
     const query = sectionFilter.trim().toLowerCase();
-    const activeGroup = activeDocument?.groups.find((group) => group.id === activeGroupId);
-    const allowedSectionNames = activeGroup ? new Set(activeGroup.sectionNames) : null;
+    const sourceSections =
+      activeSectionId && activeSectionId !== ALL_SECTIONS_TAB
+        ? activeDraft.sections.filter((section) => section.id === activeSectionId)
+        : activeDraft.sections;
 
-    return activeDraft.sections.filter((section) => {
-      const allowedByGroup = !allowedSectionNames || allowedSectionNames.has(section.originalName || section.name);
-      if (!allowedByGroup) return false;
-      if (!query) return true;
+    return sourceSections
+      .map((section) => {
+        if (!query) return section;
 
-      return (
-        section.name.toLowerCase().includes(query) ||
-        section.entries.some((entry) =>
+        const sectionMatches = section.name.toLowerCase().includes(query);
+        const entries = section.entries.filter((entry) =>
           entry.key.toLowerCase().includes(query) ||
           entry.value.toLowerCase().includes(query) ||
           entry.comment.toLowerCase().includes(query)
-        )
-      );
-    });
-  }, [activeDocument?.groups, activeDraft, activeGroupId, sectionFilter]);
+        );
+
+        if (sectionMatches && entries.length === 0) {
+          return section;
+        }
+
+        if (entries.length === 0) {
+          return null;
+        }
+
+        return { ...section, entries };
+      })
+      .filter((section): section is EditableSection => Boolean(section));
+  }, [activeDraft, activeSectionId, sectionFilter]);
 
   const dirtyCount = useMemo(() => Object.values(drafts).filter((draft) => draft.dirty).length, [drafts]);
+  const visibleEntryCount = useMemo(
+    () => visibleSections.reduce((total, section) => total + section.entries.length, 0),
+    [visibleSections]
+  );
+  const structuredAvailable = activeDocument?.summary.supportsStructuredEdit ?? false;
+
+  const updateSectionTabOverflow = useCallback(() => {
+    const element = sectionTabsRef.current;
+    if (!element) {
+      setSectionTabOverflow({ left: false, right: false });
+      return;
+    }
+
+    const { scrollLeft, scrollWidth, clientWidth } = element;
+    const maxScrollLeft = Math.max(0, scrollWidth - clientWidth);
+    setSectionTabOverflow({
+      left: scrollLeft > 2,
+      right: scrollLeft < maxScrollLeft - 2,
+    });
+  }, []);
+
+  const scrollSectionTabs = useCallback((delta: number) => {
+    const element = sectionTabsRef.current;
+    if (!element) return;
+    element.scrollBy({ left: delta, behavior: 'smooth' });
+  }, []);
+
+  const handleSectionTabsWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    const element = sectionTabsRef.current;
+    if (!element) return;
+
+    const horizontalDelta = Math.abs(event.deltaX);
+    const verticalDelta = Math.abs(event.deltaY);
+    if (verticalDelta === 0 && horizontalDelta === 0) return;
+
+    if (horizontalDelta > 0 || verticalDelta > 0) {
+      event.preventDefault();
+      element.scrollBy({
+        left: horizontalDelta > verticalDelta ? event.deltaX : event.deltaY,
+        behavior: 'auto',
+      });
+    }
+  }, []);
 
   const updateActiveDraft = (updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
     if (!selectedFilePath) return;
@@ -405,25 +461,76 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     setPendingConfirm({ title, message, onConfirm: onConfirmAction });
   };
 
-  const handleSelectFile = (filePath: string) => {
-    if (filePath === selectedFilePath) return;
+  useEffect(() => {
+    if (!activeDraft) {
+      setActiveSectionId(null);
+      return;
+    }
+
+    if (activeDraft.sections.length === 0) {
+      setActiveSectionId(null);
+      return;
+    }
+
+    if (!activeSectionId || (activeSectionId !== ALL_SECTIONS_TAB && !activeDraft.sections.some((section) => section.id === activeSectionId))) {
+      setActiveSectionId(ALL_SECTIONS_TAB);
+    }
+  }, [activeDraft, activeSectionId, selectedFilePath]);
+
+  useEffect(() => {
+    const element = sectionTabsRef.current;
+    if (!element || editorMode !== 'structured') {
+      setSectionTabOverflow({ left: false, right: false });
+      return;
+    }
+
+    const syncOverflow = () => updateSectionTabOverflow();
+    syncOverflow();
+    element.addEventListener('scroll', syncOverflow, { passive: true });
+    window.addEventListener('resize', syncOverflow);
+
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(syncOverflow)
+      : null;
+    resizeObserver?.observe(element);
+
+    return () => {
+      element.removeEventListener('scroll', syncOverflow);
+      window.removeEventListener('resize', syncOverflow);
+      resizeObserver?.disconnect();
+    };
+  }, [editorMode, sectionTabs, updateSectionTabOverflow]);
+
+  const applyFileSelection = (file: ConfigFileSummary, preferredMode: EditorMode = 'structured') => {
+    const nextMode = file.supportsStructuredEdit && preferredMode === 'structured' ? 'structured' : 'raw';
+    setSelectedFilePath(file.path);
+    setEditorMode(nextMode);
+    setSectionFilter('');
+    setActiveSectionId(null);
+  };
+
+  const handleSelectFile = (file: ConfigFileSummary, preferredMode: EditorMode = 'structured') => {
+    if (file.path === selectedFilePath) {
+      if ((preferredMode === 'raw' || !file.supportsStructuredEdit) && editorMode !== 'raw') {
+        handleModeChange('raw');
+      } else if (preferredMode === 'structured' && file.supportsStructuredEdit && editorMode !== 'structured') {
+        handleModeChange('structured');
+      }
+      return;
+    }
 
     if (activeDraft?.dirty) {
       requestConfirm(
         'Switch File?',
         'This file has unsaved changes. Switching files will keep the draft, but it will not be saved until you return and apply it.',
         () => {
-          setSelectedFilePath(filePath);
-          setSectionFilter('');
-          setActiveGroupId(null);
+          applyFileSelection(file, preferredMode);
         }
       );
       return;
     }
 
-    setSelectedFilePath(filePath);
-    setSectionFilter('');
-    setActiveGroupId(null);
+    applyFileSelection(file, preferredMode);
   };
 
   const handleCloseRequest = () => {
@@ -709,36 +816,48 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                         const draft = drafts[file.path];
                         const selected = file.path === selectedFilePath;
                         return (
-                          <button
-                            key={file.path}
-                            type="button"
-                            className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
-                            onClick={() => handleSelectFile(file.path)}
-                          >
-                            <div className="config-explorer__file-head">
-                              <strong>{file.name}</strong>
-                              {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
-                            </div>
-                            <div className="config-explorer__file-meta">
-                              <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
-                              <span>{formatSettingCount(file.entryCount)}</span>
-                            </div>
-                            <div className="config-explorer__file-badges">
-                              <span className="settings-chip">
-                                {file.fileType === 'LoaderConfig'
-                                  ? 'Loader'
-                                  : file.fileType === 'MelonPreferences'
-                                    ? 'Melon'
-                                    : file.fileType === 'Json'
-                                      ? 'JSON'
-                                      : 'CFG'}
-                              </span>
-                              <span className="settings-chip settings-chip--muted">{file.supportsStructuredEdit ? 'Structured' : 'Raw only'}</span>
-                            </div>
-                            <div className="config-explorer__file-path" title={file.relativePath}>
-                              {file.relativePath}
-                            </div>
-                          </button>
+                          <div key={file.path} className="config-explorer__file-stack">
+                            <button
+                              type="button"
+                              className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
+                              onClick={() => handleSelectFile(file)}
+                            >
+                              <div className="config-explorer__file-head">
+                                <strong>{file.name}</strong>
+                                {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
+                              </div>
+                              <div className="config-explorer__file-meta">
+                                <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
+                                <span>{formatSettingCount(file.entryCount)}</span>
+                              </div>
+                              <div className="config-explorer__file-badges">
+                                <span className="settings-chip">
+                                  {file.fileType === 'LoaderConfig'
+                                    ? 'Loader'
+                                    : file.fileType === 'MelonPreferences'
+                                      ? 'Melon'
+                                      : file.fileType === 'Json'
+                                        ? 'JSON'
+                                        : 'CFG'}
+                                </span>
+                                <span className="settings-chip settings-chip--muted">{file.supportsStructuredEdit ? 'Structured' : 'Raw only'}</span>
+                              </div>
+                              <div className="config-explorer__file-path" title={file.relativePath}>
+                                {file.relativePath}
+                              </div>
+                            </button>
+                            {selected && (
+                              <button
+                                type="button"
+                                className={`config-explorer__subentry ${editorMode === 'raw' ? 'config-explorer__subentry--active' : ''}`}
+                                onClick={() => handleSelectFile(file, 'raw')}
+                              >
+                                <i className="fas fa-code"></i>
+                                <span>Raw Editor</span>
+                                {!file.supportsStructuredEdit && <span className="settings-chip settings-chip--muted">Default</span>}
+                              </button>
+                            )}
+                          </div>
                         );
                       })}
                     </section>
@@ -755,28 +874,40 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                           const draft = drafts[file.path];
                           const selected = file.path === selectedFilePath;
                           return (
-                            <button
-                              key={file.path}
-                              type="button"
-                              className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
-                              onClick={() => handleSelectFile(file.path)}
-                            >
-                              <div className="config-explorer__file-head">
-                                <strong>{file.name}</strong>
-                                {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
-                              </div>
-                              <div className="config-explorer__file-meta">
-                                <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
-                                <span>{formatSettingCount(file.entryCount)}</span>
-                              </div>
-                              <div className="config-explorer__file-badges">
-                                <span className="settings-chip">{file.fileType === 'Json' ? 'JSON' : 'CFG'}</span>
-                                <span className="settings-chip settings-chip--muted">{file.supportsStructuredEdit ? 'Structured' : 'Raw only'}</span>
-                              </div>
-                              <div className="config-explorer__file-path" title={file.relativePath}>
-                                {file.relativePath}
-                              </div>
-                            </button>
+                            <div key={file.path} className="config-explorer__file-stack">
+                              <button
+                                type="button"
+                                className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
+                                onClick={() => handleSelectFile(file)}
+                              >
+                                <div className="config-explorer__file-head">
+                                  <strong>{file.name}</strong>
+                                  {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
+                                </div>
+                                <div className="config-explorer__file-meta">
+                                  <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
+                                  <span>{formatSettingCount(file.entryCount)}</span>
+                                </div>
+                                <div className="config-explorer__file-badges">
+                                  <span className="settings-chip">{file.fileType === 'Json' ? 'JSON' : 'CFG'}</span>
+                                  <span className="settings-chip settings-chip--muted">{file.supportsStructuredEdit ? 'Structured' : 'Raw only'}</span>
+                                </div>
+                                <div className="config-explorer__file-path" title={file.relativePath}>
+                                  {file.relativePath}
+                                </div>
+                              </button>
+                              {selected && (
+                                <button
+                                  type="button"
+                                  className={`config-explorer__subentry ${editorMode === 'raw' ? 'config-explorer__subentry--active' : ''}`}
+                                  onClick={() => handleSelectFile(file, 'raw')}
+                                >
+                                  <i className="fas fa-code"></i>
+                                  <span>Raw Editor</span>
+                                  {!file.supportsStructuredEdit && <span className="settings-chip settings-chip--muted">Default</span>}
+                                </button>
+                              )}
+                            </div>
                           );
                         })}
                       </div>
@@ -796,7 +927,7 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
           </div>
         </aside>
 
-        <section className="config-workspace">
+        <section className={`config-workspace ${activeDocument?.parseWarnings.length ? 'config-workspace--with-warning' : ''}`}>
           {!selectedFilePath ? (
             <div className="config-editor__empty config-editor__empty--workspace">
               <i className="fas fa-sliders"></i>
@@ -825,8 +956,7 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                               ? 'JSON Config'
                               : 'Other CFG'}
                       </span>
-                      <span className="settings-chip settings-chip--muted">{activeDocument.summary.supportsStructuredEdit ? 'Structured Ready' : 'Raw Fallback'}</span>
-                      {activeDraft.dirty && <span className="settings-chip settings-chip--warn">Unsaved Draft</span>}
+                      <span className="settings-chip settings-chip--muted">{structuredAvailable ? 'Structured Ready' : 'Structured Disabled'}</span>
                     </div>
                   </div>
                   <div className="config-workspace__meta-row">
@@ -862,43 +992,79 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                 </div>
               </header>
 
-              <div className="config-workspace__toolbar">
-                <div className="config-workspace__toolbar-main">
-                  <div className="config-editor__mode-toggle">
-                    <button
-                      type="button"
-                      className={`config-editor__mode-button ${editorMode === 'structured' ? 'config-editor__mode-button--active' : ''}`}
-                      disabled={!activeDocument.summary.supportsStructuredEdit}
-                      onClick={() => handleModeChange('structured')}
-                    >
-                      Structured
-                    </button>
-                    <button
-                      type="button"
-                      className={`config-editor__mode-button config-editor__mode-button--fallback ${editorMode === 'raw' ? 'config-editor__mode-button--active' : ''}`}
-                      onClick={() => handleModeChange('raw')}
-                    >
-                      Raw
-                    </button>
+              {editorMode === 'structured' ? (
+                <div className="config-workspace__toolbar">
+                  <div className="config-workspace__toolbar-main">
+                    <div className={`config-workspace__section-tabs-shell ${sectionTabOverflow.left ? 'config-workspace__section-tabs-shell--left' : ''} ${sectionTabOverflow.right ? 'config-workspace__section-tabs-shell--right' : ''}`}>
+                      {sectionTabOverflow.left && (
+                        <button
+                          type="button"
+                          className="config-workspace__section-tabs-shift config-workspace__section-tabs-shift--left"
+                          aria-label="Show earlier sections"
+                          onClick={() => scrollSectionTabs(-240)}
+                        >
+                          <i className="fas fa-chevron-left"></i>
+                        </button>
+                      )}
+                      <div
+                        ref={sectionTabsRef}
+                        className="config-workspace__section-tabs"
+                        onWheel={handleSectionTabsWheel}
+                      >
+                        {sectionTabs.length > 1 && (
+                          <button
+                            type="button"
+                            className={`config-workspace__section-tab ${activeSectionId === ALL_SECTIONS_TAB ? 'config-workspace__section-tab--active' : ''}`}
+                            onClick={() => setActiveSectionId(ALL_SECTIONS_TAB)}
+                          >
+                            All Sections
+                          </button>
+                        )}
+                        {sectionTabs.map((section) => (
+                          <button
+                            key={section.id}
+                            type="button"
+                            className={`config-workspace__section-tab ${activeSectionId === section.id ? 'config-workspace__section-tab--active' : ''}`}
+                            onClick={() => setActiveSectionId(section.id)}
+                          >
+                            {section.name}
+                          </button>
+                        ))}
+                      </div>
+                      {sectionTabOverflow.right && (
+                        <button
+                          type="button"
+                          className="config-workspace__section-tabs-shift config-workspace__section-tabs-shift--right"
+                          aria-label="Show later sections"
+                          onClick={() => scrollSectionTabs(240)}
+                        >
+                          <i className="fas fa-chevron-right"></i>
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="config-editor__mode-note">
-                    {activeDocument.summary.supportsStructuredEdit
-                      ? 'Raw is available when exact formatting matters.'
-                      : 'This file opens in raw mode because structured editing is not available.'}
-                  </div>
-                </div>
 
-                <div className="config-editor__search">
-                  <i className="fas fa-search"></i>
-                  <input
-                    type="text"
-                    value={sectionFilter}
-                    onChange={(e) => setSectionFilter(e.target.value)}
-                    placeholder={editorMode === 'structured' ? 'Search sections or keys' : 'Search draft context'}
-                    disabled={editorMode !== 'structured'}
-                  />
+                  <div className="config-editor__search config-editor__search--workspace">
+                    <i className="fas fa-search"></i>
+                    <input
+                      type="text"
+                      value={sectionFilter}
+                      onChange={(e) => setSectionFilter(e.target.value)}
+                      placeholder="Filter keys or comments"
+                    />
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="config-workspace__toolbar config-workspace__toolbar--raw">
+                  <div className="config-workspace__toolbar-main">
+                    <div className="config-editor__mode-note">
+                      {structuredAvailable
+                        ? 'Raw editing stays available for exact formatting and manual edits.'
+                        : 'This file stays in raw mode because structured editing is not available.'}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {activeDocument.parseWarnings.length > 0 && (
                 <div className="config-editor__warning">
@@ -913,128 +1079,120 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                 </div>
               )}
 
-              <div className="config-workspace__body">
+              <div className={`config-workspace__body ${editorMode === 'raw' ? 'config-workspace__body--raw' : 'config-workspace__body--structured'}`}>
                 {editorMode === 'structured' ? (
                   <div className="config-structured">
-                    {activeDocument.groups.length > 0 && (
-                      <div className="config-structured__groups">
-                        <button
-                          type="button"
-                          className={`workspace-collection__rail-button ${activeGroupId === null ? 'workspace-collection__rail-button--active' : ''}`}
-                          onClick={() => setActiveGroupId(null)}
-                        >
-                          All Sections
-                        </button>
-                        {activeDocument.groups.map((group: ConfigGroup) => (
-                          <button
-                            key={group.id}
-                            type="button"
-                            className={`workspace-collection__rail-button ${activeGroupId === group.id ? 'workspace-collection__rail-button--active' : ''}`}
-                            onClick={() => setActiveGroupId(group.id)}
-                          >
-                            {group.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
                     <div className="config-structured__sheet">
                       <div className="config-structured__header">
                         <div>
                           <span className="settings-eyebrow">Structured Editor</span>
-                          <h4>Settings in this file</h4>
+                          <h4>
+                            {activeSectionId && activeSectionId !== ALL_SECTIONS_TAB
+                              ? sectionTabs.find((section) => section.id === activeSectionId)?.name || 'Settings'
+                              : 'Settings in this file'}
+                          </h4>
+                          <p>
+                            {visibleSections.length} section{visibleSections.length === 1 ? '' : 's'} · {visibleEntryCount}{' '}
+                            setting{visibleEntryCount === 1 ? '' : 's'}
+                          </p>
                         </div>
                       </div>
 
                       <div className="config-structured__sections">
-                      {visibleSections.length === 0 ? (
-                        <div className="config-editor__empty config-editor__empty--workspace">
-                          <i className="fas fa-sliders"></i>
-                          <strong>No matching sections</strong>
-                          <p>Adjust the section search or clear the active group filter to widen the result set.</p>
-                        </div>
-                      ) : (
-                        visibleSections.map((section) => (
-                          <article key={section.id} className="config-section-card">
-                            <div className="config-section-card__header">
-                              <div className="config-section-card__title">
-                                <h4>{section.name}</h4>
-                                <p>{formatSettingCount(section.entries.length)}</p>
-                              </div>
-                              <button type="button" className="btn btn-secondary btn-small" onClick={() => handleDeleteSection(section.id)}>
-                                <i className="fas fa-trash"></i>
-                                Remove Section
-                              </button>
-                            </div>
-
-                            <div className="config-section-card__entries">
-                              {section.entries.map((entry) => (
-                                <div key={entry.id} className="config-entry-row">
-                                  <div className="config-entry-row__key">
-                                    {entry.isNew ? (
-                                      <label htmlFor={`config-key-${section.id}-${entry.id}`}>Key</label>
-                                    ) : (
-                                      <span>Key</span>
-                                    )}
-                                    {entry.isNew ? (
-                                      <input
-                                        id={`config-key-${section.id}-${entry.id}`}
-                                        type="text"
-                                        value={entry.key}
-                                        onChange={(e) => handleEntryChange(section.id, entry.id, 'key', e.target.value)}
-                                        placeholder="settingName"
-                                      />
-                                    ) : (
-                                      <div className="config-entry-row__key-label">
-                                        {entry.key}
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  <div className="config-entry-row__value">
-                                    <label htmlFor={`config-value-${section.id}-${entry.id}`}>Value</label>
-                                    <input
-                                      id={`config-value-${section.id}-${entry.id}`}
-                                      type="text"
-                                      value={entry.value}
-                                      onChange={(e) => handleEntryChange(section.id, entry.id, 'value', e.target.value)}
-                                    />
-                                  </div>
-
-                                  <div className="config-entry-row__comment">
-                                    <label htmlFor={`config-comment-${section.id}-${entry.id}`}>Comment</label>
-                                    <textarea
-                                      id={`config-comment-${section.id}-${entry.id}`}
-                                      value={entry.comment}
-                                      onChange={(e) => handleEntryChange(section.id, entry.id, 'comment', e.target.value)}
-                                      rows={2}
-                                      placeholder="Optional inline comment"
-                                    />
-                                  </div>
-
-                                  <div className="config-entry-row__actions">
-                                    <button
-                                      type="button"
-                                      className="btn btn-secondary btn-small"
-                                      aria-label={`Delete ${entry.key || 'entry'}`}
-                                      onClick={() => handleDeleteEntry(section.id, entry.id)}
-                                    >
-                                      <i className="fas fa-trash"></i>
-                                    </button>
-                                  </div>
+                        {visibleSections.length === 0 ? (
+                          <div className="config-editor__empty config-editor__empty--workspace">
+                            <i className="fas fa-sliders"></i>
+                            <strong>No matching settings</strong>
+                            <p>Adjust the search or switch sections to widen the result set.</p>
+                          </div>
+                        ) : (
+                          visibleSections.map((section) => (
+                            <article key={section.id} className="config-section-card">
+                              <div className="config-section-card__header">
+                                <div className="config-section-card__title">
+                                  <h4>{section.name}</h4>
+                                  <p>{formatSettingCount(section.entries.length)}</p>
                                 </div>
-                              ))}
-                            </div>
+                                <div className="config-section-card__header-actions">
+                                  <button type="button" className="btn btn-secondary btn-small" onClick={() => handleAddEntry(section.id)}>
+                                    <i className="fas fa-plus"></i>
+                                    Add Entry
+                                  </button>
+                                  <button type="button" className="btn btn-secondary btn-small" onClick={() => handleDeleteSection(section.id)}>
+                                    <i className="fas fa-trash"></i>
+                                    Remove Section
+                                  </button>
+                                </div>
+                              </div>
 
-                            <div className="config-section-card__footer">
-                              <button type="button" className="btn btn-secondary" onClick={() => handleAddEntry(section.id)}>
-                                <i className="fas fa-plus"></i>
-                                Add Entry
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      )}
+                              <div className="config-entry-table">
+                                <div className="config-entry-table__head">
+                                  <span>Key</span>
+                                  <span>Value</span>
+                                  <span>Comment</span>
+                                  <span>Actions</span>
+                                </div>
+
+                                <div className="config-section-card__entries">
+                                  {section.entries.map((entry) => (
+                                    <div key={entry.id} className="config-entry-row">
+                                      <div className="config-entry-row__key">
+                                        {entry.isNew ? (
+                                          <>
+                                            <label htmlFor={`config-key-${section.id}-${entry.id}`}>Key</label>
+                                            <input
+                                              id={`config-key-${section.id}-${entry.id}`}
+                                              type="text"
+                                              value={entry.key}
+                                              onChange={(e) => handleEntryChange(section.id, entry.id, 'key', e.target.value)}
+                                              placeholder="settingName"
+                                            />
+                                          </>
+                                        ) : (
+                                          <div className="config-entry-row__key-label" title={entry.key}>
+                                            {entry.key}
+                                          </div>
+                                        )}
+                                      </div>
+
+                                      <div className="config-entry-row__value">
+                                        <input
+                                          id={`config-value-${section.id}-${entry.id}`}
+                                          type="text"
+                                          aria-label={`Value for ${entry.key || 'new entry'}`}
+                                          value={entry.value}
+                                          onChange={(e) => handleEntryChange(section.id, entry.id, 'value', e.target.value)}
+                                        />
+                                      </div>
+
+                                      <div className="config-entry-row__comment">
+                                        <textarea
+                                          id={`config-comment-${section.id}-${entry.id}`}
+                                          aria-label={`Comment for ${entry.key || 'new entry'}`}
+                                          value={entry.comment}
+                                          onChange={(e) => handleEntryChange(section.id, entry.id, 'comment', e.target.value)}
+                                          rows={2}
+                                          placeholder="Optional inline comment"
+                                        />
+                                      </div>
+
+                                      <div className="config-entry-row__actions">
+                                        <button
+                                          type="button"
+                                          className="btn btn-secondary btn-small"
+                                          aria-label={`Delete ${entry.key || 'entry'}`}
+                                          onClick={() => handleDeleteEntry(section.id, entry.id)}
+                                        >
+                                          <i className="fas fa-trash"></i>
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </article>
+                          ))
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1042,7 +1200,8 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                   <div className="config-raw">
                     <div className="config-raw__header">
                       <span className="settings-eyebrow">Raw Editor</span>
-                      <p>Edit the file directly when you need exact formatting control or when structured edits are limited.</p>
+                      <h4>{activeDocument.summary.name}</h4>
+                      <p>Edit the file directly when exact formatting matters or structured editing is not available.</p>
                     </div>
                     <textarea
                       className="config-raw__textarea"

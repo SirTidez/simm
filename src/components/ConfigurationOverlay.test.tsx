@@ -155,21 +155,21 @@ describe('ConfigurationOverlay', () => {
       />
     );
 
-    expect(await screen.findByText('Loader.cfg')).toBeTruthy();
-    expect(await screen.findByText('Custom.cfg')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Loader\.cfg/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Custom\.cfg/i })).toBeTruthy();
     expect(await screen.findByText('CoolMod')).toBeTruthy();
-    expect(await screen.findByText('ModSettings.json')).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /ModSettings\.json/i })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Custom\.cfg/i }));
 
     expect(await screen.findByText('Raw editing is safer for part of this file.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Structured' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByRole('button', { name: 'Raw' }).className.includes('config-editor__mode-button--active')).toBe(true);
+    expect(screen.getByText('Structured Disabled')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Raw Editor/i })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Loader\.cfg/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Structured' }).className.includes('config-editor__mode-button--active')).toBe(true);
+      expect(screen.getByText('Structured Editor')).toBeTruthy();
     });
   });
 
@@ -239,12 +239,9 @@ describe('ConfigurationOverlay', () => {
       />
     );
 
-    expect(await screen.findByText('Loader.cfg')).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Structured' }).className.includes('config-editor__mode-button--active')).toBe(true);
-    });
+    expect(await screen.findByRole('button', { name: /Loader\.cfg/i })).toBeTruthy();
 
-    const valueInput = await screen.findByDisplayValue('bar');
+    const valueInput = await screen.findByRole('textbox', { name: 'Value for foo' });
     fireEvent.change(valueInput, { target: { value: 'baz' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
