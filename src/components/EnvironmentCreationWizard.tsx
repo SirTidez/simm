@@ -394,25 +394,25 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
                   <div className="wizard-steam-card__list" role="list">
                     {steamInstallations.map((installation) => (
-                      <button
-                        key={installation.path}
-                        type="button"
-                        role="listitem"
-                        className="wizard-steam-install-row"
-                        onClick={() => void handleCreateSteamEnvironment(installation.path)}
-                        disabled={loading}
-                      >
-                        <div className="wizard-steam-install-row__icon">
-                          <i className="fab fa-steam-symbol"></i>
-                        </div>
-                        <div className="wizard-steam-install-row__content">
-                          <strong>Schedule I Steam install</strong>
-                          <span>{installation.path}</span>
-                        </div>
-                        <span className="wizard-inline-action">
-                          {loading ? 'Linking…' : 'Add to SIMM'}
-                        </span>
-                      </button>
+                      <div key={installation.path} role="listitem">
+                        <button
+                          type="button"
+                          className="wizard-steam-install-row"
+                          onClick={() => void handleCreateSteamEnvironment(installation.path)}
+                          disabled={loading}
+                        >
+                          <div className="wizard-steam-install-row__icon">
+                            <i className="fab fa-steam-symbol"></i>
+                          </div>
+                          <div className="wizard-steam-install-row__content">
+                            <strong>Schedule I Steam install</strong>
+                            <span>{installation.path}</span>
+                          </div>
+                          <span className="wizard-inline-action">
+                            {loading ? 'Linking…' : 'Add to SIMM'}
+                          </span>
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </>
@@ -518,41 +518,41 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   const disabled = authRequired || depotRequired;
 
                   return (
-                    <button
-                      key={branch.name}
-                      type="button"
-                      role="listitem"
-                      className={`wizard-branch-card ${disabled ? 'wizard-branch-card--disabled' : ''}`}
-                      onClick={() => {
-                        if (!disabled) handleBranchSelect(branch);
-                      }}
-                      disabled={disabled}
-                      title={
-                        authRequired
-                          ? 'Steam authentication required to select this branch'
-                          : depotRequired
-                            ? 'DepotDownloader is required to download this branch'
-                            : undefined
-                      }
-                    >
-                      <div className="wizard-branch-card__header">
-                        <div>
-                          <h4>{branch.displayName}</h4>
-                          <p>{branch.name}</p>
+                    <div key={branch.name} role="listitem">
+                      <button
+                        type="button"
+                        className={`wizard-branch-card ${disabled ? 'wizard-branch-card--disabled' : ''}`}
+                        onClick={() => {
+                          if (!disabled) handleBranchSelect(branch);
+                        }}
+                        disabled={disabled}
+                        title={
+                          authRequired
+                            ? 'Steam authentication required to select this branch'
+                            : depotRequired
+                              ? 'DepotDownloader is required to download this branch'
+                              : undefined
+                        }
+                      >
+                        <div className="wizard-branch-card__header">
+                          <div>
+                            <h4>{branch.displayName}</h4>
+                            <p>{branch.name}</p>
+                          </div>
+                          <div className="wizard-branch-card__badges">
+                            <span className="settings-chip">{branch.runtime}</span>
+                            {branch.requiresAuth && (
+                              <span className={`auth-badge ${isSteamAuthenticated ? 'auth-badge-ready' : 'auth-badge-required'}`}>
+                                {isSteamAuthenticated ? 'Auth Ready' : 'Auth Required'}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <div className="wizard-branch-card__badges">
-                          <span className="settings-chip">{branch.runtime}</span>
-                          {branch.requiresAuth && (
-                            <span className={`auth-badge ${isSteamAuthenticated ? 'auth-badge-ready' : 'auth-badge-required'}`}>
-                              {isSteamAuthenticated ? 'Auth Ready' : 'Auth Required'}
-                            </span>
-                          )}
+                        <div className="wizard-branch-card__footer">
+                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? 'Install DepotDownloader to unlock downloads.' : 'Continue to environment configuration.'}</span>
                         </div>
-                      </div>
-                      <div className="wizard-branch-card__footer">
-                        <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? 'Install DepotDownloader to unlock downloads.' : 'Continue to environment configuration.'}</span>
-                      </div>
-                    </button>
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -851,15 +851,16 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 ) : (
                   <>
                     {getParentPath(directoryPath) && (
-                      <button
-                        type="button"
-                        role="listitem"
-                        className="wizard-directory-row wizard-directory-row--parent"
-                        onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
-                      >
-                        <i className="fas fa-arrow-up"></i>
-                        <span>Parent Directory</span>
-                      </button>
+                      <div role="listitem">
+                        <button
+                          type="button"
+                          className="wizard-directory-row wizard-directory-row--parent"
+                          onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
+                        >
+                          <i className="fas fa-arrow-up"></i>
+                          <span>Parent Directory</span>
+                        </button>
+                      </div>
                     )}
 
                     {directoryList.length === 0 ? (
@@ -870,16 +871,16 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       </div>
                     ) : (
                       directoryList.map((dir) => (
-                        <button
-                          key={dir.path}
-                          type="button"
-                          role="listitem"
-                          className="wizard-directory-row"
-                          onClick={() => void loadDirectory(dir.path)}
-                        >
-                          <i className="fas fa-folder"></i>
-                          <span>{dir.name}</span>
-                        </button>
+                        <div key={dir.path} role="listitem">
+                          <button
+                            type="button"
+                            className="wizard-directory-row"
+                            onClick={() => void loadDirectory(dir.path)}
+                          >
+                            <i className="fas fa-folder"></i>
+                            <span>{dir.name}</span>
+                          </button>
+                        </div>
                       ))
                     )}
                   </>
