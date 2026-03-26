@@ -70,7 +70,8 @@ pub async fn extract_game_version(
         .await
         .map_err(|e| e.to_string())?;
 
-    let is_steam = env.environment_type == Some(EnvironmentType::Steam) || env.id.starts_with("steam-");
+    let is_steam =
+        env.environment_type == Some(EnvironmentType::Steam) || env.id.starts_with("steam-");
     let (branch, runtime) = if is_steam {
         (
             Some(env.branch.clone()),

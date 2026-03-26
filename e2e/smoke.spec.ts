@@ -1,94 +1,81 @@
 import { expect, test } from '@playwright/test';
 
-test('renders app shell and opens environment wizard', async ({ page }) => {
-  await page.addInitScript(() => {
-    const callbacks = new Map<number, (payload: unknown) => void>();
-    const eventListeners = new Map<string, number[]>();
-    let nextCallbackId = 1;
-    let nextEventId = 1;
+import { connectToTauriApp } from './tauriApp';
 
-    const defaultSettings = {
-      defaultDownloadDir: 'C:/SIMM',
-      maxConcurrentDownloads: 2,
-      platform: 'windows',
-      language: 'english',
-      theme: 'modern-blue',
-      autoCheckUpdates: false,
-      updateCheckInterval: 60,
-      autoInstallMelonLoader: false,
-      logLevel: 'info',
-    };
+test('opens the real Tauri app shell and reaches environment configuration', async () => {
+  const { browser, page } = await connectToTauriApp();
 
-    const commandMap: Record<string, (args?: Record<string, unknown>) => unknown> = {
-      was_simm_directory_just_created: () => false,
-      get_settings: () => defaultSettings,
-      detect_depot_downloader: () => ({ installed: true, path: 'C:/Tools/DepotDownloader' }),
-      get_environments: () => [],
-      get_schedule1_config: () => ({
-        appId: '3164500',
-        name: 'Schedule I',
-        branches: [
-          {
-            name: 'public',
-            displayName: 'Public (IL2CPP)',
-            runtime: 'IL2CPP',
-            requiresAuth: false,
-          },
-        ],
-      }),
-      'plugin:event|listen': (args = {}) => {
-        const event = String(args.event ?? '');
-        const handler = Number(args.handler);
-        const listenerIds = eventListeners.get(event) ?? [];
-        listenerIds.push(handler);
-        eventListeners.set(event, listenerIds);
-        return nextEventId++;
-      },
-      'plugin:event|unlisten': () => null,
-    };
+  try {
+    const shellModLibraryButton = page.getByTitle('Open Mod Library').first();
+    await expect(shellModLibraryButton).toBeVisible();
+    await expect(page.getByRole('button', { name: 'New Game' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Accounts' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Help' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
 
-    (window as unknown as { isTauri: boolean }).isTauri = true;
-    (window as unknown as { __TAURI_INTERNALS__: Record<string, unknown> }).__TAURI_INTERNALS__ = {
-      invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
-        const handler = commandMap[cmd];
-        if (handler) {
-          return handler(args);
-        }
-        return null;
-      },
-      transformCallback: (cb: (payload: unknown) => void) => {
-        const id = nextCallbackId++;
-        callbacks.set(id, cb);
-        return id;
-      },
-      unregisterCallback: (id: number) => {
-        callbacks.delete(id);
-      },
-      runCallback: (id: number, payload: unknown) => {
-        callbacks.get(id)?.(payload);
-      },
-      callbacks,
-      metadata: {
-        currentWindow: { label: 'main' },
-        currentWebview: { windowLabel: 'main', label: 'main' },
-      },
-    };
-    (window as unknown as { __TAURI_EVENT_PLUGIN_INTERNALS__: Record<string, unknown> }).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
-      unregisterListener: () => {},
-    };
-  });
+    const createEnvironmentHeading = page.getByRole('heading', { name: 'Create Environment' });
+    if (!(await createEnvironmentHeading.isVisible().catch(() => false))) {
+      await page.getByRole('button', { name: 'New Game' }).click();
+    }
 
-  await page.goto('/');
+    await expect(createEnvironmentHeading).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Close create environment panel' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Download New Branch' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Import Existing Folder' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Steam install/i }).first()).toBeVisible();
 
-  await expect(page.getByRole('heading', { name: 'Schedule I Mod Manager' })).toBeVisible();
-  await expect(page.getByText('No game installs yet. Create one to get started!')).toBeVisible();
+    await page.getByRole('button', { name: /Browse Branches/i }).click();
+    const enabledBranchCards = page.locator('.wizard-branch-card:not(.wizard-branch-card--disabled)');
+    await expect(enabledBranchCards.first()).toBeVisible();
+    await enabledBranchCards.first().click();
 
-  await page.getByRole('button', { name: 'Add New Environment' }).click();
-  await expect(page.getByRole('heading', { name: 'Create New Game Install' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Configure Environment' })).toBeVisible();
 
-  await page.locator('.branch-card').first().click();
-  await expect(page.getByRole('heading', { name: 'Configure Environment' })).toBeVisible();
+    await page.getByRole('button', { name: 'Close create environment panel' }).click();
+    await expect(createEnvironmentHeading).toBeHidden();
 
-  await page.locator('.modal-header .modal-close').click();
-  await expect(page.getByRole('heading', { name: 'Configure Environment' })).toBeHidden();
+    await shellModLibraryButton.click();
+    await expect(page.locator('.mods-overlay--library')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.mods-overlay--library .workspace-collection__rail-button', { hasText: 'Discover' }).first()).toBeVisible();
+    await expect(page.locator('.mods-overlay--library .workspace-collection__rail-button', { hasText: 'Library' }).first()).toBeVisible();
+    await expect(page.locator('.mods-overlay--library .workspace-collection__rail-button', { hasText: 'Updates' }).first()).toBeVisible();
+
+    await page.locator('.mods-overlay--library .modal-header .btn', { hasText: 'Back' }).first().click();
+    await expect(page.getByRole('button', { name: 'Launch' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Mods' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Config' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Logs' }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Config' }).first().click();
+    await expect(page.locator('.config-editor')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.config-explorer')).toBeVisible();
+    await expect(page.getByPlaceholder('Search config files')).toBeVisible();
+    await page.locator('.config-editor .modal-header .btn', { hasText: 'Back' }).first().click();
+
+    await page.getByRole('button', { name: 'Logs' }).first().click();
+    await expect(page.locator('.logs-panel')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.logs-panel__rail')).toBeVisible();
+    await expect(page.locator('.logs-panel__viewer')).toBeVisible();
+    await expect(page.locator('.logs-panel__inspector')).toBeVisible();
+
+    const logSourceButtons = page.locator('.logs-panel__source-button');
+    if ((await logSourceButtons.count()) > 0) {
+      await logSourceButtons.first().click();
+    }
+
+    const logRows = page.locator('.logs-panel__line');
+    if ((await logRows.count()) > 0) {
+      await logRows.first().click();
+      await expect(page.locator('.logs-panel__inspector .logs-panel__inspector-card').first()).toContainText('Line');
+    }
+
+    await page.locator('.logs-panel .modal-header .btn', { hasText: 'Back' }).first().click();
+
+    await page.getByRole('button', { name: 'Mods' }).first().click();
+    await expect(page.locator('.mods-overlay--environment')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.mods-overlay--environment .workspace-collection__rail-button', { hasText: 'Installed' }).first()).toBeVisible();
+    await expect(page.locator('.mods-overlay--environment .workspace-collection__rail-button', { hasText: 'Updates' }).first()).toBeVisible();
+  } finally {
+    await browser.close();
+  }
 });

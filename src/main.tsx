@@ -2,7 +2,12 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import '@fortawesome/fontawesome-free/css/all.min.css'
 import { App } from './components/App'
+import { interceptConsole } from './utils/logger'
+import { applyBuiltInTheme, readCachedThemeSelection } from './utils/theme'
 import './style.css'
+
+interceptConsole();
+applyBuiltInTheme(readCachedThemeSelection());
 
 // Error boundary for catching render errors
 window.addEventListener('error', (event) => {

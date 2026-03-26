@@ -10,6 +10,12 @@ use std::sync::Arc;
 use tokio::fs;
 use zip::ZipArchive;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 #[derive(Clone)]
 pub struct PluginsService {
     pool: Arc<SqlitePool>,

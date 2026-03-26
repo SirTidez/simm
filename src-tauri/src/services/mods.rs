@@ -20,6 +20,12 @@ use unrar::Archive;
 use uuid::Uuid;
 use zip::ZipArchive;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";

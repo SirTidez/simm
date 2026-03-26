@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
+import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import type { Environment, ModLibraryEntry, NexusMod, NexusModFile } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 
@@ -52,7 +53,11 @@ interface Props {
   onModsChanged?: () => void;
   onModUpdatesChecked?: (count: number) => void;
   onOpenAccounts?: () => void;
+  onOpenModLibrary?: () => void;
+  onOpenConfig?: () => void;
 }
+
+type ModsTab = 'installed' | 'updates';
 
 interface ConfirmDialog {
   title: string;
@@ -241,7 +246,7 @@ function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] 
   return merged;
 }
 
-export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked, onOpenAccounts }: Props) {
+export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked, onOpenAccounts, onOpenModLibrary, onOpenConfig }: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
 
   const [mods, setMods] = useState<ModInfo[]>([]);
@@ -285,7 +290,10 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [updatingAllMods, setUpdatingAllMods] = useState(false);
   const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
+  const [modsTab, setModsTab] = useState<ModsTab>('installed');
+  const [installedSearchTerm, setInstalledSearchTerm] = useState('');
   const [activeModView, setActiveModView] = useState<ModViewState | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
   const suppressWatcherReloadUntilRef = useRef(0);
   const modsReloadTimerRef = useRef<number | null>(null);
   const activeLoadRequestRef = useRef(0);
@@ -504,11 +512,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     setUpdatingAllMods(false);
     setShowSearchInOverlay(false);
     setModListFilter('all');
+    setModsTab('installed');
+    setInstalledSearchTerm('');
     setConfirmDialog(null);
     setPendingRuntimeSelection(null);
     setPendingUpload(null);
     setDownloadedMods([]);
     setActiveModView(null);
+    setContextMenu(null);
   }, [isOpen, environmentId]);
 
   useEffect(() => {
@@ -1592,6 +1603,12 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
     .filter((mod) => {
       const updateAvailable = !!modUpdates.get(mod.fileName)?.updateAvailable;
+      if (modsTab === 'updates' && !updateAvailable) {
+        return false;
+      }
+      if (modsTab === 'updates') {
+        return true;
+      }
       switch (modListFilter) {
         case 'updates':
           return updateAvailable;
@@ -1602,6 +1619,16 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         default:
           return true;
       }
+    })
+    .filter((mod) => {
+      const query = installedSearchTerm.trim().toLowerCase();
+      if (!query) {
+        return true;
+      }
+      return mod.name.toLowerCase().includes(query)
+        || mod.fileName.toLowerCase().includes(query)
+        || (mod.summary || '').toLowerCase().includes(query)
+        || (mod.version || '').toLowerCase().includes(query);
     });
 
   const openInstalledModView = (mod: ModInfo) => {
@@ -1682,6 +1709,31 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     });
   };
 
+  const selectedInstalledMod = useMemo(() => {
+    if (activeModView?.kind !== 'installed') {
+      return null;
+    }
+    return mods.find((mod) => `${mod.fileName}-${mod.path}` === activeModView.id) || null;
+  }, [activeModView, mods]);
+
+  useEffect(() => {
+    if (!isOpen || filteredMods.length === 0) {
+      return;
+    }
+
+    const stillValid = activeModView?.kind === 'installed'
+      && filteredMods.some((mod) => `${mod.fileName}-${mod.path}` === activeModView.id);
+
+    if (!stillValid) {
+      openInstalledModView(filteredMods[0]);
+    }
+  }, [activeModView, filteredMods, isOpen]);
+
+  const openContextMenu = (event: ReactMouseEvent, items: AnchoredContextMenuItem[]) => {
+    event.preventDefault();
+    setContextMenu({ x: event.clientX, y: event.clientY, items });
+  };
+
   const renderCardIcon = (name: string, iconCachePath?: string, iconUrl?: string, variant: 'inline' | 'rail' = 'inline') => {
     const local = resolveImageSource(iconCachePath);
     const remote = resolveImageSource(iconUrl);
@@ -1714,7 +1766,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     );
   };
 
-  return (
+  const legacyLayout = () => (
     <>
       <ConfirmOverlay
         isOpen={showNexusKeyRequiredModal}
@@ -2817,6 +2869,290 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         )}
       </div>
 
+    </>
+  );
+
+  void legacyLayout;
+
+  return (
+    <>
+      <ConfirmOverlay
+        isOpen={showNexusKeyRequiredModal}
+        onClose={() => setShowNexusKeyRequiredModal(false)}
+        onConfirm={() => {
+          setShowNexusKeyRequiredModal(false);
+          if (onOpenAccounts) {
+            onOpenAccounts();
+          } else {
+            setError('Nexus Login is required to download files. Open Accounts to continue.');
+          }
+        }}
+        title="Nexus Login Required"
+        message={nexusRequiresSiteConfirmation ? 'This Nexus account must confirm downloads on NexusMods website for each file. Open Accounts for details.' : 'Downloading from NexusMods requires Nexus Login. Open Accounts to continue.'}
+        confirmText="Open Accounts"
+        cancelText="Not Now"
+        isNested
+      />
+      <ConfirmOverlay
+        isOpen={!!pendingUpload}
+        onClose={handleRuntimeMismatchCancel}
+        onConfirm={handleRuntimeMismatchConfirm}
+        title="Runtime Mismatch Warning"
+        message={pendingUpload?.runtimeMismatch.warning || ''}
+        confirmText="Continue Anyway"
+        cancelText="Cancel"
+        isNested
+      />
+      <ConfirmOverlay
+        isOpen={!!confirmDialog}
+        onClose={() => setConfirmDialog(null)}
+        onConfirm={handleConfirmDialog}
+        title={confirmDialog?.title || ''}
+        message={confirmDialog?.message || ''}
+        confirmText={confirmDialog?.confirmText}
+        cancelText={confirmDialog?.cancelText}
+        isNested
+      />
+      {pendingRuntimeSelection && (
+        <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
+          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
+            <div className="modal-header">
+              <h2>Select Mod Runtime</h2>
+              <button className="modal-close" onClick={handleRuntimeSelectionCancel}>×</button>
+            </div>
+            <div style={{ padding: '1.5rem' }}>
+              <p style={{ marginBottom: '1rem', color: '#ccc' }}>
+                Could not determine the runtime for <strong>{pendingRuntimeSelection.fileName}</strong>.
+              </p>
+              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+                <button className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('Mono')}>Mono</button>
+                <button className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}>IL2CPP</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="mods-overlay mods-overlay--environment workspace-collection-shell">
+        <div className="modal-header">
+          <h2>Mods</h2>
+          <button className="btn btn-secondary btn-small" onClick={onClose}>
+            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+            Back
+          </button>
+        </div>
+
+        <div className="workspace-collection">
+          <div className="workspace-collection__main">
+            <div className="workspace-collection__header">
+              <div className="workspace-collection__nav">
+                <div className="workspace-collection__rail-group workspace-collection__rail-group--inline">
+                  {([
+                    ['installed', 'Installed', 'fas fa-puzzle-piece'],
+                    ['updates', 'Updates', 'fas fa-arrow-up'],
+                  ] as Array<[ModsTab, string, string]>).map(([tab, label, icon]) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      className={`workspace-collection__rail-button ${modsTab === tab ? 'workspace-collection__rail-button--active' : ''}`}
+                      onClick={() => setModsTab(tab)}
+                    >
+                      <i className={icon}></i>
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="workspace-collection__summary">
+                  <div className="workspace-collection__summary-chip">
+                    <span>Installed</span>
+                    <strong>{mods.length}</strong>
+                  </div>
+                  <div className="workspace-collection__summary-chip">
+                    <span>Updates</span>
+                    <strong>{totalUpdatesAvailable}</strong>
+                  </div>
+                  <div className="workspace-collection__summary-chip">
+                    <span>Runtime</span>
+                    <strong>{environment?.runtime || 'Unknown'}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {modsTab === 'installed' && (
+                <div className="workspace-collection__rail-group workspace-collection__rail-group--inline workspace-collection__filters-row">
+                  {(['all', 'enabled', 'disabled'] as Array<'all' | 'enabled' | 'disabled'>).map((filter) => (
+                    <button
+                      key={filter}
+                      type="button"
+                      className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${modListFilter === filter ? 'workspace-collection__rail-button--active' : ''}`}
+                      onClick={() => setModListFilter(filter)}
+                    >
+                      {filter === 'all' ? 'All' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="workspace-collection__toolbar">
+                <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--summary">
+                  <strong>{environment?.name || 'Environment'}</strong>
+                  <span>{environment?.runtime || 'Unknown'} • {modsTab === 'updates' ? 'Update review' : 'Installed mods'}</span>
+                </div>
+                <div className="workspace-collection__toolbar-search">
+                  <input
+                    type="text"
+                    value={installedSearchTerm}
+                    onChange={(event) => setInstalledSearchTerm(event.target.value)}
+                    placeholder={modsTab === 'updates' ? 'Filter updates' : 'Search installed mods'}
+                  />
+                </div>
+                <div className="workspace-collection__toolbar-group">
+                  <button onClick={handleCheckModUpdates} className="btn btn-secondary btn-small" disabled={checkingModUpdates}>
+                    {checkingModUpdates ? 'Checking...' : 'Check Updates'}
+                  </button>
+                  <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
+                    {uploading ? 'Uploading...' : 'Upload Mod'}
+                  </button>
+                  <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
+                    Open Folder
+                  </button>
+                  <button onClick={onOpenModLibrary} className="btn btn-secondary btn-small" disabled={!onOpenModLibrary}>
+                    Open Mod Library
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="workspace-collection__content" ref={modsScrollContainerRef}>
+              {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
+              {!loading && !error && filteredMods.length === 0 && (
+                <div className="workspace-collection__empty">
+                  {modsTab === 'updates' ? 'No installed mods currently need updates.' : 'No installed mods match this filter.'}
+                </div>
+              )}
+              {!error && filteredMods.length > 0 && (
+                <div className="workspace-collection__list">
+                  {filteredMods.map((mod) => {
+                    const updateInfo = modUpdates.get(mod.fileName);
+                    const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
+                    const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
+                    return (
+                      <div
+                        key={`${mod.fileName}-${mod.path}`}
+                        className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                        role="button"
+                        aria-label={`Open details for ${mod.name}`}
+                        tabIndex={0}
+                        onClick={() => openInstalledModView(mod)}
+                        onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
+                        onContextMenu={(event) => openContextMenu(event, [
+                          {
+                            key: mod.disabled ? 'enable' : 'disable',
+                            label: mod.disabled ? 'Enable' : 'Disable',
+                            icon: mod.disabled ? 'fas fa-check' : 'fas fa-ban',
+                            onSelect: () => void (mod.disabled ? handleEnableMod(mod) : handleDisableMod(mod)),
+                          },
+                          {
+                            key: 'update',
+                            label: 'Update',
+                            icon: 'fas fa-arrow-up',
+                            disabled: !canAutoUpdate || !updateInfo?.updateAvailable,
+                            onSelect: () => void handleUpdateMod(mod),
+                          },
+                          {
+                            key: 'config',
+                            label: 'Open Config',
+                            icon: 'fas fa-sliders-h',
+                            disabled: !onOpenConfig,
+                            onSelect: () => onOpenConfig?.(),
+                          },
+                          {
+                            key: 'library',
+                            label: 'Open in Mod Library',
+                            icon: 'fas fa-book-open',
+                            disabled: !onOpenModLibrary,
+                            onSelect: () => onOpenModLibrary?.(),
+                          },
+                          {
+                            key: 'delete',
+                            label: 'Uninstall',
+                            icon: 'fas fa-trash',
+                            danger: true,
+                            onSelect: () => requestDeleteMod(mod),
+                          },
+                        ])}
+                      >
+                        {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'inline')}
+                        <div className="workspace-collection__row-body">
+                          <div className="workspace-collection__row-title">{mod.name}</div>
+                          <div className="workspace-collection__row-meta">
+                            {mod.disabled && <span className="workspace-pill workspace-pill--danger">Disabled</span>}
+                            {updateInfo?.updateAvailable && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                            {mod.source && <span className="workspace-pill workspace-pill--source">{getSourceLabel(mod.source)}</span>}
+                            {mod.version && <span className="workspace-pill">{mod.version}</span>}
+                          </div>
+                          <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <aside className="workspace-collection__inspector">
+            {!selectedInstalledMod && <div className="workspace-collection__inspector-empty">Select an installed mod to review details and actions.</div>}
+            {selectedInstalledMod && (
+              <div className="workspace-inspector-card">
+                <div className="workspace-inspector-card__header">
+                  {renderCardIcon(selectedInstalledMod.name, selectedInstalledMod.iconCachePath, selectedInstalledMod.iconUrl, 'rail')}
+                  <div>
+                    <h3>{selectedInstalledMod.name}</h3>
+                    <div className="workspace-inspector-card__subtle">
+                      {getSourceLabel(selectedInstalledMod.source)} {selectedInstalledMod.version ? `• ${selectedInstalledMod.version}` : ''}
+                    </div>
+                  </div>
+                </div>
+                <p className="workspace-inspector-card__summary">{selectedInstalledMod.summary || selectedInstalledMod.fileName}</p>
+                <div className="workspace-inspector-card__metrics">
+                  <div><span>Status</span><strong>{selectedInstalledMod.disabled ? 'Disabled' : 'Enabled'}</strong></div>
+                  <div><span>Installed</span><strong>{selectedInstalledMod.version || 'unknown'}</strong></div>
+                  <div><span>Latest</span><strong>{modUpdates.get(selectedInstalledMod.fileName)?.latestVersion || 'unknown'}</strong></div>
+                </div>
+                <div className="workspace-inspector-card__actions">
+                  {selectedInstalledMod.disabled ? (
+                    <button className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</button>
+                  ) : (
+                    <button className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</button>
+                  )}
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => void handleUpdateMod(selectedInstalledMod)}
+                    disabled={!modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable}
+                  >
+                    Update
+                  </button>
+                  <button className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</button>
+                  <button className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</button>
+                  <button className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</button>
+                  <button className="btn btn-danger" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall</button>
+                </div>
+              </div>
+            )}
+          </aside>
+        </div>
+      </div>
+
+      {contextMenu && (
+        <AnchoredContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </>
   );
 }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Utc};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,6 +51,23 @@ impl LogsService {
             last_line_count: Arc::new(RwLock::new(0)),
             watch_session_id: Arc::new(RwLock::new(0)),
         }
+    }
+
+    fn parse_log_timestamp_local(
+        timestamp: &str,
+        reference_dt: DateTime<Local>,
+        live_rollover: bool,
+    ) -> Option<DateTime<Local>> {
+        let parsed_time = NaiveTime::parse_from_str(timestamp, "%H:%M:%S%.3f").ok()?;
+        let mut parsed = Local
+            .from_local_datetime(&reference_dt.date_naive().and_time(parsed_time))
+            .single()?;
+
+        if live_rollover && parsed > reference_dt {
+            parsed -= ChronoDuration::days(1);
+        }
+
+        Some(parsed)
     }
 
     pub fn get_melonloader_logs_dir(&self, game_dir: &str) -> PathBuf {
@@ -411,8 +428,12 @@ impl LogsService {
         &self,
         log_path: &str,
         filter_level: Option<&str>,
+        filter_category: Option<&str>,
         search_query: Option<&str>,
         filter_mod_tag: Option<&str>,
+        time_period: Option<&str>,
+        custom_time_start: Option<&str>,
+        custom_time_end: Option<&str>,
         output_path: &str,
     ) -> Result<()> {
         let log_lines = self.read_log_file(log_path, None).await?;
@@ -426,6 +447,22 @@ impl LogsService {
         };
 
         let normalized_filter_tag = filter_mod_tag.map(normalize_mod_tag);
+        let normalized_filter_category = filter_category.map(|value| value.to_ascii_lowercase());
+        let reference_dt = fs::metadata(Path::new(log_path))
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(|modified| DateTime::<Utc>::from(modified).with_timezone(&Local))
+            .unwrap_or_else(Local::now);
+        let live_rollover = Path::new(log_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| matches!(name.to_ascii_lowercase().as_str(), "latest.log" | "player.log"))
+            .unwrap_or(false);
+        let custom_start =
+            custom_time_start.and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
+        let custom_end =
+            custom_time_end.and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
 
         let filtered_lines = log_lines
             .iter()
@@ -437,6 +474,19 @@ impl LogsService {
                             return false;
                         }
                     } else {
+                        return false;
+                    }
+                }
+
+                if let Some(ref category) = normalized_filter_category {
+                    let category_matches = match category.as_str() {
+                        "melonloader" => matches!(line.category, LogCategory::MelonLoader),
+                        "mod" => matches!(line.category, LogCategory::Mod),
+                        "general" => matches!(line.category, LogCategory::General),
+                        _ => true,
+                    };
+
+                    if !category_matches {
                         return false;
                     }
                 }
@@ -458,6 +508,54 @@ impl LogsService {
                         && !line.content.to_lowercase().contains(&query.to_lowercase())
                     {
                         return false;
+                    }
+                }
+
+                if let Some(period) = time_period {
+                    if !period.eq_ignore_ascii_case("all") {
+                        if let Some(timestamp) = line.timestamp.as_deref() {
+                            if let Some(log_time) =
+                                Self::parse_log_timestamp_local(timestamp, reference_dt, live_rollover)
+                            {
+                                let matches_period = match period {
+                                    "last5min" => {
+                                        log_time >= reference_dt - ChronoDuration::minutes(5)
+                                    }
+                                    "last15min" => {
+                                        log_time >= reference_dt - ChronoDuration::minutes(15)
+                                    }
+                                    "last1hour" => {
+                                        log_time >= reference_dt - ChronoDuration::hours(1)
+                                    }
+                                    "custom" => {
+                                        if custom_start.is_none() && custom_end.is_none() {
+                                            true
+                                        } else {
+                                            if let Some(start) = custom_start.as_ref() {
+                                                if log_time < start.clone() {
+                                                    return false;
+                                                }
+                                            }
+                                            if let Some(end) = custom_end.as_ref() {
+                                                if log_time > end.clone() {
+                                                    return false;
+                                                }
+                                            }
+                                            true
+                                        }
+                                    }
+                                    _ => true,
+                                };
+
+                                if !matches_period {
+                                    return false;
+                                }
+                            } else {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
                     }
                 }
 

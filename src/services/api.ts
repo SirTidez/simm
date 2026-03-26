@@ -6,9 +6,9 @@ import type {
   DownloadProgress,
   AppConfig,
   UpdateCheckResult,
-  ConfigFile,
-  ConfigSection,
-  ConfigUpdate,
+  ConfigDocument,
+  ConfigEditOperation,
+  ConfigFileSummary,
   ExtractGameVersionResult,
 } from '../types';
 
@@ -35,6 +35,11 @@ export class ApiService {
   static async saveSettings(settings: Partial<Settings>): Promise<{ success: boolean }> {
     await invoke('save_settings', { updates: settings });
     return { success: true };
+  }
+
+  static async backupDatabase(): Promise<{ success: boolean; path: string }> {
+    const path = await invoke<string>('backup_database');
+    return { success: true, path };
   }
 
   // Environments
@@ -532,17 +537,17 @@ export class ApiService {
 
   static async disableUserLib(
     environmentId: string,
-    userLibFileName: string
+    userLibPath: string
   ): Promise<{ success: boolean }> {
-    await invoke('disable_user_lib', { environmentId, userLibFileName });
+    await invoke('disable_user_lib', { environmentId, userLibPath });
     return { success: true };
   }
 
   static async enableUserLib(
     environmentId: string,
-    userLibFileName: string
+    userLibPath: string
   ): Promise<{ success: boolean }> {
-    await invoke('enable_user_lib', { environmentId, userLibFileName });
+    await invoke('enable_user_lib', { environmentId, userLibPath });
     return { success: true };
   }
 
@@ -1344,29 +1349,49 @@ export class ApiService {
   static async exportLogs(
     logPath: string,
     filterLevel: string | null,
+    filterCategory: string | null,
     searchQuery: string | null,
     filterModTag: string | null,
+    timePeriod: string | null,
+    customTimeStart: string | null,
+    customTimeEnd: string | null,
     outputPath: string
   ): Promise<void> {
     return invoke('export_logs', {
       logPath,
       filterLevel,
+      filterCategory,
       searchQuery,
       filterModTag,
+      timePeriod,
+      customTimeStart,
+      customTimeEnd,
       outputPath,
     });
   }
 
   // Config
-  static async getConfigFiles(environmentId: string): Promise<ConfigFile[]> {
-    return invoke('get_config_files', { environmentId });
+  static async getConfigCatalog(environmentId: string): Promise<ConfigFileSummary[]> {
+    return invoke('get_config_catalog', { environmentId });
   }
 
-  static async getGroupedConfig(environmentId: string): Promise<Record<string, ConfigSection[]>> {
-    return invoke('get_grouped_config', { environmentId });
+  static async getConfigDocument(environmentId: string, filePath: string): Promise<ConfigDocument> {
+    return invoke('get_config_document', { environmentId, filePath });
   }
 
-  static async updateConfig(filePath: string, updates: ConfigUpdate[]): Promise<void> {
-    return invoke('update_config', { filePath, updates });
+  static async applyConfigEdits(environmentId: string, filePath: string, operations: ConfigEditOperation[]): Promise<void> {
+    return invoke('apply_config_edits', { environmentId, filePath, operations });
+  }
+
+  static async saveRawConfig(environmentId: string, filePath: string, content: string): Promise<void> {
+    return invoke('save_raw_config', { environmentId, filePath, content });
+  }
+
+  static async openPath(path: string): Promise<void> {
+    return invoke('open_path', { path });
+  }
+
+  static async revealPath(path: string): Promise<void> {
+    return invoke('reveal_path', { path });
   }
 }

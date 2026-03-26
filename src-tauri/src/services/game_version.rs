@@ -3,6 +3,12 @@ use regex::Regex;
 use std::path::Path;
 use tokio::fs;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 pub struct GameVersionService;
 
 impl GameVersionService {

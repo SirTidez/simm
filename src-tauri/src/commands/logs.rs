@@ -10,6 +10,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 static LOGS_SERVICE: Lazy<AsyncMutex<Option<Arc<LogsService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+static APP_LOGGER_SERVICE: Lazy<AsyncMutex<Option<Arc<LoggerService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_logs_service() -> std::result::Result<Arc<LogsService>, String> {
     let mut service = LOGS_SERVICE.lock().await;
@@ -20,12 +22,11 @@ async fn get_logs_service() -> std::result::Result<Arc<LogsService>, String> {
 }
 
 async fn get_logger_service() -> Result<Arc<LoggerService>, String> {
-    // Create a new logger instance
-    // Note: Multiple instances are safe because they all write to the same
-    // log files in ~/SIMM/logs/ and file operations are atomic
-    LoggerService::new()
-        .map(|logger| Arc::new(logger))
-        .map_err(|e| e.to_string())
+    let mut service = APP_LOGGER_SERVICE.lock().await;
+    if service.is_none() {
+        *service = Some(Arc::new(LoggerService::new().map_err(|e| e.to_string())?));
+    }
+    Ok(service.as_ref().unwrap().clone())
 }
 
 #[tauri::command]
@@ -93,7 +94,7 @@ pub async fn watch_log_file(app_handle: AppHandle, log_path: String) -> Result<(
     // Spawn a task to watch the file
     tokio::spawn(async move {
         if let Err(e) = logs_service.watch_log_file(&log_path, app_handle).await {
-            eprintln!("Error watching log file: {}", e);
+            log::error!("Error watching log file: {}", e);
         }
     });
 
@@ -111,8 +112,12 @@ pub async fn stop_watching_log() -> Result<(), String> {
 pub async fn export_logs(
     log_path: String,
     filter_level: Option<String>,
+    filter_category: Option<String>,
     search_query: Option<String>,
     filter_mod_tag: Option<String>,
+    time_period: Option<String>,
+    custom_time_start: Option<String>,
+    custom_time_end: Option<String>,
     output_path: String,
 ) -> Result<(), String> {
     let logs_service = get_logs_service().await?;
@@ -120,8 +125,12 @@ pub async fn export_logs(
         .export_logs(
             &log_path,
             filter_level.as_deref(),
+            filter_category.as_deref(),
             search_query.as_deref(),
             filter_mod_tag.as_deref(),
+            time_period.as_deref(),
+            custom_time_start.as_deref(),
+            custom_time_end.as_deref(),
             &output_path,
         )
         .await

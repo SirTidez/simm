@@ -1,6 +1,15 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
-import type { Environment, ConfigFile, ConfigSection, ConfigUpdate } from '../types';
+import type {
+  ConfigDocument,
+  ConfigEditOperation,
+  ConfigFileSummary,
+  ConfigGroup,
+  ConfigSection,
+  Environment,
+} from '../types';
 
 interface Props {
   isOpen: boolean;
@@ -9,343 +18,1045 @@ interface Props {
   environment: Environment;
 }
 
+type EditorMode = 'structured' | 'raw';
+
+interface EditableEntry {
+  id: string;
+  key: string;
+  value: string;
+  comment: string;
+  isNew: boolean;
+  originalKey: string | null;
+}
+
+interface EditableSection {
+  id: string;
+  name: string;
+  isNew: boolean;
+  originalName: string | null;
+  entries: EditableEntry[];
+}
+
+interface FileDraft {
+  sections: EditableSection[];
+  rawContent: string;
+  dirty: boolean;
+  dirtyMode: EditorMode | null;
+}
+
+interface PendingConfirm {
+  title: string;
+  message: string;
+  onConfirm: () => void;
+}
+
+function createEditorId(prefix: string) {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+}
+
+function buildEditableSections(sections: ConfigSection[]): EditableSection[] {
+  return sections.map((section) => ({
+    id: createEditorId('section'),
+    name: section.name,
+    isNew: false,
+    originalName: section.name,
+    entries: section.entries.map((entry) => ({
+      id: createEditorId('entry'),
+      key: entry.key,
+      value: entry.value,
+      comment: entry.comment || '',
+      isNew: false,
+      originalKey: entry.key,
+    })),
+  }));
+}
+
+function createDraft(document: ConfigDocument): FileDraft {
+  return {
+    sections: buildEditableSections(document.sections),
+    rawContent: document.rawContent,
+    dirty: false,
+    dirtyMode: null,
+  };
+}
+
+function toConfigSections(sections: EditableSection[]): ConfigSection[] {
+  return sections.map((section) => ({
+    name: section.name,
+    entries: section.entries.map((entry) => ({
+      key: entry.key,
+      value: entry.value,
+      comment: entry.comment || undefined,
+    })),
+  }));
+}
+
+function formatRelativeTimestamp(timestamp?: number) {
+  if (!timestamp) return 'Unknown';
+  return new Date(timestamp).toLocaleString();
+}
+
+function formatSettingCount(count: number) {
+  return `${count} ${count === 1 ? 'Setting' : 'Settings'}`;
+}
+
+function getPreferredConfigFilePath(catalog: ConfigFileSummary[], currentSelection: string | null) {
+  if (currentSelection && catalog.some((file) => file.path === currentSelection)) {
+    return currentSelection;
+  }
+
+  return (
+    catalog.find((file) => file.fileType === 'MelonPreferences')?.path ||
+    catalog.find((file) => file.fileType === 'LoaderConfig')?.path ||
+    catalog[0]?.path ||
+    null
+  );
+}
+
+function hasDirtyDraft(drafts: Record<string, FileDraft>) {
+  return Object.values(drafts).some((draft) => draft.dirty);
+}
+
+function buildOperations(originalSections: ConfigSection[], draftSections: EditableSection[]): ConfigEditOperation[] {
+  const operations: ConfigEditOperation[] = [];
+  const originalSectionMap = new Map(originalSections.map((section) => [section.name, section]));
+  const draftSectionNames = new Set(draftSections.map((section) => section.name.trim()));
+
+  for (const originalSection of originalSections) {
+    if (!draftSectionNames.has(originalSection.name)) {
+      operations.push({ kind: 'deleteSection', section: originalSection.name });
+    }
+  }
+
+  for (const draftSection of draftSections) {
+    const draftSectionName = draftSection.name.trim();
+    const originalSection = draftSection.originalName ? originalSectionMap.get(draftSection.originalName) : undefined;
+
+    if (!originalSection) {
+      operations.push({ kind: 'addSection', section: draftSectionName });
+      for (const entry of draftSection.entries) {
+        operations.push({
+          kind: 'addEntry',
+          section: draftSectionName,
+          key: entry.key.trim(),
+          value: entry.value,
+          comment: entry.comment.trim() || null,
+        });
+      }
+      continue;
+    }
+
+    const originalEntryMap = new Map(originalSection.entries.map((entry) => [entry.key, entry]));
+    const draftEntryKeys = new Set(draftSection.entries.map((entry) => entry.key.trim()));
+
+    for (const originalEntry of originalSection.entries) {
+      if (!draftEntryKeys.has(originalEntry.key)) {
+        operations.push({
+          kind: 'deleteEntry',
+          section: originalSection.name,
+          key: originalEntry.key,
+        });
+      }
+    }
+
+    for (const draftEntry of draftSection.entries) {
+      const draftKey = draftEntry.key.trim();
+      const originalEntry = draftEntry.originalKey ? originalEntryMap.get(draftEntry.originalKey) : undefined;
+
+      if (!originalEntry) {
+        operations.push({
+          kind: 'addEntry',
+          section: originalSection.name,
+          key: draftKey,
+          value: draftEntry.value,
+          comment: draftEntry.comment.trim() || null,
+        });
+        continue;
+      }
+
+      if (originalEntry.value !== draftEntry.value) {
+        operations.push({
+          kind: 'setValue',
+          section: originalSection.name,
+          key: originalEntry.key,
+          value: draftEntry.value,
+        });
+      }
+
+      const originalComment = (originalEntry.comment || '').trim();
+      const nextComment = draftEntry.comment.trim();
+      if (originalComment !== nextComment) {
+        operations.push({
+          kind: 'setComment',
+          section: originalSection.name,
+          key: originalEntry.key,
+          comment: nextComment || null,
+        });
+      }
+    }
+  }
+
+  return operations;
+}
+
+function validateStructuredDraft(sections: EditableSection[]) {
+  const seenSections = new Set<string>();
+
+  for (const section of sections) {
+    const sectionName = section.name.trim();
+    if (!sectionName) return 'Section names cannot be empty.';
+    if (seenSections.has(sectionName)) return `Section '${sectionName}' appears more than once.`;
+    seenSections.add(sectionName);
+
+    const seenKeys = new Set<string>();
+    for (const entry of section.entries) {
+      const key = entry.key.trim();
+      if (!key) return `Section '${sectionName}' has an entry without a key.`;
+      if (seenKeys.has(key)) return `Section '${sectionName}' contains duplicate key '${key}'.`;
+      seenKeys.add(key);
+    }
+  }
+
+  return null;
+}
+
 export function ConfigurationOverlay({ isOpen, onClose, environmentId, environment }: Props) {
-  const [configFiles, setConfigFiles] = useState<ConfigFile[]>([]);
-  const [groupedConfig, setGroupedConfig] = useState<Record<string, ConfigSection[]>>({});
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedMod, setSelectedMod] = useState<string | null>(null);
-  const [editedValues, setEditedValues] = useState<Record<string, Record<string, string>>>({});
-  const [hasChanges, setHasChanges] = useState(false);
+  const [catalog, setCatalog] = useState<ConfigFileSummary[]>([]);
+  const [documentCache, setDocumentCache] = useState<Record<string, ConfigDocument>>({});
+  const [drafts, setDrafts] = useState<Record<string, FileDraft>>({});
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [editorMode, setEditorMode] = useState<EditorMode>('structured');
+  const [fileFilter, setFileFilter] = useState('');
+  const [sectionFilter, setSectionFilter] = useState('');
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+  const [loadingCatalog, setLoadingCatalog] = useState(false);
+  const [loadingDocument, setLoadingDocument] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
+  const selectedFilePathRef = useRef<string | null>(null);
+
+  const activeDocument = selectedFilePath ? documentCache[selectedFilePath] ?? null : null;
+  const activeDraft = selectedFilePath ? drafts[selectedFilePath] ?? null : null;
 
   useEffect(() => {
-    if (isOpen) {
-      loadConfigFiles();
-    }
-  }, [isOpen, environmentId]);
+    selectedFilePathRef.current = selectedFilePath;
+  }, [selectedFilePath]);
 
-  const loadConfigFiles = async () => {
-    setLoading(true);
+  useEffect(() => {
+    if (!isOpen) return;
+    setCatalog([]);
+    setDocumentCache({});
+    setDrafts({});
+    setSelectedFilePath(null);
+    setEditorMode('structured');
+    setFileFilter('');
+    setSectionFilter('');
+    setActiveGroupId(null);
     setError(null);
-    try {
-      // Get all config files
-      const files = await ApiService.getConfigFiles(environmentId);
-      setConfigFiles(files);
+  }, [environmentId, isOpen]);
 
-      // Get grouped config for MelonPreferences
-      const grouped = await ApiService.getGroupedConfig(environmentId);
-      setGroupedConfig(grouped);
+  useEffect(() => {
+    if (!isOpen) return;
 
-      // Auto-select first mod or loader settings
-      const modNames = Object.keys(grouped);
-      if (modNames.length > 0 && !selectedMod) {
-        setSelectedMod(modNames[0]);
-      } else {
-        // Check if Loader.cfg exists
-        const loaderCfg = files.find(f => f.fileType === 'LoaderConfig');
-        if (loaderCfg && !selectedMod) {
-          setSelectedMod('_loader_settings');
+    let cancelled = false;
+    const loadCatalog = async () => {
+      setLoadingCatalog(true);
+      setError(null);
+
+      try {
+        const nextCatalog = await ApiService.getConfigCatalog(environmentId);
+        if (cancelled) return;
+
+        setCatalog(nextCatalog);
+        setSelectedFilePath((currentSelection) => getPreferredConfigFilePath(nextCatalog, currentSelection));
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load configuration catalog');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingCatalog(false);
         }
       }
-    } catch (err) {
-      console.error('Failed to load config files:', err);
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+    };
+
+    void loadCatalog();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [environmentId, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || !selectedFilePath) return;
+    if (documentCache[selectedFilePath]) {
+      const cached = documentCache[selectedFilePath];
+      const draft = drafts[selectedFilePath];
+      setEditorMode(draft?.dirtyMode ?? (cached.summary.supportsStructuredEdit ? 'structured' : 'raw'));
+      return;
     }
+
+    let cancelled = false;
+    const loadDocument = async () => {
+      const requestedFilePath = selectedFilePath;
+      setLoadingDocument(true);
+      setError(null);
+      try {
+        const document = await ApiService.getConfigDocument(environmentId, requestedFilePath);
+        if (cancelled) return;
+
+        setDocumentCache((current) => ({ ...current, [requestedFilePath]: document }));
+        setDrafts((current) => current[requestedFilePath] ? current : { ...current, [requestedFilePath]: createDraft(document) });
+        const draft = drafts[requestedFilePath];
+        if (selectedFilePathRef.current === requestedFilePath) {
+          setEditorMode(draft?.dirtyMode ?? (document.summary.supportsStructuredEdit ? 'structured' : 'raw'));
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load configuration file');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingDocument(false);
+        }
+      }
+    };
+
+    void loadDocument();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [documentCache, drafts, environmentId, isOpen, selectedFilePath]);
+
+  const filteredCatalog = useMemo(() => {
+    const query = fileFilter.trim().toLowerCase();
+    if (!query) return catalog;
+
+    return catalog.filter((file) =>
+      file.name.toLowerCase().includes(query) ||
+      file.path.toLowerCase().includes(query) ||
+      file.relativePath.toLowerCase().includes(query) ||
+      file.groupName.toLowerCase().includes(query)
+    );
+  }, [catalog, fileFilter]);
+
+  const catalogGroups = useMemo(() => ({
+    loader: filteredCatalog.filter((file) => file.fileType === 'LoaderConfig'),
+    melon: filteredCatalog.filter((file) => file.fileType === 'MelonPreferences'),
+    other: filteredCatalog.filter((file) => file.fileType === 'Other' || file.fileType === 'Json'),
+  }), [filteredCatalog]);
+
+  const otherCatalogGroups = useMemo(() => {
+    const grouped = new Map<string, ConfigFileSummary[]>();
+    for (const file of catalogGroups.other) {
+      const key = file.groupName || 'Other Config Files';
+      const current = grouped.get(key) || [];
+      current.push(file);
+      grouped.set(key, current);
+    }
+    return Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [catalogGroups.other]);
+
+  const visibleSections = useMemo(() => {
+    if (!activeDraft) return [];
+
+    const query = sectionFilter.trim().toLowerCase();
+    const activeGroup = activeDocument?.groups.find((group) => group.id === activeGroupId);
+    const allowedSectionNames = activeGroup ? new Set(activeGroup.sectionNames) : null;
+
+    return activeDraft.sections.filter((section) => {
+      const allowedByGroup = !allowedSectionNames || allowedSectionNames.has(section.originalName || section.name);
+      if (!allowedByGroup) return false;
+      if (!query) return true;
+
+      return (
+        section.name.toLowerCase().includes(query) ||
+        section.entries.some((entry) =>
+          entry.key.toLowerCase().includes(query) ||
+          entry.value.toLowerCase().includes(query) ||
+          entry.comment.toLowerCase().includes(query)
+        )
+      );
+    });
+  }, [activeDocument?.groups, activeDraft, activeGroupId, sectionFilter]);
+
+  const dirtyCount = useMemo(() => Object.values(drafts).filter((draft) => draft.dirty).length, [drafts]);
+
+  const updateActiveDraft = (updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
+    if (!selectedFilePath) return;
+    setDrafts((current) => {
+      const existingDraft = current[selectedFilePath];
+      if (!existingDraft) return current;
+
+      return {
+        ...current,
+        [selectedFilePath]: {
+          ...updater(existingDraft),
+          dirty: true,
+          dirtyMode,
+        },
+      };
+    });
   };
 
-  const handleValueChange = (section: string, key: string, value: string) => {
-    setEditedValues(prev => ({
-      ...prev,
-      [section]: {
-        ...(prev[section] || {}),
-        [key]: value,
-      },
-    }));
-    setHasChanges(true);
+  const requestConfirm = (title: string, message: string, onConfirmAction: () => void) => {
+    setPendingConfirm({ title, message, onConfirm: onConfirmAction });
+  };
+
+  const handleSelectFile = (filePath: string) => {
+    if (filePath === selectedFilePath) return;
+
+    if (activeDraft?.dirty) {
+      requestConfirm(
+        'Switch File?',
+        'This file has unsaved changes. Switching files will keep the draft, but it will not be saved until you return and apply it.',
+        () => {
+          setSelectedFilePath(filePath);
+          setSectionFilter('');
+          setActiveGroupId(null);
+        }
+      );
+      return;
+    }
+
+    setSelectedFilePath(filePath);
+    setSectionFilter('');
+    setActiveGroupId(null);
+  };
+
+  const handleCloseRequest = () => {
+    if (hasDirtyDraft(drafts)) {
+      requestConfirm(
+        'Discard Unsaved Changes?',
+        'Closing the configuration editor will discard any unsaved drafts for this session.',
+        onClose
+      );
+      return;
+    }
+
+    onClose();
+  };
+
+  const handleReload = async () => {
+    if (!selectedFilePath) return;
+    const requestedFilePath = selectedFilePath;
+
+    const reloadFile = async () => {
+      setLoadingDocument(true);
+      setError(null);
+      try {
+        const document = await ApiService.getConfigDocument(environmentId, requestedFilePath);
+        setDocumentCache((current) => ({ ...current, [requestedFilePath]: document }));
+        setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(document) }));
+        if (selectedFilePathRef.current === requestedFilePath && !document.summary.supportsStructuredEdit) {
+          setEditorMode('raw');
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to reload configuration file');
+      } finally {
+        setLoadingDocument(false);
+      }
+    };
+
+    if (activeDraft?.dirty) {
+      requestConfirm(
+        'Reload File?',
+        'Reloading will discard the unsaved draft for this file and restore the current content from disk.',
+        () => {
+          void reloadFile();
+        }
+      );
+      return;
+    }
+
+    await reloadFile();
+  };
+
+  const handleDiscard = () => {
+    if (!selectedFilePath || !activeDocument) return;
+    setDrafts((current) => ({ ...current, [selectedFilePath]: createDraft(activeDocument) }));
+  };
+
+  const handleModeChange = (nextMode: EditorMode) => {
+    if (!activeDocument || !activeDraft || nextMode === editorMode) return;
+
+    if (activeDraft.dirty && activeDraft.dirtyMode && activeDraft.dirtyMode !== nextMode) {
+      requestConfirm(
+        'Discard Current Draft?',
+        `Switching to ${nextMode === 'raw' ? 'Raw' : 'Structured'} mode will discard the unsaved ${activeDraft.dirtyMode} draft for this file.`,
+        () => {
+          if (!selectedFilePath) return;
+          setDrafts((current) => ({ ...current, [selectedFilePath]: createDraft(activeDocument) }));
+          setEditorMode(nextMode);
+        }
+      );
+      return;
+    }
+
+    setEditorMode(nextMode);
+  };
+
+  const handleDeleteSection = (sectionId: string) => {
+    updateActiveDraft((draft) => ({
+      ...draft,
+      sections: draft.sections.filter((section) => section.id !== sectionId),
+    }), 'structured');
+  };
+
+  const handleAddEntry = (sectionId: string) => {
+    updateActiveDraft((draft) => ({
+      ...draft,
+      sections: draft.sections.map((section) =>
+        section.id === sectionId
+          ? {
+              ...section,
+              entries: [
+                ...section.entries,
+                {
+                  id: createEditorId('entry'),
+                  key: '',
+                  value: '',
+                  comment: '',
+                  isNew: true,
+                  originalKey: null,
+                },
+              ],
+            }
+          : section
+      ),
+    }), 'structured');
+  };
+
+  const handleDeleteEntry = (sectionId: string, entryId: string) => {
+    updateActiveDraft((draft) => ({
+      ...draft,
+      sections: draft.sections.map((section) =>
+        section.id === sectionId
+          ? { ...section, entries: section.entries.filter((entry) => entry.id !== entryId) }
+          : section
+      ),
+    }), 'structured');
+  };
+
+  const handleEntryChange = (
+    sectionId: string,
+    entryId: string,
+    field: 'key' | 'value' | 'comment',
+    value: string
+  ) => {
+    updateActiveDraft((draft) => ({
+      ...draft,
+      sections: draft.sections.map((section) =>
+        section.id === sectionId
+          ? {
+              ...section,
+              entries: section.entries.map((entry) =>
+                entry.id === entryId ? { ...entry, [field]: value } : entry
+              ),
+            }
+          : section
+      ),
+    }), 'structured');
+  };
+
+  const handleRawChange = (value: string) => {
+    updateActiveDraft((draft) => ({
+      ...draft,
+      rawContent: value,
+    }), 'raw');
   };
 
   const handleSave = async () => {
+    if (!selectedFilePath || !activeDocument || !activeDraft) return;
+    const requestedFilePath = selectedFilePath;
+
     setSaving(true);
     setError(null);
+
     try {
-      // Determine which config file to update
-      let filePath: string;
-      if (selectedMod === '_loader_settings') {
-        const loaderCfg = configFiles.find(f => f.fileType === 'LoaderConfig');
-        if (!loaderCfg) {
-          throw new Error('Loader.cfg not found');
-        }
-        filePath = loaderCfg.path;
+      if (editorMode === 'raw') {
+        await ApiService.saveRawConfig(environmentId, requestedFilePath, activeDraft.rawContent);
       } else {
-        const melonPrefs = configFiles.find(f => f.fileType === 'MelonPreferences');
-        if (!melonPrefs) {
-          throw new Error('MelonPreferences.cfg not found');
+        const validationError = validateStructuredDraft(activeDraft.sections);
+        if (validationError) {
+          setError(validationError);
+          setSaving(false);
+          return;
         }
-        filePath = melonPrefs.path;
+
+        const operations = buildOperations(activeDocument.sections, activeDraft.sections);
+        await ApiService.applyConfigEdits(environmentId, requestedFilePath, operations);
       }
 
-      // Convert editedValues to ConfigUpdate array
-      const updates: ConfigUpdate[] = [];
-      for (const [section, entries] of Object.entries(editedValues)) {
-        for (const [key, value] of Object.entries(entries)) {
-          updates.push({ section, key, value });
+      const savedDocument: ConfigDocument = {
+        ...activeDocument,
+        rawContent: editorMode === 'raw' ? activeDraft.rawContent : activeDocument.rawContent,
+        sections: editorMode === 'raw' ? activeDocument.sections : toConfigSections(activeDraft.sections),
+      };
+      setDocumentCache((current) => ({ ...current, [requestedFilePath]: savedDocument }));
+      setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(savedDocument) }));
+
+      try {
+        const [nextCatalog, nextDocument] = await Promise.all([
+          ApiService.getConfigCatalog(environmentId),
+          ApiService.getConfigDocument(environmentId, requestedFilePath),
+        ]);
+
+        setCatalog(nextCatalog);
+        setDocumentCache((current) => ({ ...current, [requestedFilePath]: nextDocument }));
+        setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(nextDocument) }));
+        if (selectedFilePathRef.current === requestedFilePath) {
+          setEditorMode((currentMode) => (
+            currentMode === 'structured' && !nextDocument.summary.supportsStructuredEdit
+              ? 'raw'
+              : currentMode
+          ));
         }
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Changes saved, but SIMM could not refresh the editor state: ${err.message}`
+            : 'Changes saved, but SIMM could not refresh the editor state.'
+        );
       }
-
-      // Save changes
-      await ApiService.updateConfig(filePath, updates);
-
-      // Reset state
-      setEditedValues({});
-      setHasChanges(false);
-
-      // Reload config
-      await loadConfigFiles();
     } catch (err) {
-      console.error('Failed to save config:', err);
-      setError(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : 'Failed to save configuration changes');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDiscard = () => {
-    setEditedValues({});
-    setHasChanges(false);
-  };
-
-  const getCurrentSections = (): ConfigSection[] => {
-    if (selectedMod === '_loader_settings') {
-      const loaderCfg = configFiles.find(f => f.fileType === 'LoaderConfig');
-      return loaderCfg?.sections || [];
-    } else if (selectedMod) {
-      return groupedConfig[selectedMod] || [];
-    }
-    return [];
-  };
-
-  const getDisplayValue = (section: string, key: string, originalValue: string): string => {
-    return editedValues[section]?.[key] ?? originalValue;
-  };
-
   if (!isOpen) return null;
 
   return (
-    <div className="config-overlay" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      {/* Header */}
-      <div className="modal-header" style={{ borderBottom: '1px solid #3a3a3a', padding: '0.9rem 1.25rem' }}>
-          <div>
-            <h2 style={{ margin: 0 }}>Configuration - {environment.name}</h2>
-            <p style={{ margin: '0.35rem 0 0 0', color: '#888', fontSize: '0.8rem' }}>
-              Edit loader and mod configuration values for this environment.
-            </p>
+    <div className="modal-content workspace-panel config-editor config-editor--workspace">
+      <ConfirmOverlay
+        isOpen={Boolean(pendingConfirm)}
+        onClose={() => setPendingConfirm(null)}
+        onConfirm={() => {
+          if (!pendingConfirm) return;
+          pendingConfirm.onConfirm();
+        }}
+        title={pendingConfirm?.title || ''}
+        message={pendingConfirm?.message || ''}
+        confirmText="Continue"
+        cancelText="Cancel"
+        isNested
+      />
+
+      <div className="modal-header">
+        <div>
+          <h2>Configuration</h2>
+          <p className="config-editor__subtitle">
+            Manage loader, mod, and auxiliary configuration files for {environment.name}.
+          </p>
+        </div>
+        <div className="config-editor__header-actions">
+          <button className="btn btn-secondary btn-small" onClick={handleCloseRequest}>
+            <i className="fas fa-arrow-left"></i>
+            Back
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="settings-error-banner">{error}</div>}
+
+      <div className="config-editor__shell">
+        <aside className="config-explorer">
+          <div className="config-explorer__overview">
+            <div className="config-explorer__overview-head">
+              <span className="settings-eyebrow">Files</span>
+              <div className="config-explorer__overview-pills">
+                <span className="config-explorer__overview-pill">
+                  {catalog.length} file{catalog.length === 1 ? '' : 's'}
+                </span>
+                <span className="config-explorer__overview-pill">
+                  {dirtyCount} draft{dirtyCount === 1 ? '' : 's'}
+                </span>
+              </div>
+            </div>
+            <p>Browse loader, MelonPreferences, and UserData config files.</p>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-            {hasChanges && (
+
+          <div className="config-explorer__search">
+            <i className="fas fa-search"></i>
+            <input
+              type="text"
+              value={fileFilter}
+              onChange={(e) => setFileFilter(e.target.value)}
+              placeholder="Search config files"
+            />
+          </div>
+
+          <div className="config-explorer__list">
+            {loadingCatalog ? (
+              <div className="config-editor__empty">
+                <i className="fas fa-spinner fa-spin"></i>
+                <strong>Loading configuration catalog</strong>
+              </div>
+            ) : (
               <>
-                <button
-                  onClick={handleDiscard}
-                  disabled={saving}
-                    className="btn btn-secondary"
-                    style={{ fontSize: '0.875rem' }}
-                  >
-                    Revert Draft
-                  </button>
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="btn btn-primary"
-                  style={{ fontSize: '0.875rem' }}
-                >
-                  {saving ? (
-                    <>
-                      <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <i className="fas fa-save" style={{ marginRight: '0.5rem' }}></i>
-                      Save Draft
-                    </>
-                  )}
-                </button>
+                {[
+                  { label: 'Loader', files: catalogGroups.loader },
+                  { label: 'MelonPreferences', files: catalogGroups.melon },
+                ].map((group) =>
+                  group.files.length > 0 ? (
+                    <section key={group.label} className="config-explorer__group">
+                      <div className="config-explorer__group-label">{group.label}</div>
+                      {group.files.map((file) => {
+                        const draft = drafts[file.path];
+                        const selected = file.path === selectedFilePath;
+                        return (
+                          <button
+                            key={file.path}
+                            type="button"
+                            className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
+                            onClick={() => handleSelectFile(file.path)}
+                          >
+                            <div className="config-explorer__file-head">
+                              <strong>{file.name}</strong>
+                              {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
+                            </div>
+                            <div className="config-explorer__file-meta">
+                              <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
+                              <span>{formatSettingCount(file.entryCount)}</span>
+                            </div>
+                            <div className="config-explorer__file-badges">
+                              <span className="settings-chip">
+                                {file.fileType === 'LoaderConfig'
+                                  ? 'Loader'
+                                  : file.fileType === 'MelonPreferences'
+                                    ? 'Melon'
+                                    : file.fileType === 'Json'
+                                      ? 'JSON'
+                                      : 'CFG'}
+                              </span>
+                              <span className="settings-chip settings-chip--muted">{file.supportsStructuredEdit ? 'Structured' : 'Raw only'}</span>
+                            </div>
+                            <div className="config-explorer__file-path" title={file.relativePath}>
+                              {file.relativePath}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </section>
+                  ) : null
+                )}
+
+                {otherCatalogGroups.length > 0 && (
+                  <section className="config-explorer__group">
+                    <div className="config-explorer__group-label">Other Config Files</div>
+                    {otherCatalogGroups.map(([groupName, files]) => (
+                      <div key={groupName} className="config-explorer__nested-group">
+                        <div className="config-explorer__nested-label">{groupName}</div>
+                        {files.map((file) => {
+                          const draft = drafts[file.path];
+                          const selected = file.path === selectedFilePath;
+                          return (
+                            <button
+                              key={file.path}
+                              type="button"
+                              className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
+                              onClick={() => handleSelectFile(file.path)}
+                            >
+                              <div className="config-explorer__file-head">
+                                <strong>{file.name}</strong>
+                                {draft?.dirty && <span className="config-editor__dirty-dot" aria-label="Unsaved changes" />}
+                              </div>
+                              <div className="config-explorer__file-meta">
+                                <span>{file.sectionCount} section{file.sectionCount === 1 ? '' : 's'}</span>
+                                <span>{formatSettingCount(file.entryCount)}</span>
+                              </div>
+                              <div className="config-explorer__file-badges">
+                                <span className="settings-chip">{file.fileType === 'Json' ? 'JSON' : 'CFG'}</span>
+                                <span className="settings-chip settings-chip--muted">{file.supportsStructuredEdit ? 'Structured' : 'Raw only'}</span>
+                              </div>
+                              <div className="config-explorer__file-path" title={file.relativePath}>
+                                {file.relativePath}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </section>
+                )}
+
+                {!loadingCatalog && filteredCatalog.length === 0 && (
+                  <div className="config-editor__empty">
+                    <i className="fas fa-file-circle-question"></i>
+                    <strong>No config files found</strong>
+                    <p>Try a different search term or verify that this environment has generated config files.</p>
+                  </div>
+                )}
               </>
             )}
-            <button className="btn btn-secondary btn-small" onClick={onClose}>
-              <i className="fas fa-arrow-left" style={{ marginRight: '0.4rem' }}></i>
-              Back
-            </button>
           </div>
-        </div>
+        </aside>
 
-        {/* Content */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
-          {/* Left Sidebar - Mod List */}
-          <div style={{ width: '250px', borderRight: '1px solid #3a3a3a', overflowY: 'auto', backgroundColor: '#1a1a1a' }}>
-            {/* Loader Settings */}
-            {configFiles.some(f => f.fileType === 'LoaderConfig') && (
-              <div
-                onClick={() => setSelectedMod('_loader_settings')}
-                style={{
-                  padding: '1rem',
-                  cursor: 'pointer',
-                  borderBottom: '1px solid #3a3a3a',
-                  backgroundColor: selectedMod === '_loader_settings' ? '#2a2a2a' : 'transparent',
-                  transition: 'background-color 0.2s'
-                }}
-                onMouseEnter={(e) => {
-                  if (selectedMod !== '_loader_settings') {
-                    e.currentTarget.style.backgroundColor = '#232323';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (selectedMod !== '_loader_settings') {
-                    e.currentTarget.style.backgroundColor = 'transparent';
-                  }
-                }}
-              >
-                <div style={{ fontWeight: '600', color: '#fff', fontSize: '0.9rem' }}>
-                  <i className="fas fa-cog" style={{ marginRight: '0.5rem', color: '#4a90e2' }}></i>
-                  Loader Settings
-                </div>
-                <div style={{ fontSize: '0.75rem', color: '#888', marginTop: '0.25rem' }}>
-                  MelonLoader Configuration
-                </div>
-              </div>
-            )}
-
-            {/* Mod Configurations */}
-            {Object.keys(groupedConfig).sort().map(modName => (
-              <div
-                key={modName}
-                onClick={() => setSelectedMod(modName)}
-                style={{
-                  padding: '1rem',
-                  cursor: 'pointer',
-                  borderBottom: '1px solid #3a3a3a',
-                  backgroundColor: selectedMod === modName ? '#2a2a2a' : 'transparent',
-                  transition: 'background-color 0.2s'
-                }}
-                onMouseEnter={(e) => {
-                  if (selectedMod !== modName) {
-                    e.currentTarget.style.backgroundColor = '#232323';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (selectedMod !== modName) {
-                    e.currentTarget.style.backgroundColor = 'transparent';
-                  }
-                }}
-              >
-                <div style={{ fontWeight: '600', color: '#fff', fontSize: '0.9rem' }}>
-                  <i className="fas fa-cube" style={{ marginRight: '0.5rem', color: '#7c3aed' }}></i>
-                  {modName}
-                </div>
-                <div style={{ fontSize: '0.75rem', color: '#888', marginTop: '0.25rem' }}>
-                  {groupedConfig[modName].length} section{groupedConfig[modName].length !== 1 ? 's' : ''}
-                </div>
-              </div>
-            ))}
-
-            {Object.keys(groupedConfig).length === 0 && !configFiles.some(f => f.fileType === 'LoaderConfig') && !loading && (
-              <div style={{ padding: '1rem', color: '#888', fontSize: '0.875rem' }}>
-                No configuration files found
-              </div>
-            )}
-          </div>
-
-          {/* Right Content - Config Editor */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem', backgroundColor: '#0f0f0f' }}>
-            {loading && (
-              <div style={{ textAlign: 'center', color: '#888', padding: '2rem' }}>
-                <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
-                <div>Loading configuration...</div>
-              </div>
-            )}
-
-            {error && (
-              <div style={{ backgroundColor: '#dc3545', color: '#fff', padding: '0.75rem', borderRadius: '4px', marginBottom: '1rem' }}>
-                <i className="fas fa-exclamation-triangle" style={{ marginRight: '0.5rem' }}></i>
-                {error}
-              </div>
-            )}
-
-            {!loading && !error && selectedMod && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                {getCurrentSections().map((section, idx) => {
-                  // Extract the last part of the section name (category name)
-                  const getSectionTitle = (sectionName: string): string => {
-                    if (selectedMod === '_loader_settings') {
-                      return sectionName;
-                    }
-                    const parts = sectionName.split('_');
-                    return parts.length > 0 ? parts[parts.length - 1] : sectionName;
-                  };
-                  
-                  return (
-                    <div key={idx} style={{ backgroundColor: '#1a1a1a', borderRadius: '4px', padding: '1rem', border: '1px solid #3a3a3a' }}>
-                      <h3 style={{ fontSize: '1.1rem', fontWeight: '600', color: '#fff', marginBottom: '1rem', paddingBottom: '0.5rem', borderBottom: '1px solid #3a3a3a' }}>
-                        {getSectionTitle(section.name)}
-                      </h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                      {section.entries.map((entry, entryIdx) => (
-                        <div key={entryIdx} style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                          {entry.comment && (
-                            <div style={{ fontSize: '0.75rem', color: '#888', fontStyle: 'italic' }}>
-                              {entry.comment}
-                            </div>
-                          )}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                            <label style={{ fontSize: '0.875rem', fontWeight: '500', color: '#aaa', minWidth: '200px' }}>
-                              {entry.key}
-                            </label>
-                            <input
-                              type="text"
-                              value={getDisplayValue(section.name, entry.key, entry.value)}
-                              onChange={(e) => handleValueChange(section.name, entry.key, e.target.value)}
-                              style={{
-                                flex: 1,
-                                backgroundColor: '#0f0f0f',
-                                border: '1px solid #3a3a3a',
-                                borderRadius: '4px',
-                                padding: '0.5rem 0.75rem',
-                                color: '#fff',
-                                fontSize: '0.875rem',
-                                transition: 'border-color 0.2s'
-                              }}
-                              onFocus={(e) => {
-                                e.currentTarget.style.borderColor = '#4a90e2';
-                              }}
-                              onBlur={(e) => {
-                                e.currentTarget.style.borderColor = '#3a3a3a';
-                              }}
-                            />
-                          </div>
-                        </div>
-                      ))}
+        <section className="config-workspace">
+          {!selectedFilePath ? (
+            <div className="config-editor__empty config-editor__empty--workspace">
+              <i className="fas fa-sliders"></i>
+              <strong>Select a configuration file</strong>
+              <p>Choose a file from the explorer to inspect and edit its current settings.</p>
+            </div>
+          ) : loadingDocument && !activeDocument ? (
+            <div className="config-editor__empty config-editor__empty--workspace">
+              <i className="fas fa-spinner fa-spin"></i>
+              <strong>Loading configuration file</strong>
+            </div>
+          ) : activeDocument && activeDraft ? (
+            <>
+              <header className="config-workspace__header">
+                <div className="config-workspace__identity">
+                  <div className="config-workspace__title-row">
+                    <span className="settings-eyebrow">Selected File</span>
+                    <h3>{activeDocument.summary.name}</h3>
+                    <div className="config-workspace__badges">
+                      <span className="settings-chip">
+                        {activeDocument.summary.fileType === 'LoaderConfig'
+                          ? 'Loader Config'
+                          : activeDocument.summary.fileType === 'MelonPreferences'
+                            ? 'MelonPreferences'
+                            : activeDocument.summary.fileType === 'Json'
+                              ? 'JSON Config'
+                              : 'Other CFG'}
+                      </span>
+                      <span className="settings-chip settings-chip--muted">{activeDocument.summary.supportsStructuredEdit ? 'Structured Ready' : 'Raw Fallback'}</span>
+                      {activeDraft.dirty && <span className="settings-chip settings-chip--warn">Unsaved Draft</span>}
                     </div>
                   </div>
-                  );
-                })}
+                  <div className="config-workspace__meta-row">
+                    <span className="config-workspace__path" title={activeDocument.summary.path}>
+                      {activeDocument.summary.path}
+                    </span>
+                    <span>Modified {formatRelativeTimestamp(activeDocument.summary.lastModified)}</span>
+                    <span>{activeDocument.summary.entryCount} values</span>
+                  </div>
+                </div>
 
-                {getCurrentSections().length === 0 && (
-                  <div style={{ textAlign: 'center', color: '#888', padding: '2rem' }}>
-                    No configuration sections found for this mod
+                <div className="config-workspace__actions">
+                  <button type="button" className="btn btn-secondary" onClick={() => void ApiService.openPath(activeDocument.summary.path)}>
+                    <i className="fas fa-file-lines"></i>
+                    Open File
+                  </button>
+                  <button type="button" className="btn btn-secondary" onClick={() => void ApiService.revealPath(activeDocument.summary.path)}>
+                    <i className="fas fa-folder-open"></i>
+                    Open Folder
+                  </button>
+                  <button type="button" className="btn btn-secondary" onClick={() => void handleReload()} disabled={loadingDocument || saving}>
+                    <i className={loadingDocument ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'}></i>
+                    Reload
+                  </button>
+                  <button type="button" className="btn btn-secondary" onClick={handleDiscard} disabled={!activeDraft.dirty || saving}>
+                    <i className="fas fa-rotate-left"></i>
+                    Discard Draft
+                  </button>
+                  <button type="button" className="btn btn-primary" onClick={() => void handleSave()} disabled={!activeDraft.dirty || saving}>
+                    <i className={saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'}></i>
+                    {saving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+              </header>
+
+              <div className="config-workspace__toolbar">
+                <div className="config-workspace__toolbar-main">
+                  <div className="config-editor__mode-toggle">
+                    <button
+                      type="button"
+                      className={`config-editor__mode-button ${editorMode === 'structured' ? 'config-editor__mode-button--active' : ''}`}
+                      disabled={!activeDocument.summary.supportsStructuredEdit}
+                      onClick={() => handleModeChange('structured')}
+                    >
+                      Structured
+                    </button>
+                    <button
+                      type="button"
+                      className={`config-editor__mode-button config-editor__mode-button--fallback ${editorMode === 'raw' ? 'config-editor__mode-button--active' : ''}`}
+                      onClick={() => handleModeChange('raw')}
+                    >
+                      Raw
+                    </button>
+                  </div>
+                  <div className="config-editor__mode-note">
+                    {activeDocument.summary.supportsStructuredEdit
+                      ? 'Raw is available when exact formatting matters.'
+                      : 'This file opens in raw mode because structured editing is not available.'}
+                  </div>
+                </div>
+
+                <div className="config-editor__search">
+                  <i className="fas fa-search"></i>
+                  <input
+                    type="text"
+                    value={sectionFilter}
+                    onChange={(e) => setSectionFilter(e.target.value)}
+                    placeholder={editorMode === 'structured' ? 'Search sections or keys' : 'Search draft context'}
+                    disabled={editorMode !== 'structured'}
+                  />
+                </div>
+              </div>
+
+              {activeDocument.parseWarnings.length > 0 && (
+                <div className="config-editor__warning">
+                  <i className="fas fa-triangle-exclamation"></i>
+                  <span className="settings-chip">
+                    Raw Fallback
+                  </span>
+                  <div>
+                    <strong>Raw editing is safer for part of this file.</strong>
+                    <p>{activeDocument.parseWarnings[0]}</p>
+                  </div>
+                </div>
+              )}
+
+              <div className="config-workspace__body">
+                {editorMode === 'structured' ? (
+                  <div className="config-structured">
+                    {activeDocument.groups.length > 0 && (
+                      <div className="config-structured__groups">
+                        <button
+                          type="button"
+                          className={`workspace-collection__rail-button ${activeGroupId === null ? 'workspace-collection__rail-button--active' : ''}`}
+                          onClick={() => setActiveGroupId(null)}
+                        >
+                          All Sections
+                        </button>
+                        {activeDocument.groups.map((group: ConfigGroup) => (
+                          <button
+                            key={group.id}
+                            type="button"
+                            className={`workspace-collection__rail-button ${activeGroupId === group.id ? 'workspace-collection__rail-button--active' : ''}`}
+                            onClick={() => setActiveGroupId(group.id)}
+                          >
+                            {group.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="config-structured__sheet">
+                      <div className="config-structured__header">
+                        <div>
+                          <span className="settings-eyebrow">Structured Editor</span>
+                          <h4>Settings in this file</h4>
+                        </div>
+                      </div>
+
+                      <div className="config-structured__sections">
+                      {visibleSections.length === 0 ? (
+                        <div className="config-editor__empty config-editor__empty--workspace">
+                          <i className="fas fa-sliders"></i>
+                          <strong>No matching sections</strong>
+                          <p>Adjust the section search or clear the active group filter to widen the result set.</p>
+                        </div>
+                      ) : (
+                        visibleSections.map((section) => (
+                          <article key={section.id} className="config-section-card">
+                            <div className="config-section-card__header">
+                              <div className="config-section-card__title">
+                                <h4>{section.name}</h4>
+                                <p>{formatSettingCount(section.entries.length)}</p>
+                              </div>
+                              <button type="button" className="btn btn-secondary btn-small" onClick={() => handleDeleteSection(section.id)}>
+                                <i className="fas fa-trash"></i>
+                                Remove Section
+                              </button>
+                            </div>
+
+                            <div className="config-section-card__entries">
+                              {section.entries.map((entry) => (
+                                <div key={entry.id} className="config-entry-row">
+                                  <div className="config-entry-row__key">
+                                    {entry.isNew ? (
+                                      <label htmlFor={`config-key-${section.id}-${entry.id}`}>Key</label>
+                                    ) : (
+                                      <span>Key</span>
+                                    )}
+                                    {entry.isNew ? (
+                                      <input
+                                        id={`config-key-${section.id}-${entry.id}`}
+                                        type="text"
+                                        value={entry.key}
+                                        onChange={(e) => handleEntryChange(section.id, entry.id, 'key', e.target.value)}
+                                        placeholder="settingName"
+                                      />
+                                    ) : (
+                                      <div className="config-entry-row__key-label">
+                                        {entry.key}
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="config-entry-row__value">
+                                    <label htmlFor={`config-value-${section.id}-${entry.id}`}>Value</label>
+                                    <input
+                                      id={`config-value-${section.id}-${entry.id}`}
+                                      type="text"
+                                      value={entry.value}
+                                      onChange={(e) => handleEntryChange(section.id, entry.id, 'value', e.target.value)}
+                                    />
+                                  </div>
+
+                                  <div className="config-entry-row__comment">
+                                    <label htmlFor={`config-comment-${section.id}-${entry.id}`}>Comment</label>
+                                    <textarea
+                                      id={`config-comment-${section.id}-${entry.id}`}
+                                      value={entry.comment}
+                                      onChange={(e) => handleEntryChange(section.id, entry.id, 'comment', e.target.value)}
+                                      rows={2}
+                                      placeholder="Optional inline comment"
+                                    />
+                                  </div>
+
+                                  <div className="config-entry-row__actions">
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary btn-small"
+                                      aria-label={`Delete ${entry.key || 'entry'}`}
+                                      onClick={() => handleDeleteEntry(section.id, entry.id)}
+                                    >
+                                      <i className="fas fa-trash"></i>
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div className="config-section-card__footer">
+                              <button type="button" className="btn btn-secondary" onClick={() => handleAddEntry(section.id)}>
+                                <i className="fas fa-plus"></i>
+                                Add Entry
+                              </button>
+                            </div>
+                          </article>
+                        ))
+                      )}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="config-raw">
+                    <div className="config-raw__header">
+                      <span className="settings-eyebrow">Raw Editor</span>
+                      <p>Edit the file directly when you need exact formatting control or when structured edits are limited.</p>
+                    </div>
+                    <textarea
+                      className="config-raw__textarea"
+                      value={activeDraft.rawContent}
+                      onChange={(e) => handleRawChange(e.target.value)}
+                      spellCheck={false}
+                    />
                   </div>
                 )}
               </div>
-            )}
-
-            {!loading && !error && !selectedMod && (
-              <div style={{ textAlign: 'center', color: '#888', padding: '2rem' }}>
-                Select a mod from the left to view and edit its configuration
-              </div>
-            )}
-          </div>
-        </div>
+            </>
+          ) : null}
+        </section>
+      </div>
     </div>
   );
 }

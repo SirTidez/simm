@@ -99,6 +99,8 @@ impl AuthService {
         let output = child.wait_with_output().await?;
         let all_output = String::from_utf8_lossy(&output.stdout).to_string()
             + &String::from_utf8_lossy(&output.stderr).to_string();
+        let sanitized_output =
+            crate::services::logger::LoggerService::sanitize_log_text(&all_output);
         let lower_output = all_output.to_lowercase();
 
         if output.status.success()
@@ -127,7 +129,7 @@ impl AuthService {
         } else {
             Ok(AuthResult {
                 success: false,
-                error: Some(format!("Authentication failed: {}", all_output)),
+                error: Some(format!("Authentication failed: {}", sanitized_output)),
                 requires_steam_guard: None,
             })
         }

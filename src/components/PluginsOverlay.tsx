@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+
 import { ApiService } from '../services/api';
+import type { Environment } from '../types';
+import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 
 interface PluginInfo {
@@ -10,6 +13,7 @@ interface PluginInfo {
   version?: string;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   relatedMod?: string;
+  disabled?: boolean;
 }
 
 interface Props {
@@ -19,28 +23,62 @@ interface Props {
   onPluginsChanged?: () => void;
 }
 
+function getPluginKey(plugin: PluginInfo): string {
+  return `${plugin.fileName}::${plugin.path}`;
+}
+
+function getPluginSourceLabel(source?: PluginInfo['source']): string {
+  switch (source) {
+    case 'thunderstore':
+      return 'Thunderstore';
+    case 'nexusmods':
+      return 'Nexus Mods';
+    case 'github':
+      return 'GitHub';
+    case 'local':
+      return 'Local';
+    default:
+      return 'Unknown';
+  }
+}
+
 export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChanged }: Props) {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pluginsDirectory, setPluginsDirectory] = useState<string>('');
-  const [deletingPlugin, setDeletingPlugin] = useState<string | null>(null);
+  const [pluginsDirectory, setPluginsDirectory] = useState('');
+  const [environment, setEnvironment] = useState<Environment | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedPluginKey, setSelectedPluginKey] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<{ file: null; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
-  const [environment, setEnvironment] = useState<import('../types').Environment | null>(null);
+  const [deletingPluginKey, setDeletingPluginKey] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PluginInfo | null>(null);
+  const [pendingUpload, setPendingUpload] = useState<{
+    runtimeMismatch: {
+      detected: 'IL2CPP' | 'Mono' | 'unknown';
+      environment: 'IL2CPP' | 'Mono';
+      warning: string;
+    };
+  } | null>(null);
+  const [togglingPluginKey, setTogglingPluginKey] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isOpen && environmentId) {
-      loadEnvironment();
-      loadPlugins();
-    } else {
-      // Reset state when closing
+    if (!isOpen || !environmentId) {
       setPlugins([]);
-      setError(null);
       setPluginsDirectory('');
       setEnvironment(null);
+      setError(null);
+      setSearchTerm('');
+      setSelectedPluginKey(null);
+      setContextMenu(null);
+      setPendingDelete(null);
+      return;
     }
-  }, [isOpen, environmentId]);
+
+    void loadEnvironment();
+    void loadPlugins();
+  }, [environmentId, isOpen]);
 
   const loadEnvironment = async () => {
     try {
@@ -54,48 +92,99 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
   const loadPlugins = async () => {
     setLoading(true);
     setError(null);
+
     try {
       const result = await ApiService.getPlugins(environmentId);
-      const normalizedPlugins = result.plugins.map(plugin => ({
+      setPlugins(result.plugins.map((plugin) => ({
         ...plugin,
-        source: plugin.source as PluginInfo['source']
-      }));
-      setPlugins(normalizedPlugins);
+        source: plugin.source as PluginInfo['source'],
+      })));
       setPluginsDirectory(result.pluginsDirectory);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load plugins');
       setPlugins([]);
+      setError(err instanceof Error ? err.message : 'Failed to load plugins');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDeletePlugin = async (plugin: PluginInfo) => {
-    if (!confirm(`Are you sure you want to delete "${plugin.name}"?`)) {
+  const filteredPlugins = useMemo(() => {
+    const normalizedQuery = searchTerm.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return plugins;
+    }
+
+    return plugins.filter((plugin) => (
+      plugin.name.toLowerCase().includes(normalizedQuery)
+      || plugin.fileName.toLowerCase().includes(normalizedQuery)
+      || plugin.path.toLowerCase().includes(normalizedQuery)
+      || getPluginSourceLabel(plugin.source).toLowerCase().includes(normalizedQuery)
+      || (plugin.relatedMod || '').toLowerCase().includes(normalizedQuery)
+      || (plugin.version || '').toLowerCase().includes(normalizedQuery)
+    ));
+  }, [plugins, searchTerm]);
+
+  useEffect(() => {
+    if (filteredPlugins.length === 0) {
+      setSelectedPluginKey(null);
       return;
     }
 
-    setDeletingPlugin(plugin.fileName);
-    try {
-      await ApiService.deletePlugin(environmentId, plugin.fileName);
-      // Reload plugins list after deletion
-      await loadPlugins();
-      // Notify parent that plugins changed (so it can refresh the count)
-      if (onPluginsChanged) {
-        onPluginsChanged();
-      }
-    } catch (err) {
-      alert(`Failed to delete plugin: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    } finally {
-      setDeletingPlugin(null);
+    if (!selectedPluginKey || !filteredPlugins.some((plugin) => getPluginKey(plugin) === selectedPluginKey)) {
+      setSelectedPluginKey(getPluginKey(filteredPlugins[0]));
     }
-  };
+  }, [filteredPlugins, selectedPluginKey]);
+
+  const selectedPlugin = useMemo(() => (
+    filteredPlugins.find((plugin) => getPluginKey(plugin) === selectedPluginKey)
+      || plugins.find((plugin) => getPluginKey(plugin) === selectedPluginKey)
+      || null
+  ), [filteredPlugins, plugins, selectedPluginKey]);
+
+  const disabledCount = plugins.filter((plugin) => plugin.disabled).length;
 
   const handleOpenFolder = async () => {
     try {
       await ApiService.openPluginsFolder(environmentId);
     } catch (err) {
-      alert(`Failed to open plugins folder: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setError(err instanceof Error ? err.message : 'Failed to open plugins folder');
+    }
+  };
+
+  const handleTogglePlugin = async (plugin: PluginInfo) => {
+    const pluginKey = getPluginKey(plugin);
+    setTogglingPluginKey(pluginKey);
+    setError(null);
+
+    try {
+      if (plugin.disabled) {
+        await ApiService.enablePlugin(environmentId, plugin.fileName);
+      } else {
+        await ApiService.disablePlugin(environmentId, plugin.fileName);
+      }
+
+      await loadPlugins();
+      onPluginsChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${plugin.disabled ? 'enable' : 'disable'} plugin`);
+    } finally {
+      setTogglingPluginKey(null);
+    }
+  };
+
+  const handleDeletePlugin = async (plugin: PluginInfo) => {
+    const pluginKey = getPluginKey(plugin);
+    setDeletingPluginKey(pluginKey);
+    setError(null);
+
+    try {
+      await ApiService.deletePlugin(environmentId, plugin.fileName);
+      await loadPlugins();
+      onPluginsChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete plugin');
+    } finally {
+      setDeletingPluginKey(null);
     }
   };
 
@@ -109,35 +198,25 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
     setError(null);
 
     try {
-      // Use Tauri dialog to select file
       const selected = await open({
         multiple: false,
         filters: [{
           name: 'Plugin Files',
-          extensions: ['dll', 'zip']
+          extensions: ['dll', 'zip'],
         }],
         title: 'Select Plugin File',
       }) as string | { path: string; name?: string } | null;
 
       if (!selected) {
-        // User cancelled
         setUploading(false);
         return;
       }
 
-      // Handle both string path and FileEntry object
-      let filePath: string;
-      let fileName: string;
+      const filePath = typeof selected === 'string' ? selected : selected.path;
+      const fileName = typeof selected === 'string'
+        ? selected.split(/[/\\]/).pop() || 'unknown'
+        : selected.name || selected.path.split(/[/\\]/).pop() || 'unknown';
 
-      if (typeof selected === 'string') {
-        filePath = selected;
-        fileName = selected.split(/[/\\]/).pop() || 'unknown';
-      } else {
-        filePath = selected.path;
-        fileName = selected.name || filePath.split(/[/\\]/).pop() || 'unknown';
-      }
-
-      // Call upload with file path and runtime
       const result = await ApiService.uploadPlugin(
         environmentId,
         filePath,
@@ -145,49 +224,68 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
         environment.runtime
       );
 
-      if (result.success) {
-        // Check for runtime mismatch - plugin is already installed, just show warning
-        if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-          // Store the mismatch info to show confirmation dialog
-          setPendingUpload({ file: null, runtimeMismatch: result.runtimeMismatch });
-          // Plugin is already installed, so we can proceed with success handling
-          // but show the warning dialog first
-        } else {
-          // No mismatch - proceed with success handling
-          await handleUploadSuccess();
-        }
-      } else {
+      if (!result.success) {
         setError(result.error || 'Failed to upload plugin');
         setUploading(false);
+        return;
       }
+
+      if (result.runtimeMismatch?.requiresConfirmation) {
+        setPendingUpload({
+          runtimeMismatch: result.runtimeMismatch,
+        });
+        return;
+      }
+
+      await loadPlugins();
+      onPluginsChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload plugin');
+    } finally {
       setUploading(false);
     }
   };
 
-  const handleUploadSuccess = async () => {
-    // Reload plugins list after successful upload
+  const handleRuntimeMismatchClose = async () => {
+    setPendingUpload(null);
     await loadPlugins();
-    // Notify parent that plugins changed
-    if (onPluginsChanged) {
-      onPluginsChanged();
-    }
-    setUploading(false);
-    setPendingUpload(null);
+    onPluginsChanged?.();
   };
 
-  const handleRuntimeMismatchConfirm = async () => {
-    // Plugin is already installed, just acknowledge and continue
-    setPendingUpload(null);
-    await handleUploadSuccess();
-  };
-
-  const handleRuntimeMismatchCancel = () => {
-    // Plugin is already installed, but user canceled acknowledgment
-    // Still reload plugins since it was installed
-    setPendingUpload(null);
-    handleUploadSuccess();
+  const openContextMenu = (event: ReactMouseEvent, plugin: PluginInfo) => {
+    event.preventDefault();
+    setSelectedPluginKey(getPluginKey(plugin));
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        {
+          key: plugin.disabled ? 'enable' : 'disable',
+          label: plugin.disabled ? 'Enable' : 'Disable',
+          icon: plugin.disabled ? 'fas fa-toggle-on' : 'fas fa-toggle-off',
+          onSelect: () => void handleTogglePlugin(plugin),
+        },
+        {
+          key: 'open-folder',
+          label: 'Open Folder',
+          icon: 'fas fa-folder-open',
+          onSelect: () => void handleOpenFolder(),
+        },
+        {
+          key: 'reload',
+          label: 'Reload',
+          icon: 'fas fa-rotate',
+          onSelect: () => void loadPlugins(),
+        },
+        {
+          key: 'delete',
+          label: 'Delete',
+          icon: 'fas fa-trash',
+          danger: true,
+          onSelect: () => setPendingDelete(plugin),
+        },
+      ],
+    });
   };
 
   if (!isOpen) return null;
@@ -195,147 +293,223 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
   return (
     <>
       <ConfirmOverlay
+        isOpen={!!pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) {
+            void handleDeletePlugin(pendingDelete);
+          }
+        }}
+        title="Delete Plugin"
+        message={pendingDelete ? `Delete "${pendingDelete.name}" from this environment?` : ''}
+        confirmText="Delete Plugin"
+        cancelText="Cancel"
+      />
+      <ConfirmOverlay
         isOpen={!!pendingUpload}
-        onClose={handleRuntimeMismatchCancel}
-        onConfirm={handleRuntimeMismatchConfirm}
+        onClose={() => {
+          void handleRuntimeMismatchClose();
+        }}
+        onConfirm={() => {}}
         title="Runtime Mismatch Warning"
         message={pendingUpload?.runtimeMismatch.warning || ''}
         confirmText="Continue Anyway"
-        cancelText="Cancel"
+        cancelText="Close"
       />
-      <div className="mods-overlay" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <div className="modal-header" style={{ borderBottom: '1px solid #3a3a3a', padding: '0.9rem 1.25rem' }}>
-          <div>
-            <h2 style={{ margin: 0 }}>Plugins</h2>
-            <p style={{ margin: '0.35rem 0 0 0', color: '#888', fontSize: '0.8rem' }}>
-              Manage plugin files for this environment.
-            </p>
-          </div>
+
+      <div className="mods-overlay workspace-collection-shell">
+        <div className="modal-header">
+          <h2>Plugins</h2>
           <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i className="fas fa-arrow-left" style={{ marginRight: '0.4rem' }}></i>
+            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
             Back
           </button>
         </div>
 
-        <div className="mods-content" style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {error && (
-            <div className="error-message" style={{ margin: '0 1.25rem', padding: '0.75rem', backgroundColor: '#dc3545', color: '#fff', borderRadius: '4px' }}>
-              {error}
-            </div>
-          )}
+        <div className="workspace-collection">
+          <div className="workspace-collection__main">
+            <div className="workspace-collection__header">
+              <div className="workspace-collection__nav">
+                <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--summary">
+                  <strong>{environment?.name || 'Environment'}</strong>
+                  <span>{environment?.runtime || 'Unknown'} • Plugin inventory</span>
+                </div>
 
-          <div className="mods-actions" style={{ padding: '0 1.25rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-            <div style={{ flex: 1 }}>
+                <div className="workspace-collection__summary">
+                  <div className="workspace-collection__summary-chip">
+                    <span>Plugins</span>
+                    <strong>{plugins.length}</strong>
+                  </div>
+                  <div className="workspace-collection__summary-chip">
+                    <span>Disabled</span>
+                    <strong>{disabledCount}</strong>
+                  </div>
+                  <div className="workspace-collection__summary-chip">
+                    <span>Folder</span>
+                    <strong>{pluginsDirectory ? 'Ready' : 'Unavailable'}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="workspace-collection__toolbar">
+                <div className="workspace-collection__toolbar-search">
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(event) => setSearchTerm(event.target.value)}
+                    placeholder="Search plugins"
+                  />
+                </div>
+                <div className="workspace-collection__toolbar-group">
+                  <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
+                    {uploading ? 'Uploading...' : 'Add Plugin'}
+                  </button>
+                  <button type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
+                    Open Folder
+                  </button>
+                  <button type="button" className="btn btn-secondary btn-small" onClick={() => void loadPlugins()} disabled={loading}>
+                    Reload
+                  </button>
+                </div>
+              </div>
+
               {pluginsDirectory && (
-                <p style={{ margin: 0, color: '#888', fontSize: '0.875rem' }}>
-                  <i className="fas fa-folder" style={{ marginRight: '0.5rem' }}></i>
-                  {pluginsDirectory}
-                </p>
+                <div className="workspace-collection__toolbar-group workspace-collection__toolbar-group--path">
+                  <span className="workspace-collection__path-label">Plugins Directory</span>
+                  <code className="workspace-collection__path-value">{pluginsDirectory}</code>
+                </div>
               )}
             </div>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <button
-                onClick={handleUploadClick}
-                className="btn btn-primary"
-                disabled={uploading}
-                title="Upload a plugin file (.dll, .zip, or .rar)"
-              >
-                {uploading ? (
-                  <>
-                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                    Uploading...
-                  </>
-                ) : (
-                  <>
-                    <i className="fas fa-upload" style={{ marginRight: '0.5rem' }}></i>
-                    Add Plugin
-                  </>
-                )}
-              </button>
-              <button
-                onClick={handleOpenFolder}
-                className="btn btn-secondary"
-                title="Open plugins folder in file explorer"
-              >
-                <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
-                Open Folder
-              </button>
+
+            <div className="workspace-collection__content">
+              {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
+              {!error && loading && <div className="workspace-collection__empty">Loading plugins...</div>}
+              {!error && !loading && plugins.length === 0 && (
+                <div className="workspace-collection__empty">No plugins detected for this environment.</div>
+              )}
+              {!error && !loading && plugins.length > 0 && filteredPlugins.length === 0 && (
+                <div className="workspace-collection__empty">No plugins match this search.</div>
+              )}
+              {!error && !loading && filteredPlugins.length > 0 && (
+                <div className="workspace-collection__list">
+                  {filteredPlugins.map((plugin) => {
+                    const pluginKey = getPluginKey(plugin);
+                    const isSelected = selectedPluginKey === pluginKey;
+                    return (
+                      <div
+                        key={pluginKey}
+                        className={`workspace-collection__row workspace-file-row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setSelectedPluginKey(pluginKey)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setSelectedPluginKey(pluginKey);
+                          }
+                        }}
+                        onContextMenu={(event) => openContextMenu(event, plugin)}
+                      >
+                        <div className="workspace-file-row__icon">
+                          <i className="fas fa-plug" aria-hidden="true"></i>
+                        </div>
+                        <div className="workspace-collection__row-body">
+                          <div className="workspace-collection__row-title">{plugin.name}</div>
+                          <div className="workspace-collection__row-meta">
+                            {plugin.disabled ? (
+                              <span className="workspace-pill workspace-pill--danger">Disabled</span>
+                            ) : (
+                              <span className="workspace-pill workspace-pill--success">Enabled</span>
+                            )}
+                            <span className="workspace-pill workspace-pill--source">{getPluginSourceLabel(plugin.source)}</span>
+                            {plugin.version && <span className="workspace-pill">{plugin.version}</span>}
+                            {plugin.relatedMod && <span className="workspace-pill">Mod: {plugin.relatedMod}</span>}
+                          </div>
+                          <p className="workspace-collection__row-summary">{plugin.fileName}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
 
-          {!loading && (
-            <div style={{ padding: '0 1.25rem 1.25rem', flex: 1, overflowY: 'auto' }}>
-              <div style={{ display: 'grid', gap: '1rem' }}>
-                {/* Regular Plugins List */}
-                {plugins.length === 0 ? (
-                  <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                    <i className="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
-                     <p>No plugins detected</p>
-                    <p style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
-                       Add `.dll` or plugin archive files to the Plugins directory.
-                    </p>
-                  </div>
-                ) : (
-                  plugins.map((plugin) => (
-                    <div
-                      key={plugin.fileName}
-                      className="mod-card"
-                      style={{
-                        backgroundColor: '#2a2a2a',
-                        border: '1px solid #3a3a3a',
-                        borderRadius: '8px',
-                        padding: '1rem',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center'
-                      }}
-                    >
-                      <div style={{ flex: 1 }}>
-                        <h3 style={{ margin: 0, marginBottom: '0.5rem', fontSize: '1rem', color: '#fff' }}>
-                          {plugin.name}
-                        </h3>
-                        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', fontSize: '0.875rem', color: '#888', flexWrap: 'wrap' }}>
-                          <span>
-                            <i className="fas fa-file-code" style={{ marginRight: '0.25rem' }}></i>
-                            {plugin.fileName}
-                          </span>
-                          {plugin.version && (
-                            <span>
-                              <i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>
-                              Version: {plugin.version}
-                            </span>
-                          )}
-                          {plugin.source && (
-                            <span>
-                              <i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>
-                              Source: {plugin.source}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button
-                          onClick={() => handleDeletePlugin(plugin)}
-                          className="btn btn-danger btn-small"
-                          disabled={deletingPlugin === plugin.fileName}
-                          title="Delete plugin"
-                        >
-                          {deletingPlugin === plugin.fileName ? (
-                            <i className="fas fa-spinner fa-spin"></i>
-                          ) : (
-                            <i className="fas fa-trash"></i>
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
+          <aside className="workspace-collection__inspector">
+            {!selectedPlugin && (
+              <div className="workspace-collection__inspector-empty">
+                Select a plugin to review file details and environment actions.
               </div>
-            </div>
-          )}
-        </div>
-       </div>
+            )}
+            {selectedPlugin && (
+              <div className="workspace-inspector-card">
+                <div className="workspace-inspector-card__header workspace-inspector-card__header--file">
+                  <div className="workspace-file-row__icon workspace-file-row__icon--large">
+                    <i className="fas fa-plug" aria-hidden="true"></i>
+                  </div>
+                  <div>
+                    <h3>{selectedPlugin.name}</h3>
+                    <div className="workspace-inspector-card__subtle">
+                      {getPluginSourceLabel(selectedPlugin.source)} {selectedPlugin.version ? `• ${selectedPlugin.version}` : ''}
+                    </div>
+                  </div>
+                </div>
 
+                <div className="workspace-inspector-card__metrics">
+                  <div><span>Status</span><strong>{selectedPlugin.disabled ? 'Disabled' : 'Enabled'}</strong></div>
+                  <div><span>Runtime</span><strong>{environment?.runtime || 'Unknown'}</strong></div>
+                  <div><span>Version</span><strong>{selectedPlugin.version || 'Unknown'}</strong></div>
+                </div>
+
+                <div className="workspace-inspector-card__field">
+                  <label>File Name</label>
+                  <div className="workspace-inspector-card__value">{selectedPlugin.fileName}</div>
+                </div>
+
+                {selectedPlugin.relatedMod && (
+                  <div className="workspace-inspector-card__field">
+                    <label>Related Mod</label>
+                    <div className="workspace-inspector-card__value">{selectedPlugin.relatedMod}</div>
+                  </div>
+                )}
+
+                <div className="workspace-inspector-card__field">
+                  <label>Path</label>
+                  <div className="workspace-inspector-card__value workspace-inspector-card__value--path">{selectedPlugin.path}</div>
+                </div>
+
+                <div className="workspace-inspector-card__actions">
+                  <button
+                    className={selectedPlugin.disabled ? 'btn btn-primary' : 'btn btn-secondary'}
+                    onClick={() => void handleTogglePlugin(selectedPlugin)}
+                    disabled={togglingPluginKey === getPluginKey(selectedPlugin)}
+                  >
+                    {selectedPlugin.disabled ? 'Enable' : 'Disable'}
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => setPendingDelete(selectedPlugin)} disabled={deletingPluginKey === getPluginKey(selectedPlugin)}>
+                    Delete
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
+                    Open Folder
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => void loadPlugins()} disabled={loading}>
+                    Reload
+                  </button>
+                </div>
+              </div>
+            )}
+          </aside>
+        </div>
+
+        {contextMenu && (
+          <AnchoredContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            items={contextMenu.items}
+            onClose={() => setContextMenu(null)}
+          />
+        )}
+      </div>
     </>
   );
 }
