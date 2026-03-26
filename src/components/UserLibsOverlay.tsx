@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
@@ -41,9 +41,42 @@ export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChan
   const [selectedUserLibKey, setSelectedUserLibKey] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
   const [togglingUserLibKey, setTogglingUserLibKey] = useState<string | null>(null);
+  const loadRequestTokenRef = useRef(0);
+
+  const loadEnvironment = useCallback(async (requestToken = loadRequestTokenRef.current) => {
+    try {
+      const env = await ApiService.getEnvironment(environmentId);
+      if (requestToken !== loadRequestTokenRef.current) return;
+      setEnvironment(env);
+    } catch (err) {
+      if (requestToken !== loadRequestTokenRef.current) return;
+      console.error('Failed to load environment:', err);
+    }
+  }, [environmentId]);
+
+  const loadUserLibs = useCallback(async (requestToken = loadRequestTokenRef.current) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const result = await ApiService.getUserLibs(environmentId);
+      if (requestToken !== loadRequestTokenRef.current) return;
+      setUserLibs(result.userLibs);
+      setUserLibsDirectory(result.userLibsDirectory);
+    } catch (err) {
+      if (requestToken !== loadRequestTokenRef.current) return;
+      setUserLibs([]);
+      setError(err instanceof Error ? err.message : 'Failed to load UserLibs');
+    } finally {
+      if (requestToken === loadRequestTokenRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [environmentId]);
 
   useEffect(() => {
     if (!isOpen || !environmentId) {
+      loadRequestTokenRef.current += 1;
       setUserLibs([]);
       setError(null);
       setUserLibsDirectory('');
@@ -54,34 +87,11 @@ export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChan
       return;
     }
 
-    void loadEnvironment();
-    void loadUserLibs();
-  }, [environmentId, isOpen]);
-
-  const loadEnvironment = async () => {
-    try {
-      const env = await ApiService.getEnvironment(environmentId);
-      setEnvironment(env);
-    } catch (err) {
-      console.error('Failed to load environment:', err);
-    }
-  };
-
-  const loadUserLibs = async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const result = await ApiService.getUserLibs(environmentId);
-      setUserLibs(result.userLibs);
-      setUserLibsDirectory(result.userLibsDirectory);
-    } catch (err) {
-      setUserLibs([]);
-      setError(err instanceof Error ? err.message : 'Failed to load UserLibs');
-    } finally {
-      setLoading(false);
-    }
-  };
+    const requestToken = loadRequestTokenRef.current + 1;
+    loadRequestTokenRef.current = requestToken;
+    void loadEnvironment(requestToken);
+    void loadUserLibs(requestToken);
+  }, [environmentId, isOpen, loadEnvironment, loadUserLibs]);
 
   const filteredUserLibs = useMemo(() => {
     const normalizedQuery = searchTerm.trim().toLowerCase();
@@ -124,16 +134,16 @@ export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChan
     }
   };
 
-  const handleToggleUserLib = async (userLib: UserLibInfo) => {
+  const handleToggleUserLib = useCallback(async (userLib: UserLibInfo) => {
     const userLibKey = getUserLibKey(userLib);
     setTogglingUserLibKey(userLibKey);
     setError(null);
 
     try {
       if (userLib.disabled) {
-        await ApiService.enableUserLib(environmentId, userLib.fileName);
+        await ApiService.enableUserLib(environmentId, userLib.path);
       } else {
-        await ApiService.disableUserLib(environmentId, userLib.fileName);
+        await ApiService.disableUserLib(environmentId, userLib.path);
       }
 
       await loadUserLibs();
@@ -143,7 +153,7 @@ export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChan
     } finally {
       setTogglingUserLibKey(null);
     }
-  };
+  }, [environmentId, loadUserLibs, onUserLibsChanged]);
 
   const openContextMenu = (event: ReactMouseEvent, userLib: UserLibInfo) => {
     event.preventDefault();

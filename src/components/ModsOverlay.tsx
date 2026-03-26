@@ -1763,7 +1763,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     );
   };
 
-  const legacyLayout = (
+  const legacyLayout = () => (
     <>
       <ConfirmOverlay
         isOpen={showNexusKeyRequiredModal}
@@ -3039,6 +3039,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                         key={`${mod.fileName}-${mod.path}`}
                         className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
                         role="button"
+                        aria-label={`Open details for ${mod.name}`}
                         tabIndex={0}
                         onClick={() => openInstalledModView(mod)}
                         onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}

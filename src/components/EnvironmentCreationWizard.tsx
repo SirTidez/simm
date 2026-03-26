@@ -18,6 +18,7 @@ function getParentPath(currentPath: string): string | null {
   if (currentPath === '/' || currentPath === '\\') return null;
 
   const separator = currentPath.includes('/') ? '/' : '\\';
+  const hasLeadingSeparator = separator === '/' && currentPath.startsWith('/');
   const parts = currentPath.split(separator).filter(Boolean);
 
   if (parts.length <= 1 && currentPath.includes(':')) return null;
@@ -28,7 +29,7 @@ function getParentPath(currentPath: string): string | null {
     return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
   }
 
-  return parts.join(separator) + (separator === '/' ? '/' : '');
+  return `${hasLeadingSeparator ? '/' : ''}${parts.join(separator)}${separator === '/' ? '/' : ''}`;
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {

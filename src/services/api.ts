@@ -537,17 +537,17 @@ export class ApiService {
 
   static async disableUserLib(
     environmentId: string,
-    userLibFileName: string
+    userLibPath: string
   ): Promise<{ success: boolean }> {
-    await invoke('disable_user_lib', { environmentId, userLibFileName });
+    await invoke('disable_user_lib', { environmentId, userLibPath });
     return { success: true };
   }
 
   static async enableUserLib(
     environmentId: string,
-    userLibFileName: string
+    userLibPath: string
   ): Promise<{ success: boolean }> {
-    await invoke('enable_user_lib', { environmentId, userLibFileName });
+    await invoke('enable_user_lib', { environmentId, userLibPath });
     return { success: true };
   }
 
@@ -1371,12 +1371,12 @@ export class ApiService {
     return invoke('get_config_document', { environmentId, filePath });
   }
 
-  static async applyConfigEdits(filePath: string, operations: ConfigEditOperation[]): Promise<void> {
-    return invoke('apply_config_edits', { filePath, operations });
+  static async applyConfigEdits(environmentId: string, filePath: string, operations: ConfigEditOperation[]): Promise<void> {
+    return invoke('apply_config_edits', { environmentId, filePath, operations });
   }
 
-  static async saveRawConfig(filePath: string, content: string): Promise<void> {
-    return invoke('save_raw_config', { filePath, content });
+  static async saveRawConfig(environmentId: string, filePath: string, content: string): Promise<void> {
+    return invoke('save_raw_config', { environmentId, filePath, content });
   }
 
   static async openPath(path: string): Promise<void> {

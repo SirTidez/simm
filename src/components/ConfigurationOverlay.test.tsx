@@ -250,6 +250,7 @@ describe('ConfigurationOverlay', () => {
 
     await waitFor(() => {
       expect(apiMocks.applyConfigEdits).toHaveBeenCalledWith(
+        'env-1',
         'C:/Games/Schedule I/MelonLoader/Loader.cfg',
         [{ kind: 'setValue', section: 'General', key: 'foo', value: 'baz' }]
       );

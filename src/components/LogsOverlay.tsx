@@ -1047,7 +1047,7 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
                       }}
                       role="option"
                       aria-selected={isSelected}
-                      tabIndex={0}
+                      tabIndex={-1}
                       className={`logs-panel__line ${isSelected ? 'logs-panel__line--selected' : ''}`}
                       onClick={() => setSelectedLineKey(key)}
                       onDoubleClick={() => {

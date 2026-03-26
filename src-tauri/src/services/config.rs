@@ -88,15 +88,14 @@ impl ConfigService {
         }
 
         let rendered = self.render_sections(&parsed.sections);
+        let reparsed = self.parse_rendered_document(&rendered, file_type);
+        if !reparsed.parse_warnings.is_empty() {
+            bail!("Config file could not be re-parsed cleanly after applying edits");
+        }
+
         fs::write(&path, rendered)
             .await
             .context("Failed to write config file")?;
-
-        // Best-effort sanity parse after save for supported files.
-        let reparsed = self.parse_config_document(&path, file_type).await?;
-        if !reparsed.parse_warnings.is_empty() {
-            bail!("Config file saved but could not be re-parsed cleanly");
-        }
 
         Ok(())
     }
@@ -228,6 +227,25 @@ impl ConfigService {
             .await
             .context("Failed to read config file")?;
 
+        Ok(self.parse_ini_like_content(raw_content))
+    }
+
+    fn parse_rendered_document(&self, raw_content: &str, file_type: ConfigFileType) -> ParsedDocument {
+        if file_type == ConfigFileType::Json {
+            ParsedDocument {
+                raw_content: raw_content.to_string(),
+                sections: Vec::new(),
+                parse_warnings: vec![
+                    "Structured editing is not currently available for JSON configuration files."
+                        .to_string(),
+                ],
+            }
+        } else {
+            self.parse_ini_like_content(raw_content.to_string())
+        }
+    }
+
+    fn parse_ini_like_content(&self, raw_content: String) -> ParsedDocument {
         let mut sections = vec![ParsedSection {
             name: "General".to_string(),
             has_header: false,
@@ -308,11 +326,11 @@ impl ConfigService {
             sections.remove(0);
         }
 
-        Ok(ParsedDocument {
+        ParsedDocument {
             raw_content,
             sections,
             parse_warnings,
-        })
+        }
     }
 
     fn build_groups(&self, sections: &[ConfigSection]) -> Vec<ConfigGroup> {

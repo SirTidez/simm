@@ -33,6 +33,38 @@ impl UserLibsService {
         Path::new(output_dir).join("UserLibs")
     }
 
+    fn resolve_user_lib_path(&self, output_dir: &str, user_lib_path: &str) -> Result<PathBuf> {
+        let user_libs_directory = self.get_user_libs_directory(output_dir);
+        let requested_path = PathBuf::from(user_lib_path);
+        let normalized_path = if requested_path.is_absolute() {
+            requested_path
+        } else {
+            user_libs_directory.join(requested_path)
+        };
+
+        let normalized_path = if normalized_path.exists() {
+            normalized_path
+                .canonicalize()
+                .context("Failed to canonicalize user lib path")?
+        } else {
+            normalized_path
+        };
+
+        let normalized_root = if user_libs_directory.exists() {
+            user_libs_directory
+                .canonicalize()
+                .context("Failed to canonicalize UserLibs directory")?
+        } else {
+            user_libs_directory
+        };
+
+        if !normalized_path.starts_with(&normalized_root) {
+            return Err(anyhow::anyhow!("UserLib path must be within the UserLibs directory"));
+        }
+
+        Ok(normalized_path)
+    }
+
     pub async fn list_user_libs(&self, game_dir: &str) -> Result<serde_json::Value> {
         let user_libs_directory = self.get_user_libs_directory(game_dir);
 
@@ -96,10 +128,28 @@ impl UserLibsService {
         Ok(count)
     }
 
-    pub async fn enable_user_lib(&self, game_dir: &str, user_lib_file_name: &str) -> Result<()> {
-        let user_libs_directory = self.get_user_libs_directory(game_dir);
-        let disabled_path = user_libs_directory.join(format!("{}.disabled", user_lib_file_name));
-        let enabled_path = user_libs_directory.join(user_lib_file_name);
+    pub async fn enable_user_lib(&self, game_dir: &str, user_lib_path: &str) -> Result<()> {
+        let disabled_path = self.resolve_user_lib_path(game_dir, user_lib_path)?;
+        let enabled_path = if disabled_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase().ends_with(".disabled"))
+            .unwrap_or(false)
+        {
+            let file_name = disabled_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?;
+            disabled_path.with_file_name(file_name.trim_end_matches(".disabled"))
+        } else {
+            disabled_path.with_file_name(format!(
+                "{}",
+                disabled_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?
+            ))
+        };
 
         if !disabled_path.exists() {
             return Err(anyhow::anyhow!("Disabled user lib file not found"));
@@ -125,10 +175,15 @@ impl UserLibsService {
         Ok(())
     }
 
-    pub async fn disable_user_lib(&self, game_dir: &str, user_lib_file_name: &str) -> Result<()> {
-        let user_libs_directory = self.get_user_libs_directory(game_dir);
-        let enabled_path = user_libs_directory.join(user_lib_file_name);
-        let disabled_path = user_libs_directory.join(format!("{}.disabled", user_lib_file_name));
+    pub async fn disable_user_lib(&self, game_dir: &str, user_lib_path: &str) -> Result<()> {
+        let enabled_path = self.resolve_user_lib_path(game_dir, user_lib_path)?;
+        let disabled_path = enabled_path.with_file_name(format!(
+            "{}.disabled",
+            enabled_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?
+        ));
 
         if !enabled_path.exists() {
             return Err(anyhow::anyhow!("User lib file not found"));
@@ -203,13 +258,22 @@ mod tests {
         fs::write(userlibs_dir.join("LibA.dll"), b"data").await?;
 
         service
-            .disable_user_lib(temp.path().to_string_lossy().as_ref(), "LibA.dll")
+            .disable_user_lib(
+                temp.path().to_string_lossy().as_ref(),
+                userlibs_dir.join("LibA.dll").to_string_lossy().as_ref(),
+            )
             .await?;
         assert!(!userlibs_dir.join("LibA.dll").exists());
         assert!(userlibs_dir.join("LibA.dll.disabled").exists());
 
         service
-            .enable_user_lib(temp.path().to_string_lossy().as_ref(), "LibA.dll")
+            .enable_user_lib(
+                temp.path().to_string_lossy().as_ref(),
+                userlibs_dir
+                    .join("LibA.dll.disabled")
+                    .to_string_lossy()
+                    .as_ref(),
+            )
             .await?;
         assert!(userlibs_dir.join("LibA.dll").exists());
         assert!(!userlibs_dir.join("LibA.dll.disabled").exists());

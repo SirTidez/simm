@@ -113,7 +113,7 @@ describe('UserLibsOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
 
     await waitFor(() => {
-      expect(apiMocks.enableUserLib).toHaveBeenCalledWith('env-1', 'SharedAssets');
+      expect(apiMocks.enableUserLib).toHaveBeenCalledWith('env-1', 'C:/env/UserLibs/SharedAssets');
       expect(onUserLibsChanged).toHaveBeenCalled();
     });
   });

@@ -1322,6 +1322,17 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       || null;
   }, [getSortedGroupEntries, selectedStorageByGroup]);
 
+  const findDownloadedEntryByStorageIds = useCallback((group: DownloadedModGroup, storageIds: string[]) => {
+    if (storageIds.length === 0) {
+      return null;
+    }
+
+    return group.entries.find((entry) =>
+      storageIds.includes(entry.storageId)
+      || Object.values(entry.storageIdsByRuntime || {}).some((id) => id ? storageIds.includes(id) : false)
+    ) || null;
+  }, []);
+
   const entrySupportsRuntime = useCallback((entry: ModLibraryEntry, runtime: 'IL2CPP' | 'Mono') => {
     if (entry.storageIdsByRuntime?.[runtime]) {
       return true;
@@ -1366,12 +1377,26 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
   }, [entrySupportsRuntime, environments]);
 
   const promptInstallTargets = useCallback(async (entry: ModLibraryEntry, title: string, installMoreOnly: boolean) => {
+    const containingGroup = downloadedGroups.find((group) =>
+      group.entries.some((candidate) => candidate.storageId === entry.storageId)
+    );
+
     const compatible = environments.filter((environment) => {
       if (!entrySupportsRuntime(entry, environment.runtime)) {
         return false;
       }
       if (!installMoreOnly) {
         return true;
+      }
+      const hasSiblingVersionInstalled = containingGroup?.entries.some((candidate) => {
+        if (candidate.storageId === entry.storageId) {
+          return false;
+        }
+        const siblingInstalledIds = candidate.installedInByRuntime?.[environment.runtime] || candidate.installedIn || [];
+        return siblingInstalledIds.includes(environment.id);
+      }) || false;
+      if (hasSiblingVersionInstalled) {
+        return false;
       }
       const installedIds = entry.installedInByRuntime?.[environment.runtime] || entry.installedIn || [];
       return !installedIds.includes(environment.id);
@@ -1406,7 +1431,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       compatibleEnvironments: compatible,
       excludedEnvironments: excluded,
     });
-  }, [entrySupportsRuntime, environments, installEntryToEnvironmentIds, notifyLibraryUpdated, notifyModUpdateStateChanged, refreshLibrary, showLibraryNotice]);
+  }, [downloadedGroups, entrySupportsRuntime, environments, installEntryToEnvironmentIds, notifyLibraryUpdated, notifyModUpdateStateChanged, refreshLibrary, showLibraryNotice]);
 
   const handleConfirmInstallTargets = useCallback(async () => {
     if (!installDialog.entry || selectedInstallEnvironmentIds.size === 0) {
@@ -1618,7 +1643,12 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           );
         } else {
           const refreshedGroup = findDownloadedGroupForThunderstorePackage(pkg, nextLibrary);
-          const selectedEntry = refreshedGroup ? getActiveEntryForGroup(refreshedGroup) || refreshedGroup.entries[0] : null;
+          const downloadedStorageIds = results.flatMap((result) => result.storageId ? [result.storageId] : []);
+          const selectedEntry = refreshedGroup
+            ? findDownloadedEntryByStorageIds(refreshedGroup, downloadedStorageIds)
+              || getActiveEntryForGroup(refreshedGroup)
+              || refreshedGroup.entries[0]
+            : null;
           if (selectedEntry) {
             openDownloadedModView(refreshedGroup!, selectedEntry.storageId);
             await promptInstallTargets(selectedEntry, `Install ${selectedEntry.displayName}`, false);
@@ -1693,6 +1723,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       setDownloading(`nexus-${modId}`);
       let keepPendingDownload = false;
       try {
+        const results: Array<{ success: boolean; storageId?: string; alreadyStored?: boolean }> = [];
         if (!access.canDirectDownload && access.requiresSiteConfirmation) {
           if (runtime === 'Both') {
             throw new Error('Manual Nexus download flow requires a single runtime selection.');
@@ -1720,21 +1751,26 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
           const il2cppFile = selectNexusFileForRuntime(files, 'IL2CPP');
           const monoFile = selectNexusFileForRuntime(files, 'Mono');
           if (il2cppFile?.file_id) {
-            await ApiService.downloadNexusModToLibrary(modId, il2cppFile.file_id, 'IL2CPP');
+            results.push(await ApiService.downloadNexusModToLibrary(modId, il2cppFile.file_id, 'IL2CPP'));
           }
           if (monoFile?.file_id && monoFile?.file_id !== il2cppFile?.file_id) {
-            await ApiService.downloadNexusModToLibrary(modId, monoFile.file_id, 'Mono');
+            results.push(await ApiService.downloadNexusModToLibrary(modId, monoFile.file_id, 'Mono'));
           }
         } else {
           const targetFile = selectNexusFileForRuntime(files, runtime);
           if (!targetFile?.file_id) return;
-          await ApiService.downloadNexusModToLibrary(modId, targetFile.file_id, runtime);
+          results.push(await ApiService.downloadNexusModToLibrary(modId, targetFile.file_id, runtime));
         }
         const nextLibrary = await ApiService.getModLibrary();
         setLibrary(nextLibrary);
         notifyLibraryUpdated();
         const refreshedGroup = findDownloadedGroupForNexusMod(modId, nextLibrary);
-        const selectedEntry = refreshedGroup ? getActiveEntryForGroup(refreshedGroup) || refreshedGroup.entries[0] : null;
+        const selectedEntry = refreshedGroup
+          ? findDownloadedEntryByStorageIds(
+            refreshedGroup,
+            results.flatMap((result) => result.storageId ? [result.storageId] : [])
+          ) || getActiveEntryForGroup(refreshedGroup) || refreshedGroup.entries[0]
+          : null;
         if (selectedEntry) {
           openDownloadedModView(refreshedGroup!, selectedEntry.storageId);
           await promptInstallTargets(selectedEntry, `Install ${selectedEntry.displayName}`, false);
@@ -2131,7 +2167,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
 
   if (!isOpen) return null;
 
-  const legacyLayout = (
+  const legacyLayout = () => (
     <>
       <ConfirmOverlay
         isOpen={confirmOverlay.isOpen}

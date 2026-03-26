@@ -276,7 +276,8 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     if (!isOpen || !selectedFilePath) return;
     if (documentCache[selectedFilePath]) {
       const cached = documentCache[selectedFilePath];
-      setEditorMode(cached.summary.supportsStructuredEdit ? 'structured' : 'raw');
+      const draft = drafts[selectedFilePath];
+      setEditorMode(draft?.dirtyMode ?? (cached.summary.supportsStructuredEdit ? 'structured' : 'raw'));
       return;
     }
 
@@ -290,7 +291,8 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
 
         setDocumentCache((current) => ({ ...current, [selectedFilePath]: document }));
         setDrafts((current) => current[selectedFilePath] ? current : { ...current, [selectedFilePath]: createDraft(document) });
-        setEditorMode(document.summary.supportsStructuredEdit ? 'structured' : 'raw');
+        const draft = drafts[selectedFilePath];
+        setEditorMode(draft?.dirtyMode ?? (document.summary.supportsStructuredEdit ? 'structured' : 'raw'));
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load configuration file');
@@ -307,7 +309,7 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     return () => {
       cancelled = true;
     };
-  }, [documentCache, environmentId, isOpen, selectedFilePath]);
+  }, [documentCache, drafts, environmentId, isOpen, selectedFilePath]);
 
   const filteredCatalog = useMemo(() => {
     const query = fileFilter.trim().toLowerCase();
@@ -554,7 +556,7 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
 
     try {
       if (editorMode === 'raw') {
-        await ApiService.saveRawConfig(selectedFilePath, activeDraft.rawContent);
+        await ApiService.saveRawConfig(environmentId, selectedFilePath, activeDraft.rawContent);
       } else {
         const validationError = validateStructuredDraft(activeDraft.sections);
         if (validationError) {
@@ -564,7 +566,7 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
         }
 
         const operations = buildOperations(activeDocument.sections, activeDraft.sections);
-        await ApiService.applyConfigEdits(selectedFilePath, operations);
+        await ApiService.applyConfigEdits(environmentId, selectedFilePath, operations);
       }
 
       const [nextCatalog, nextDocument] = await Promise.all([

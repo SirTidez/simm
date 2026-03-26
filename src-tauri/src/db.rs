@@ -153,6 +153,23 @@ fn backup_file_name(reason: &str) -> String {
     )
 }
 
+fn backup_file_sort_key(path: &Path) -> std::time::SystemTime {
+    let parsed_from_name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .and_then(|stem| stem.strip_prefix("SIMM-db-backup-"))
+        .and_then(|stem| stem.get(stem.len().saturating_sub(19)..))
+        .and_then(|timestamp| chrono::NaiveDateTime::parse_from_str(timestamp, "%Y%m%d-%H%M%S-%3f").ok())
+        .map(|naive| chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+        .map(std::time::SystemTime::from);
+
+    parsed_from_name.unwrap_or_else(|| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    })
+}
+
 fn sqlite_quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -294,7 +311,7 @@ async fn prune_old_database_backups(pool: &SqlitePool) -> Result<()> {
         return Ok(());
     }
 
-    backup_files.sort();
+    backup_files.sort_by_key(|path| backup_file_sort_key(path));
     let excess_count = backup_files.len().saturating_sub(retention_limit);
     for path in backup_files.into_iter().take(excess_count) {
         std::fs::remove_file(&path)

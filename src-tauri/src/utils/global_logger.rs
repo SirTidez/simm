@@ -33,7 +33,14 @@ impl GlobalLogger {
         // Start a background thread to process log messages
         std::thread::spawn(move || {
             // Create a Tokio runtime for this thread
-            let rt = tokio::runtime::Runtime::new().unwrap();
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    LOGGER_SERVICE_STARTED.store(false, Ordering::SeqCst);
+                    eprintln!("[GlobalLogger] Failed to create runtime for LoggerService: {}", error);
+                    return;
+                }
+            };
 
             // Initialize the LoggerService
             let logger_service = rt.block_on(async {
@@ -43,6 +50,7 @@ impl GlobalLogger {
                         Some(service)
                     }
                     Err(e) => {
+                        LOGGER_SERVICE_STARTED.store(false, Ordering::SeqCst);
                         eprintln!("[GlobalLogger] Failed to initialize LoggerService: {}", e);
                         None
                     }

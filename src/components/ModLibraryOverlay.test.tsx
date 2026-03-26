@@ -5,6 +5,7 @@ import type { ModLibraryEntry } from '../types';
 
 const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
+  getEnvironments: vi.fn(),
   getS1APILatestRelease: vi.fn(),
   getMLVScanLatestRelease: vi.fn(),
   getS1APIReleases: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock('../services/events', () => ({
 describe('ModLibraryOverlay', () => {
   beforeEach(() => {
     apiMocks.getModLibrary.mockReset();
+    apiMocks.getEnvironments.mockReset();
     apiMocks.getS1APILatestRelease.mockReset();
     apiMocks.getMLVScanLatestRelease.mockReset();
     apiMocks.getS1APIReleases.mockReset();
@@ -62,6 +64,7 @@ describe('ModLibraryOverlay', () => {
 
     apiMocks.getS1APIReleases.mockResolvedValue([]);
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
+    apiMocks.getEnvironments.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
@@ -107,16 +110,15 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    expect(await screen.findByText('Installed: v1.0.0')).toBeTruthy();
-    expect(await screen.findByText('Latest: v1.1.0')).toBeTruthy();
-    expect((await screen.findAllByRole('button', { name: 'Update' })).length).toBeGreaterThan(0);
+    expect(await screen.findByText('S1API')).toBeTruthy();
+    expect(await screen.findByText('v1.0.0')).toBeTruthy();
 
     await waitFor(() => {
-      expect(screen.getAllByText('Update Available').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Update available').length).toBeGreaterThan(0);
     });
   });
 
-  it('shows author/version/runtime and latest version in downloaded mods cards', async () => {
+  it('shows version, runtime, and update state in downloaded mod rows', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
         makeEntry({
@@ -139,10 +141,9 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    expect(await screen.findByText('Mono Utility')).toBeTruthy();
-    expect(await screen.findByText('TestAuthor')).toBeTruthy();
-    expect(await screen.findByText(/Active\s+v1\.2\.3/i)).toBeTruthy();
-    expect(await screen.findByText(/Latest:?\s+v1\.3\.0/i)).toBeTruthy();
+    expect((await screen.findAllByText('Mono Utility')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('v1.2.3')).length).toBeGreaterThan(0);
+    expect(await screen.findByText('Update available')).toBeTruthy();
     expect(await screen.findByText('Mono')).toBeTruthy();
   });
 
@@ -166,11 +167,12 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    const card = await screen.findByRole('button', { name: 'Open details for Keyboard Mod' });
+    const card = (await screen.findAllByText('Keyboard Mod'))[0].closest('[role="button"]') as HTMLElement;
     fireEvent.keyDown(card, { key: 'Enter', code: 'Enter' });
 
-    expect(await screen.findByText('Mod View')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Open Source Page' })).toBeTruthy();
+    expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Install…' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete downloaded files' })).toBeTruthy();
   });
 
   it('suppresses unsafe source links in mod view', async () => {
@@ -193,10 +195,10 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    const card = await screen.findByRole('button', { name: 'Open details for Unsafe Link Mod' });
+    const card = (await screen.findAllByText('Unsafe Link Mod'))[0].closest('[role="button"]') as HTMLElement;
     fireEvent.click(card);
 
-    expect(await screen.findByText('Mod View')).toBeTruthy();
+    expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
     expect(screen.queryByRole('link', { name: 'Open Source Page' })).toBeNull();
   });
 
@@ -229,7 +231,7 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Update and activate' }));
 
     expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
     expect(await screen.findByText(/Could not resolve the latest Thunderstore package/i)).toBeTruthy();
@@ -262,7 +264,7 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Update and activate' }));
 
     expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
     expect(await screen.findByText(/missing Thunderstore or Nexus source metadata/i)).toBeTruthy();
@@ -309,8 +311,10 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /v1\.1\.0/i }));
-    fireEvent.click(await screen.findByRole('button', { name: /v1\.0\.0/i }));
+    fireEvent.change(await screen.findByLabelText('Available versions'), {
+      target: { value: 'storage-old' },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Activate selected version' }));
 
     await waitFor(() => {
       expect(apiMocks.uninstallDownloadedMod).toHaveBeenCalledWith('storage-new', ['env-1']);

@@ -204,10 +204,10 @@ describe('ApiService', () => {
 
     const catalog = await ApiService.getConfigCatalog('env-1');
     const document = await ApiService.getConfigDocument('env-1', 'C:/Games/Schedule I/MelonLoader/Loader.cfg');
-    await ApiService.applyConfigEdits('C:/Games/Schedule I/MelonLoader/Loader.cfg', [
+    await ApiService.applyConfigEdits('env-1', 'C:/Games/Schedule I/MelonLoader/Loader.cfg', [
       { kind: 'setValue', section: 'General', key: 'foo', value: 'baz' },
     ]);
-    await ApiService.saveRawConfig('C:/Games/Schedule I/MelonLoader/Loader.cfg', '[General]\nfoo = qux');
+    await ApiService.saveRawConfig('env-1', 'C:/Games/Schedule I/MelonLoader/Loader.cfg', '[General]\nfoo = qux');
 
     expect(catalog).toHaveLength(1);
     expect(document.summary.name).toBe('Loader.cfg');
@@ -217,10 +217,12 @@ describe('ApiService', () => {
       filePath: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
     });
     expect(invokeMock).toHaveBeenNthCalledWith(3, 'apply_config_edits', {
+      environmentId: 'env-1',
       filePath: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
       operations: [{ kind: 'setValue', section: 'General', key: 'foo', value: 'baz' }],
     });
     expect(invokeMock).toHaveBeenNthCalledWith(4, 'save_raw_config', {
+      environmentId: 'env-1',
       filePath: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
       content: '[General]\nfoo = qux',
     });

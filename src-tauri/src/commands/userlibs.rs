@@ -59,12 +59,12 @@ async fn get_userlibs_count_impl(
 async fn enable_user_lib_impl(
     db: Arc<SqlitePool>,
     environment_id: String,
-    user_lib_file_name: String,
+    user_lib_path: String,
 ) -> Result<(), String> {
     let output_dir = get_environment_output_dir(db, &environment_id).await?;
     let userlibs_service = get_userlibs_service().await?;
     userlibs_service
-        .enable_user_lib(&output_dir, &user_lib_file_name)
+        .enable_user_lib(&output_dir, &user_lib_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -72,12 +72,12 @@ async fn enable_user_lib_impl(
 async fn disable_user_lib_impl(
     db: Arc<SqlitePool>,
     environment_id: String,
-    user_lib_file_name: String,
+    user_lib_path: String,
 ) -> Result<(), String> {
     let output_dir = get_environment_output_dir(db, &environment_id).await?;
     let userlibs_service = get_userlibs_service().await?;
     userlibs_service
-        .disable_user_lib(&output_dir, &user_lib_file_name)
+        .disable_user_lib(&output_dir, &user_lib_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -118,18 +118,18 @@ pub async fn get_userlibs_count(
 pub async fn enable_user_lib(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
-    user_lib_file_name: String,
+    user_lib_path: String,
 ) -> Result<(), String> {
-    enable_user_lib_impl(db.inner().clone(), environment_id, user_lib_file_name).await
+    enable_user_lib_impl(db.inner().clone(), environment_id, user_lib_path).await
 }
 
 #[tauri::command]
 pub async fn disable_user_lib(
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
-    user_lib_file_name: String,
+    user_lib_path: String,
 ) -> Result<(), String> {
-    disable_user_lib_impl(db.inner().clone(), environment_id, user_lib_file_name).await
+    disable_user_lib_impl(db.inner().clone(), environment_id, user_lib_path).await
 }
 
 #[tauri::command]
@@ -201,7 +201,15 @@ mod tests {
             .expect("initial count");
         assert_eq!(initial.get("count").and_then(|v| v.as_u64()), Some(1));
 
-        disable_user_lib_impl(pool.clone(), env.id.clone(), "LibA.dll".to_string())
+        disable_user_lib_impl(
+            pool.clone(),
+            env.id.clone(),
+            output_dir
+                .join("UserLibs")
+                .join("LibA.dll")
+                .to_string_lossy()
+                .to_string(),
+        )
             .await
             .expect("disable");
 
@@ -222,7 +230,15 @@ mod tests {
             Some(true)
         );
 
-        enable_user_lib_impl(pool.clone(), env.id.clone(), "LibA.dll".to_string())
+        enable_user_lib_impl(
+            pool.clone(),
+            env.id.clone(),
+            output_dir
+                .join("UserLibs")
+                .join("LibA.dll.disabled")
+                .to_string_lossy()
+                .to_string(),
+        )
             .await
             .expect("enable");
 
