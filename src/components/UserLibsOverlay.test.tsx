@@ -48,7 +48,7 @@ describe('UserLibsOverlay', () => {
         {
           name: 'SharedAssets',
           fileName: 'SharedAssets',
-          path: 'C:/env/UserLibs/SharedAssets',
+          path: 'C:/env/UserLibs/SharedAssets.disabled',
           isDirectory: true,
           disabled: true,
         },
@@ -113,7 +113,7 @@ describe('UserLibsOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
 
     await waitFor(() => {
-      expect(apiMocks.enableUserLib).toHaveBeenCalledWith('env-1', 'C:/env/UserLibs/SharedAssets');
+      expect(apiMocks.enableUserLib).toHaveBeenCalledWith('env-1', 'C:/env/UserLibs/SharedAssets.disabled');
       expect(onUserLibsChanged).toHaveBeenCalled();
     });
   });

@@ -190,7 +190,7 @@ pub struct NexusRateLimits {
 pub enum Theme {
     Light,
     Dark,
-    #[serde(rename = "modern-blue")]
+    #[serde(rename = "modern-blue", alias = "custom")]
     ModernBlue,
 }
 

@@ -1349,15 +1349,23 @@ export class ApiService {
   static async exportLogs(
     logPath: string,
     filterLevel: string | null,
+    filterCategory: string | null,
     searchQuery: string | null,
     filterModTag: string | null,
+    timePeriod: string | null,
+    customTimeStart: string | null,
+    customTimeEnd: string | null,
     outputPath: string
   ): Promise<void> {
     return invoke('export_logs', {
       logPath,
       filterLevel,
+      filterCategory,
       searchQuery,
       filterModTag,
+      timePeriod,
+      customTimeStart,
+      customTimeEnd,
       outputPath,
     });
   }

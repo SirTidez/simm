@@ -622,8 +622,12 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
       await ApiService.exportLogs(
         selectedLogFile.path,
         filterLevel === 'ALL' ? null : filterLevel,
+        filterCategory === 'ALL' ? null : filterCategory,
         searchQuery.trim() || null,
         selectedModTag,
+        timePeriod === 'all' ? null : timePeriod,
+        timePeriod === 'custom' ? customTimeStart.trim() || null : null,
+        timePeriod === 'custom' ? customTimeEnd.trim() || null : null,
         destination,
       );
       showToast('Filtered logs exported successfully.');

@@ -112,8 +112,12 @@ pub async fn stop_watching_log() -> Result<(), String> {
 pub async fn export_logs(
     log_path: String,
     filter_level: Option<String>,
+    filter_category: Option<String>,
     search_query: Option<String>,
     filter_mod_tag: Option<String>,
+    time_period: Option<String>,
+    custom_time_start: Option<String>,
+    custom_time_end: Option<String>,
     output_path: String,
 ) -> Result<(), String> {
     let logs_service = get_logs_service().await?;
@@ -121,8 +125,12 @@ pub async fn export_logs(
         .export_logs(
             &log_path,
             filter_level.as_deref(),
+            filter_category.as_deref(),
             search_query.as_deref(),
             filter_mod_tag.as_deref(),
+            time_period.as_deref(),
+            custom_time_start.as_deref(),
+            custom_time_end.as_deref(),
             &output_path,
         )
         .await

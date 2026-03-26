@@ -23,12 +23,12 @@ fn normalize_path(path: &str) -> String {
 
 pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
     let db_path = get_database_path()?;
-    let database_preexisted = db_path.exists();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create database directory")?;
     }
 
     migrate_legacy_database_if_needed(&db_path)?;
+    let database_preexisted = db_path.exists();
 
     let options = SqliteConnectOptions::new()
         .filename(&db_path)

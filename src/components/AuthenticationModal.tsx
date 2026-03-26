@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { ApiService } from '../services/api';
@@ -30,6 +30,14 @@ export function AuthenticationModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveCredentials, setSaveCredentials] = useState(true);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -51,19 +59,30 @@ export function AuthenticationModal({
           steamGuard,
           saveCredentials,
         });
+        if (isMountedRef.current) {
+          setLoading(false);
+        }
         onClose();
         return;
       }
 
       if (result.requiresSteamGuard) {
-        setError('Steam Guard approval required. Approve the login in the Steam Mobile App, then SIMM will continue automatically.');
+        if (isMountedRef.current) {
+          setError('Steam Guard approval required. Approve the login in the Steam Mobile App, then SIMM will continue automatically.');
+        }
       } else {
-        setError(result.message || 'Authentication failed');
+        if (isMountedRef.current) {
+          setError(result.message || 'Authentication failed');
+        }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Authentication failed');
+      if (isMountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Authentication failed');
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
   };
 

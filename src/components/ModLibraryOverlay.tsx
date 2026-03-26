@@ -1982,7 +1982,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
 
   const displayedDownloadedGroups = useMemo(() => {
     if (libraryTab === 'updates') {
-      return downloadedGroups.filter((group) => isGroupUpdateAvailable(group));
+      return filteredDownloadedGroups.filter((group) => isGroupUpdateAvailable(group));
     }
     return filteredDownloadedGroups;
   }, [downloadedGroups, filteredDownloadedGroups, isGroupUpdateAvailable, libraryTab]);
@@ -2056,6 +2056,10 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     }
 
     if (libraryTab === 'discover') {
+      if (activeModView?.kind === 'downloaded') {
+        return;
+      }
+
       if (showSearchResults && searchResults.length > 0) {
         const stillValid = activeModView?.kind === 'thunderstore' && searchResults.some((pkg) => pkg.key === activeModView.id);
         if (!stillValid) {

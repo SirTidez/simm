@@ -69,7 +69,9 @@ child.once('exit', (code, signal) => {
   void shutdown(code ?? 0);
 });
 
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+const signals = isWindows ? ['SIGINT', 'SIGTERM'] : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+for (const signal of signals) {
   process.on(signal, () => {
     void shutdown(0);
   });

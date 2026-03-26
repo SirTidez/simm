@@ -80,7 +80,7 @@ impl FileSystemService {
         {
             use std::os::windows::process::CommandExt;
             std::process::Command::new("explorer")
-                .arg(format!("/select,{}", path))
+                .arg(format!("/select,\"{}\"", path))
                 .creation_flags(0x08000000)
                 .spawn()
                 .context("Failed to reveal path")?;

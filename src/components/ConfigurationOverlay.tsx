@@ -577,7 +577,11 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
       setCatalog(nextCatalog);
       setDocumentCache((current) => ({ ...current, [selectedFilePath]: nextDocument }));
       setDrafts((current) => ({ ...current, [selectedFilePath]: createDraft(nextDocument) }));
-      setEditorMode(nextDocument.summary.supportsStructuredEdit ? 'structured' : 'raw');
+      setEditorMode((currentMode) => (
+        currentMode === 'structured' && !nextDocument.summary.supportsStructuredEdit
+          ? 'raw'
+          : currentMode
+      ));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save configuration changes');
     } finally {
@@ -595,7 +599,6 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
         onConfirm={() => {
           if (!pendingConfirm) return;
           pendingConfirm.onConfirm();
-          setPendingConfirm(null);
         }}
         title={pendingConfirm?.title || ''}
         message={pendingConfirm?.message || ''}

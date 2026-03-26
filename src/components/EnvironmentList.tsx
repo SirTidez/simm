@@ -122,6 +122,7 @@ export function EnvironmentList({
     environmentsRef.current = environments;
   }, [environments]);
   const initialUpdateCheckDoneRef = useRef(false);
+  const melonLoaderPrefetchStartedRef = useRef(false);
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;
@@ -857,8 +858,12 @@ export function EnvironmentList({
 
       // Load releases for environments with MelonLoader installed (so we can show/hide the Change Version button)
       for (const env of environments) {
-        if (env.status === 'completed' && melonLoaderStatuses.get(env.id)?.installed) {
-          // Load releases in background (don't await, let it happen async)
+        if (
+          env.status === 'completed'
+          && melonLoaderStatuses.get(env.id)?.installed
+          && !melonLoaderPrefetchStartedRef.current
+        ) {
+          melonLoaderPrefetchStartedRef.current = true;
           loadMelonLoaderReleases(env.id).catch(err => {
             console.error(`Failed to load MelonLoader releases for ${env.id}:`, err);
           });

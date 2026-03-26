@@ -397,6 +397,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       <button
                         key={installation.path}
                         type="button"
+                        role="listitem"
                         className="wizard-steam-install-row"
                         onClick={() => void handleCreateSteamEnvironment(installation.path)}
                         disabled={loading}
@@ -520,6 +521,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     <button
                       key={branch.name}
                       type="button"
+                      role="listitem"
                       className={`wizard-branch-card ${disabled ? 'wizard-branch-card--disabled' : ''}`}
                       onClick={() => {
                         if (!disabled) handleBranchSelect(branch);
@@ -851,6 +853,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     {getParentPath(directoryPath) && (
                       <button
                         type="button"
+                        role="listitem"
                         className="wizard-directory-row wizard-directory-row--parent"
                         onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
                       >
@@ -870,6 +873,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                         <button
                           key={dir.path}
                           type="button"
+                          role="listitem"
                           className="wizard-directory-row"
                           onClick={() => void loadDirectory(dir.path)}
                         >

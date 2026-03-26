@@ -1606,6 +1606,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       if (modsTab === 'updates' && !updateAvailable) {
         return false;
       }
+      if (modsTab === 'updates') {
+        return true;
+      }
       switch (modListFilter) {
         case 'updates':
           return updateAvailable;
@@ -3014,7 +3017,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
                     Open Folder
                   </button>
-                  <button onClick={onOpenModLibrary} className="btn btn-secondary btn-small">
+                  <button onClick={onOpenModLibrary} className="btn btn-secondary btn-small" disabled={!onOpenModLibrary}>
                     Open Mod Library
                   </button>
                 </div>
@@ -3023,7 +3026,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
             <div className="workspace-collection__content" ref={modsScrollContainerRef}>
               {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
-              {!error && filteredMods.length === 0 && (
+              {!loading && !error && filteredMods.length === 0 && (
                 <div className="workspace-collection__empty">
                   {modsTab === 'updates' ? 'No installed mods currently need updates.' : 'No installed mods match this filter.'}
                 </div>

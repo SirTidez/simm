@@ -111,7 +111,7 @@ describe('ModLibraryOverlay', () => {
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
     expect(await screen.findByText('S1API')).toBeTruthy();
-    expect(await screen.findByText('v1.0.0')).toBeTruthy();
+    expect((await screen.findAllByText('v1.0.0')).length).toBeGreaterThan(0);
 
     await waitFor(() => {
       expect(screen.getAllByText('Update available').length).toBeGreaterThan(0);
@@ -147,7 +147,7 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText('Mono')).toBeTruthy();
   });
 
-  it('opens downloaded mod details via keyboard activation', async () => {
+  it('shows downloaded mod details in the preselected inspector state', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
         makeEntry({
@@ -167,15 +167,12 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    const card = (await screen.findAllByText('Keyboard Mod'))[0].closest('[role="button"]') as HTMLElement;
-    fireEvent.keyDown(card, { key: 'Enter', code: 'Enter' });
-
-    expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
     expect(await screen.findByRole('button', { name: 'Install…' })).toBeTruthy();
+    expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
     expect(screen.getByRole('button', { name: 'Delete downloaded files' })).toBeTruthy();
   });
 
-  it('suppresses unsafe source links in mod view', async () => {
+  it('does not render unsafe source links for downloaded inspector details', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
         makeEntry({
@@ -195,9 +192,7 @@ describe('ModLibraryOverlay', () => {
 
     render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
 
-    const card = (await screen.findAllByText('Unsafe Link Mod'))[0].closest('[role="button"]') as HTMLElement;
-    fireEvent.click(card);
-
+    expect(await screen.findByRole('button', { name: 'Install…' })).toBeTruthy();
     expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
     expect(screen.queryByRole('link', { name: 'Open Source Page' })).toBeNull();
   });

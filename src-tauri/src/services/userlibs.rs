@@ -24,6 +24,15 @@ struct UserLibsListResult {
     count: usize,
 }
 
+fn strip_disabled_suffix_case_insensitive(file_name: &str) -> Option<String> {
+    let suffix = ".disabled";
+    if file_name.to_ascii_lowercase().ends_with(suffix) {
+        Some(file_name[..file_name.len() - suffix.len()].to_string())
+    } else {
+        None
+    }
+}
+
 impl UserLibsService {
     pub fn new() -> Self {
         Self
@@ -42,14 +51,6 @@ impl UserLibsService {
             user_libs_directory.join(requested_path)
         };
 
-        let normalized_path = if normalized_path.exists() {
-            normalized_path
-                .canonicalize()
-                .context("Failed to canonicalize user lib path")?
-        } else {
-            normalized_path
-        };
-
         let normalized_root = if user_libs_directory.exists() {
             user_libs_directory
                 .canonicalize()
@@ -57,6 +58,34 @@ impl UserLibsService {
         } else {
             user_libs_directory
         };
+
+        let mut candidate_paths = vec![normalized_path.clone()];
+        if let Some(file_name) = normalized_path.file_name().and_then(|value| value.to_str()) {
+            if let Some(stripped_name) = strip_disabled_suffix_case_insensitive(file_name) {
+                candidate_paths.push(normalized_path.with_file_name(stripped_name));
+            } else {
+                candidate_paths.push(normalized_path.with_file_name(format!("{file_name}.disabled")));
+            }
+        }
+
+        let resolved_candidate = candidate_paths
+            .into_iter()
+            .find(|candidate| candidate.exists())
+            .unwrap_or(normalized_path);
+
+        let normalized_path = if resolved_candidate.exists() {
+            resolved_candidate
+                .canonicalize()
+                .context("Failed to canonicalize user lib path")?
+        } else {
+            resolved_candidate
+        };
+
+        if normalized_path == normalized_root {
+            return Err(anyhow::anyhow!(
+                "UserLib path must point to a file or directory inside the UserLibs directory"
+            ));
+        }
 
         if !normalized_path.starts_with(&normalized_root) {
             return Err(anyhow::anyhow!("UserLib path must be within the UserLibs directory"));
@@ -90,9 +119,9 @@ impl UserLibsService {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            let is_disabled = !metadata.is_dir() && file_name.to_lowercase().ends_with(".disabled");
+            let is_disabled = file_name.to_ascii_lowercase().ends_with(".disabled");
             let original_file_name = if is_disabled {
-                file_name.replace(".disabled", "")
+                strip_disabled_suffix_case_insensitive(file_name).unwrap_or_else(|| file_name.to_string())
             } else {
                 file_name.to_string()
             };
@@ -130,26 +159,12 @@ impl UserLibsService {
 
     pub async fn enable_user_lib(&self, game_dir: &str, user_lib_path: &str) -> Result<()> {
         let disabled_path = self.resolve_user_lib_path(game_dir, user_lib_path)?;
-        let enabled_path = if disabled_path
+        let enabled_file_name = disabled_path
             .file_name()
             .and_then(|value| value.to_str())
-            .map(|value| value.to_ascii_lowercase().ends_with(".disabled"))
-            .unwrap_or(false)
-        {
-            let file_name = disabled_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?;
-            disabled_path.with_file_name(file_name.trim_end_matches(".disabled"))
-        } else {
-            disabled_path.with_file_name(format!(
-                "{}",
-                disabled_path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?
-            ))
-        };
+            .and_then(strip_disabled_suffix_case_insensitive)
+            .ok_or_else(|| anyhow::anyhow!("User lib is not disabled"))?;
+        let enabled_path = disabled_path.with_file_name(enabled_file_name);
 
         if !disabled_path.exists() {
             return Err(anyhow::anyhow!("Disabled user lib file not found"));
@@ -177,12 +192,16 @@ impl UserLibsService {
 
     pub async fn disable_user_lib(&self, game_dir: &str, user_lib_path: &str) -> Result<()> {
         let enabled_path = self.resolve_user_lib_path(game_dir, user_lib_path)?;
+        let file_name = enabled_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?;
+        if strip_disabled_suffix_case_insensitive(file_name).is_some() {
+            return Err(anyhow::anyhow!("User lib is already disabled"));
+        }
         let disabled_path = enabled_path.with_file_name(format!(
             "{}.disabled",
-            enabled_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| anyhow::anyhow!("Invalid user lib path"))?
+            file_name
         ));
 
         if !enabled_path.exists() {
@@ -277,6 +296,42 @@ mod tests {
             .await?;
         assert!(userlibs_dir.join("LibA.dll").exists());
         assert!(!userlibs_dir.join("LibA.dll.disabled").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_directories_roundtrip_and_list_as_disabled() -> Result<()> {
+        let temp = tempdir()?;
+        let service = UserLibsService::new();
+
+        let userlibs_dir = temp.path().join("UserLibs");
+        fs::create_dir_all(userlibs_dir.join("SharedAssets.disabled")).await?;
+
+        let listed = service
+            .list_user_libs(temp.path().to_string_lossy().as_ref())
+            .await?;
+        let entries = listed
+            .get("userLibs")
+            .and_then(|v| v.as_array())
+            .expect("entries");
+        let entry = entries
+            .iter()
+            .find(|value| value.get("name").and_then(|name| name.as_str()) == Some("SharedAssets"))
+            .expect("shared assets entry");
+
+        assert_eq!(entry.get("disabled").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(entry.get("fileName").and_then(|value| value.as_str()), Some("SharedAssets"));
+
+        service
+            .enable_user_lib(
+                temp.path().to_string_lossy().as_ref(),
+                userlibs_dir.join("SharedAssets").to_string_lossy().as_ref(),
+            )
+            .await?;
+
+        assert!(userlibs_dir.join("SharedAssets").exists());
+        assert!(!userlibs_dir.join("SharedAssets.disabled").exists());
 
         Ok(())
     }
