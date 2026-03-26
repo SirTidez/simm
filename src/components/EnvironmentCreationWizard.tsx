@@ -19,6 +19,7 @@ function getParentPath(currentPath: string): string | null {
 
   const separator = currentPath.includes('/') ? '/' : '\\';
   const hasLeadingSeparator = separator === '/' && currentPath.startsWith('/');
+  const hasUncPrefix = separator === '\\' && currentPath.startsWith('\\\\');
   const parts = currentPath.split(separator).filter(Boolean);
 
   if (parts.length <= 1 && currentPath.includes(':')) return null;
@@ -26,10 +27,13 @@ function getParentPath(currentPath: string): string | null {
   parts.pop();
 
   if (parts.length === 0) {
-    return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
+    if (separator === '/') return '/';
+    const drive = currentPath.match(/^[A-Z]:/i)?.[0];
+    return drive ? `${drive}\\` : (hasUncPrefix ? '\\\\' : '\\');
   }
 
-  return `${hasLeadingSeparator ? '/' : ''}${parts.join(separator)}${separator === '/' ? '/' : ''}`;
+  const prefix = hasLeadingSeparator ? '/' : hasUncPrefix ? '\\\\' : '';
+  return `${prefix}${parts.join(separator)}${separator === '/' ? '/' : ''}`;
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
@@ -63,6 +67,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [depotDownloaderInstalled, setDepotDownloaderInstalled] = useState<boolean | null>(null);
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
+  const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
 
   const hasSteamEnvironment = environments.some(
     env => env.environmentType === 'steam' || env.id.startsWith('steam-')
@@ -89,14 +94,21 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   useEffect(() => {
     const loadInitialState = async () => {
       try {
-        const [config, depotInfo] = await Promise.all([
-          ApiService.getSchedule1Config(),
-          ApiService.detectDepotDownloader().catch(() => ({ installed: false })),
-        ]);
+        const config = await ApiService.getSchedule1Config();
         setAppConfig(config);
-        setDepotDownloaderInstalled(!!depotInfo.installed);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load environment creation data');
+      }
+
+      try {
+        const depotInfo = await ApiService.detectDepotDownloader();
+        setDepotDownloaderInstalled(!!depotInfo.installed);
+        setDepotDownloaderDetectionError(null);
+      } catch (err) {
+        setDepotDownloaderInstalled(null);
+        setDepotDownloaderDetectionError(
+          err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
+        );
       }
     };
 
@@ -133,6 +145,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
   const openDirectoryPicker = async (purpose: DirectoryPurpose) => {
     setDirectoryPurpose(purpose);
+    setDirectoryPath('');
+    setDirectoryList([]);
     setShowDirectoryPicker(true);
 
     if (purpose === 'import') {
@@ -205,13 +219,28 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     setDepotDownloaderPromptError(null);
     try {
       await ApiService.installDepotDownloader();
-      await refreshDepotDownloader();
       setDepotDownloaderInstalled(true);
+      setDepotDownloaderDetectionError(null);
     } catch (err) {
       setDepotDownloaderPromptError(err instanceof Error ? err.message : 'Failed to install DepotDownloader automatically.');
-    } finally {
       setInstallingDepotDownloader(false);
+      return;
     }
+
+    try {
+      await refreshDepotDownloader();
+      const depotInfo = await ApiService.detectDepotDownloader();
+      setDepotDownloaderInstalled(!!depotInfo.installed);
+      setDepotDownloaderDetectionError(null);
+    } catch (err) {
+      setDepotDownloaderPromptError(
+        err instanceof Error
+          ? `DepotDownloader installed, but SIMM could not refresh its status: ${err.message}`
+          : 'DepotDownloader installed, but SIMM could not refresh its status.'
+      );
+    }
+
+    setInstallingDepotDownloader(false);
   };
 
   const handleOpenDepotDownloaderInstructions = () => {
@@ -265,18 +294,34 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     setError(null);
     try {
       await ApiService.importLocalEnvironment(importPath, name || undefined, description.trim() || undefined);
-      await refreshEnvironments();
-      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to import local environment');
-    } finally {
       setImportingLocal(false);
+      return;
     }
+
+    try {
+      await refreshEnvironments();
+    } catch (err) {
+      console.warn('Environment imported, but SIMM could not refresh the environment list.', err);
+    }
+
+    setImportingLocal(false);
+    onClose();
   };
 
   const wizardStats = [
     { label: 'Steam', value: hasSteamEnvironment ? 'Managed' : steamDetected ? 'Detected' : 'Not linked' },
-    { label: 'DepotDownloader', value: depotDownloaderInstalled === null ? 'Checking' : depotDownloaderInstalled ? 'Ready' : 'Missing' },
+    {
+      label: 'DepotDownloader',
+      value: depotDownloaderDetectionError
+        ? 'Check failed'
+        : depotDownloaderInstalled === null
+          ? 'Checking'
+          : depotDownloaderInstalled
+            ? 'Ready'
+            : 'Missing'
+    },
     { label: 'Default path', value: settings?.defaultDownloadDir ? 'Configured' : 'Unset' },
   ];
 
@@ -477,26 +522,47 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </button>
             </div>
 
-            {depotDownloaderInstalled !== true && (
+            {(depotDownloaderInstalled !== true || depotDownloaderDetectionError) && (
               <div className="wizard-prerequisite-card">
                 <div className="wizard-prerequisite-card__copy">
                   <span className="settings-eyebrow">Requirement</span>
-                  <h4>DepotDownloader is required for branch downloads</h4>
+                  <h4>{depotDownloaderDetectionError ? 'Unable to verify DepotDownloader status' : 'DepotDownloader is required for branch downloads'}</h4>
                   <p>
-                    SIMM uses DepotDownloader to install and update non-Steam environments. You can install it automatically or open the
-                    official manual instructions.
+                    {depotDownloaderDetectionError
+                      ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before downloading a branch.'
+                      : 'SIMM uses DepotDownloader to install and update non-Steam environments. You can install it automatically or open the official manual instructions.'}
                   </p>
+                  {depotDownloaderDetectionError && <div className="settings-error-banner">{depotDownloaderDetectionError}</div>}
                   {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
                 </div>
                 <div className="wizard-inline-actions">
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => void handleAutoInstallDepotDownloader()}
-                    disabled={installingDepotDownloader || depotDownloaderInstalled === null}
+                    onClick={() => {
+                      if (depotDownloaderDetectionError) {
+                        setDepotDownloaderInstalled(null);
+                        void ApiService.detectDepotDownloader()
+                          .then((info) => {
+                            setDepotDownloaderInstalled(!!info.installed);
+                            setDepotDownloaderDetectionError(null);
+                          })
+                          .catch((err) => {
+                            setDepotDownloaderInstalled(null);
+                            setDepotDownloaderDetectionError(
+                              err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
+                            );
+                          });
+                        return;
+                      }
+                      void handleAutoInstallDepotDownloader();
+                    }}
+                    disabled={installingDepotDownloader || (!depotDownloaderDetectionError && depotDownloaderInstalled === null)}
                   >
                     <i className={installingDepotDownloader ? 'fas fa-spinner fa-spin' : 'fas fa-download'}></i>
-                    {depotDownloaderInstalled === null
+                    {depotDownloaderDetectionError
+                      ? 'Retry Detection'
+                      : depotDownloaderInstalled === null
                       ? 'Checking…'
                       : installingDepotDownloader
                         ? 'Installing…'
@@ -514,7 +580,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="wizard-branch-grid" role="list">
                 {appConfig.branches.map((branch) => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
-                  const depotRequired = depotDownloaderInstalled !== true;
+                  const depotRequired = depotDownloaderInstalled !== true || !!depotDownloaderDetectionError;
                   const disabled = authRequired || depotRequired;
 
                   return (
@@ -530,7 +596,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           authRequired
                             ? 'Steam authentication required to select this branch'
                             : depotRequired
-                              ? 'DepotDownloader is required to download this branch'
+                              ? depotDownloaderDetectionError
+                                ? 'SIMM could not verify DepotDownloader for this branch'
+                                : 'DepotDownloader is required to download this branch'
                               : undefined
                         }
                       >
@@ -549,7 +617,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           </div>
                         </div>
                         <div className="wizard-branch-card__footer">
-                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? 'Install DepotDownloader to unlock downloads.' : 'Continue to environment configuration.'}</span>
+                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before starting this download.' : 'Install DepotDownloader to unlock downloads.') : 'Continue to environment configuration.'}</span>
                         </div>
                       </button>
                     </div>
@@ -895,7 +963,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   type="button"
                   className="btn btn-primary"
                   onClick={() => handleDirectorySelection(directoryPath)}
-                  disabled={!directoryPath}
+                  disabled={browsing || !directoryPath}
                 >
                   <i className="fas fa-check"></i>
                   Select Folder

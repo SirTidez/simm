@@ -932,22 +932,30 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                               {section.entries.map((entry) => (
                                 <div key={entry.id} className="config-entry-row">
                                   <div className="config-entry-row__key">
-                                    <label>Key</label>
+                                    {entry.isNew ? (
+                                      <label htmlFor={`config-key-${section.id}-${entry.id}`}>Key</label>
+                                    ) : (
+                                      <span>Key</span>
+                                    )}
                                     {entry.isNew ? (
                                       <input
+                                        id={`config-key-${section.id}-${entry.id}`}
                                         type="text"
                                         value={entry.key}
                                         onChange={(e) => handleEntryChange(section.id, entry.id, 'key', e.target.value)}
                                         placeholder="settingName"
                                       />
                                     ) : (
-                                      <div className="config-entry-row__key-label">{entry.key}</div>
+                                      <div className="config-entry-row__key-label">
+                                        {entry.key}
+                                      </div>
                                     )}
                                   </div>
 
                                   <div className="config-entry-row__value">
-                                    <label>Value</label>
+                                    <label htmlFor={`config-value-${section.id}-${entry.id}`}>Value</label>
                                     <input
+                                      id={`config-value-${section.id}-${entry.id}`}
                                       type="text"
                                       value={entry.value}
                                       onChange={(e) => handleEntryChange(section.id, entry.id, 'value', e.target.value)}
@@ -955,8 +963,9 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                                   </div>
 
                                   <div className="config-entry-row__comment">
-                                    <label>Comment</label>
+                                    <label htmlFor={`config-comment-${section.id}-${entry.id}`}>Comment</label>
                                     <textarea
+                                      id={`config-comment-${section.id}-${entry.id}`}
                                       value={entry.comment}
                                       onChange={(e) => handleEntryChange(section.id, entry.id, 'comment', e.target.value)}
                                       rows={2}
@@ -965,7 +974,12 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
                                   </div>
 
                                   <div className="config-entry-row__actions">
-                                    <button type="button" className="btn btn-secondary btn-small" onClick={() => handleDeleteEntry(section.id, entry.id)}>
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary btn-small"
+                                      aria-label={`Delete ${entry.key || 'entry'}`}
+                                      onClick={() => handleDeleteEntry(section.id, entry.id)}
+                                    >
                                       <i className="fas fa-trash"></i>
                                     </button>
                                   </div>

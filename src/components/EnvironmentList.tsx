@@ -46,6 +46,10 @@ function getLatestStableMelonLoaderTag(
   return releases.find((release) => !release.isNightly && !release.prerelease)?.tag_name ?? releases[0]?.tag_name;
 }
 
+function isSteamEnvironment(env: Pick<Environment, 'environmentType' | 'id'>): boolean {
+  return env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+}
+
 // Shared ref to track last update check time (accessible across components)
 // This is exported so Footer can update it when doing manual checks
 export const lastUpdateCheckTimeRef = { current: null as number | null };
@@ -689,7 +693,7 @@ export function EnvironmentList({
 
   const handleUpdate = async (env: Environment) => {
     // For Steam environments, show message that Steam handles updates
-    if (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) {
+    if (isSteamEnvironment(env)) {
       showMessage('Steam Manages Updates', 'Steam manages updates for this installation. Please update it through Steam.', 'info');
       return;
     }
@@ -709,7 +713,7 @@ export function EnvironmentList({
       return;
     }
 
-    if (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) {
+    if (isSteamEnvironment(env)) {
       showMessage('Steam Manages Updates', 'Steam manages updates for this installation. Please update it through Steam.', 'info');
       return;
     }
@@ -1280,7 +1284,7 @@ export function EnvironmentList({
 
   const buildEnvironmentMenuItems = (env: Environment): AnchoredContextMenuItem[] => {
     const currentMethod = preferredLaunchMethod.get(env.id) || 'steam';
-    const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+    const isSteam = isSteamEnvironment(env);
 
     return [
       {
@@ -1323,9 +1327,9 @@ export function EnvironmentList({
       },
       {
         key: 'delete',
-        label: isSteam ? 'Delete Unavailable for Steam' : 'Delete Environment',
+        label: isSteam ? 'Clear Environment Records' : 'Delete Environment',
         icon: 'fas fa-trash',
-        disabled: isSteam,
+        disabled: false,
         danger: true,
         onSelect: () => handleDelete(env),
       },
@@ -1335,7 +1339,7 @@ export function EnvironmentList({
   const renderEnvironmentCard = (env: Environment) => {
     const prog = progress.get(env.id);
     const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
-    const isSteam = env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+    const isSteam = isSteamEnvironment(env);
     const isCheckingUpdate = checkingEnvironments.has(env.id);
     const isCompleted = env.status === 'completed';
     const status = getDominantStatus(env);
@@ -1365,6 +1369,10 @@ export function EnvironmentList({
         key={env.id}
         className="environment-card environment-card--workspace"
         onContextMenu={(event) => {
+          const target = event.target as HTMLElement;
+          if (target.closest('input, textarea, button, a, [contenteditable="true"]')) {
+            return;
+          }
           event.preventDefault();
           openEnvironmentMenu(env.id, event.clientX, event.clientY);
         }}
@@ -1735,21 +1743,21 @@ export function EnvironmentList({
         isOpen={deleteConfirm.isOpen && !!deleteConfirm.env}
         onClose={resetDeleteConfirm}
         onConfirm={handleConfirmDelete}
-        title={deleteConfirm.env?.environmentType === 'steam' ? 'Clear Environment Records' : 'Remove Environment'}
+        title={deleteConfirm.env && isSteamEnvironment(deleteConfirm.env) ? 'Clear Environment Records' : 'Remove Environment'}
         message={
-          deleteConfirm.env?.environmentType === 'steam'
+          deleteConfirm.env && isSteamEnvironment(deleteConfirm.env)
             ? `Clear tracked mod, plugin, and UserLib records for "${deleteConfirm.env.name}"?`
             : `Remove "${deleteConfirm.env?.name}" from SIMM?`
         }
         confirmText={
-          deleteConfirm.env?.environmentType === 'steam'
+          deleteConfirm.env && isSteamEnvironment(deleteConfirm.env)
             ? 'Clear Records'
             : deleteConfirm.deleteFiles
               ? 'Delete Files and Remove'
               : 'Remove from App'
         }
         tone="danger"
-        bodyContent={deleteConfirm.env?.environmentType === 'steam' ? (
+        bodyContent={deleteConfirm.env && isSteamEnvironment(deleteConfirm.env) ? (
           <div className="app-dialog__option-copy">
             <span>Steam manages the installation itself. This only clears SIMM tracking for mods, plugins, and runtime files.</span>
           </div>
@@ -1931,8 +1939,8 @@ export function EnvironmentList({
 
       <div className="environments-grid">
         {[...environments].sort((a, b) => {
-          const aIsSteam = a.environmentType === 'Steam' || a.environmentType === 'steam' || a.id.startsWith('steam-');
-          const bIsSteam = b.environmentType === 'Steam' || b.environmentType === 'steam' || b.id.startsWith('steam-');
+          const aIsSteam = isSteamEnvironment(a);
+          const bIsSteam = isSteamEnvironment(b);
           if (aIsSteam && !bIsSteam) return -1;
           if (!aIsSteam && bIsSteam) return 1;
           return 0;
