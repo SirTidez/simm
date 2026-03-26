@@ -23,6 +23,14 @@ pub async fn save_settings(
 }
 
 #[tauri::command]
+pub async fn backup_database(db: State<'_, Arc<SqlitePool>>) -> Result<String, String> {
+    let backup_path = crate::db::create_database_backup(db.inner().as_ref(), "manual")
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(backup_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub async fn save_credentials(
     db: State<'_, Arc<SqlitePool>>,
     username: String,

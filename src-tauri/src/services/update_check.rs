@@ -29,8 +29,7 @@ impl UpdateCheckService {
         env: &Environment,
     ) -> Result<UpdateCheckResult> {
         let mut effective_env = env.clone();
-        let env_service =
-            crate::services::environment::EnvironmentService::new(self.pool.clone())?;
+        let env_service = crate::services::environment::EnvironmentService::new(self.pool.clone())?;
         if let Err(err) = env_service
             .reconcile_steam_env_branch_runtime_from_disk(&mut effective_env)
             .await
@@ -65,7 +64,10 @@ impl UpdateCheckService {
         };
 
         // Extract current game version if environment is completed (but don't fail if this doesn't work)
-        if matches!(effective_env.status, crate::types::EnvironmentStatus::Completed) {
+        if matches!(
+            effective_env.status,
+            crate::types::EnvironmentStatus::Completed
+        ) {
             if let Ok(Some(version)) = self
                 .game_version_service
                 .extract_game_version(&effective_env.output_dir)
@@ -89,8 +91,11 @@ impl UpdateCheckService {
                     result.remote_manifest_id = Some(manifest_id.clone());
                     log::info!("Remote manifest ID: {}", manifest_id);
 
-                    result.update_available =
-                        Self::compare_manifest_ids(&effective_env, &manifest_id, "Steam environment");
+                    result.update_available = Self::compare_manifest_ids(
+                        &effective_env,
+                        &manifest_id,
+                        "Steam environment",
+                    );
                 }
                 Err(e) => {
                     // For Steam environments, errors in manifest check are not critical
@@ -337,7 +342,11 @@ impl UpdateCheckService {
                 captures.get(1)?.as_str().parse().ok()?,
                 captures.get(2)?.as_str().parse().ok()?,
                 captures.get(3)?.as_str().parse().ok()?,
-                captures.get(4).map(|m| m.as_str()).unwrap_or("").to_string(),
+                captures
+                    .get(4)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 captures
                     .get(5)
                     .map(|m| m.as_str())
@@ -393,10 +402,9 @@ impl UpdateCheckService {
             })?;
 
         log::info!(
-            "Fetching manifest ID from Steam: app_id={}, branch={}, username={}",
+            "Fetching manifest ID from Steam: app_id={}, branch={}",
             app_id,
-            branch,
-            username
+            branch
         );
 
         // Get depots directory from SIMM folder
@@ -436,10 +444,16 @@ impl UpdateCheckService {
         let output_str = String::from_utf8_lossy(&output.stdout);
         let error_str = String::from_utf8_lossy(&output.stderr);
         let all_output = format!("{}{}", output_str, error_str);
+        let sanitized_stdout =
+            crate::services::logger::LoggerService::sanitize_log_text(&output_str);
+        let sanitized_stderr =
+            crate::services::logger::LoggerService::sanitize_log_text(&error_str);
+        let sanitized_output =
+            crate::services::logger::LoggerService::sanitize_log_text(&all_output);
 
-        log::info!("DepotDownloader stdout: {}", output_str);
+        log::info!("DepotDownloader stdout: {}", sanitized_stdout);
         if !error_str.is_empty() {
-            log::info!("DepotDownloader stderr: {}", error_str);
+            log::info!("DepotDownloader stderr: {}", sanitized_stderr);
         }
 
         // Check if command failed
@@ -447,7 +461,7 @@ impl UpdateCheckService {
             return Err(anyhow::anyhow!(
                 "DepotDownloader exited with code {}: {}",
                 output.status.code().unwrap_or(-1),
-                error_str
+                sanitized_stderr
             ));
         }
 
@@ -490,7 +504,7 @@ impl UpdateCheckService {
 
         Err(anyhow::anyhow!(
             "Could not parse manifest ID from DepotDownloader output. Output: {}",
-            all_output
+            sanitized_output
         ))
     }
 }
@@ -840,7 +854,9 @@ mod tests {
             &mut results,
         );
 
-        let healed = results.get("alternate-beta").expect("alternate-beta result");
+        let healed = results
+            .get("alternate-beta")
+            .expect("alternate-beta result");
         assert!(!healed.update_available);
         assert_eq!(healed.current_manifest_id.as_deref(), Some("317"));
     }

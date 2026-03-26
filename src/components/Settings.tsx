@@ -3,7 +3,6 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
-import { CustomThemeEditor } from './CustomThemeEditor';
 
 type SettingsProps = {
   isOpen: boolean;
@@ -12,6 +11,8 @@ type SettingsProps = {
 
 const MIN_MOD_ICON_CACHE_LIMIT_MB = 100;
 const MAX_MOD_ICON_CACHE_LIMIT_MB = 8192;
+const MIN_DATABASE_BACKUP_COUNT = 1;
+const MAX_DATABASE_BACKUP_COUNT = 100;
 
 export function normalizeModIconCacheLimitMb(value: unknown): number {
   const parsed =
@@ -25,6 +26,20 @@ export function normalizeModIconCacheLimitMb(value: unknown): number {
 
   const rounded = Math.trunc(parsed as number);
   return Math.min(MAX_MOD_ICON_CACHE_LIMIT_MB, Math.max(MIN_MOD_ICON_CACHE_LIMIT_MB, rounded));
+}
+
+export function normalizeDatabaseBackupCount(value: unknown): number {
+  const parsed =
+    typeof value === 'number'
+      ? value
+      : Number.parseInt(String(value ?? ''), 10);
+
+  if (!Number.isFinite(parsed)) {
+    return 10;
+  }
+
+  const rounded = Math.trunc(parsed as number);
+  return Math.min(MAX_DATABASE_BACKUP_COUNT, Math.max(MIN_DATABASE_BACKUP_COUNT, rounded));
 }
 
 function extractReleaseApiLastUpdated(health: Record<string, unknown> | null): string | null {
@@ -63,25 +78,33 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const [releaseApiHealth, setReleaseApiHealth] = useState<Record<string, unknown> | null>(null);
   const [releaseApiError, setReleaseApiError] = useState<string | null>(null);
   const [checkingReleaseApi, setCheckingReleaseApi] = useState(false);
-  const [showThemeEditor, setShowThemeEditor] = useState(false);
+  const [backingUpDatabase, setBackingUpDatabase] = useState(false);
+  const [openingBackupsFolder, setOpeningBackupsFolder] = useState(false);
+  const [databaseBackupFeedback, setDatabaseBackupFeedback] = useState<{
+    tone: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [formData, setFormData] = useState({
     defaultDownloadDir: '',
     maxConcurrentDownloads: 2,
     platform: 'windows' as 'windows' | 'macos' | 'linux',
     language: 'english',
-    theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue' | 'custom',
+    theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue',
     melonLoaderVersion: '',
     autoInstallMelonLoader: false,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
     logLevel: 'info' as 'debug' | 'info' | 'warn' | 'error',
     modIconCacheLimitMb: 500,
+    databaseBackupCount: 10,
   });
   const [error, setError] = useState<string | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [directoryPath, setDirectoryPath] = useState('');
   const [directoryList, setDirectoryList] = useState<Array<{ name: string; path: string }>>([]);
   const [browsing, setBrowsing] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
   const [melonLoaderVersions, setMelonLoaderVersions] = useState<Array<{ tag: string; name: string }>>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -109,9 +132,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
-        if (showThemeEditor) {
-          return;
-        }
         if (showDirectoryPicker) {
           setShowDirectoryPicker(false);
           return;
@@ -127,7 +147,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     return () => {
       document.removeEventListener('keydown', handleEscape);
     };
-  }, [isOpen, onClose, showDirectoryPicker, showThemeEditor]);
+  }, [isOpen, onClose, showDirectoryPicker]);
 
   useEffect(() => {
     if (settings) {
@@ -136,13 +156,16 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
         platform: 'windows' as 'windows' | 'macos' | 'linux', // Always Windows
         language: 'english', // Always English
-        theme: (settings.theme as 'light' | 'dark' | 'modern-blue' | 'custom') || 'modern-blue',
+        theme: (settings.theme === 'light' || settings.theme === 'dark' || settings.theme === 'modern-blue')
+          ? settings.theme
+          : 'modern-blue',
         melonLoaderVersion: settings.melonLoaderVersion || '',
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
         logLevel: (settings.logLevel as 'debug' | 'info' | 'warn' | 'error') || 'info',
         modIconCacheLimitMb: normalizeModIconCacheLimitMb(settings.modIconCacheLimitMb),
+        databaseBackupCount: normalizeDatabaseBackupCount(settings.databaseBackupCount),
       });
     }
   }, [settings]);
@@ -202,6 +225,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         const normalizedFormData = {
           ...formData,
           modIconCacheLimitMb: normalizeModIconCacheLimitMb(formData.modIconCacheLimitMb),
+          databaseBackupCount: normalizeDatabaseBackupCount(formData.databaseBackupCount),
           platform: 'windows' as const,
           language: 'english',
         };
@@ -261,34 +285,101 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     }
   };
 
+  const openDirectoryPicker = async () => {
+    const currentPath = formData.defaultDownloadDir || settings?.defaultDownloadDir || '';
+    setDirectoryPath(currentPath);
+    setNewFolderName('');
+    setShowDirectoryPicker(true);
+    if (currentPath) {
+      await loadDirectory(currentPath);
+    } else {
+      setDirectoryList([]);
+    }
+  };
+
+  const handleCreateFolder = async () => {
+    if (!directoryPath || !newFolderName.trim()) {
+      return;
+    }
+
+    const separator = directoryPath.includes('/') ? '/' : '\\';
+    const basePath = directoryPath.replace(/[\\/]+$/, '');
+    const nextPath = `${basePath}${separator}${newFolderName.trim()}`;
+
+    setCreatingFolder(true);
+    try {
+      await ApiService.createDirectory(nextPath);
+      setNewFolderName('');
+      await loadDirectory(directoryPath);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create folder');
+    } finally {
+      setCreatingFolder(false);
+    }
+  };
+
   const handleDirectorySelect = (selectedPath: string) => {
     setFormData({ ...formData, defaultDownloadDir: selectedPath });
     setShowDirectoryPicker(false);
+    setNewFolderName('');
   };
 
-  const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
   const depotStatusLabel = depotDownloader ? 'Installed' : 'Missing';
-  const depotStatusTone = depotDownloader ? 'success' : 'warning';
   const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
   const releaseApiTone = checkingReleaseApi ? 'checking' : releaseApiError ? 'offline' : 'online';
   const releaseApiLabel = checkingReleaseApi ? 'Checking' : releaseApiError ? 'Offline' : 'Online';
+  const depotStatusDetail = depotDownloader
+    ? depotDownloader.method
+      ? `Managed via ${depotDownloader.method}`
+      : 'Managed automatically for protected branches'
+    : 'Installed automatically when protected downloads need it';
+  const releaseApiDetail = checkingReleaseApi
+    ? 'Checking release metadata'
+    : releaseApiError
+      ? 'Unable to reach release metadata'
+      : releaseApiLastUpdated
+        ? `Last updated ${releaseApiLastUpdated}`
+        : 'Release metadata available';
+
+  const handleBackupDatabase = async () => {
+    try {
+      setBackingUpDatabase(true);
+      setDatabaseBackupFeedback(null);
+      const result = await ApiService.backupDatabase();
+      setDatabaseBackupFeedback({
+        tone: 'success',
+        message: `Backup created at ${result.path}`,
+      });
+    } catch (err) {
+      setDatabaseBackupFeedback({
+        tone: 'error',
+        message: err instanceof Error ? err.message : 'Failed to back up the database',
+      });
+    } finally {
+      setBackingUpDatabase(false);
+    }
+  };
+
+  const handleOpenBackupsFolder = async () => {
+    try {
+      setOpeningBackupsFolder(true);
+      const homeDirectory = await ApiService.getHomeDirectory();
+      const normalizedHome = homeDirectory.replace(/[\\/]+$/, '');
+      await ApiService.openPath(`${normalizedHome}\\backups`);
+    } catch (err) {
+      setDatabaseBackupFeedback({
+        tone: 'error',
+        message: err instanceof Error ? err.message : 'Failed to open the backups folder',
+      });
+    } finally {
+      setOpeningBackupsFolder(false);
+    }
+  };
 
   return (
     <>
       {isOpen && (
-        <section
-          className="modal-content workspace-panel settings-panel"
-          style={{
-            width: '100%',
-            height: '100%',
-            maxWidth: 'none',
-            margin: 0,
-            borderRadius: '0.75rem',
-            display: 'flex',
-            flexDirection: 'column'
-          }}
-          aria-label="Settings panel"
-        >
+        <section className="modal-content workspace-panel settings-panel" aria-label="Settings panel">
             <div className="modal-header">
               <h2>Settings</h2>
               <button className="modal-close" onClick={onClose} aria-label="Close settings panel">×</button>
@@ -303,31 +394,23 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   <h3>Adjust appearance, downloads, updates, and tooling.</h3>
                   <p>Changes save automatically. Use this pane to keep SIMM’s environment setup, update cadence, and theme behavior aligned with your workflow.</p>
                 </div>
-                <div className="settings-overview__stats">
-                  <div className="settings-stat-card">
-                    <span>Theme</span>
-                    <strong>{formData.theme === 'modern-blue' ? 'Modern Blue' : formData.theme === 'custom' ? 'Custom' : formData.theme.charAt(0).toUpperCase() + formData.theme.slice(1)}</strong>
-                  </div>
-                  <div className="settings-stat-card">
-                    <span>Managed Environments</span>
-                    <strong>{completedEnvironmentCount}</strong>
-                  </div>
-                  <div className="settings-stat-card">
-                    <span>DepotDownloader</span>
-                    <strong>{depotStatusLabel}</strong>
-                  </div>
+                <div className="settings-overview__statusline">
+                  <span className={`settings-status-pill settings-status-pill--${releaseApiTone}`} title={releaseApiError || undefined}>
+                    <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
+                    GitHub API {releaseApiLabel}
+                  </span>
                 </div>
               </div>
 
-              <div className="settings-shell">
-                <div className="settings-primary">
-                  <section className="settings-section settings-section--desktop">
-                    <div className="settings-section__header">
+              <div className="settings-shell settings-shell--single">
+                <section className="settings-sheet">
+                  <div className="settings-subsection">
+                    <div className="settings-subsection__header">
                       <div>
-                        <span className="settings-section__eyebrow">Appearance</span>
-                        <h3><i className="fas fa-palette"></i> Theme & visuals</h3>
+                        <span className="settings-section__eyebrow">Interface</span>
+                        <h3><i className="fas fa-sliders"></i> App defaults</h3>
                       </div>
-                      <p>Keep the desktop shell consistent with the rest of SIMM.</p>
+                      <p>Pick the built-in app palette and the amount of diagnostic detail SIMM writes while it runs.</p>
                     </div>
 
                     <div className="settings-field-grid">
@@ -335,40 +418,44 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         <label>Theme preset</label>
                         <select
                           value={formData.theme || 'modern-blue'}
-                          onChange={(e) => setFormData({ ...formData, theme: e.target.value as 'light' | 'dark' | 'modern-blue' | 'custom' })}
+                          onChange={(e) => {
+                            const nextTheme = e.target.value as 'light' | 'dark' | 'modern-blue';
+                            setFormData({ ...formData, theme: nextTheme });
+                          }}
                           disabled={loading}
                         >
                           <option value="modern-blue">Modern Blue</option>
                           <option value="dark">Dark</option>
                           <option value="light">Light</option>
-                          <option value="custom">Custom</option>
                         </select>
-                        <small>Choose the default surface and accent palette for the app shell.</small>
+                        <small>Built-in SIMM palettes only. Modern Blue remains the default app theme.</small>
                       </div>
 
-                      <div className="settings-field settings-field--compact">
-                        <label>Custom theme editor</label>
-                        <button
-                          type="button"
-                          onClick={() => setShowThemeEditor(true)}
-                          className="btn btn-secondary"
-                          disabled={formData.theme !== 'custom'}
+                      <div className="settings-field">
+                        <label>Log level</label>
+                        <select
+                          value={formData.logLevel || 'info'}
+                          onChange={(e) => setFormData({ ...formData, logLevel: e.target.value as any })}
                         >
-                          <i className="fas fa-paint-brush" style={{ marginRight: '0.5rem' }}></i>
-                          Open Theme Editor
-                        </button>
-                        <small>{formData.theme === 'custom' ? 'Edit the currently selected custom theme.' : 'Switch to the Custom theme preset to enable editing.'}</small>
+                          <option value="debug">Debug</option>
+                          <option value="info">Info</option>
+                          <option value="warn">Warning</option>
+                          <option value="error">Error</option>
+                        </select>
+                        <small>Minimum log detail written to disk for SIMM troubleshooting.</small>
                       </div>
                     </div>
-                  </section>
+                  </div>
 
-                  <section className="settings-section settings-section--desktop">
-                    <div className="settings-section__header">
+                  <hr className="settings-divider" />
+
+                  <div className="settings-subsection">
+                    <div className="settings-subsection__header">
                       <div>
-                        <span className="settings-section__eyebrow">Downloads</span>
-                        <h3><i className="fas fa-folder-open"></i> Storage & throughput</h3>
+                        <span className="settings-section__eyebrow">Install Defaults</span>
+                        <h3><i className="fas fa-folder-tree"></i> Downloads, storage, and loader setup</h3>
                       </div>
-                      <p>Control where new installs are staged and how aggressively SIMM downloads in parallel.</p>
+                      <p>Control where installs stage by default, how many transfers SIMM runs at once, and which MelonLoader version new environments prefer.</p>
                     </div>
 
                     <div className="settings-field-grid">
@@ -383,14 +470,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           />
                           <button
                             type="button"
-                            onClick={async () => {
-                              const currentPath = formData.defaultDownloadDir || settings?.defaultDownloadDir || '';
-                              setDirectoryPath(currentPath);
-                              setShowDirectoryPicker(true);
-                              if (currentPath) {
-                                await loadDirectory(currentPath);
-                              }
-                            }}
+                            onClick={() => void openDirectoryPicker()}
                             className="btn btn-secondary"
                           >
                             Browse
@@ -410,19 +490,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         />
                         <small>Higher values improve throughput but use more bandwidth and disk I/O.</small>
                       </div>
-                    </div>
-                  </section>
 
-                  <section className="settings-section settings-section--desktop">
-                    <div className="settings-section__header">
-                      <div>
-                        <span className="settings-section__eyebrow">Tooling</span>
-                        <h3><i className="fas fa-cubes"></i> MelonLoader & prerequisites</h3>
-                      </div>
-                      <p>Manage the preferred loader version and verify external tooling required for non-Steam branches.</p>
-                    </div>
-
-                    <div className="settings-field-grid">
                       <div className="settings-field">
                         <label>Preferred MelonLoader version</label>
                         <select
@@ -460,35 +528,36 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       </div>
                     </div>
 
-                    <div className={`settings-callout settings-callout--${depotStatusTone}`}>
-                      {depotDownloader ? (
-                        <>
-                          <div className="settings-callout__header">
-                            <strong>DepotDownloader ready</strong>
-                            <button onClick={refreshDepotDownloader} className="btn btn-secondary btn-small">Refresh</button>
-                          </div>
-                          <p><strong>Path:</strong> <span title={depotDownloader.path}>{depotDownloader.path}</span></p>
-                          <p><strong>Method:</strong> {depotDownloader.method || 'Unknown'}</p>
-                        </>
-                      ) : (
-                        <>
-                          <div className="settings-callout__header">
-                            <strong>DepotDownloader is not installed</strong>
-                          </div>
-                          <p>Re-run the SIMM installer to repair prerequisites, or install it manually with:</p>
-                          <code>winget install --exact --id SteamRE.DepotDownloader</code>
-                        </>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="settings-section settings-section--desktop">
-                    <div className="settings-section__header">
-                      <div>
-                        <span className="settings-section__eyebrow">Updates</span>
-                        <h3><i className="fas fa-rotate"></i> Automatic checks & cache</h3>
+                    <div className="settings-inline-status-grid">
+                      <div className="settings-inline-status">
+                        <span>DepotDownloader</span>
+                        <strong>{depotStatusLabel}</strong>
+                        <small>{depotStatusDetail}</small>
                       </div>
-                      <p>Balance update frequency, cache size, and batch operations across your managed environments.</p>
+                      {depotDownloader?.path && (
+                        <div className="settings-inline-status settings-inline-status--path">
+                          <span>Detected Path</span>
+                          <strong title={depotDownloader.path}>{depotDownloader.path}</strong>
+                        </div>
+                      )}
+                      <div className="settings-inline-status settings-inline-status--action">
+                        <span>Tooling Check</span>
+                        <button onClick={refreshDepotDownloader} className="btn btn-secondary btn-small">
+                          Refresh
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <hr className="settings-divider" />
+
+                  <div className="settings-subsection">
+                    <div className="settings-subsection__header">
+                      <div>
+                        <span className="settings-section__eyebrow">Updates & Maintenance</span>
+                        <h3><i className="fas fa-rotate"></i> Cadence, cache, and service state</h3>
+                      </div>
+                      <p>Balance background checks, cache size, and manual update runs without leaving the main settings sheet.</p>
                     </div>
 
                     <div className="settings-field-grid">
@@ -535,6 +604,21 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       </div>
 
                       <div className="settings-field settings-field--compact">
+                        <label>Database backups to keep</label>
+                        <input
+                          type="number"
+                          value={formData.databaseBackupCount ?? 10}
+                          onChange={(e) => setFormData({
+                            ...formData,
+                            databaseBackupCount: normalizeDatabaseBackupCount(e.target.value),
+                          })}
+                          min="1"
+                          max="100"
+                        />
+                        <small>Automatic and manual backups prune the oldest snapshots above this count.</small>
+                      </div>
+
+                      <div className="settings-field settings-field--compact">
                         <label>Manual batch actions</label>
                         <button
                           type="button"
@@ -547,217 +631,188 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         <small>Run an immediate check across all completed environments.</small>
                       </div>
                     </div>
-                  </section>
 
-                  <section className="settings-section settings-section--desktop">
-                    <div className="settings-section__header">
-                      <div>
-                        <span className="settings-section__eyebrow">Logging</span>
-                        <h3><i className="fas fa-file-lines"></i> Diagnostics</h3>
+                    <div className="settings-inline-status-grid">
+                      <div className="settings-inline-status">
+                        <span>Release API</span>
+                        <strong>
+                          <span className={`settings-status-pill settings-status-pill--${releaseApiTone}`} title={releaseApiError || undefined}>
+                            <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
+                            {releaseApiLabel}
+                          </span>
+                        </strong>
+                        <small>{releaseApiDetail}</small>
                       </div>
-                      <p>Control how much detail SIMM writes to its log output.</p>
-                    </div>
-
-                    <div className="settings-field-grid">
-                      <div className="settings-field settings-field--span">
-                        <label>Log level</label>
-                        <select
-                          value={formData.logLevel || 'info'}
-                          onChange={(e) => setFormData({ ...formData, logLevel: e.target.value as any })}
-                        >
-                          <option value="debug">Debug</option>
-                          <option value="info">Info</option>
-                          <option value="warn">Warning</option>
-                          <option value="error">Error</option>
-                        </select>
-                        <small>
-                          Minimum log level written to disk. Logs are saved to <code>{settings?.defaultDownloadDir || 'your default download directory'}/s1devenvmanager-YYYY-MM-DD.log</code>
-                        </small>
-                      </div>
-                    </div>
-                  </section>
-                </div>
-
-                <aside className="settings-sidebar">
-                  <section className="settings-sidecard">
-                    <span className="settings-section__eyebrow">Status</span>
-                    <h3>Auto-save</h3>
-                    <p>Settings persist automatically after a short delay. You can close this pane at any time.</p>
-                    <div className="settings-sidecard__meta">
-                      <div>
-                        <span>Theme</span>
-                        <strong>{formData.theme === 'modern-blue' ? 'Modern Blue' : formData.theme === 'custom' ? 'Custom' : formData.theme.charAt(0).toUpperCase() + formData.theme.slice(1)}</strong>
-                      </div>
-                      <div>
-                        <span>Downloads</span>
-                        <strong>{formData.maxConcurrentDownloads} concurrent</strong>
-                      </div>
-                    </div>
-                  </section>
-
-                  <section className="settings-sidecard">
-                    <span className="settings-section__eyebrow">Paths</span>
-                    <h3>Current storage</h3>
-                    <p title={formData.defaultDownloadDir || 'No directory configured'}>{formData.defaultDownloadDir || 'No default download directory configured.'}</p>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-small"
-                      onClick={async () => {
-                        const currentPath = formData.defaultDownloadDir || settings?.defaultDownloadDir || '';
-                        setDirectoryPath(currentPath);
-                        setShowDirectoryPicker(true);
-                        if (currentPath) {
-                          await loadDirectory(currentPath);
-                        }
-                      }}
-                    >
-                      Browse folders
-                    </button>
-                  </section>
-
-                  <section className="settings-sidecard">
-                    <span className="settings-section__eyebrow">Environment Health</span>
-                    <h3>Update posture</h3>
-                    <div className="settings-sidecard__meta">
-                      <div>
-                        <span>Completed installs</span>
-                        <strong>{completedEnvironmentCount}</strong>
-                      </div>
-                      <div>
-                        <span>Auto-check</span>
+                      <div className="settings-inline-status">
+                        <span>Update Checks</span>
                         <strong>{formData.autoCheckUpdates ? 'Enabled' : 'Disabled'}</strong>
-                      </div>
-                      <div>
-                        <span>Cache budget</span>
-                        <strong>{normalizeModIconCacheLimitMb(formData.modIconCacheLimitMb)} MB</strong>
+                        <small>{formData.autoCheckUpdates ? 'Background checks follow the configured interval.' : 'Checks only run when you trigger them manually.'}</small>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => void runCheckAllUpdates()}
-                      disabled={checkingAllUpdates}
-                      className="btn btn-primary btn-small"
-                    >
-                      {checkingAllUpdates ? 'Checking…' : 'Run update check'}
-                    </button>
-                  </section>
 
-                  <section className="settings-sidecard">
-                    <span className="settings-section__eyebrow">Service Health</span>
-                    <h3>Release API</h3>
-                    <p>Checks whether SIMM can reach the GitHub-backed release metadata used for updates and tooling version lookups.</p>
-                    <div className="settings-service-health">
-                      <span className={`settings-status-pill settings-status-pill--${releaseApiTone}`} title={releaseApiError || undefined}>
-                        <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
-                        {releaseApiLabel}
-                      </span>
-                      {releaseApiLastUpdated && !checkingReleaseApi && (
-                        <span className="settings-service-health__timestamp">Last updated: {releaseApiLastUpdated}</span>
+                    <div className="settings-backup-panel">
+                      <div className="settings-backup-panel__header">
+                        <div>
+                          <span className="settings-section__eyebrow">Database Backups</span>
+                          <h4>Snapshots before upgrades and migrations</h4>
+                        </div>
+                        <p>SIMM automatically backs up the SQLite database before app-version upgrades and migration work. You can also create a manual snapshot at any time.</p>
+                      </div>
+
+                      <div className="settings-backup-panel__actions">
+                        <button
+                          type="button"
+                          onClick={() => void handleBackupDatabase()}
+                          disabled={backingUpDatabase}
+                          className="btn btn-secondary"
+                        >
+                          {backingUpDatabase ? 'Backing Up...' : 'Back Up Database'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenBackupsFolder()}
+                          disabled={openingBackupsFolder}
+                          className="btn btn-secondary"
+                        >
+                          {openingBackupsFolder ? 'Opening...' : 'Open Backups Folder'}
+                        </button>
+                      </div>
+
+                      {databaseBackupFeedback && (
+                        <div
+                          className={`settings-inline-feedback settings-inline-feedback--${databaseBackupFeedback.tone}`}
+                          role={databaseBackupFeedback.tone === 'error' ? 'alert' : 'status'}
+                        >
+                          {databaseBackupFeedback.message}
+                        </div>
                       )}
-                      {releaseApiError && <span className="settings-service-health__error">{releaseApiError}</span>}
                     </div>
-                  </section>
-                </aside>
+                  </div>
+                </section>
               </div>
             </div>
         </section>
       )}
 
-      <CustomThemeEditor isOpen={showThemeEditor} onClose={() => setShowThemeEditor(false)} />
-
       {/* Directory Picker Modal */}
       {showDirectoryPicker && (
-        <div className="modal-overlay" onClick={() => setShowDirectoryPicker(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+        <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDirectoryPicker(false)}>
+          <div className="modal-content modal-content-nested wizard-directory-dialog settings-directory-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>Select Directory</h2>
-              <button className="modal-close" onClick={() => setShowDirectoryPicker(false)}>×</button>
+              <h2>Select Download Directory</h2>
+              <button className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">×</button>
             </div>
 
-            <div style={{ padding: '1rem 1.25rem' }}>
-              <div style={{ marginBottom: '1rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem' }}>Current Path:</label>
-                <input
-                  type="text"
-                  value={directoryPath}
-                  onChange={(e) => setDirectoryPath(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      loadDirectory(directoryPath);
-                    }
-                  }}
-                  style={{ width: '100%', padding: '0.5rem', fontSize: '0.85rem' }}
-                  placeholder="C:\Users\YourName"
-                />
-                <button
-                  onClick={() => loadDirectory(directoryPath)}
-                  className="btn btn-primary"
-                  style={{ marginTop: '0.5rem', width: '100%' }}
-                  disabled={browsing}
-                >
-                  {browsing ? 'Loading...' : 'Go to Path'}
-                </button>
+            <div className="wizard-directory-dialog__body">
+              <div className="wizard-directory-dialog__overview">
+                <span className="settings-eyebrow">Directory Browser</span>
+                <h3>Choose the default download location</h3>
+                <p>Browse folders, create a new subdirectory if needed, and confirm the current location when you are ready.</p>
               </div>
 
-              <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid #3a3a3a', borderRadius: '4px', padding: '0.5rem' }}>
+              <div className="settings-field-card settings-field-card--full">
+                <label htmlFor="settings-directory-path">Current path</label>
+                <div className="settings-inline-field">
+                  <input
+                    id="settings-directory-path"
+                    type="text"
+                    value={directoryPath}
+                    onChange={(e) => setDirectoryPath(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        void loadDirectory(directoryPath);
+                      }
+                    }}
+                    placeholder="C:\\Users\\YourName"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void loadDirectory(directoryPath)}
+                    className="btn btn-secondary"
+                    disabled={browsing}
+                  >
+                    <i className={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'} aria-hidden="true"></i>
+                    {browsing ? 'Loading…' : 'Go to Path'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="settings-field-card settings-field-card--full">
+                <label htmlFor="settings-new-folder">Create a folder in the current location</label>
+                <div className="settings-inline-field">
+                  <input
+                    id="settings-new-folder"
+                    type="text"
+                    value={newFolderName}
+                    onChange={(e) => setNewFolderName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newFolderName.trim()) {
+                        void handleCreateFolder();
+                      }
+                    }}
+                    placeholder="Folder name"
+                    disabled={creatingFolder || !directoryPath}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void handleCreateFolder()}
+                    disabled={creatingFolder || !newFolderName.trim() || !directoryPath}
+                  >
+                    <i className={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} aria-hidden="true"></i>
+                    {creatingFolder ? 'Creating…' : 'Create Folder'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="wizard-directory-dialog__list" role="list">
                 {browsing ? (
-                  <p style={{ color: '#888', textAlign: 'center', padding: '2rem' }}>Loading...</p>
+                  <div className="wizard-empty-card">
+                    <i className="fas fa-spinner fa-spin"></i>
+                    <strong>Loading directories</strong>
+                    <p>SIMM is reading the current folder contents.</p>
+                  </div>
                 ) : (
                   <>
                     {getParentPath(directoryPath) && (
-                      <div
-                        onClick={() => {
-                          const parent = getParentPath(directoryPath);
-                          if (parent) {
-                            loadDirectory(parent);
-                          }
-                        }}
-                        style={{
-                          padding: '0.75rem',
-                          cursor: 'pointer',
-                          borderRadius: '4px',
-                          marginBottom: '0.5rem',
-                          backgroundColor: '#3a3a3a',
-                          border: '1px solid #4a4a4a'
-                        }}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#4a4a4a'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#3a3a3a'}
+                      <button
+                        type="button"
+                        className="wizard-directory-row wizard-directory-row--parent"
+                        onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
                       >
-                        <i className="fas fa-arrow-up" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-                        <strong>.. (Parent Directory)</strong>
-                      </div>
+                        <i className="fas fa-arrow-up"></i>
+                        <span>Parent Directory</span>
+                      </button>
                     )}
                     {directoryList.length === 0 ? (
-                      <p style={{ color: '#888', textAlign: 'center', padding: '2rem' }}>No directories found</p>
+                      <div className="wizard-empty-card">
+                        <i className="fas fa-folder-open"></i>
+                        <strong>No subdirectories found</strong>
+                        <p>This location does not contain any folders that SIMM can browse into right now.</p>
+                      </div>
                     ) : (
                       directoryList.map((dir) => (
-                        <div
+                        <button
                           key={dir.path}
-                          onClick={() => loadDirectory(dir.path)}
-                          style={{
-                            padding: '0.75rem',
-                            cursor: 'pointer',
-                            borderRadius: '4px',
-                            marginBottom: '0.25rem',
-                            backgroundColor: '#3a3a3a'
-                          }}
-                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#4a4a4a'}
-                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#3a3a3a'}
+                          type="button"
+                          className="wizard-directory-row"
+                          onClick={() => void loadDirectory(dir.path)}
                         >
-                          <i className="fas fa-folder" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-                          {dir.name}
-                        </div>
+                          <i className="fas fa-folder"></i>
+                          <span>{dir.name}</span>
+                        </button>
                       ))
                     )}
                   </>
                 )}
               </div>
 
-              <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                <button onClick={() => setShowDirectoryPicker(false)} className="btn btn-secondary">
+              <div className="wizard-panel__actions wizard-panel__actions--dialog">
+                <button type="button" onClick={() => setShowDirectoryPicker(false)} className="btn btn-secondary">
                   Cancel
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleDirectorySelect(directoryPath)}
                   className="btn btn-primary"
                   disabled={!directoryPath}

@@ -13,6 +13,12 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 pub struct DepotDownloaderService {
     active_downloads: Arc<RwLock<HashMap<String, Child>>>,
     download_progress: Arc<RwLock<HashMap<String, DownloadProgress>>>,
@@ -227,20 +233,16 @@ impl DepotDownloaderService {
             }
         }
 
-        // Parse file counts: "Downloaded 123 of 456 files"
-        let file_re = Regex::new(r"(?i)Downloaded\s+(\d+)\s+of\s+(\d+)\s+files").unwrap();
-        if let Some(caps) = file_re.captures(line) {
-            if let (Ok(downloaded), Ok(total)) = (caps[1].parse::<u64>(), caps[2].parse::<u64>()) {
-                progress.downloaded_files = Some(downloaded);
-                progress.total_files = Some(total);
+        if let Some((downloaded, total)) = Self::extract_file_counts(line) {
+            progress.downloaded_files = Some(downloaded);
+            progress.total_files = Some(total);
 
-                // Calculate progress from file counts if percentage wasn't found
-                // This ensures we always have a progress value
-                if progress.progress == 0.0 && total > 0 {
-                    progress.progress = ((downloaded as f64 / total as f64) * 100.0)
-                        .min(100.0)
-                        .max(0.0);
-                }
+            // Calculate progress from file counts if percentage wasn't found
+            // This ensures we always have a progress value
+            if progress.progress == 0.0 && total > 0 {
+                progress.progress = ((downloaded as f64 / total as f64) * 100.0)
+                    .min(100.0)
+                    .max(0.0);
             }
         }
 
@@ -253,8 +255,7 @@ impl DepotDownloaderService {
         // Parse manifest ID from output. Keep the most recent match because an
         // update run can mention the currently installed manifest before the
         // newly resolved target manifest later in the output.
-        let manifest_pattern =
-            Regex::new(r"(?i)(?:manifest|manifestid)[:\s]+(\d{10,})").unwrap();
+        let manifest_pattern = Regex::new(r"(?i)(?:manifest|manifestid)[:\s]+(\d{10,})").unwrap();
         if let Some(caps) = manifest_pattern.captures(line) {
             if let Some(manifest_id) = caps.get(1) {
                 let manifest_id = manifest_id.as_str().to_string();
@@ -310,6 +311,31 @@ impl DepotDownloaderService {
         crate::events::emit_progress(app, progress)?;
 
         Ok(())
+    }
+
+    fn extract_file_counts(line: &str) -> Option<(u64, u64)> {
+        let patterns = [
+            r"(?i)Downloaded\s+(\d+)\s+of\s+(\d+)\s+files?",
+            r"(?i)(\d+)\s*/\s*(\d+)\s+files?",
+            r"(?i)files?\s*:\s*(\d+)\s*/\s*(\d+)",
+            r"(?i)file\s+(\d+)\s+of\s+(\d+)",
+            r"(?i)(\d+)\s+of\s+(\d+)\s+files?",
+        ];
+
+        for pattern in patterns {
+            let regex = Regex::new(pattern).unwrap();
+            if let Some(caps) = regex.captures(line) {
+                if let (Ok(downloaded), Ok(total)) =
+                    (caps[1].parse::<u64>(), caps[2].parse::<u64>())
+                {
+                    if total > 0 && downloaded <= total {
+                        return Some((downloaded, total));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub async fn start_download<R: Runtime>(
@@ -846,6 +872,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parse_progress_captures_alternate_file_count_formats() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+
+        service
+            .parse_progress("3/27 files", "download-9", &handle)
+            .await?;
+        let progress = service
+            .get_progress("download-9")
+            .await
+            .expect("progress set");
+        assert_eq!(progress.downloaded_files, Some(3));
+        assert_eq!(progress.total_files, Some(27));
+
+        service
+            .parse_progress("file 4 of 27", "download-10", &handle)
+            .await?;
+        let progress = service
+            .get_progress("download-10")
+            .await
+            .expect("progress set");
+        assert_eq!(progress.downloaded_files, Some(4));
+        assert_eq!(progress.total_files, Some(27));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn parse_progress_sets_validating_status() -> Result<()> {
         let service = DepotDownloaderService::new();
         let app = mock_app();
@@ -878,7 +933,11 @@ mod tests {
             )
             .await?;
         service
-            .parse_progress("Manifest 3177164058227208309 (03/14/2026 02:10:46)", "download-8", &handle)
+            .parse_progress(
+                "Manifest 3177164058227208309 (03/14/2026 02:10:46)",
+                "download-8",
+                &handle,
+            )
             .await?;
 
         let progress = service

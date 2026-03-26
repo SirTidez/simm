@@ -23,7 +23,6 @@ import { DownloadStatusStoreProvider } from '../stores/downloadStatusStore';
 import { SettingsStoreProvider } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
-import { interceptConsole } from '../utils/logger';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DownloadsPanel } from './DownloadsPanel';
 
@@ -124,16 +123,6 @@ function AppContent() {
 
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
-
-  // Initialize console logging interception after a short delay to avoid blocking startup
-  useEffect(() => {
-    // Defer console interception to not block initial render
-    const timer = setTimeout(() => {
-      interceptConsole();
-    }, 100); // Small delay to let app render first
-
-    return () => clearTimeout(timer);
-  }, []);
 
   // Check if SIMM directory was just created on app launch
   useEffect(() => {
@@ -465,11 +454,26 @@ function AppContent() {
       case 'accounts':
         return <SteamAccountOverlay isOpen={true} onClose={onCloseHandler} />;
       case 'help':
-        return <HelpOverlay isOpen={true} onClose={onCloseHandler} />;
+        return (
+          <HelpOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            onOpenWizard={() => openWorkspace({ view: 'wizard' })}
+            onOpenSettings={() => openWorkspace({ view: 'settings' })}
+            onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
+          />
+        );
       case 'settings':
         return <Settings isOpen={true} onClose={onCloseHandler} />;
       case 'welcome':
-        return <WelcomeOverlay isOpen={true} onClose={onCloseHandler} />;
+        return (
+          <WelcomeOverlay
+            isOpen={true}
+            onClose={onCloseHandler}
+            onOpenWizard={() => openWorkspace({ view: 'wizard' })}
+            onOpenSettings={() => openWorkspace({ view: 'settings' })}
+          />
+        );
       case 'mods':
         return 'environmentId' in workspace ? (
           <ModsOverlay
@@ -532,7 +536,7 @@ function AppContent() {
     if (activeWorkspace.view === 'library' && backgroundWorkspace) {
       return (
         <>
-          <div style={{ display: 'none' }}>
+          <div className="app-workspace-background">
             {renderWorkspacePanelFor(backgroundWorkspace, goHome)}
           </div>
           {activePanel}
@@ -642,7 +646,7 @@ function AppContent() {
                 <aside
                   className="workspace-sidebar"
                 >
-                  <button onClick={goHome} className="btn btn-secondary" style={{ width: '100%', marginBottom: '1rem' }}>
+                  <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
                     <i className="fas fa-arrow-left"></i>
                     Back to Home
                   </button>
@@ -653,7 +657,7 @@ function AppContent() {
                   />
                   <DownloadsPanel />
                 </aside>
-                <main className="app-main workspace-main" style={{ position: 'relative' }}>
+                <main className="app-main workspace-main app-workspace-main">
                   {renderWorkspacePanel()}
                 </main>
               </div>
@@ -665,64 +669,55 @@ function AppContent() {
       </div>
 
       {appNotice && (
-        <div
-          style={{
-            position: 'fixed',
-            top: '4.75rem',
-            right: '1.25rem',
-            zIndex: 4200,
-            maxWidth: '30rem',
-            background: 'rgba(120, 32, 32, 0.96)',
-            border: '1px solid rgba(255, 140, 140, 0.4)',
-            color: '#fff5f5',
-            borderRadius: '0.85rem',
-            boxShadow: '0 18px 48px rgba(0, 0, 0, 0.35)',
-            padding: '0.9rem 1rem',
-            display: 'grid',
-            gap: '0.5rem',
-          }}
-          role="alert"
-          aria-live="assertive"
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start' }}>
-            <strong style={{ fontSize: '0.95rem' }}>Nexus Download Blocked</strong>
+        <div className="app-notice app-notice--danger" role="alert" aria-live="assertive">
+          <div className="app-notice__header">
+            <strong>Nexus Download Blocked</strong>
             <button
               type="button"
-              className="window-control-btn"
+              className="window-control-btn app-notice__dismiss"
               onClick={() => setAppNotice(null)}
-              style={{ width: '1.75rem', height: '1.75rem', borderRadius: '999px' }}
               aria-label="Dismiss notice"
             >
               <i className="fas fa-times"></i>
             </button>
           </div>
-          <span style={{ color: '#ffe4e4', lineHeight: 1.45 }}>{appNotice}</span>
+          <span className="app-notice__body">{appNotice}</span>
         </div>
       )}
 
       {pendingNexusRuntimeSelection && (
         <div className="modal-overlay" onClick={() => void handleCancelNexusRuntimeSelection()}>
-          <div className="modal-content" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-content app-dialog app-dialog--message app-runtime-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <h2>Select Runtime</h2>
               <button className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()}>×</button>
             </div>
-            <div style={{ padding: '1.5rem', display: 'grid', gap: '1rem' }}>
-              <p style={{ margin: 0, color: '#cccccc' }}>
-                SIMM could not determine the runtime for this Nexus download. Choose the runtime before it is added to the library or installed.
-              </p>
-              <div style={{ color: '#9aa4b2', fontSize: '0.95rem', display: 'grid', gap: '0.35rem' }}>
-                <span><strong style={{ color: '#ffffff' }}>Mod:</strong> {pendingNexusRuntimeSelection.modName || 'Unknown Mod'}</span>
-                <span><strong style={{ color: '#ffffff' }}>File:</strong> {pendingNexusRuntimeSelection.fileName || 'Unknown File'}</span>
+            <div className="app-dialog__body app-runtime-dialog__body">
+              <div className="app-dialog__callout app-dialog__callout--info">
+                <div className="app-dialog__icon">
+                  <i className="fas fa-microchip" aria-hidden="true"></i>
+                </div>
+                <div className="app-dialog__meta">
+                  <strong>Runtime selection required</strong>
+                  <p>
+                    SIMM could not determine the runtime for this Nexus download. Choose the runtime before it is added to the library or installed.
+                  </p>
+                </div>
+              </div>
+              <div className="app-runtime-dialog__details">
+                <span><strong>Mod:</strong> {pendingNexusRuntimeSelection.modName || 'Unknown Mod'}</span>
+                <span><strong>File:</strong> {pendingNexusRuntimeSelection.fileName || 'Unknown File'}</span>
                 {pendingNexusRuntimeSelection.version && (
-                  <span><strong style={{ color: '#ffffff' }}>Version:</strong> {pendingNexusRuntimeSelection.version}</span>
+                  <span><strong>Version:</strong> {pendingNexusRuntimeSelection.version}</span>
                 )}
               </div>
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            </div>
+            <div className="app-dialog__footer">
+              <div className="app-runtime-dialog__actions">
                 <button className="btn btn-secondary" onClick={() => void handleCancelNexusRuntimeSelection()}>
                   Cancel
                 </button>
-                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <div className="app-runtime-dialog__runtime-actions">
                   <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Mono')}>
                     Use Mono
                   </button>
@@ -740,7 +735,7 @@ function AppContent() {
       )}
 
       {showStartupSplash && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 4000 }}>
+        <div className="boot-screen-shell">
           <div className="boot-screen" role="status" aria-live="polite">
             <div className="boot-card">
               <div className="boot-title">Schedule I</div>

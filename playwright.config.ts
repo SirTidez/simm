@@ -13,7 +13,7 @@ export default defineConfig({
   webServer: {
     command: 'npm run tauri:playwright',
     url: 'http://127.0.0.1:9222/json/version',
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     timeout: 180000,
   },
 });

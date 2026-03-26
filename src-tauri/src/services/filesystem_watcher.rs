@@ -128,7 +128,7 @@ impl FileSystemWatcherService {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Watch error: {:?}", e);
+                    log::error!("Watch error: {:?}", e);
                 }
             }
         })

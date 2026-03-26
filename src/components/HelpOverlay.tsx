@@ -1,5 +1,13 @@
 import { useEffect } from 'react';
 
+interface HelpOverlayProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onOpenWizard: () => void;
+  onOpenSettings: () => void;
+  onOpenAccounts: () => void;
+}
+
 const quickStartSteps = [
   {
     icon: 'fas fa-plus-circle',
@@ -93,7 +101,28 @@ const referenceCards = [
   },
 ];
 
-export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+const quickActions = [
+  {
+    icon: 'fas fa-plus-circle',
+    title: 'Create Environment',
+    body: 'Start a new managed install or import an existing folder into SIMM.',
+    action: 'wizard' as const,
+  },
+  {
+    icon: 'fas fa-user-gear',
+    title: 'Open Accounts',
+    body: 'Reconnect Steam or Nexus when protected downloads or manager support need attention.',
+    action: 'accounts' as const,
+  },
+  {
+    icon: 'fas fa-sliders',
+    title: 'Open Settings',
+    body: 'Adjust paths, update cadence, theme, tools, and logging behavior.',
+    action: 'settings' as const,
+  },
+];
+
+export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onOpenAccounts }: HelpOverlayProps) {
   useEffect(() => {
     if (!isOpen) return;
 
@@ -110,19 +139,7 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
   if (!isOpen) return null;
 
   return (
-    <section
-      className="modal-content help-overlay workspace-panel"
-      style={{
-        width: '100%',
-        height: '100%',
-        maxWidth: 'none',
-        margin: 0,
-        borderRadius: '0.75rem',
-        display: 'flex',
-        flexDirection: 'column'
-      }}
-      aria-label="Help panel"
-    >
+    <section className="modal-content help-overlay workspace-panel" aria-label="Help panel">
       <div className="modal-header">
         <h2>Help Center</h2>
         <button className="modal-close" onClick={onClose} aria-label="Close help panel">×</button>
@@ -132,8 +149,8 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
         <div className="help-overview">
           <div className="help-overview__copy">
             <span className="help-eyebrow">Operator Guide</span>
-            <h3>Use SIMM as a workspace for installs, mods, accounts, and support tools.</h3>
-            <p>Start with environment creation, then move into updates, mod management, and linked-service access as your install matures.</p>
+            <h3>Use SIMM as a desktop workspace for installs, updates, mods, accounts, and support tools.</h3>
+            <p>Start with environment creation, then move into account access, updates, mod management, and diagnostics as your install matures.</p>
           </div>
           <div className="help-overview__stats">
             <div className="help-stat-card">
@@ -142,7 +159,7 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
             </div>
             <div className="help-stat-card">
               <span>Primary areas</span>
-              <strong>Installs, mods, tools</strong>
+              <strong>Installs, accounts, mods</strong>
             </div>
             <div className="help-stat-card">
               <span>Support focus</span>
@@ -151,98 +168,151 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
           </div>
         </div>
 
-        <section className="help-hero-card">
-          <div className="help-card-header">
-            <div className="help-card-header__icon">
-              <i className="fas fa-circle-info"></i>
-            </div>
-            <div>
-              <span className="help-eyebrow">Quick Start</span>
-              <h3>Get from first launch to a managed environment quickly.</h3>
-              <p>These are the actions most users need first. Everything else in this pane is supporting reference.</p>
-            </div>
+        <section className="help-action-strip">
+          <div className="help-section-group__header">
+            <span className="help-eyebrow">Next Actions</span>
+            <h3>Jump directly to the workspace you need most often.</h3>
           </div>
 
-          <div className="help-step-list">
-            {quickStartSteps.map((step, index) => (
-              <div key={step.title} className="help-step-card">
-                <span className="help-step-card__index">{index + 1}</span>
-                <div className="help-step-card__body">
-                  <h4>
-                    <i className={step.icon}></i>
-                    {step.title}
-                  </h4>
-                  <p>{step.body}</p>
+          <div className="help-action-grid">
+            {quickActions.map((actionCard) => {
+              const handleClick = actionCard.action === 'wizard'
+                ? onOpenWizard
+                : actionCard.action === 'accounts'
+                  ? onOpenAccounts
+                  : onOpenSettings;
+
+              return (
+                <button
+                  key={actionCard.title}
+                  type="button"
+                  className="help-action-card"
+                  onClick={handleClick}
+                >
+                  <div className="help-card-header__icon">
+                    <i className={actionCard.icon}></i>
+                  </div>
+                  <div className="help-action-card__content">
+                    <h4>{actionCard.title}</h4>
+                    <p>{actionCard.body}</p>
+                  </div>
+                  <i className="fas fa-arrow-right help-action-card__chevron" aria-hidden="true"></i>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
+        <div className="help-layout">
+          <div className="help-layout__primary">
+            <section className="help-hero-card">
+              <div className="help-card-header">
+                <div className="help-card-header__icon">
+                  <i className="fas fa-circle-info"></i>
+                </div>
+                <div>
+                  <span className="help-eyebrow">Quick Start</span>
+                  <h3>Get from first launch to a managed environment quickly.</h3>
+                  <p>These are the actions most users need first. Everything else in this pane is supporting reference.</p>
                 </div>
               </div>
-            ))}
-          </div>
-        </section>
 
-        <section className="help-section-group">
-          <div className="help-section-group__header">
-            <span className="help-eyebrow">Task Guides</span>
-            <h3>Find the right workspace for the job.</h3>
-          </div>
-
-          <div className="help-task-grid">
-            {primaryHelpCards.map((card) => (
-              <article key={card.title} className="help-task-card">
-                <div className="help-task-card__header">
-                  <div className="help-card-header__icon">
-                    <i className={card.icon}></i>
+              <div className="help-step-list">
+                {quickStartSteps.map((step, index) => (
+                  <div key={step.title} className="help-step-card">
+                    <span className="help-step-card__index">{index + 1}</span>
+                    <div className="help-step-card__body">
+                      <h4>
+                        <i className={step.icon}></i>
+                        {step.title}
+                      </h4>
+                      <p>{step.body}</p>
+                    </div>
                   </div>
-                  <div>
-                    <h4>{card.title}</h4>
-                    <p>{card.copy}</p>
-                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="help-section-group">
+              <div className="help-section-group__header">
+                <span className="help-eyebrow">Task Guides</span>
+                <h3>Find the right workspace for the job.</h3>
+              </div>
+
+              <div className="help-task-grid">
+                {primaryHelpCards.map((card) => (
+                  <article key={card.title} className="help-task-card">
+                    <div className="help-task-card__header">
+                      <div className="help-card-header__icon">
+                        <i className={card.icon}></i>
+                      </div>
+                      <div>
+                        <h4>{card.title}</h4>
+                        <p>{card.copy}</p>
+                      </div>
+                    </div>
+                    <ul className="help-list">
+                      {card.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </div>
+
+          <aside className="help-layout__secondary">
+            <section className="help-reference-card help-reference-card--summary">
+              <div className="help-reference-card__header">
+                <i className="fas fa-compass"></i>
+                <h4>Where to Start</h4>
+              </div>
+              <ul className="help-list help-list--compact">
+                <li>Create or import an environment first.</li>
+                <li>Use Accounts when Steam or Nexus access becomes a blocker.</li>
+                <li>Open Logs and Config together when deeper diagnostics are needed.</li>
+              </ul>
+            </section>
+
+            <section className="help-section-group">
+              <div className="help-section-group__header">
+                <span className="help-eyebrow">Reference</span>
+                <h3>Supporting details for common maintenance tasks.</h3>
+              </div>
+
+              <div className="help-reference-grid">
+                {referenceCards.map((card) => (
+                  <article key={card.title} className="help-reference-card">
+                    <div className="help-reference-card__header">
+                      <i className={card.icon}></i>
+                      <h4>{card.title}</h4>
+                    </div>
+                    <ul className="help-list help-list--compact">
+                      {card.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="help-callout-card">
+              <div className="help-card-header">
+                <div className="help-card-header__icon">
+                  <i className="fas fa-wrench"></i>
                 </div>
-                <ul className="help-list">
-                  {card.items.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="help-section-group">
-          <div className="help-section-group__header">
-            <span className="help-eyebrow">Reference</span>
-            <h3>Supporting details for common maintenance tasks.</h3>
-          </div>
-
-          <div className="help-reference-grid">
-            {referenceCards.map((card) => (
-              <article key={card.title} className="help-reference-card">
-                <div className="help-reference-card__header">
-                  <i className={card.icon}></i>
-                  <h4>{card.title}</h4>
+                <div>
+                  <span className="help-eyebrow">Repair Hint</span>
+                  <h3>DepotDownloader is required for Steam depot workflows.</h3>
+                  <p>If SIMM reports that DepotDownloader is missing, repair prerequisites or install it manually before retrying a protected branch download.</p>
                 </div>
-                <ul className="help-list help-list--compact">
-                  {card.items.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="help-callout-card">
-          <div className="help-card-header">
-            <div className="help-card-header__icon">
-              <i className="fas fa-wrench"></i>
-            </div>
-            <div>
-              <span className="help-eyebrow">Repair Hint</span>
-              <h3>DepotDownloader is required for Steam depot workflows.</h3>
-              <p>If SIMM reports that DepotDownloader is missing, repair prerequisites or install it manually before retrying a protected branch download.</p>
-            </div>
-          </div>
-          <code>winget install --exact --id SteamRE.DepotDownloader</code>
-        </section>
+              </div>
+              <code>winget install --exact --id SteamRE.DepotDownloader</code>
+            </section>
+          </aside>
+        </div>
       </div>
     </section>
   );

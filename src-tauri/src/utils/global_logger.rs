@@ -1,5 +1,7 @@
 use crate::types::LogLevel;
 use log::{Level, Metadata, Record};
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 
@@ -51,7 +53,13 @@ impl GlobalLogger {
             while let Ok(log_msg) = rx.recv() {
                 if let Some(ref service) = logger_service {
                     rt.block_on(async {
-                        service.log(log_msg.level, &log_msg.message, None).await;
+                        service
+                            .log(
+                                log_msg.level,
+                                &format!("[Server] {}", log_msg.message),
+                                None,
+                            )
+                            .await;
                     });
                 }
             }
@@ -78,9 +86,11 @@ impl log::Log for GlobalLogger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             let message = format!("{}", record.args());
+            let sanitized_message =
+                crate::services::logger::LoggerService::sanitize_log_text(&message);
 
             // Always print to console immediately (synchronous)
-            eprintln!("[{}] {}", record.level(), message);
+            eprintln!("[{}] {}", record.level(), sanitized_message);
 
             // Send to file logger (non-blocking)
             let level = match record.level() {
@@ -91,7 +101,7 @@ impl log::Log for GlobalLogger {
                 Level::Trace => LogLevel::Debug,
             };
 
-            self.send_to_file(level, message);
+            self.send_to_file(level, sanitized_message);
         }
     }
 
@@ -102,6 +112,7 @@ impl log::Log for GlobalLogger {
 
 static GLOBAL_LOGGER: once_cell::sync::Lazy<GlobalLogger> =
     once_cell::sync::Lazy::new(|| GlobalLogger::new());
+static LOGGER_SERVICE_STARTED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 /// Initialize the global logger
 pub fn init_global_logger() {
@@ -119,5 +130,9 @@ pub fn init_global_logger() {
 
 /// Initialize the LoggerService for the global logger (starts background thread)
 pub fn init_logger_service() {
+    if LOGGER_SERVICE_STARTED.swap(true, Ordering::SeqCst) {
+        eprintln!("[GlobalLogger] LoggerService already started");
+        return;
+    }
     GLOBAL_LOGGER.initialize_logger_service();
 }

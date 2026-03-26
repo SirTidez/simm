@@ -77,9 +77,13 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       : 'Website confirmation required';
 
   const steamConnected = Boolean(settings?.steamUsername);
+  const steamIdentity = settings?.steamUsername || 'Steam not connected';
   const steamSummary = steamConnected
-    ? 'Protected Steam branches are ready to authenticate when SIMM needs depot access.'
-    : 'No Steam account is connected yet. Connect Steam to access protected branches and refresh branch auth when downloads require it.';
+    ? 'Protected Steam branches are ready for depot access, and you can refresh the Steam session here whenever credentials or Steam Guard requirements change.'
+    : 'No Steam account is connected yet. Authenticate with Steam here when SIMM needs access to protected branches or depot downloads.';
+  const steamActionNote = steamConnected
+    ? 'Refresh the stored Steam session if branch downloads start prompting again or Steam changes its approval requirements.'
+    : 'SIMM only uses Steam credentials for protected branch authentication and stores them locally in encrypted form if you choose to remember them.';
   const nexusExpiry = nexusStatus.connected && nexusStatus.expiresAt
     ? new Date(nexusStatus.expiresAt * 1000).toLocaleString()
     : null;
@@ -170,15 +174,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
     <>
       <section
         className="modal-content workspace-panel accounts-panel"
-        style={{
-          width: '100%',
-          height: '100%',
-          maxWidth: 'none',
-          margin: 0,
-          borderRadius: '0.75rem',
-          display: 'flex',
-          flexDirection: 'column'
-        }}
         aria-label="Account panel"
       >
         <div className="modal-header">
@@ -193,20 +188,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
               <h3>Manage Steam and Nexus access for protected downloads.</h3>
               <p>Keep account links healthy, verify what capabilities are available, and understand how SIMM stores credentials on this machine.</p>
             </div>
-            <div className="accounts-overview__stats">
-              <div className="accounts-stat-card">
-                <span>Steam</span>
-                <strong>{steamConnected ? 'Connected' : 'Needs login'}</strong>
-              </div>
-              <div className="accounts-stat-card">
-                <span>Nexus</span>
-                <strong>{nexusStatus.connected ? tierLabel : 'Disconnected'}</strong>
-              </div>
-              <div className="accounts-stat-card">
-                <span>Download mode</span>
-                <strong>{nexusStatus.account?.canDirectDownload ? 'Direct' : 'Confirm on site'}</strong>
-              </div>
-            </div>
           </div>
 
           <section className="account-service-card">
@@ -217,43 +198,39 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 </div>
                 <div>
                   <span className="accounts-eyebrow">Steam Account</span>
-                  <h3>Branch authentication</h3>
+                  <h3>{steamIdentity}</h3>
                   <p>{steamSummary}</p>
                 </div>
               </div>
+            </div>
+
+            <div className="account-inline-pills">
               <span className={`account-status-pill account-status-pill--${steamConnected ? 'connected' : 'disconnected'}`}>
                 <i className={steamConnected ? 'fas fa-check-circle' : 'fas fa-exclamation-circle'}></i>
                 {steamConnected ? 'Connected' : 'Not connected'}
               </span>
+              <span className="account-capability-pill">
+                <i className="fab fa-steam-symbol"></i>
+                Protected branch access
+              </span>
+              <span className="account-capability-pill">
+                <i className="fas fa-lock"></i>
+                Encrypted local storage
+              </span>
             </div>
 
-            {steamConnected ? (
-              <div className="account-metadata-grid">
-                <div className="account-metadata-card">
-                  <span>Account</span>
-                  <strong>{settings?.steamUsername}</strong>
-                </div>
-                <div className="account-metadata-card">
-                  <span>Credential storage</span>
-                  <strong>Encrypted and local</strong>
-                </div>
-                <div className="account-metadata-card">
-                  <span>Use case</span>
-                  <strong>Steam depot access</strong>
-                </div>
-              </div>
-            ) : (
+            {!steamConnected && (
               <div className="account-disconnected-note">
-                SIMM only needs Steam when a branch requires authenticated depot access. Connect once here, then refresh the link whenever Steam changes credentials or session requirements.
+                Authenticate here when SIMM needs protected Steam access. If Steam Guard prompts appear, approve them and SIMM will continue automatically.
               </div>
             )}
 
             <div className="account-service-card__actions">
               <button onClick={() => setShowAuthModal(true)} className="btn btn-primary">
                 <i className={steamConnected ? 'fas fa-sync-alt' : 'fas fa-sign-in-alt'}></i>
-                {steamConnected ? 'Reconnect Steam' : 'Connect Steam'}
+                {steamConnected ? 'Refresh Steam Access' : 'Authenticate with Steam'}
               </button>
-              <span className="account-action-note">Required for protected Steam branch downloads.</span>
+              <span className="account-action-note">{steamActionNote}</span>
             </div>
           </section>
 
@@ -265,54 +242,40 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                 </div>
                 <div>
                   <span className="accounts-eyebrow">Nexus Mods</span>
-                  <h3>Manager download access</h3>
+                  <h3>{nexusStatus.connected ? nexusIdentity : 'Nexus not connected'}</h3>
                   <p>Nexus browsing works without signing in, but authenticated access unlocks manager downloads and premium features when the account allows them.</p>
                 </div>
               </div>
-              <div className="account-service-card__pills">
-                <span className={`account-status-pill account-status-pill--${nexusStatus.connected ? 'connected' : 'disconnected'}`}>
-                  <i className={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'}></i>
-                  {tierLabel}
-                </span>
-                <span className="account-capability-pill">
-                  <i className={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'}></i>
-                  {capabilityLabel}
-                </span>
-              </div>
             </div>
 
-            {nexusStatus.connected ? (
-              <div className="account-metadata-grid">
-                <div className="account-metadata-card">
-                  <span>Account</span>
-                  <strong>{nexusIdentity}</strong>
-                </div>
-                <div className="account-metadata-card">
-                  <span>Membership</span>
-                  <strong>{tierLabel}</strong>
-                </div>
-                <div className="account-metadata-card">
-                  <span>Manager downloads</span>
-                  <strong>{nexusStatus.account?.canDirectDownload ? 'Enabled' : 'Requires site confirmation'}</strong>
-                </div>
-                {typeof nexusStatus.account?.memberId === 'number' && (
-                  <div className="account-metadata-card">
-                    <span>Member ID</span>
-                    <strong>{nexusStatus.account.memberId}</strong>
-                  </div>
-                )}
-                {nexusExpiry && (
-                  <div className="account-metadata-card">
-                    <span>Session expires</span>
-                    <strong>{nexusExpiry}</strong>
-                  </div>
-                )}
-                <div className="account-metadata-card">
-                  <span>Website confirmation</span>
-                  <strong>{nexusStatus.account?.requiresSiteConfirmation ? 'Required for free-tier downloads' : 'Not required for current account'}</strong>
-                </div>
-              </div>
-            ) : (
+            <div className="account-inline-pills">
+              <span className={`account-status-pill account-status-pill--${nexusStatus.connected ? 'connected' : 'disconnected'}`}>
+                <i className={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'}></i>
+                {nexusStatus.connected ? 'Connected' : 'Disconnected'}
+              </span>
+              <span className="account-capability-pill">
+                <i className="fas fa-id-badge"></i>
+                {tierLabel}
+              </span>
+              <span className="account-capability-pill">
+                <i className={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'}></i>
+                {capabilityLabel}
+              </span>
+              {typeof nexusStatus.account?.memberId === 'number' && (
+                <span className="account-capability-pill">
+                  <i className="fas fa-hashtag"></i>
+                  Member {nexusStatus.account.memberId}
+                </span>
+              )}
+              {nexusExpiry && (
+                <span className="account-capability-pill">
+                  <i className="fas fa-clock"></i>
+                  Expires {nexusExpiry}
+                </span>
+              )}
+            </div>
+
+            {!nexusStatus.connected && (
               <div className="account-disconnected-note">
                 You can still browse and search Nexus content without linking an account. Sign in here when you want manager downloads or need SIMM to handle the site authorization flow for you.
               </div>

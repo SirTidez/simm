@@ -6,9 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::time::{sleep, Duration};
 
-use crate::types::{
-    schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime,
-};
+use crate::types::{schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime};
 
 pub struct EnvironmentService {
     pool: Arc<SqlitePool>,
@@ -29,7 +27,10 @@ impl EnvironmentService {
         let has_mono_bleeding_edge = data_dir.join("MonoBleedingEdge").exists();
         let has_il2cpp_data = data_dir.join("il2cpp_data").exists();
         let has_game_assembly = path.join("GameAssembly.dll").exists();
-        let has_assembly_csharp = data_dir.join("Managed").join("Assembly-CSharp.dll").exists();
+        let has_assembly_csharp = data_dir
+            .join("Managed")
+            .join("Assembly-CSharp.dll")
+            .exists();
 
         if has_mono_bleeding_edge {
             return Runtime::Mono;
@@ -69,8 +70,8 @@ impl EnvironmentService {
         &self,
         env: &mut Environment,
     ) -> Result<bool> {
-        let is_steam = env.environment_type == Some(EnvironmentType::Steam)
-            || env.id.starts_with("steam-");
+        let is_steam =
+            env.environment_type == Some(EnvironmentType::Steam) || env.id.starts_with("steam-");
         if !is_steam || !matches!(env.status, EnvironmentStatus::Completed) {
             return Ok(false);
         }
@@ -89,7 +90,8 @@ impl EnvironmentService {
             .flatten()
             .unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
 
-        let detected_runtime = Self::runtime_for_branch(&detected_branch).unwrap_or(runtime_from_files);
+        let detected_runtime =
+            Self::runtime_for_branch(&detected_branch).unwrap_or(runtime_from_files);
 
         let mut changed = false;
         if env.branch != detected_branch {

@@ -40,6 +40,12 @@ function safeExternalUrl(raw: string | null | undefined): string | undefined {
   }
 }
 
+function getLatestStableMelonLoaderTag(
+  releases: Array<{ tag_name: string; prerelease: boolean; isNightly?: boolean }>
+): string | undefined {
+  return releases.find((release) => !release.isNightly && !release.prerelease)?.tag_name ?? releases[0]?.tag_name;
+}
+
 // Shared ref to track last update check time (accessible across components)
 // This is exported so Footer can update it when doing manual checks
 export const lastUpdateCheckTimeRef = { current: null as number | null };
@@ -166,6 +172,14 @@ export function EnvironmentList({
     localStorage.setItem(LAST_ENV_KEY, envId);
   }, []);
 
+  const showMessage = useCallback((title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setMessageOverlay({ isOpen: true, title, message, type });
+  }, []);
+
+  const resetDeleteConfirm = useCallback(() => {
+    setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false });
+  }, []);
+
   const handleStartDownload = async (env: Environment) => {
     try {
       rememberEnvironment(env.id);
@@ -185,7 +199,7 @@ export function EnvironmentList({
       if (err?.response?.data?.requiresAuth || err?.message?.includes('authentication')) {
         setAuthModal({ isOpen: true, envId: env.id, waiting: false });
       } else {
-        alert(`Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`);
+        showMessage('Download Failed', `Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
       }
     }
   };
@@ -208,7 +222,7 @@ export function EnvironmentList({
       setAuthCredentials(null);
     } catch (err) {
       setAuthModal(prev => ({ ...prev, waiting: false }));
-      alert(`Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showMessage('Download Failed', `Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
       setAuthCredentials(null);
     }
   };
@@ -373,7 +387,7 @@ export function EnvironmentList({
             }
           } else if (authModal.envId === data.downloadId) {
             setAuthModal(prev => ({ ...prev, waiting: false }));
-            alert(`Authentication failed: ${data.error}`);
+            showMessage('Authentication Failed', data.error, 'error');
             setAuthCredentials(null);
           }
         });
@@ -415,7 +429,7 @@ export function EnvironmentList({
         unlistenMelonLoaderError = await onMelonLoaderError((data) => {
           const env = environments.find(e => e.id === data.downloadId);
           if (env) {
-            alert(`MelonLoader installation failed: ${data.message}`);
+            showMessage('MelonLoader Install Failed', data.message, 'error');
           }
         });
 
@@ -646,7 +660,7 @@ export function EnvironmentList({
     try {
       await cancelDownload(env.id);
     } catch (err) {
-      alert(`Failed to cancel download: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showMessage('Cancel Failed', `Failed to cancel download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   };
 
@@ -658,7 +672,7 @@ export function EnvironmentList({
     if (!deleteConfirm.env) return;
     const env = deleteConfirm.env;
     const deleteFiles = deleteConfirm.deleteFiles;
-    setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false });
+    resetDeleteConfirm();
 
     try {
       await deleteEnvironment(env.id, deleteFiles);
@@ -675,7 +689,7 @@ export function EnvironmentList({
   const handleUpdate = async (env: Environment) => {
     // For Steam environments, show message that Steam handles updates
     if (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) {
-      alert('Steam manages updates for this installation. Please update through Steam.');
+      showMessage('Steam Manages Updates', 'Steam manages updates for this installation. Please update it through Steam.', 'info');
       return;
     }
     // Start the download to update to the latest version
@@ -695,7 +709,7 @@ export function EnvironmentList({
     }
 
     if (env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')) {
-      alert('Steam manages updates for this installation. Please update through Steam.');
+      showMessage('Steam Manages Updates', 'Steam manages updates for this installation. Please update it through Steam.', 'info');
       return;
     }
 
@@ -711,7 +725,7 @@ export function EnvironmentList({
         return;
       }
 
-      alert('No update is currently available for this environment.');
+      showMessage('No Update Available', 'No update is currently available for this environment.', 'info');
     } catch (err) {
       console.error(`Failed to update ${env.id}:`, err);
     } finally {
@@ -734,7 +748,7 @@ export function EnvironmentList({
       setEditingDescription(null);
       setDescriptionValue('');
     } catch (err) {
-      alert(`Failed to save description: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showMessage('Description Save Failed', `Failed to save description: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   };
 
@@ -752,14 +766,14 @@ export function EnvironmentList({
     try {
       const trimmedName = nameValue.trim();
       if (!trimmedName) {
-        alert('Environment name cannot be empty');
+        showMessage('Name Required', 'Environment name cannot be empty.', 'info');
         return;
       }
       await updateEnvironment(envId, { name: trimmedName });
       setEditingName(null);
       setNameValue('');
     } catch (err) {
-      alert(`Failed to save name: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showMessage('Name Save Failed', `Failed to save name: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   };
 
@@ -772,7 +786,7 @@ export function EnvironmentList({
     try {
       await ApiService.openFolder(env.id);
     } catch (err) {
-      alert(`Failed to open folder: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showMessage('Open Folder Failed', `Failed to open folder: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   };
 
@@ -780,10 +794,16 @@ export function EnvironmentList({
     try {
       const result = await ApiService.launchGame(env.id, method);
       if (!result.success) {
-        alert(`Failed to launch game: ${result.executablePath ? `Executable found at ${result.executablePath} but launch failed.` : 'Game executable not found.'}`);
+        showMessage(
+          'Launch Failed',
+          result.executablePath
+            ? `Executable found at ${result.executablePath}, but launch failed.`
+            : 'Game executable not found.',
+          'error'
+        );
       }
     } catch (err) {
-      alert(`Failed to launch game: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      showMessage('Launch Failed', `Failed to launch game: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
   };
 
@@ -1026,15 +1046,11 @@ export function EnvironmentList({
         next.set(envId, releases);
         return next;
       });
-      // Set default selection to stable version (0.7.0) if available, otherwise first in list
-      if (releases.length > 0) {
-        // Find stable version - check if tag_name is "0.7.0" or starts with "0.7.0" and is not nightly
-        const stableVersion = releases.find(r => {
-          const tag = r.tag_name || '';
-          return (tag === '0.7.0' || tag === 'v0.7.0' || tag.startsWith('0.7.0')) && !r.isNightly;
-        });
+      const latestStableTag = getLatestStableMelonLoaderTag(releases);
 
-        const defaultVersion = stableVersion ? stableVersion.tag_name : releases[0].tag_name;
+      // Default to the latest stable tag reported by the Lockwire GitHub release API.
+      if (releases.length > 0) {
+        const defaultVersion = latestStableTag ?? releases[0].tag_name;
 
         setSelectedMelonLoaderVersion(prev => {
           const next = new Map(prev);
@@ -1064,6 +1080,17 @@ export function EnvironmentList({
     loadMelonLoaderReleases(env.id);
     setShowMelonLoaderVersionSelector(env.id);
   };
+
+  const closeMelonLoaderVersionSelector = useCallback(() => {
+    setShowMelonLoaderVersionSelector(null);
+    setSelectedMelonLoaderVersion(prev => {
+      const next = new Map(prev);
+      if (showMelonLoaderVersionSelector) {
+        next.delete(showMelonLoaderVersionSelector);
+      }
+      return next;
+    });
+  }, [showMelonLoaderVersionSelector]);
 
   const handleMelonLoaderVersionSelected = async (envId: string) => {
     const selectedVersion = selectedMelonLoaderVersion.get(envId);
@@ -1171,10 +1198,7 @@ export function EnvironmentList({
 
     return (
       <span
-        className="badge badge-blue"
-        style={{
-          marginRight: '0.5rem'
-        }}
+        className="badge badge-blue environment-card__steam-badge"
         title="Steam-managed installation"
       >
         {!showFallback && <i ref={iconRef} className="fab fa-steam"></i>}
@@ -1189,6 +1213,21 @@ export function EnvironmentList({
     if (Number.isNaN(date.getTime())) return 'Unknown';
     return date.toLocaleString();
   };
+
+  const melonLoaderSelectorEnvironment = showMelonLoaderVersionSelector
+    ? environments.find((environment) => environment.id === showMelonLoaderVersionSelector) ?? null
+    : null;
+  const melonLoaderSelectorReleases = showMelonLoaderVersionSelector
+    ? (melonLoaderReleases.get(showMelonLoaderVersionSelector) ?? [])
+    : [];
+  const latestStableMelonLoaderTag = getLatestStableMelonLoaderTag(melonLoaderSelectorReleases);
+  const selectedMelonLoaderTag = showMelonLoaderVersionSelector
+    ? (selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) ?? '')
+    : '';
+  const currentMelonLoaderVersion =
+    showMelonLoaderVersionSelector && melonLoaderStatus.get(showMelonLoaderVersionSelector)?.installed
+      ? (melonLoaderStatus.get(showMelonLoaderVersionSelector)?.version || 'Installed')
+      : 'Not installed';
 
   const getDominantStatus = (env: Environment) => {
     const prog = progress.get(env.id);
@@ -1303,7 +1342,13 @@ export function EnvironmentList({
     const mlStatus = melonLoaderStatus.get(env.id);
     const metrics = [
       { label: 'Version', value: isCompleted ? (env.currentGameVersion || 'Unknown') : 'Not installed' },
-      { label: 'Mods', value: isCompleted ? `${modCount}${modUpdateCount > 0 ? ` (${modUpdateCount} updates)` : ''}` : 'Unavailable', tone: modUpdateCount > 0 ? 'warning' : undefined },
+      {
+        label: 'Mods',
+        value: isCompleted
+          ? `${modCount}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
+          : 'Unavailable',
+        tone: modUpdateCount > 0 ? 'warning' : undefined
+      },
       { label: 'Plugins', value: isCompleted ? `${pluginCount}` : 'Unavailable' },
       { label: 'UserLibs', value: isCompleted ? `${userLibsCount}` : 'Unavailable' },
       { label: 'MelonLoader', value: isCompleted ? (mlStatus?.installed ? `Installed${mlStatus.version ? ` (${mlStatus.version})` : ''}` : 'Not installed') : 'Unavailable' },
@@ -1479,7 +1524,7 @@ export function EnvironmentList({
                   <i className="fas fa-plug"></i>
                   <span>Plugins</span>
                 </button>
-                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary" title="View UserLibs (read-only)">
+                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary" title="View UserLibs">
                   <i className="fas fa-book"></i>
                   <span>UserLibs</span>
                 </button>
@@ -1506,7 +1551,7 @@ export function EnvironmentList({
                 <div className="progress-fill" style={{ width: `${Math.min(100, Math.max(0, prog.progress))}%` }} />
               </div>
               <p><strong>{Math.round(prog.progress)}%</strong>{prog.message ? ` • ${prog.message}` : ''}</p>
-              {prog.downloadedFiles !== undefined && prog.totalFiles !== undefined && (
+              {typeof prog.downloadedFiles === 'number' && typeof prog.totalFiles === 'number' && prog.totalFiles > 0 && (
                 <p>Files: {prog.downloadedFiles} / {prog.totalFiles}</p>
               )}
               {prog.speed && <p>Speed: {prog.speed}</p>}
@@ -1565,12 +1610,12 @@ export function EnvironmentList({
         : null;
 
     return (
-      <div className="workspace-environment-sidebar" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-        <h3 style={{ margin: 0 }}>Environments</h3>
-        <p style={{ margin: 0, color: 'var(--text-secondary, #9aa4b2)', fontSize: '0.72rem' }}>
+      <div className="workspace-environment-sidebar">
+        <h3 className="workspace-environment-sidebar__title">Environments</h3>
+        <p className="workspace-environment-sidebar__copy">
           Select an environment to open its active tools workspace.
         </p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+        <div className="workspace-environment-sidebar__list">
           {[...environments].sort((a, b) => a.name.localeCompare(b.name)).map((env) => (
             <button
               key={env.id}
@@ -1578,14 +1623,7 @@ export function EnvironmentList({
                 rememberEnvironment(env.id);
                 onSelectEnvironment?.(env.id);
               }}
-              className="btn btn-secondary"
-              style={{
-                justifyContent: 'flex-start',
-                textAlign: 'left',
-                width: '100%',
-                borderColor: selectedEnvironmentId === env.id ? 'var(--primary-btn-color, #646cff)' : undefined,
-                backgroundColor: selectedEnvironmentId === env.id ? 'rgba(100, 108, 255, 0.18)' : undefined
-              }}
+              className={`btn btn-secondary workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
               title={env.name}
             >
               {env.name}
@@ -1598,15 +1636,11 @@ export function EnvironmentList({
 
   return (
     <div className="environment-list">
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem', marginBottom: '1rem' }}>
-        <h2 style={{ margin: 0 }}>Game Installs</h2>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.8rem', color: 'var(--app-text-color-secondary, #9aa4b2)' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-            <span className="badge badge-orange-red" style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}>Mono</span>
-          </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-            <span className="badge badge-blue" style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem' }}>IL2CPP</span>
-          </span>
+      <div className="environment-list__header">
+        <h2 className="environment-list__title">Game Installs</h2>
+        <div className="environment-list__runtime-strip" aria-label="Supported runtimes">
+          <span className="badge badge-orange-red environment-list__runtime-badge">Mono</span>
+          <span className="badge badge-blue environment-list__runtime-badge">IL2CPP</span>
         </div>
       </div>
 
@@ -1692,58 +1726,42 @@ export function EnvironmentList({
         message={confirmOverlay.message}
       />
 
-      {/* Delete Confirmation Modal */}
-      {deleteConfirm.isOpen && deleteConfirm.env && (
-        <div className="modal-overlay" onClick={() => setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false })}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '450px' }}>
-            <div className="modal-header">
-              <h2>Delete Environment</h2>
-              <button className="modal-close" onClick={() => setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false })}>×</button>
-            </div>
-            <div style={{ padding: '1.5rem' }}>
-              <p style={{ marginBottom: '1rem', color: '#cccccc' }}>
-                {deleteConfirm.env.environmentType === 'steam'
-                  ? <>Clear tracked mod records for <strong>"{deleteConfirm.env.name}"</strong>?</>
-                  : <>Are you sure you want to remove <strong>"{deleteConfirm.env.name}"</strong> from the manager?</>}
-              </p>
-
-              {(deleteConfirm.env.environmentType === 'depotDownloader' || deleteConfirm.env.environmentType === 'local') && (
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={deleteConfirm.deleteFiles}
-                    onChange={(e) => setDeleteConfirm(prev => ({ ...prev, deleteFiles: e.target.checked }))}
-                    style={{ width: '18px', height: '18px' }}
-                  />
-                  <span style={{ color: '#ff6b6b' }}>Also delete game files from disk</span>
-                </label>
-              )}
-
-              {deleteConfirm.env.environmentType === 'steam' && (
-                <p style={{ fontSize: '0.85rem', color: '#888', marginBottom: '1rem' }}>
-                  <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
-                  Steam manages this installation. This action clears mod/plugin tracking only.
-                </p>
-              )}
-
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
-                <button className="btn btn-secondary" onClick={() => setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false })}>
-                  Cancel
-                </button>
-                <button
-                  className="btn"
-                  style={{ backgroundColor: deleteConfirm.deleteFiles ? '#dc3545' : 'var(--primary-btn-color, #646cff)' }}
-                  onClick={handleConfirmDelete}
-                >
-                  {deleteConfirm.env.environmentType === 'steam'
-                    ? 'Clear Mod Records'
-                    : (deleteConfirm.deleteFiles ? 'Delete Environment & Files' : 'Remove from Manager')}
-                </button>
-              </div>
-            </div>
+      <ConfirmOverlay
+        isOpen={deleteConfirm.isOpen && !!deleteConfirm.env}
+        onClose={resetDeleteConfirm}
+        onConfirm={handleConfirmDelete}
+        title={deleteConfirm.env?.environmentType === 'steam' ? 'Clear Environment Records' : 'Remove Environment'}
+        message={
+          deleteConfirm.env?.environmentType === 'steam'
+            ? `Clear tracked mod, plugin, and UserLib records for "${deleteConfirm.env.name}"?`
+            : `Remove "${deleteConfirm.env?.name}" from SIMM?`
+        }
+        confirmText={
+          deleteConfirm.env?.environmentType === 'steam'
+            ? 'Clear Records'
+            : deleteConfirm.deleteFiles
+              ? 'Delete Files and Remove'
+              : 'Remove from App'
+        }
+        tone="danger"
+        bodyContent={deleteConfirm.env?.environmentType === 'steam' ? (
+          <div className="app-dialog__option-copy">
+            <span>Steam manages the installation itself. This only clears SIMM tracking for mods, plugins, and runtime files.</span>
           </div>
-        </div>
-      )}
+        ) : (
+          <label className="app-dialog__option">
+            <input
+              type="checkbox"
+              checked={deleteConfirm.deleteFiles}
+              onChange={(event) => setDeleteConfirm((previous) => ({ ...previous, deleteFiles: event.target.checked }))}
+            />
+            <span className="app-dialog__option-copy">
+              <strong>Also delete game files from disk</strong>
+              <span>Leave this off to remove the environment from SIMM while keeping the files in place.</span>
+            </span>
+          </label>
+        )}
+      />
 
       <MessageOverlay
         isOpen={messageOverlay.isOpen}
@@ -1757,126 +1775,99 @@ export function EnvironmentList({
       {showMelonLoaderVersionSelector && (
         <div className="modal-overlay" onClick={(e) => {
           if (e.target === e.currentTarget) {
-            setShowMelonLoaderVersionSelector(null);
-            setSelectedMelonLoaderVersion(prev => {
-              const next = new Map(prev);
-              next.delete(showMelonLoaderVersionSelector);
-              return next;
-            });
+            closeMelonLoaderVersionSelector();
           }
         }}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+          <div className="modal-content melonloader-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>Select MelonLoader Version</h2>
-              <button className="modal-close" onClick={() => {
-                setShowMelonLoaderVersionSelector(null);
-                setSelectedMelonLoaderVersion(prev => {
-                  const next = new Map(prev);
-                  next.delete(showMelonLoaderVersionSelector!);
-                  return next;
-                });
-              }}>×</button>
+              <button className="modal-close" onClick={closeMelonLoaderVersionSelector}>×</button>
             </div>
 
-            <div style={{ padding: '1.25rem' }}>
+            <div className="melonloader-dialog__body">
+                <div className="melonloader-dialog__overview">
+                  <div className="melonloader-dialog__copy">
+                    <span className="workspace-section-eyebrow">MelonLoader</span>
+                    <h3>{melonLoaderSelectorEnvironment?.name || 'Environment version selection'}</h3>
+                    <p>
+                      Choose the MelonLoader release to install or switch to for this environment. Stable is based on the latest
+                      stable GitHub release tag.
+                    </p>
+                  </div>
+                  <div className="melonloader-dialog__stats">
+                    <div className="melonloader-dialog__stat-card">
+                      <span className="melonloader-dialog__stat-label">Installed</span>
+                      <strong className="melonloader-dialog__stat-value">{currentMelonLoaderVersion}</strong>
+                    </div>
+                    <div className="melonloader-dialog__stat-card">
+                      <span className="melonloader-dialog__stat-label">Selected</span>
+                      <strong className="melonloader-dialog__stat-value">{selectedMelonLoaderTag || 'Choose a release'}</strong>
+                    </div>
+                    <div className="melonloader-dialog__stat-card">
+                      <span className="melonloader-dialog__stat-label">Source</span>
+                      <strong className="melonloader-dialog__stat-value">GitHub</strong>
+                    </div>
+                  </div>
+                </div>
+
               {loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector) ? (
-                <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                  <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+                <div className="melonloader-dialog__empty">
+                  <i className="fas fa-spinner fa-spin melonloader-dialog__empty-icon"></i>
                   <p>Loading releases...</p>
                 </div>
-              ) : (melonLoaderReleases.get(showMelonLoaderVersionSelector)?.length ?? 0) === 0 ? (
-                <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
+              ) : melonLoaderSelectorReleases.length === 0 ? (
+                <div className="melonloader-dialog__empty">
                   <p>No releases found</p>
                 </div>
               ) : (
                 <>
-                  <div style={{ marginBottom: '1rem', maxHeight: '400px', overflowY: 'auto' }}>
-                    <div style={{ display: 'grid', gap: '0.5rem' }}>
-                      {melonLoaderReleases.get(showMelonLoaderVersionSelector)?.map((release) => (
+                  <div className="melonloader-dialog__list">
+                    <div className="melonloader-dialog__release-grid">
+                      {melonLoaderSelectorReleases.map((release) => (
                         <label
                           key={release.tag_name}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            padding: '0.75rem',
-                            backgroundColor: selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) === release.tag_name ? '#3a3a3a' : '#2a2a2a',
-                            border: '1px solid',
-                            borderColor: selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) === release.tag_name ? '#4a90e2' : '#3a3a3a',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s'
-                          }}
-                          onMouseEnter={(e) => {
-                            if (selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) !== release.tag_name) {
-                              e.currentTarget.style.backgroundColor = '#333';
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            if (selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) !== release.tag_name) {
-                              e.currentTarget.style.backgroundColor = '#2a2a2a';
-                            }
-                          }}
+                          className={`melonloader-dialog__release-row ${
+                            selectedMelonLoaderTag === release.tag_name ? 'melonloader-dialog__release-row--selected' : ''
+                          }`}
                         >
                           <input
                             type="radio"
                             name="melonLoaderVersion"
                             value={release.tag_name}
-                            checked={selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) === release.tag_name}
+                            checked={selectedMelonLoaderTag === release.tag_name}
                             onChange={(e) => setSelectedMelonLoaderVersion(prev => {
                               const next = new Map(prev);
                               next.set(showMelonLoaderVersionSelector, e.target.value);
                               return next;
                             })}
-                            style={{ marginRight: '0.75rem', cursor: 'pointer' }}
+                            className="melonloader-dialog__radio"
                           />
-                          <div style={{ flex: 1 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                              <strong style={{ color: '#fff' }}>{release.tag_name}</strong>
-                              {/* Show "Stable" tag for v0.7.0 in green */}
-                              {(release.tag_name === 'v0.7.0' || release.tag_name === '0.7.0') && (
-                                <span style={{
-                                  fontSize: '0.7rem',
-                                  padding: '0.15rem 0.4rem',
-                                  backgroundColor: '#28a74520',
-                                  color: '#28a745',
-                                  borderRadius: '4px',
-                                  border: '1px solid #28a74540',
-                                  fontWeight: '600'
-                                }}>
+                          <div className="melonloader-dialog__release-content">
+                            <div className="melonloader-dialog__release-header">
+                              <strong>{release.tag_name}</strong>
+                              {/* Show "Stable" tag for the latest stable tag returned by the Lockwire API. */}
+                              {release.tag_name === latestStableMelonLoaderTag && (
+                                <span className="melonloader-dialog__tag melonloader-dialog__tag--stable">
                                   Stable
                                 </span>
                               )}
                               {release.isNightly ? (
-                                <span style={{
-                                  fontSize: '0.7rem',
-                                  padding: '0.15rem 0.4rem',
-                                  backgroundColor: '#ff6b6b20',
-                                  color: '#ff6b6b',
-                                  borderRadius: '4px',
-                                  border: '1px solid #ff6b6b40'
-                                }}>
+                                <span className="melonloader-dialog__tag melonloader-dialog__tag--nightly">
                                   Alpha-Nightly
                                 </span>
-                              ) : release.prerelease && (release.tag_name !== 'v0.7.0' && release.tag_name !== '0.7.0') && (
-                                <span style={{
-                                  fontSize: '0.7rem',
-                                  padding: '0.15rem 0.4rem',
-                                  backgroundColor: '#ffd70020',
-                                  color: '#ffd700',
-                                  borderRadius: '4px',
-                                  border: '1px solid #ffd70040'
-                                }}>
+                              ) : release.prerelease && release.tag_name !== latestStableMelonLoaderTag && (
+                                <span className="melonloader-dialog__tag melonloader-dialog__tag--beta">
                                   Beta
                                 </span>
                               )}
                             </div>
                             {release.name && (
-                              <div style={{ fontSize: '0.85rem', color: '#aaa', marginBottom: '0.25rem' }}>
+                              <div className="melonloader-dialog__release-name">
                                 {release.name}
                               </div>
                             )}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-                              <div style={{ fontSize: '0.75rem', color: '#888' }}>
+                            <div className="melonloader-dialog__release-meta">
+                              <div>
                                 Published: {new Date(release.published_at).toLocaleDateString()}
                               </div>
                               <a
@@ -1888,26 +1879,10 @@ export function EnvironmentList({
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={(e) => e.stopPropagation()}
-                                style={{
-                                  fontSize: '0.75rem',
-                                  color: '#4a90e2',
-                                  textDecoration: 'none',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '0.25rem',
-                                  transition: 'color 0.2s'
-                                }}
-                                onMouseEnter={(e) => {
-                                  e.currentTarget.style.color = '#6ba3f5';
-                                  e.currentTarget.style.textDecoration = 'underline';
-                                }}
-                                onMouseLeave={(e) => {
-                                  e.currentTarget.style.color = '#4a90e2';
-                                  e.currentTarget.style.textDecoration = 'none';
-                                }}
+                                className="melonloader-dialog__release-link"
                                 title={release.isNightly ? "View GitHub Actions" : "View release page and changelog"}
                               >
-                                <i className="fas fa-external-link-alt" style={{ fontSize: '0.7rem' }}></i>
+                                <i className="fas fa-external-link-alt"></i>
                                 {release.isNightly ? 'View Actions' : 'View Release & Changelog'}
                               </a>
                             </div>
@@ -1917,17 +1892,10 @@ export function EnvironmentList({
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
+                  <div className="melonloader-dialog__footer">
                     <button
                       className="btn btn-secondary"
-                      onClick={() => {
-                        setShowMelonLoaderVersionSelector(null);
-                        setSelectedMelonLoaderVersion(prev => {
-                          const next = new Map(prev);
-                          next.delete(showMelonLoaderVersionSelector);
-                          return next;
-                        });
-                      }}
+                      onClick={closeMelonLoaderVersionSelector}
                     >
                       Cancel
                     </button>
@@ -1938,13 +1906,13 @@ export function EnvironmentList({
                     >
                       {installingMelonLoader.has(showMelonLoaderVersionSelector) ? (
                         <>
-                          <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                          <i className="fas fa-spinner fa-spin"></i>
                           Installing...
                         </>
                       ) : (
                         <>
-                          <i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>
-                          Install
+                          <i className="fas fa-download"></i>
+                          {currentMelonLoaderVersion === 'Not installed' ? 'Install' : 'Change Version'}
                         </>
                       )}
                     </button>

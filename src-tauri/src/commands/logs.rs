@@ -10,6 +10,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 static LOGS_SERVICE: Lazy<AsyncMutex<Option<Arc<LogsService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+static APP_LOGGER_SERVICE: Lazy<AsyncMutex<Option<Arc<LoggerService>>>> =
+    Lazy::new(|| AsyncMutex::new(None));
 
 async fn get_logs_service() -> std::result::Result<Arc<LogsService>, String> {
     let mut service = LOGS_SERVICE.lock().await;
@@ -20,12 +22,11 @@ async fn get_logs_service() -> std::result::Result<Arc<LogsService>, String> {
 }
 
 async fn get_logger_service() -> Result<Arc<LoggerService>, String> {
-    // Create a new logger instance
-    // Note: Multiple instances are safe because they all write to the same
-    // log files in ~/SIMM/logs/ and file operations are atomic
-    LoggerService::new()
-        .map(|logger| Arc::new(logger))
-        .map_err(|e| e.to_string())
+    let mut service = APP_LOGGER_SERVICE.lock().await;
+    if service.is_none() {
+        *service = Some(Arc::new(LoggerService::new().map_err(|e| e.to_string())?));
+    }
+    Ok(service.as_ref().unwrap().clone())
 }
 
 #[tauri::command]
@@ -93,7 +94,7 @@ pub async fn watch_log_file(app_handle: AppHandle, log_path: String) -> Result<(
     // Spawn a task to watch the file
     tokio::spawn(async move {
         if let Err(e) = logs_service.watch_log_file(&log_path, app_handle).await {
-            eprintln!("Error watching log file: {}", e);
+            log::error!("Error watching log file: {}", e);
         }
     });
 

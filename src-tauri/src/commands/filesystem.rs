@@ -8,6 +8,12 @@ use tauri::State;
 use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 
@@ -38,6 +44,21 @@ pub async fn open_folder(
     let fs_service = get_fs_service().await?;
     fs_service
         .open_folder(&env.output_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_path(path: String) -> Result<(), String> {
+    let fs_service = get_fs_service().await?;
+    fs_service.open_path(&path).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    let fs_service = get_fs_service().await?;
+    fs_service
+        .reveal_path(&path)
         .await
         .map_err(|e| e.to_string())
 }

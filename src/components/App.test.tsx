@@ -95,21 +95,48 @@ vi.mock('./SteamAccountOverlay', () => ({
 }));
 
 vi.mock('./HelpOverlay', () => ({
-  HelpOverlay: ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) =>
+  HelpOverlay: ({
+    isOpen,
+    onClose,
+    onOpenWizard,
+    onOpenSettings,
+    onOpenAccounts,
+  }: {
+    isOpen: boolean;
+    onClose: () => void;
+    onOpenWizard: () => void;
+    onOpenSettings: () => void;
+    onOpenAccounts: () => void;
+  }) =>
     isOpen ? (
       <div>
         <span>Help Overlay</span>
         <button onClick={onClose}>Close Help</button>
+        <button onClick={onOpenWizard}>Open Wizard From Help</button>
+        <button onClick={onOpenSettings}>Open Settings From Help</button>
+        <button onClick={onOpenAccounts}>Open Accounts From Help</button>
       </div>
     ) : null,
 }));
 
 vi.mock('./WelcomeOverlay', () => ({
-  WelcomeOverlay: ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) =>
+  WelcomeOverlay: ({
+    isOpen,
+    onClose,
+    onOpenWizard,
+    onOpenSettings,
+  }: {
+    isOpen: boolean;
+    onClose: () => void;
+    onOpenWizard: () => void;
+    onOpenSettings: () => void;
+  }) =>
     isOpen ? (
       <div>
         <span>Welcome Overlay</span>
         <button onClick={onClose}>Close Welcome</button>
+        <button onClick={onOpenWizard}>Open Wizard From Welcome</button>
+        <button onClick={onOpenSettings}>Open Settings From Welcome</button>
       </div>
     ) : null,
 }));
@@ -190,5 +217,15 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('uses window close for the custom close button', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    await waitFor(() => {
+      expect(windowMocks.close).toHaveBeenCalled();
+    });
   });
 });

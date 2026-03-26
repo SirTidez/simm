@@ -23,6 +23,17 @@ describe('ApiService', () => {
     expect(result).toEqual({ success: true });
   });
 
+  it('backupDatabase returns created backup path', async () => {
+    invokeMock.mockResolvedValueOnce('C:/Users/Test/SIMM/backups/SIMM-db-backup-manual-20260326-034426.db');
+    const result = await ApiService.backupDatabase();
+
+    expect(invokeMock).toHaveBeenCalledWith('backup_database');
+    expect(result).toEqual({
+      success: true,
+      path: 'C:/Users/Test/SIMM/backups/SIMM-db-backup-manual-20260326-034426.db',
+    });
+  });
+
   it('deleteEnvironment wraps boolean response', async () => {
     invokeMock.mockResolvedValueOnce(true);
     const result = await ApiService.deleteEnvironment('env-1');
@@ -155,11 +166,73 @@ describe('ApiService', () => {
     ]);
   });
 
+  it('config editor commands use the new document-oriented API', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        name: 'Loader.cfg',
+        path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
+        fileType: 'LoaderConfig',
+        format: 'ini',
+        relativePath: 'MelonLoader/Loader.cfg',
+        groupName: 'Loader',
+        sectionCount: 2,
+        entryCount: 8,
+        supportsStructuredEdit: true,
+        supportsRawEdit: true,
+      },
+    ]);
+    invokeMock.mockResolvedValueOnce({
+      summary: {
+        name: 'Loader.cfg',
+        path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
+        fileType: 'LoaderConfig',
+        format: 'ini',
+        relativePath: 'MelonLoader/Loader.cfg',
+        groupName: 'Loader',
+        sectionCount: 2,
+        entryCount: 8,
+        supportsStructuredEdit: true,
+        supportsRawEdit: true,
+      },
+      rawContent: '[General]\nfoo = bar',
+      sections: [],
+      parseWarnings: [],
+      groups: [],
+    });
+    invokeMock.mockResolvedValueOnce(undefined);
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    const catalog = await ApiService.getConfigCatalog('env-1');
+    const document = await ApiService.getConfigDocument('env-1', 'C:/Games/Schedule I/MelonLoader/Loader.cfg');
+    await ApiService.applyConfigEdits('C:/Games/Schedule I/MelonLoader/Loader.cfg', [
+      { kind: 'setValue', section: 'General', key: 'foo', value: 'baz' },
+    ]);
+    await ApiService.saveRawConfig('C:/Games/Schedule I/MelonLoader/Loader.cfg', '[General]\nfoo = qux');
+
+    expect(catalog).toHaveLength(1);
+    expect(document.summary.name).toBe('Loader.cfg');
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'get_config_catalog', { environmentId: 'env-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'get_config_document', {
+      environmentId: 'env-1',
+      filePath: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'apply_config_edits', {
+      filePath: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
+      operations: [{ kind: 'setValue', section: 'General', key: 'foo', value: 'baz' }],
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'save_raw_config', {
+      filePath: 'C:/Games/Schedule I/MelonLoader/Loader.cfg',
+      content: '[General]\nfoo = qux',
+    });
+  });
+
   it.each([
     ['getReleaseApiHealth', () => ApiService.getReleaseApiHealth(), 'get_release_api_health', undefined],
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
+    ['openPath', () => ApiService.openPath('C:/test/file.cfg'), 'open_path', { path: 'C:/test/file.cfg' }],
+    ['revealPath', () => ApiService.revealPath('C:/test/file.cfg'), 'reveal_path', { path: 'C:/test/file.cfg' }],
   ])('%s invokes correct command contract', async (_label, call, command, payload) => {
     invokeMock.mockResolvedValueOnce({ success: true });
 

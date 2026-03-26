@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { ApiService } from '../services/api';
@@ -8,10 +8,34 @@ interface Props {
   onClose: () => void;
 }
 
+type WizardMode = 'landing' | 'download-select' | 'download-configure' | 'import-configure';
+type DirectoryPurpose = 'download' | 'import';
+type SteamInstallation = { path: string; executablePath: string; appId: string };
+
+function getParentPath(currentPath: string): string | null {
+  if (!currentPath) return null;
+  if (/^[A-Z]:\\?$/i.test(currentPath)) return null;
+  if (currentPath === '/' || currentPath === '\\') return null;
+
+  const separator = currentPath.includes('/') ? '/' : '\\';
+  const parts = currentPath.split(separator).filter(Boolean);
+
+  if (parts.length <= 1 && currentPath.includes(':')) return null;
+
+  parts.pop();
+
+  if (parts.length === 0) {
+    return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
+  }
+
+  return parts.join(separator) + (separator === '/' ? '/' : '');
+}
+
 export function EnvironmentCreationWizard({ onClose }: Props) {
   const { createEnvironment, refreshEnvironments, environments } = useEnvironmentStore();
   const { settings, refreshDepotDownloader } = useSettingsStore();
-  const [step, setStep] = useState(1);
+
+  const [wizardMode, setWizardMode] = useState<WizardMode>('landing');
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<BranchConfig | null>(null);
   const [outputDir, setOutputDir] = useState('');
@@ -19,22 +43,31 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
+  const [directoryPurpose, setDirectoryPurpose] = useState<DirectoryPurpose>('download');
   const [directoryPath, setDirectoryPath] = useState('');
   const [directoryList, setDirectoryList] = useState<Array<{ name: string; path: string }>>([]);
   const [browsing, setBrowsing] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creatingFolder, setCreatingFolder] = useState(false);
-  const [steamInstallations, setSteamInstallations] = useState<Array<{ path: string; executablePath: string; appId: string }>>([]);
+
+  const [steamInstallations, setSteamInstallations] = useState<SteamInstallation[]>([]);
   const [detectingSteam, setDetectingSteam] = useState(false);
-  const [showSteamDetection, setShowSteamDetection] = useState(false);
-  const [showImportLocal, setShowImportLocal] = useState(false);
+  const [showSteamInstallations, setShowSteamInstallations] = useState(false);
+
   const [importPath, setImportPath] = useState('');
   const [importingLocal, setImportingLocal] = useState(false);
+
   const [depotDownloaderInstalled, setDepotDownloaderInstalled] = useState<boolean | null>(null);
-  const [showDepotDownloaderPrompt, setShowDepotDownloaderPrompt] = useState(false);
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
+
+  const hasSteamEnvironment = environments.some(
+    env => env.environmentType === 'steam' || env.id.startsWith('steam-')
+  );
+  const isSteamAuthenticated = Boolean(settings?.steamUsername);
+  const steamDetected = steamInstallations.length > 0;
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -53,75 +86,40 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   }, [onClose, showDirectoryPicker]);
 
   useEffect(() => {
-    loadSchedule1Config();
-    // Don't auto-set outputDir here - wait for branch selection
-  }, [settings]);
-
-  useEffect(() => {
-    const checkDepotDownloader = async () => {
+    const loadInitialState = async () => {
       try {
-        const info = await ApiService.detectDepotDownloader();
-        setDepotDownloaderInstalled(!!info.installed);
-        if (!info.installed) {
-          setShowDepotDownloaderPrompt(true);
-        }
-      } catch {
-        setDepotDownloaderInstalled(false);
-        setShowDepotDownloaderPrompt(true);
+        const [config, depotInfo] = await Promise.all([
+          ApiService.getSchedule1Config(),
+          ApiService.detectDepotDownloader().catch(() => ({ installed: false })),
+        ]);
+        setAppConfig(config);
+        setDepotDownloaderInstalled(!!depotInfo.installed);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load environment creation data');
       }
     };
 
-    void checkDepotDownloader();
+    void loadInitialState();
   }, []);
 
-  const loadSchedule1Config = async () => {
-    try {
-      const config = await ApiService.getSchedule1Config();
-      setAppConfig(config);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load game configuration');
-    }
-  };
+  useEffect(() => {
+    const detectSteamOnOpen = async () => {
+      try {
+        const installations = await ApiService.detectSteamInstallations();
+        setSteamInstallations(installations);
+      } catch {
+        setSteamInstallations([]);
+      }
+    };
 
-  const handleBranchSelect = (branch: BranchConfig) => {
-    if (depotDownloaderInstalled === false) {
-      setShowDepotDownloaderPrompt(true);
-      return;
-    }
-
-    setSelectedBranch(branch);
-    if (!name) {
-      // Use just the branch name, removing runtime info
-      const branchName = branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
-      setName(branchName);
-    }
-    // Auto-generate output directory: baseDir/branchName
-    const baseDir = outputDir || settings?.defaultDownloadDir || '';
-    if (baseDir) {
-      // Use path separator appropriate for the OS
-      const separator = baseDir.includes('/') ? '/' : '\\';
-      // Remove trailing separator if present
-      let cleanBase = baseDir.replace(/[/\\]+$/, '');
-      // Remove branch name if it's already at the end
-      const branchNameRegex = new RegExp(`[/\\\\]${branch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-      cleanBase = cleanBase.replace(branchNameRegex, '');
-      setOutputDir(`${cleanBase}${separator}${branch.name}`);
-    } else if (settings?.defaultDownloadDir) {
-      const separator = settings.defaultDownloadDir.includes('/') ? '/' : '\\';
-      let cleanBase = settings.defaultDownloadDir.replace(/[/\\]+$/, '');
-      // Remove branch name if it's already at the end
-      const branchNameRegex = new RegExp(`[/\\\\]${branch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-      cleanBase = cleanBase.replace(branchNameRegex, '');
-      setOutputDir(`${cleanBase}${separator}${branch.name}`);
-    }
-    setStep(2);
-  };
+    void detectSteamOnOpen();
+  }, []);
 
   const loadDirectory = async (path: string) => {
-    if (!path) return;
     setBrowsing(true);
     try {
-      const result = await ApiService.browseDirectory(path);
+      const resolvedPath = path || await ApiService.getHomeDirectory();
+      const result = await ApiService.browseDirectory(resolvedPath);
       setDirectoryPath(result.currentPath);
       setDirectoryList(result.directories);
     } catch (err) {
@@ -132,14 +130,21 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     }
   };
 
-  const handleDirectorySelect = (selectedPath: string) => {
-    if (selectedBranch) {
-      const separator = selectedPath.includes('/') ? '/' : '\\';
-      let cleanPath = selectedPath.replace(/[/\\]+$/, '');
-      // Remove branch name if it's already at the end
-      const branchNameRegex = new RegExp(`[/\\\\]${selectedBranch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-      cleanPath = cleanPath.replace(branchNameRegex, '');
-      setOutputDir(`${cleanPath}${separator}${selectedBranch.name}`);
+  const openDirectoryPicker = async (purpose: DirectoryPurpose) => {
+    setDirectoryPurpose(purpose);
+    setShowDirectoryPicker(true);
+
+    if (purpose === 'import') {
+      await loadDirectory(importPath);
+      return;
+    }
+
+    await loadDirectory(outputDir || settings?.defaultDownloadDir || '');
+  };
+
+  const handleDirectorySelection = (selectedPath: string) => {
+    if (directoryPurpose === 'import') {
+      setImportPath(selectedPath);
     } else {
       setOutputDir(selectedPath);
     }
@@ -154,10 +159,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       const separator = directoryPath.includes('/') ? '/' : '\\';
       const cleanPath = directoryPath.replace(/[/\\]+$/, '');
       const newFolderPath = `${cleanPath}${separator}${newFolderName.trim()}`;
-
       await ApiService.createDirectory(newFolderPath);
       setNewFolderName('');
-      // Reload directory to show the new folder
       await loadDirectory(directoryPath);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create folder');
@@ -172,9 +175,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     try {
       const installations = await ApiService.detectSteamInstallations();
       setSteamInstallations(installations);
-      setShowSteamDetection(true);
+      setShowSteamInstallations(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to detect Steam installations');
+      setSteamInstallations([]);
+      setShowSteamInstallations(true);
     } finally {
       setDetectingSteam(false);
     }
@@ -183,7 +188,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const handleCreateSteamEnvironment = async (steamPath: string) => {
     setLoading(true);
     setError(null);
-
     try {
       await ApiService.createSteamEnvironment(steamPath, name || undefined, description.trim() || undefined);
       await refreshEnvironments();
@@ -195,42 +199,34 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     }
   };
 
-  const handleBrowseForImport = async () => {
+  const handleAutoInstallDepotDownloader = async () => {
+    setInstallingDepotDownloader(true);
+    setDepotDownloaderPromptError(null);
     try {
-      const homeDir = await ApiService.getHomeDirectory();
-      setDirectoryPath(importPath || homeDir);
-      setShowDirectoryPicker(true);
-      if (importPath || homeDir) {
-        await loadDirectory(importPath || homeDir);
-      }
+      await ApiService.installDepotDownloader();
+      await refreshDepotDownloader();
+      setDepotDownloaderInstalled(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to open directory picker');
-    }
-  };
-
-  const handleImportDirectorySelect = (selectedPath: string) => {
-    setImportPath(selectedPath);
-    setShowDirectoryPicker(false);
-  };
-
-  const handleImportLocalEnvironment = async () => {
-    if (!importPath) {
-      setError('Please select a game folder');
-      return;
-    }
-
-    setImportingLocal(true);
-    setError(null);
-
-    try {
-      await ApiService.importLocalEnvironment(importPath, name || undefined, description.trim() || undefined);
-      await refreshEnvironments();
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to import local environment');
+      setDepotDownloaderPromptError(err instanceof Error ? err.message : 'Failed to install DepotDownloader automatically.');
     } finally {
-      setImportingLocal(false);
+      setInstallingDepotDownloader(false);
     }
+  };
+
+  const handleOpenDepotDownloaderInstructions = () => {
+    window.open('https://github.com/SteamRE/DepotDownloader#installation', '_blank', 'noopener,noreferrer');
+  };
+
+  const handleBranchSelect = (branch: BranchConfig) => {
+    if (depotDownloaderInstalled !== true) return;
+
+    setSelectedBranch(branch);
+    setName((currentName) => {
+      if (currentName) return currentName;
+      return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
+    });
+    setOutputDir((currentOutput) => currentOutput || settings?.defaultDownloadDir || '');
+    setWizardMode('download-configure');
   };
 
   const handleCreate = async () => {
@@ -258,33 +254,34 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     }
   };
 
-  const hasSteamEnvironment = environments.some(
-    env => env.environmentType === 'steam' || env.id.startsWith('steam-')
-  );
-  const isSteamAuthenticated = Boolean(settings?.steamUsername);
+  const handleImportLocalEnvironment = async () => {
+    if (!importPath) {
+      setError('Please select a game folder');
+      return;
+    }
 
-  const handleAutoInstallDepotDownloader = async () => {
-    setInstallingDepotDownloader(true);
-    setDepotDownloaderPromptError(null);
+    setImportingLocal(true);
+    setError(null);
     try {
-      await ApiService.installDepotDownloader();
-      await refreshDepotDownloader();
-      setDepotDownloaderInstalled(true);
-      setShowDepotDownloaderPrompt(false);
+      await ApiService.importLocalEnvironment(importPath, name || undefined, description.trim() || undefined);
+      await refreshEnvironments();
+      onClose();
     } catch (err) {
-      setDepotDownloaderPromptError(err instanceof Error ? err.message : 'Failed to install DepotDownloader automatically.');
+      setError(err instanceof Error ? err.message : 'Failed to import local environment');
     } finally {
-      setInstallingDepotDownloader(false);
+      setImportingLocal(false);
     }
   };
 
-  const handleOpenDepotDownloaderInstructions = () => {
-    window.open('https://github.com/SteamRE/DepotDownloader#installation', '_blank', 'noopener,noreferrer');
-  };
+  const wizardStats = [
+    { label: 'Steam', value: hasSteamEnvironment ? 'Managed' : steamDetected ? 'Detected' : 'Not linked' },
+    { label: 'DepotDownloader', value: depotDownloaderInstalled === null ? 'Checking' : depotDownloaderInstalled ? 'Ready' : 'Missing' },
+    { label: 'Default path', value: settings?.defaultDownloadDir ? 'Configured' : 'Unset' },
+  ];
 
   return (
     <section
-      className="modal-content"
+      className="modal-content workspace-panel wizard-panel"
       style={{
         width: '100%',
         height: '100%',
@@ -296,650 +293,606 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       }}
       aria-label="Create environment panel"
     >
-        <div className="modal-header">
-          <h2>Create Environment</h2>
-          <button className="modal-close" onClick={onClose} aria-label="Close create environment panel">×</button>
+      <div className="modal-header">
+        <h2>Create Environment</h2>
+        <button className="modal-close" onClick={onClose} aria-label="Close create environment panel">×</button>
+      </div>
+
+      {error && <div className="settings-error-banner">{error}</div>}
+
+      <div className="wizard-panel__body">
+        <div className="wizard-overview">
+          <div className="wizard-overview__copy">
+            <span className="settings-eyebrow">Environment Setup</span>
+            <h3>Create a new managed branch download or import an existing install.</h3>
+            <p>Use SIMM to manage download targets, detect local installs, and keep your environment aligned with branch runtime requirements.</p>
+          </div>
+          <div className="wizard-overview__stats">
+            {wizardStats.map((stat) => (
+              <div key={stat.label} className="settings-stat-card">
+                <span>{stat.label}</span>
+                <strong>{stat.value}</strong>
+              </div>
+            ))}
+          </div>
         </div>
 
-        {error && <div className="error-message">{error}</div>}
+        <section className="wizard-steam-card">
+          <div className="wizard-steam-card__header">
+            <div className="wizard-steam-card__identity">
+              <div className="wizard-steam-card__icon">
+                <i className="fab fa-steam-symbol"></i>
+              </div>
+              <div>
+                <span className="settings-eyebrow">Steam Detection</span>
+                <h3>{hasSteamEnvironment ? 'Steam install already managed' : steamDetected ? 'Steam install detected' : 'No Steam install detected yet'}</h3>
+                <p>
+                  {hasSteamEnvironment
+                    ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates while SIMM handles mods, plugins, and support tools.'
+                    : steamDetected
+                      ? 'A Steam installation for Schedule I was found on this machine. You can add it to SIMM without making Steam a primary entry card in this flow.'
+                      : 'Detect an existing Steam installation if you want to manage your current install inside SIMM without downloading a separate branch copy.'}
+                </p>
+              </div>
+            </div>
+          <div className="wizard-steam-card__actions">
+              <button type="button" className="btn btn-secondary" onClick={() => void handleDetectSteam()} disabled={detectingSteam}>
+                <i className={detectingSteam ? 'fas fa-spinner fa-spin' : 'fab fa-steam'}></i>
+                {detectingSteam ? 'Detecting…' : steamDetected ? 'Refresh Detection' : 'Detect Steam Install'}
+              </button>
+              {!hasSteamEnvironment && steamDetected && (
+                <button type="button" className="btn btn-secondary" onClick={() => setShowSteamInstallations((value) => !value)}>
+                  <i className="fas fa-list"></i>
+                  {showSteamInstallations ? 'Hide Detected Installs' : 'Review Detected Installs'}
+                </button>
+              )}
+            </div>
+          </div>
 
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-        {!showSteamDetection && !showImportLocal && step === 1 && (
-          <div className="wizard-step">
-            {!hasSteamEnvironment && (
-              <>
-                <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-                  <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <i className="fab fa-steam" style={{ color: '#00bcd4' }}></i>
-                    Link Existing Steam Install
-                  </h4>
-                  <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
-                    Add your current Steam install to manage mods, plugins, and logs. Steam continues to handle updates.
-                  </p>
-                  <button
-                    onClick={handleDetectSteam}
-                    className="btn btn-secondary"
-                    disabled={detectingSteam}
-                    style={{ width: '100%' }}
-                  >
-                    {detectingSteam ? (
-                      <>
-                        <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                        Detecting...
-                      </>
-                    ) : (
-                      <>
-                        <i className="fab fa-steam" style={{ marginRight: '0.5rem' }}></i>
-                        Detect Steam Install
-                      </>
-                    )}
-                  </button>
+          {showSteamInstallations && !hasSteamEnvironment && (
+            <div className="wizard-steam-card__detected">
+              <div className="wizard-step-card__header">
+                <div>
+                  <span className="settings-eyebrow">Detected Installs</span>
+                  <h3>{steamInstallations.length === 0 ? 'No Schedule I Steam install found' : 'Choose a detected Steam install'}</h3>
                 </div>
-                <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
-                  <span>or</span>
+              </div>
+
+              {steamInstallations.length === 0 ? (
+                <div className="wizard-empty-card">
+                  <i className="fab fa-steam"></i>
+                  <strong>No Steam installation found</strong>
+                  <p>Make sure Schedule I is installed through Steam, then refresh detection to try again.</p>
                 </div>
-              </>
-            )}
-            <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-              <h4 style={{ marginTop: 0, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <i className="fas fa-folder-open" style={{ color: '#4caf50' }}></i>
-                Import Existing Folder
-              </h4>
-              <p style={{ margin: '0 0 0.75rem 0', color: '#aaa', fontSize: '0.9rem' }}>
-                Add a game folder that is already downloaded or copied. Runtime, version, and installed mods are detected automatically.
-              </p>
-              <button
-                onClick={() => setShowImportLocal(true)}
-                className="btn btn-secondary"
-                style={{ width: '100%' }}
-              >
-                <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
-                Import Folder
+              ) : (
+                <>
+                  <div className="settings-field-grid">
+                    <div className="settings-field-card">
+                      <label htmlFor="wizard-steam-name">Display name</label>
+                      <input
+                        id="wizard-steam-name"
+                        type="text"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="Steam Installation"
+                      />
+                    </div>
+
+                    <div className="settings-field-card settings-field-card--full">
+                      <label htmlFor="wizard-steam-description">Description</label>
+                      <textarea
+                        id="wizard-steam-description"
+                        className="wizard-textarea"
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                        placeholder="Optional notes for this managed Steam install"
+                        rows={3}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="wizard-steam-card__list" role="list">
+                    {steamInstallations.map((installation) => (
+                      <button
+                        key={installation.path}
+                        type="button"
+                        className="wizard-steam-install-row"
+                        onClick={() => void handleCreateSteamEnvironment(installation.path)}
+                        disabled={loading}
+                      >
+                        <div className="wizard-steam-install-row__icon">
+                          <i className="fab fa-steam-symbol"></i>
+                        </div>
+                        <div className="wizard-steam-install-row__content">
+                          <strong>Schedule I Steam install</strong>
+                          <span>{installation.path}</span>
+                        </div>
+                        <span className="wizard-inline-action">
+                          {loading ? 'Linking…' : 'Add to SIMM'}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </section>
+
+        {wizardMode === 'landing' && (
+          <section className="wizard-entry-grid" aria-label="Environment creation methods">
+            <button
+              type="button"
+              className="wizard-entry-card"
+              onClick={() => {
+                setError(null);
+                setWizardMode('download-select');
+              }}
+            >
+              <div className="wizard-entry-card__icon">
+                <i className="fas fa-download"></i>
+              </div>
+              <div className="wizard-entry-card__content">
+                <span className="settings-eyebrow">Download</span>
+                <h3>Download New Branch</h3>
+                <p>Choose a managed branch, verify runtime/auth requirements, and create a dedicated SIMM environment.</p>
+              </div>
+              <span className="wizard-inline-action">Browse Branches</span>
+            </button>
+
+            <button
+              type="button"
+              className="wizard-entry-card"
+              onClick={() => {
+                setError(null);
+                setWizardMode('import-configure');
+              }}
+            >
+              <div className="wizard-entry-card__icon wizard-entry-card__icon--success">
+                <i className="fas fa-folder-open"></i>
+              </div>
+              <div className="wizard-entry-card__content">
+                <span className="settings-eyebrow">Import</span>
+                <h3>Import Existing Folder</h3>
+                <p>Add a local installation that already exists on disk. SIMM will detect branch, runtime, and version details automatically.</p>
+              </div>
+              <span className="wizard-inline-action">Select Folder</span>
+            </button>
+          </section>
+        )}
+
+        {wizardMode === 'download-select' && (
+          <section className="wizard-step-card">
+            <div className="wizard-step-card__header">
+              <div>
+                <span className="settings-eyebrow">Step 1</span>
+                <h3>Select a branch to download</h3>
+                <p>Choose the branch that matches the runtime and access level you need. SIMM will configure the output folder in the next step.</p>
+              </div>
+              <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('landing')}>
+                <i className="fas fa-arrow-left"></i>
+                Back
               </button>
             </div>
 
-            <div style={{ marginBottom: '1.5rem', textAlign: 'center', color: '#888' }}>
-              <span>or</span>
-            </div>
-            <h3>Download New Branch (DepotDownloader)</h3>
-            {depotDownloaderInstalled === false && (
-              <div style={{
-                marginBottom: '1rem',
-                padding: '0.75rem',
-                borderRadius: '6px',
-                border: '1px solid #6a4a2a',
-                backgroundColor: '#3a2a1a',
-                color: '#ffd7a3',
-                fontSize: '0.85rem'
-              }}>
-                <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
-                DepotDownloader is required to download and update non-Steam game versions.
+            {depotDownloaderInstalled !== true && (
+              <div className="wizard-prerequisite-card">
+                <div className="wizard-prerequisite-card__copy">
+                  <span className="settings-eyebrow">Requirement</span>
+                  <h4>DepotDownloader is required for branch downloads</h4>
+                  <p>
+                    SIMM uses DepotDownloader to install and update non-Steam environments. You can install it automatically or open the
+                    official manual instructions.
+                  </p>
+                  {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
+                </div>
+                <div className="wizard-inline-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => void handleAutoInstallDepotDownloader()}
+                    disabled={installingDepotDownloader || depotDownloaderInstalled === null}
+                  >
+                    <i className={installingDepotDownloader ? 'fas fa-spinner fa-spin' : 'fas fa-download'}></i>
+                    {depotDownloaderInstalled === null
+                      ? 'Checking…'
+                      : installingDepotDownloader
+                        ? 'Installing…'
+                        : 'Install Automatically'}
+                  </button>
+                  <button type="button" className="btn btn-secondary" onClick={handleOpenDepotDownloaderInstructions}>
+                    <i className="fas fa-external-link-alt"></i>
+                    Manual Instructions
+                  </button>
+                </div>
               </div>
             )}
+
             {appConfig ? (
-              <div className="branch-list">
-                {appConfig.branches.map(branch => {
+              <div className="wizard-branch-grid" role="list">
+                {appConfig.branches.map((branch) => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
-                  const depotRequired = depotDownloaderInstalled === false;
+                  const depotRequired = depotDownloaderInstalled !== true;
+                  const disabled = authRequired || depotRequired;
+
                   return (
-                    <div
+                    <button
                       key={branch.name}
-                      className={`branch-card ${authRequired || depotRequired ? 'branch-card--disabled' : ''}`}
+                      type="button"
+                      className={`wizard-branch-card ${disabled ? 'wizard-branch-card--disabled' : ''}`}
                       onClick={() => {
-                        if (authRequired || depotRequired) return;
-                        handleBranchSelect(branch);
+                        if (!disabled) handleBranchSelect(branch);
                       }}
-                      role="button"
-                      tabIndex={authRequired || depotRequired ? -1 : 0}
-                      onKeyDown={(e) => {
-                        if (authRequired || depotRequired) return;
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleBranchSelect(branch);
-                        }
-                      }}
-                      aria-disabled={authRequired || depotRequired}
-                      title={authRequired
-                        ? 'Steam authentication required to select this branch'
-                        : depotRequired
-                          ? 'DepotDownloader is required to download additional game versions'
-                          : undefined}
+                      disabled={disabled}
+                      title={
+                        authRequired
+                          ? 'Steam authentication required to select this branch'
+                          : depotRequired
+                            ? 'DepotDownloader is required to download this branch'
+                            : undefined
+                      }
                     >
-                      <h4>{branch.displayName}</h4>
-                      <p>Runtime: {branch.runtime}</p>
-                      {branch.requiresAuth && (
-                        <span
-                          className={`auth-badge ${isSteamAuthenticated ? 'auth-badge-ready' : 'auth-badge-required'}`}
-                          title={isSteamAuthenticated ? 'Authenticated with Steam' : 'Steam authentication required'}
-                        >
-                          Requires Auth
-                        </span>
-                      )}
-                    </div>
+                      <div className="wizard-branch-card__header">
+                        <div>
+                          <h4>{branch.displayName}</h4>
+                          <p>{branch.name}</p>
+                        </div>
+                        <div className="wizard-branch-card__badges">
+                          <span className="settings-chip">{branch.runtime}</span>
+                          {branch.requiresAuth && (
+                            <span className={`auth-badge ${isSteamAuthenticated ? 'auth-badge-ready' : 'auth-badge-required'}`}>
+                              {isSteamAuthenticated ? 'Auth Ready' : 'Auth Required'}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="wizard-branch-card__footer">
+                        <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? 'Install DepotDownloader to unlock downloads.' : 'Continue to environment configuration.'}</span>
+                      </div>
+                    </button>
                   );
                 })}
               </div>
             ) : (
-              <div className="loading">Loading branches...</div>
+              <div className="wizard-empty-card">
+                <i className="fas fa-spinner fa-spin"></i>
+                <strong>Loading branches</strong>
+                <p>SIMM is fetching the currently supported game branches.</p>
+              </div>
             )}
-          </div>
+          </section>
         )}
 
-        {step === 2 && selectedBranch && (
-          <div className="wizard-step">
-            <h3>Configure Environment</h3>
-            <div className="form-group">
-              <label>Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Environment name"
-              />
-            </div>
-            <div className="form-group">
-              <label>Base Directory *</label>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={(() => {
-                    if (!selectedBranch || !outputDir) return outputDir;
-                    // Remove branch name from the end if present
-                    const branchNameRegex = new RegExp(`[/\\\\]${selectedBranch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-                    return outputDir.replace(branchNameRegex, '').replace(/[/\\]+$/, '');
-                  })()}
-                  onChange={(e) => {
-                    // User enters base directory, we'll append branch name
-                    // Allow all characters including backslashes
-                    const baseDir = e.target.value;
-                    if (selectedBranch && baseDir) {
-                      const separator = baseDir.includes('/') ? '/' : '\\';
-                      let cleanBase = baseDir.replace(/[/\\]+$/, '');
-                      // Remove branch name if it's already at the end
-                      const branchNameRegex = new RegExp(`[/\\\\]${selectedBranch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-                      cleanBase = cleanBase.replace(branchNameRegex, '');
-                      setOutputDir(`${cleanBase}${separator}${selectedBranch.name}`);
-                    } else {
-                      setOutputDir(baseDir);
-                    }
-                  }}
-                  placeholder={selectedBranch ? `C:\\Users\\YourName\\s1devmanager\\backend` : "C:\\DevEnvironments"}
-                  required
-                  style={{ flex: 1 }}
-                />
-                <button
-                  type="button"
-                  onClick={async () => {
-                    let currentBase = outputDir || settings?.defaultDownloadDir || '';
-                    if (selectedBranch && currentBase) {
-                      // Remove branch name from the end if present
-                      const branchNameRegex = new RegExp(`[/\\\\]${selectedBranch.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-                      currentBase = currentBase.replace(branchNameRegex, '').replace(/[/\\]+$/, '');
-                    }
-                    // If no base directory, use the default download directory from settings
-                    if (!currentBase && settings?.defaultDownloadDir) {
-                      currentBase = settings.defaultDownloadDir;
-                    }
-                    setDirectoryPath(currentBase);
-                    setShowDirectoryPicker(true);
-                    if (currentBase) {
-                      await loadDirectory(currentBase);
-                    } else {
-                      // If still no path, loadDirectory will handle the default (home/SIMM) via the API
-                      await loadDirectory('');
-                    }
-                  }}
-                  className="btn btn-secondary"
-                  style={{ whiteSpace: 'nowrap' }}
-                >
-                  Browse...
-                </button>
+        {wizardMode === 'download-configure' && selectedBranch && (
+          <section className="wizard-step-card wizard-configuration-shell">
+            <div className="wizard-step-card__header">
+              <div>
+                <span className="settings-eyebrow">Step 2</span>
+                <h3>Configure Environment</h3>
+                <p>Set the display details and confirm where the selected branch should be downloaded.</p>
               </div>
-              {selectedBranch && outputDir && (
-                <div style={{ marginTop: '0.5rem', padding: '0.5rem', backgroundColor: '#2a2a2a', borderRadius: '4px' }}>
-                  <small style={{ color: '#888', display: 'block' }}>Branch "{selectedBranch.name}" will be downloaded to:</small>
-                  <code style={{ color: '#4caf50', fontSize: '0.9rem', wordBreak: 'break-all' }}>{outputDir}</code>
-                </div>
-              )}
-            </div>
-            <div className="form-group">
-              <label>Description (Optional)</label>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Describe what this version means..."
-                rows={3}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem 0.75rem',
-                  backgroundColor: 'var(--input-bg-color, #1a1a1a)',
-                  border: '1px solid var(--input-border-color, #3a3a3a)',
-                  borderRadius: '6px',
-                  color: 'var(--input-text-color, #ffffff)',
-                  fontSize: '0.85rem',
-                  fontFamily: 'inherit',
-                  resize: 'vertical',
-                  minHeight: '60px'
-                }}
-              />
-              <small style={{ color: '#888', display: 'block', marginTop: '0.25rem' }}>
-                Add a description to help you remember what this version is for
-              </small>
-            </div>
-            <div className="form-actions">
-              <button onClick={() => setStep(1)} className="btn btn-secondary">
-                Back
-              </button>
-              <button
-                onClick={handleCreate}
-                className="btn btn-primary"
-                disabled={loading || !outputDir}
-              >
-                {loading ? 'Creating...' : 'Create Environment'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {showSteamDetection && (
-          <div className="wizard-step">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>Detected Steam Installs</h3>
-              <button
-                onClick={() => {
-                  setShowSteamDetection(false);
-                  setSteamInstallations([]);
-                }}
-                className="btn btn-secondary btn-small"
-              >
-                <i className="fas fa-arrow-left" style={{ marginRight: '0.25rem' }}></i>
+              <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('download-select')}>
+                <i className="fas fa-arrow-left"></i>
                 Back
               </button>
             </div>
-            {steamInstallations.length === 0 ? (
-              <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                <i className="fab fa-steam" style={{ fontSize: '3rem', marginBottom: '1rem', display: 'block', color: '#00bcd4' }}></i>
-                <p>No Steam installation found for Schedule I.</p>
-                <p style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>
-                  Make sure Schedule I is installed through Steam and try again.
-                </p>
-              </div>
-            ) : (
-              <>
-                <div className="form-group">
-                  <label>Select Steam Installation</label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    {steamInstallations.map((installation, index) => (
-                      <div
-                        key={index}
-                        style={{
-                          padding: '1rem',
-                          backgroundColor: '#2a2a2a',
-                          borderRadius: '6px',
-                          border: '1px solid #3a3a3a',
-                          cursor: 'pointer',
-                          transition: 'border-color 0.2s'
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.borderColor = '#00bcd4';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.borderColor = '#3a3a3a';
-                        }}
-                        onClick={() => handleCreateSteamEnvironment(installation.path)}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                          <i className="fab fa-steam" style={{ color: '#00bcd4', fontSize: '1.2rem' }}></i>
-                          <strong>Steam Installation</strong>
-                        </div>
-                        <div style={{ fontSize: '0.85rem', color: '#aaa', fontFamily: 'monospace' }}>
-                          {installation.path}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+
+            <div className="settings-section">
+              <div className="settings-section__heading">
+                <div>
+                  <span className="settings-eyebrow">Identity</span>
+                  <h4>Environment details</h4>
                 </div>
-                <div className="form-group">
-                  <label>Name (Optional)</label>
+              </div>
+              <div className="settings-field-grid">
+                <div className="settings-field-card">
+                  <label htmlFor="wizard-download-name">Name</label>
                   <input
+                    id="wizard-download-name"
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Steam Installation"
+                    placeholder="Environment name"
                   />
                 </div>
-                <div className="form-group">
-                  <label>Description (Optional)</label>
+
+                <div className="settings-field-card settings-field-card--full">
+                  <label htmlFor="wizard-download-description">Description</label>
                   <textarea
+                    id="wizard-download-description"
+                    className="wizard-textarea"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Describe what this version means..."
+                    placeholder="Optional notes to explain what this install is for"
                     rows={3}
-                    style={{
-                      width: '100%',
-                      padding: '0.5rem 0.75rem',
-                      backgroundColor: 'var(--input-bg-color, #1a1a1a)',
-                      border: '1px solid var(--input-border-color, #3a3a3a)',
-                      borderRadius: '6px',
-                      color: 'var(--input-text-color, #ffffff)',
-                      fontSize: '0.85rem',
-                      fontFamily: 'inherit',
-                      resize: 'vertical',
-                      minHeight: '60px'
-                    }}
                   />
                 </div>
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section__heading">
+                <div>
+                  <span className="settings-eyebrow">Storage</span>
+                  <h4>Download location</h4>
+                </div>
+              </div>
+              <div className="settings-field-grid">
+                <div className="settings-field-card settings-field-card--full">
+                  <label htmlFor="wizard-download-base-dir">Install folder</label>
+                  <div className="settings-inline-field">
+                    <input
+                      id="wizard-download-base-dir"
+                      type="text"
+                      value={outputDir}
+                      onChange={(e) => setOutputDir(e.target.value)}
+                      placeholder="C:\\Games\\Schedule I Beta"
+                    />
+                    <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('download')}>
+                      <i className="fas fa-folder-open"></i>
+                      Browse
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="wizard-path-preview">
+                <span className="settings-eyebrow">Install Target</span>
+                <strong>{outputDir || 'Choose an install folder to continue'}</strong>
+                <p>SIMM downloads this branch into the exact folder shown here. The branch name does not rename the folder automatically.</p>
+              </div>
+            </div>
+
+            <div className="wizard-panel__actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setWizardMode('download-select')}>
+                Back
+              </button>
+              <button type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir}>
+                <i className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-plus'}></i>
+                {loading ? 'Creating…' : 'Create Environment'}
+              </button>
+            </div>
+          </section>
         )}
 
-        {showImportLocal && (
-          <div className="wizard-step">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>Import Existing Folder</h3>
+        {wizardMode === 'import-configure' && (
+          <section className="wizard-step-card wizard-configuration-shell">
+            <div className="wizard-step-card__header">
+              <div>
+                <span className="settings-eyebrow">Import</span>
+                <h3>Import Existing Folder</h3>
+                <p>Select a local Schedule I folder and let SIMM detect the branch, runtime, and version details automatically.</p>
+              </div>
               <button
+                type="button"
+                className="btn btn-secondary btn-small"
                 onClick={() => {
-                  setShowImportLocal(false);
+                  setWizardMode('landing');
                   setImportPath('');
                 }}
-                className="btn btn-secondary btn-small"
               >
-                <i className="fas fa-arrow-left" style={{ marginRight: '0.25rem' }}></i>
+                <i className="fas fa-arrow-left"></i>
                 Back
               </button>
             </div>
 
-            <div className="form-group">
-              <label>Game Folder *</label>
-              <p style={{ margin: '0 0 0.5rem 0', color: '#aaa', fontSize: '0.85rem' }}>
-                Select the folder containing Schedule I.exe
-              </p>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={importPath}
-                  onChange={(e) => setImportPath(e.target.value)}
-                  placeholder="C:\\Games\\Schedule I"
-                  style={{ flex: 1 }}
-                />
-                <button
-                  type="button"
-                  onClick={handleBrowseForImport}
-                  className="btn btn-secondary"
-                >
-                  Browse
-                </button>
+            <div className="settings-section">
+              <div className="settings-section__heading">
+                <div>
+                  <span className="settings-eyebrow">Source</span>
+                  <h4>Game folder</h4>
+                </div>
+              </div>
+              <div className="settings-field-grid">
+                <div className="settings-field-card settings-field-card--full">
+                  <label htmlFor="wizard-import-path">Folder path</label>
+                  <div className="settings-inline-field">
+                    <input
+                      id="wizard-import-path"
+                      type="text"
+                      value={importPath}
+                      onChange={(e) => setImportPath(e.target.value)}
+                      placeholder="C:\\Games\\Schedule I"
+                    />
+                    <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('import')}>
+                      <i className="fas fa-folder-open"></i>
+                      Browse
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="wizard-path-preview">
+                <span className="settings-eyebrow">Detection Notes</span>
+                <strong>{importPath || 'Pick a folder to import'}</strong>
+                <p>SIMM will inspect the game files and infer branch, runtime, version, and existing support tool state.</p>
               </div>
             </div>
 
-            <div className="form-group">
-              <label>Name (Optional)</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="My Game Install"
-              />
+            <div className="settings-section">
+              <div className="settings-section__heading">
+                <div>
+                  <span className="settings-eyebrow">Identity</span>
+                  <h4>Optional labels</h4>
+                </div>
+              </div>
+              <div className="settings-field-grid">
+                <div className="settings-field-card">
+                  <label htmlFor="wizard-import-name">Name</label>
+                  <input
+                    id="wizard-import-name"
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="My Game Install"
+                  />
+                </div>
+
+                <div className="settings-field-card settings-field-card--full">
+                  <label htmlFor="wizard-import-description">Description</label>
+                  <textarea
+                    id="wizard-import-description"
+                    className="wizard-textarea"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    placeholder="Optional notes for this imported installation"
+                    rows={3}
+                  />
+                </div>
+              </div>
             </div>
 
-            <div className="form-group">
-              <label>Description (Optional)</label>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Describe this installation..."
-                rows={3}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem 0.75rem',
-                  backgroundColor: 'var(--input-bg-color, #1a1a1a)',
-                  border: '1px solid var(--input-border-color, #3a3a3a)',
-                  borderRadius: '6px',
-                  color: 'var(--input-text-color, #ffffff)',
-                  fontSize: '0.85rem',
-                  fontFamily: 'inherit',
-                  resize: 'vertical',
-                  minHeight: '60px'
-                }}
-              />
+            <div className="wizard-empty-card wizard-empty-card--info">
+              <i className="fas fa-circle-info"></i>
+              <strong>Runtime and branch are detected automatically</strong>
+              <p>Import is only asking for the folder and optional labels. SIMM will identify runtime, branch, version, and installed tooling from disk.</p>
             </div>
 
-            <div style={{ marginTop: '1rem', padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '6px', border: '1px solid #3a3a3a' }}>
-              <p style={{ margin: 0, color: '#aaa', fontSize: '0.85rem' }}>
-                <i className="fas fa-info-circle" style={{ marginRight: '0.5rem', color: '#00bcd4' }}></i>
-                Runtime (IL2CPP/Mono), branch, and game version will be auto-detected from the game files.
-              </p>
-            </div>
-
-            <div className="modal-actions" style={{ marginTop: '1.5rem' }}>
+            <div className="wizard-panel__actions">
               <button
-                onClick={handleImportLocalEnvironment}
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setWizardMode('landing');
+                  setImportPath('');
+                }}
+              >
+                Back
+              </button>
+              <button
+                type="button"
                 className="btn btn-primary"
+                onClick={() => void handleImportLocalEnvironment()}
                 disabled={importingLocal || !importPath}
               >
-                {importingLocal ? (
-                  <>
-                    <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
-                    Importing...
-                  </>
-                ) : (
-                  <>
-                    <i className="fas fa-folder-open" style={{ marginRight: '0.5rem' }}></i>
-                    Import Installation
-                  </>
-                )}
+                <i className={importingLocal ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'}></i>
+                {importingLocal ? 'Importing…' : 'Import Installation'}
               </button>
             </div>
-          </div>
+          </section>
         )}
-        </div>
+      </div>
 
-      {/* Directory Picker Modal */}
       {showDirectoryPicker && (
         <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDirectoryPicker(false)}>
-          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+          <div className="modal-content modal-content-nested wizard-directory-dialog" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>{showImportLocal ? 'Select Game Folder' : 'Select Base Directory'}</h2>
-              <button className="modal-close" onClick={() => setShowDirectoryPicker(false)}>×</button>
+              <h2>{directoryPurpose === 'import' ? 'Select Game Folder' : 'Select Install Folder'}</h2>
+              <button className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">×</button>
             </div>
 
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Current Path:</label>
-              <input
-                type="text"
-                value={directoryPath}
-                onChange={(e) => setDirectoryPath(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    loadDirectory(directoryPath);
-                  }
-                }}
-                style={{ width: '100%', padding: '0.5rem' }}
-                placeholder="C:\\Users\\YourName"
-              />
-              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                <button
-                  onClick={() => loadDirectory(directoryPath)}
-                  className="btn btn-primary"
-                  style={{ flex: 1 }}
-                  disabled={browsing}
-                >
-                  {browsing ? 'Loading...' : 'Go to Path'}
-                </button>
+            <div className="wizard-directory-dialog__body">
+              <div className="wizard-directory-dialog__overview">
+                <span className="settings-eyebrow">Directory Browser</span>
+                <h3>{directoryPurpose === 'import' ? 'Choose the local game folder to import' : 'Choose the install folder for this branch download'}</h3>
+                <p>Browse folders, create a new subdirectory if needed, and confirm the current location when you are ready.</p>
               </div>
-            </div>
 
-            <div style={{ marginBottom: '1rem', padding: '0.75rem', backgroundColor: '#2a2a2a', borderRadius: '4px' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem' }}>Create New Folder:</label>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
-                  onKeyDown={async (e) => {
-                    if (e.key === 'Enter' && newFolderName.trim()) {
-                      await handleCreateFolder();
-                    }
-                  }}
-                  style={{ flex: 1, padding: '0.5rem' }}
-                  placeholder="Folder name"
-                  disabled={creatingFolder || !directoryPath}
-                />
-                <button
-                  onClick={handleCreateFolder}
-                  className="btn btn-secondary"
-                  disabled={creatingFolder || !newFolderName.trim() || !directoryPath}
-                >
-                  {creatingFolder ? 'Creating...' : 'Create'}
-                </button>
-              </div>
-            </div>
-
-            <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid #3a3a3a', borderRadius: '4px', padding: '0.5rem' }}>
-              {browsing ? (
-                <div className="loading">Loading directories...</div>
-              ) : directoryList.length === 0 ? (
-                <div style={{ padding: '1rem', textAlign: 'center', color: '#888' }}>
-                  No subdirectories found
-                </div>
-              ) : (
-                <div>
-                  {(() => {
-                    const getParentPath = (currentPath: string): string | null => {
-                      if (!currentPath) return null;
-                      // Handle Windows paths (C:\, D:\, etc.)
-                      const isWindowsRoot = /^[A-Z]:\\?$/i.test(currentPath);
-                      if (isWindowsRoot) return null;
-
-                      // Handle Unix paths (/)
-                      if (currentPath === '/' || currentPath === '\\') return null;
-
-                      // Get parent by removing last segment
-                      const separator = currentPath.includes('/') ? '/' : '\\';
-                      const parts = currentPath.split(separator).filter(p => p);
-
-                      // If we're at a drive root (C:\), return null
-                      if (parts.length <= 1 && currentPath.includes(':')) return null;
-
-                      // Remove last part
-                      parts.pop();
-
-                      if (parts.length === 0) {
-                        // Return root
-                        return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
+              <div className="settings-field-card settings-field-card--full">
+                <label htmlFor="wizard-directory-path">Current path</label>
+                <div className="settings-inline-field">
+                  <input
+                    id="wizard-directory-path"
+                    type="text"
+                    value={directoryPath}
+                    onChange={(e) => setDirectoryPath(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        void loadDirectory(directoryPath);
                       }
-
-                      return parts.join(separator) + (separator === '/' ? '/' : '');
-                    };
-
-                    const parentPath = getParentPath(directoryPath);
-                    return parentPath ? (
-                      <div
-                        onClick={() => {
-                          if (parentPath) {
-                            loadDirectory(parentPath);
-                          }
-                        }}
-                        style={{
-                          padding: '0.75rem',
-                          cursor: 'pointer',
-                          borderBottom: '1px solid #3a3a3a',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '0.5rem'
-                        }}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#3a3a3a'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                      >
-                        <i className="fas fa-arrow-up" style={{ color: '#646cff' }}></i>
-                        <span style={{ fontWeight: 'bold' }}>.. (Parent Directory)</span>
-                      </div>
-                    ) : null;
-                  })()}
-                  {directoryList.map((dir) => (
-                    <div
-                      key={dir.path}
-                      onClick={() => loadDirectory(dir.path)}
-                      style={{
-                        padding: '0.75rem',
-                        cursor: 'pointer',
-                        borderBottom: '1px solid #3a3a3a',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.5rem'
-                      }}
-                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#3a3a3a'}
-                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                    >
-                      <span style={{ fontSize: '1.2rem' }}>📁</span>
-                      <span>{dir.name}</span>
-                    </div>
-                  ))}
+                    }}
+                    placeholder="C:\\Users\\YourName"
+                  />
+                  <button type="button" className="btn btn-secondary" onClick={() => void loadDirectory(directoryPath)} disabled={browsing}>
+                    <i className={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'}></i>
+                    {browsing ? 'Loading…' : 'Go to Path'}
+                  </button>
                 </div>
-              )}
-            </div>
+              </div>
 
-            <div className="modal-actions" style={{ marginTop: '1rem' }}>
-              <button
-                onClick={() => showImportLocal ? handleImportDirectorySelect(directoryPath) : handleDirectorySelect(directoryPath)}
-                className="btn btn-primary"
-                disabled={!directoryPath}
-              >
-                {showImportLocal ? 'Select This Folder' : 'Select This Directory'}
-              </button>
-              <button
-                onClick={() => setShowDirectoryPicker(false)}
-                className="btn btn-secondary"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+              <div className="settings-field-card settings-field-card--full">
+                <label htmlFor="wizard-new-folder">Create a folder in the current location</label>
+                <div className="settings-inline-field">
+                  <input
+                    id="wizard-new-folder"
+                    type="text"
+                    value={newFolderName}
+                    onChange={(e) => setNewFolderName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newFolderName.trim()) {
+                        void handleCreateFolder();
+                      }
+                    }}
+                    placeholder="Folder name"
+                    disabled={creatingFolder || !directoryPath}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void handleCreateFolder()}
+                    disabled={creatingFolder || !newFolderName.trim() || !directoryPath}
+                  >
+                    <i className={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'}></i>
+                    {creatingFolder ? 'Creating…' : 'Create Folder'}
+                  </button>
+                </div>
+              </div>
 
-      {showDepotDownloaderPrompt && (
-        <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDepotDownloaderPrompt(false)}>
-          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '620px' }}>
-            <div className="modal-header">
-              <h2>Install DepotDownloader?</h2>
-              <button className="modal-close" onClick={() => setShowDepotDownloaderPrompt(false)}>×</button>
-            </div>
+              <div className="wizard-directory-dialog__list" role="list">
+                {browsing ? (
+                  <div className="wizard-empty-card">
+                    <i className="fas fa-spinner fa-spin"></i>
+                    <strong>Loading directories</strong>
+                    <p>SIMM is reading the current folder contents.</p>
+                  </div>
+                ) : (
+                  <>
+                    {getParentPath(directoryPath) && (
+                      <button
+                        type="button"
+                        className="wizard-directory-row wizard-directory-row--parent"
+                        onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
+                      >
+                        <i className="fas fa-arrow-up"></i>
+                        <span>Parent Directory</span>
+                      </button>
+                    )}
 
-            <div style={{ padding: '1rem 1.25rem 1.25rem' }}>
-              <p style={{ marginTop: 0, color: '#cbd5e1', lineHeight: 1.5 }}>
-                SIMM uses <strong>DepotDownloader</strong> for <strong>game version checks and game updates</strong> on non-Steam environments.
-              </p>
-              <p style={{ color: '#9aa4b2', lineHeight: 1.5 }}>
-                If you only plan to use your linked Steam install, you can skip this for now. You only need DepotDownloader to install or update additional game versions/branches outside Steam.
-              </p>
+                    {directoryList.length === 0 ? (
+                      <div className="wizard-empty-card">
+                        <i className="fas fa-folder-open"></i>
+                        <strong>No subdirectories found</strong>
+                        <p>This location does not contain any folders that SIMM can browse into right now.</p>
+                      </div>
+                    ) : (
+                      directoryList.map((dir) => (
+                        <button
+                          key={dir.path}
+                          type="button"
+                          className="wizard-directory-row"
+                          onClick={() => void loadDirectory(dir.path)}
+                        >
+                          <i className="fas fa-folder"></i>
+                          <span>{dir.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
 
-              {depotDownloaderPromptError && (
-                <div className="error-message" style={{ marginBottom: '0.75rem' }}>{depotDownloaderPromptError}</div>
-              )}
-
-              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <div className="wizard-panel__actions wizard-panel__actions--dialog">
+                <button type="button" className="btn btn-secondary" onClick={() => setShowDirectoryPicker(false)}>
+                  Cancel
+                </button>
                 <button
+                  type="button"
                   className="btn btn-primary"
-                  onClick={handleAutoInstallDepotDownloader}
-                  disabled={installingDepotDownloader}
+                  onClick={() => handleDirectorySelection(directoryPath)}
+                  disabled={!directoryPath}
                 >
-                  {installingDepotDownloader ? (
-                    <><i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>Installing...</>
-                  ) : (
-                    <><i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>Install Automatically</>
-                  )}
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={handleOpenDepotDownloaderInstructions}
-                >
-                  <i className="fas fa-external-link-alt" style={{ marginRight: '0.5rem' }}></i>
-                  Manual Instructions
-                </button>
-                <button className="btn btn-secondary" onClick={() => setShowDepotDownloaderPrompt(false)}>
-                  Skip for now
+                  <i className="fas fa-check"></i>
+                  Select Folder
                 </button>
               </div>
             </div>

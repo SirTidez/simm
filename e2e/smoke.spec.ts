@@ -20,8 +20,12 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
 
     await expect(createEnvironmentHeading).toBeVisible();
     await expect(page.getByRole('button', { name: 'Close create environment panel' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Download New Branch' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Import Existing Folder' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Steam install/i }).first()).toBeVisible();
 
-    const enabledBranchCards = page.locator('.branch-card:not(.branch-card--disabled)');
+    await page.getByRole('button', { name: /Browse Branches/i }).click();
+    const enabledBranchCards = page.locator('.wizard-branch-card:not(.wizard-branch-card--disabled)');
     await expect(enabledBranchCards.first()).toBeVisible();
     await enabledBranchCards.first().click();
 
@@ -41,6 +45,31 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
     await expect(page.getByRole('button', { name: 'Mods' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Config' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Logs' }).first()).toBeVisible();
+
+    await page.getByRole('button', { name: 'Config' }).first().click();
+    await expect(page.locator('.config-editor')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.config-explorer')).toBeVisible();
+    await expect(page.getByPlaceholder('Search config files')).toBeVisible();
+    await page.locator('.config-editor .modal-header .btn', { hasText: 'Back' }).first().click();
+
+    await page.getByRole('button', { name: 'Logs' }).first().click();
+    await expect(page.locator('.logs-panel')).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('.logs-panel__rail')).toBeVisible();
+    await expect(page.locator('.logs-panel__viewer')).toBeVisible();
+    await expect(page.locator('.logs-panel__inspector')).toBeVisible();
+
+    const logSourceButtons = page.locator('.logs-panel__source-button');
+    if ((await logSourceButtons.count()) > 0) {
+      await logSourceButtons.first().click();
+    }
+
+    const logRows = page.locator('.logs-panel__line');
+    if ((await logRows.count()) > 0) {
+      await logRows.first().click();
+      await expect(page.locator('.logs-panel__inspector .logs-panel__inspector-card').first()).toContainText('Line');
+    }
+
+    await page.locator('.logs-panel .modal-header .btn', { hasText: 'Back' }).first().click();
 
     await page.getByRole('button', { name: 'Mods' }).first().click();
     await expect(page.locator('.mods-overlay--environment')).toBeVisible({ timeout: 30000 });

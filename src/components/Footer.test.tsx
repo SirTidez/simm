@@ -48,10 +48,6 @@ vi.mock('../services/logger', () => ({
   logger: loggerMocks,
 }));
 
-vi.mock('./CustomThemeEditor', () => ({
-  CustomThemeEditor: () => null,
-}));
-
 const completedEnv: Environment = {
   id: 'env-1',
   name: 'Env One',

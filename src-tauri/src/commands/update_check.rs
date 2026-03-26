@@ -316,9 +316,10 @@ pub async fn check_all_updates(
         }
 
         if let Err(e) = env_service.update_environment(env_id, updates).await {
-            eprintln!(
+            log::warn!(
                 "[UpdateCheck] Failed to update environment {}: {:#}",
-                env_id, e
+                env_id,
+                e
             );
         }
 
@@ -417,7 +418,7 @@ pub async fn check_all_updates(
                     .await
                 {
                     Ok(results) => {
-                        eprintln!(
+                        log::info!(
                             "[UpdateCheck] Successfully checked mod updates for environment {}",
                             env_id
                         );
@@ -428,9 +429,10 @@ pub async fn check_all_updates(
                     }
                     Err(e) => {
                         // Log but don't fail - mod updates are nice to have but not critical
-                        eprintln!(
+                        log::warn!(
                             "[UpdateCheck] Failed to check mod updates for environment {}: {}",
-                            env_id, e
+                            env_id,
+                            e
                         );
                     }
                 }
@@ -537,9 +539,10 @@ pub async fn check_all_updates(
                 .upsert_storage_metadata_by_id(&storage_id, metadata_update)
                 .await
             {
-                eprintln!(
+                log::warn!(
                     "[UpdateCheck] Failed to backfill library metadata for {}: {}",
-                    storage_id, error
+                    storage_id,
+                    error
                 );
             }
         }

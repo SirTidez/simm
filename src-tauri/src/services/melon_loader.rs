@@ -12,6 +12,24 @@ impl MelonLoaderService {
         Self
     }
 
+    fn normalize_version(version: &str) -> String {
+        let trimmed = version.trim();
+
+        if let Some(stripped) = trimmed.strip_prefix("v0.7.") {
+            if let Some(core) = stripped.strip_suffix(".0") {
+                return format!("v0.7.{}", core);
+            }
+        }
+
+        if let Some(stripped) = trimmed.strip_prefix("0.7.") {
+            if let Some(core) = stripped.strip_suffix(".0") {
+                return format!("0.7.{}", core);
+            }
+        }
+
+        trimmed.to_string()
+    }
+
     pub fn is_melon_loader_installed(&self, game_dir: &str) -> bool {
         let game_path = Path::new(game_dir);
 
@@ -41,7 +59,7 @@ impl MelonLoaderService {
         if version_file.exists() {
             match fs::read_to_string(&version_file).await {
                 Ok(content) => {
-                    let version = content.trim().to_string();
+                    let version = Self::normalize_version(content.trim());
                     if !version.is_empty() {
                         return Ok(Some(version));
                     }
@@ -83,7 +101,7 @@ impl MelonLoaderService {
             .context("Failed to execute PowerShell command")?;
 
         if output.status.success() {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let version = Self::normalize_version(String::from_utf8_lossy(&output.stdout).trim());
             if !version.is_empty() && version != "null" {
                 return Ok(version);
             }
@@ -275,5 +293,23 @@ impl MelonLoaderService {
 impl Default for MelonLoaderService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MelonLoaderService;
+
+    #[test]
+    fn normalizes_four_part_07_versions() {
+        assert_eq!(MelonLoaderService::normalize_version("0.7.2.0"), "0.7.2");
+        assert_eq!(MelonLoaderService::normalize_version("v0.7.2.0"), "v0.7.2");
+    }
+
+    #[test]
+    fn leaves_other_versions_unchanged() {
+        assert_eq!(MelonLoaderService::normalize_version("0.8.0.0"), "0.8.0.0");
+        assert_eq!(MelonLoaderService::normalize_version("1.0.0.0"), "1.0.0.0");
+        assert_eq!(MelonLoaderService::normalize_version("0.7.2"), "0.7.2");
     }
 }

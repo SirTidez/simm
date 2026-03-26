@@ -1,12 +1,48 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 #[derive(Clone)]
 pub struct FileSystemService;
 
 impl FileSystemService {
     pub fn new() -> Self {
         Self
+    }
+
+    pub async fn open_path(&self, path: &str) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", path])
+                .creation_flags(0x08000000)
+                .spawn()
+                .context("Failed to open path")?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(path)
+                .spawn()
+                .context("Failed to open path")?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(path)
+                .spawn()
+                .context("Failed to open path")?;
+        }
+
+        Ok(())
     }
 
     pub async fn open_folder(&self, path: &str) -> Result<()> {
@@ -34,6 +70,37 @@ impl FileSystemService {
                 .arg(path)
                 .spawn()
                 .context("Failed to open folder")?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn reveal_path(&self, path: &str) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path))
+                .creation_flags(0x08000000)
+                .spawn()
+                .context("Failed to reveal path")?;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg("-R")
+                .arg(path)
+                .spawn()
+                .context("Failed to reveal path")?;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let parent = Path::new(path)
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Path has no parent folder"))?;
+            self.open_folder(parent.to_string_lossy().as_ref()).await?;
         }
 
         Ok(())

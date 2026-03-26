@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -10,7 +11,9 @@ use tokio::fs;
 use crate::types::{Environment, EnvironmentType, ModMetadata, Settings};
 
 const MIGRATION_FLAG_KEY: &str = "storage.migrated";
+const APP_VERSION_KEY: &str = "app.version";
 const SQLITE_SIDE_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
+const DEFAULT_DATABASE_BACKUP_COUNT: usize = 10;
 
 fn normalize_path(path: &str) -> String {
     path.replace('/', "\\")
@@ -20,6 +23,7 @@ fn normalize_path(path: &str) -> String {
 
 pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
     let db_path = get_database_path()?;
+    let database_preexisted = db_path.exists();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create database directory")?;
     }
@@ -39,6 +43,7 @@ pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
         .context("Failed to open SQLite database")?;
 
     let migrator = sqlx::migrate!();
+    maybe_create_startup_backup(&pool, &migrator, database_preexisted).await?;
     if let Err(err) = migrator.run(&pool).await {
         match err {
             MigrateError::VersionMismatch(version) => {
@@ -57,6 +62,7 @@ pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
     }
 
     migrate_from_files(&pool).await?;
+    set_app_meta_value(&pool, APP_VERSION_KEY, current_app_version()).await?;
 
     Ok(Arc::new(pool))
 }
@@ -75,6 +81,12 @@ pub fn get_data_dir() -> Result<PathBuf> {
         .context("Failed to initialize SIMM data directory")?;
 
     Ok(simm_dir)
+}
+
+fn get_backups_dir() -> Result<PathBuf> {
+    let backups_dir = get_data_dir()?.join("backups");
+    std::fs::create_dir_all(&backups_dir).context("Failed to create backups directory")?;
+    Ok(backups_dir)
 }
 
 fn get_data_dir_override() -> Option<PathBuf> {
@@ -104,6 +116,290 @@ fn sqlite_bundle_path(base: &Path, suffix: &str) -> PathBuf {
     }
 
     PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
+}
+
+fn current_app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn sanitize_backup_fragment(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    let mut last_was_separator = false;
+
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            sanitized.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            sanitized.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "backup".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn backup_file_name(reason: &str) -> String {
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S-%3f");
+    format!(
+        "SIMM-db-backup-{}-{}.db",
+        sanitize_backup_fragment(reason),
+        timestamp
+    )
+}
+
+fn sqlite_quote_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn parse_version_parts(version: &str) -> Option<Vec<u64>> {
+    let cleaned = version.trim().trim_start_matches(['v', 'V']);
+    let parts: Vec<u64> = cleaned
+        .split('.')
+        .map(str::trim)
+        .map(str::parse::<u64>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+fn is_version_increase(previous: &str, current: &str) -> bool {
+    match (parse_version_parts(previous), parse_version_parts(current)) {
+        (Some(previous_parts), Some(current_parts)) => {
+            let max_len = previous_parts.len().max(current_parts.len());
+            for index in 0..max_len {
+                let previous_value = previous_parts.get(index).copied().unwrap_or(0);
+                let current_value = current_parts.get(index).copied().unwrap_or(0);
+                match current_value.cmp(&previous_value) {
+                    std::cmp::Ordering::Greater => return true,
+                    std::cmp::Ordering::Less => return false,
+                    std::cmp::Ordering::Equal => continue,
+                }
+            }
+            false
+        }
+        _ => previous != current,
+    }
+}
+
+async fn table_exists(pool: &SqlitePool, table_name: &str) -> Result<bool> {
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table_name)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to inspect database tables")?;
+
+    Ok(exists.is_some())
+}
+
+async fn database_has_user_schema(pool: &SqlitePool) -> Result<bool> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to inspect database schema state")?;
+
+    Ok(!tables.is_empty())
+}
+
+async fn get_app_meta_value(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
+    if !table_exists(pool, "app_meta").await? {
+        return Ok(None);
+    }
+
+    sqlx::query_scalar("SELECT value FROM app_meta WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to read app metadata")
+}
+
+async fn set_app_meta_value(pool: &SqlitePool, key: &str, value: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await
+    .context("Failed to write app metadata")?;
+
+    Ok(())
+}
+
+async fn get_database_backup_limit(pool: &SqlitePool) -> Result<usize> {
+    if !table_exists(pool, "settings").await? {
+        return Ok(DEFAULT_DATABASE_BACKUP_COUNT);
+    }
+
+    let settings_json: Option<String> =
+        sqlx::query_scalar("SELECT data FROM settings WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .context("Failed to read backup retention settings")?;
+
+    let Some(settings_json) = settings_json else {
+        return Ok(DEFAULT_DATABASE_BACKUP_COUNT);
+    };
+
+    let raw_value: serde_json::Value = match serde_json::from_str(&settings_json) {
+        Ok(value) => value,
+        Err(_) => return Ok(DEFAULT_DATABASE_BACKUP_COUNT),
+    };
+
+    let backup_count = raw_value
+        .get("databaseBackupCount")
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            raw_value
+                .get("database_backup_count")
+                .and_then(|value| value.as_u64())
+        })
+        .unwrap_or(DEFAULT_DATABASE_BACKUP_COUNT as u64);
+
+    Ok(backup_count.clamp(1, 100) as usize)
+}
+
+async fn prune_old_database_backups(pool: &SqlitePool) -> Result<()> {
+    let retention_limit = get_database_backup_limit(pool).await?;
+    let backups_dir = get_backups_dir()?;
+    let mut backup_files: Vec<PathBuf> = std::fs::read_dir(&backups_dir)
+        .with_context(|| format!("Failed to list backups in {}", backups_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| {
+                    name.starts_with("SIMM-db-backup-")
+                        && path.extension().and_then(|ext| ext.to_str()) == Some("db")
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if backup_files.len() <= retention_limit {
+        return Ok(());
+    }
+
+    backup_files.sort();
+    let excess_count = backup_files.len().saturating_sub(retention_limit);
+    for path in backup_files.into_iter().take(excess_count) {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove old backup {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+async fn database_requires_migration_backup(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<bool> {
+    if !database_has_user_schema(pool).await? {
+        return Ok(false);
+    }
+
+    if !table_exists(pool, "_sqlx_migrations").await? {
+        return Ok(true);
+    }
+
+    let applied_versions: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .context("Failed to read applied migration versions")?;
+
+    let expected_versions: Vec<i64> = migrator.iter().map(|migration| migration.version).collect();
+
+    Ok(applied_versions != expected_versions)
+}
+
+async fn maybe_create_startup_backup(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+    database_preexisted: bool,
+) -> Result<()> {
+    if !database_preexisted || !database_has_user_schema(pool).await? {
+        return Ok(());
+    }
+
+    let current_version = current_app_version();
+    let previous_version = get_app_meta_value(pool, APP_VERSION_KEY).await?;
+    let version_increase = previous_version
+        .as_deref()
+        .map(|previous| is_version_increase(previous, current_version))
+        .unwrap_or(false);
+    let migration_backup_needed = database_requires_migration_backup(pool, migrator).await?;
+
+    if !version_increase && !migration_backup_needed {
+        return Ok(());
+    }
+
+    let reason = match (version_increase, migration_backup_needed) {
+        (true, true) => "pre-upgrade-migration",
+        (true, false) => "pre-version-upgrade",
+        (false, true) => "pre-migration",
+        (false, false) => return Ok(()),
+    };
+
+    let backup_path = create_database_backup(pool, reason).await?;
+    log::info!(
+        "Created automatic database backup before startup database work: {}",
+        backup_path.display()
+    );
+
+    Ok(())
+}
+
+pub async fn create_database_backup(pool: &SqlitePool, reason: &str) -> Result<PathBuf> {
+    let backup_path = get_backups_dir()?.join(backup_file_name(reason));
+    let backup_path_str = backup_path.to_string_lossy().to_string();
+
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("Failed to acquire database connection for backup")?;
+
+    if let Err(error) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut *connection)
+        .await
+    {
+        log::warn!("Failed to checkpoint SQLite WAL before backup: {}", error);
+    }
+
+    let vacuum_into = format!("VACUUM INTO {}", sqlite_quote_string(&backup_path_str));
+    sqlx::query(&vacuum_into)
+        .execute(&mut *connection)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to create database backup at {}",
+                backup_path.display()
+            )
+        })?;
+
+    log::info!(
+        "Created database backup [{}] at {}",
+        sanitize_backup_fragment(reason),
+        backup_path.display()
+    );
+
+    prune_old_database_backups(pool).await?;
+
+    Ok(backup_path)
 }
 
 fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
@@ -460,7 +756,7 @@ mod tests {
             auto_update_mods: Some(false),
             mod_update_check_interval: Some(60),
             mod_icon_cache_limit_mb: Some(500),
-            custom_theme: None,
+            database_backup_count: Some(10),
             log_retention_days: Some(7),
         }
     }
@@ -615,6 +911,14 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn is_version_increase_detects_only_forward_changes() {
+        assert!(is_version_increase("0.7.3", "0.7.4"));
+        assert!(is_version_increase("0.7.4", "0.8.0"));
+        assert!(!is_version_increase("0.7.4", "0.7.4"));
+        assert!(!is_version_increase("0.7.5", "0.7.4"));
+    }
+
     #[tokio::test]
     #[serial]
     async fn initialize_pool_migrates_legacy_files() -> Result<()> {
@@ -700,6 +1004,116 @@ mod tests {
                 .fetch_optional(&*pool)
                 .await?;
         assert_eq!(migration_flag.as_deref(), Some("true"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_database_backup_writes_snapshot_file() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+
+        sqlx::query(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind("backup-test")
+        .bind("snapshot")
+        .execute(&*pool)
+        .await?;
+
+        let backup_path = create_database_backup(&pool, "manual").await?;
+        assert!(backup_path.exists());
+        assert_eq!(
+            backup_path.extension().and_then(|ext| ext.to_str()),
+            Some("db")
+        );
+
+        let metadata = std::fs::metadata(&backup_path)?;
+        assert!(metadata.len() > 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_creates_backup_when_app_version_increases() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(APP_VERSION_KEY)
+        .bind("0.7.3")
+        .execute(&*pool)
+        .await?;
+        pool.close().await;
+
+        let _reopened = initialize_pool().await?;
+        let backups_dir = get_backups_dir()?;
+        let backup_files: Vec<_> = std::fs::read_dir(backups_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.contains("pre-version-upgrade"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert!(!backup_files.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_database_backup_prunes_old_snapshots_using_settings_limit() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query(
+            "INSERT INTO settings (id, data) VALUES (1, ?) \
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        )
+        .bind(
+            serde_json::json!({
+                "defaultDownloadDir": "C:\\Users\\SirTidez\\SIMM",
+                "maxConcurrentDownloads": 2,
+                "platform": "windows",
+                "language": "english",
+                "theme": "modern-blue",
+                "databaseBackupCount": 1,
+            })
+            .to_string(),
+        )
+        .execute(&*pool)
+        .await?;
+
+        let first_backup = create_database_backup(&pool, "manual").await?;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second_backup = create_database_backup(&pool, "manual").await?;
+
+        assert!(!first_backup.exists());
+        assert!(second_backup.exists());
+
+        let backups_dir = get_backups_dir()?;
+        let backup_files: Vec<_> = std::fs::read_dir(backups_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("db"))
+            .collect();
+
+        assert_eq!(backup_files.len(), 1);
 
         Ok(())
     }
