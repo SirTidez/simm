@@ -65,6 +65,12 @@ describe('EnvironmentCreationWizard', () => {
           runtime: 'Mono',
           requiresAuth: false,
         },
+        {
+          name: 'alternate-beta',
+          displayName: 'Alternate Beta',
+          runtime: 'Mono',
+          requiresAuth: false,
+        },
       ],
     });
     apiMocks.detectDepotDownloader.mockResolvedValue({ installed: true });
@@ -85,11 +91,23 @@ describe('EnvironmentCreationWizard', () => {
     vi.clearAllMocks();
   });
 
+  const clickBranchCard = (label: string) => {
+    const heading = screen.getByText(label);
+    const button = heading.closest('button');
+    expect(button).toBeTruthy();
+    fireEvent.click(button!);
+  };
+
+  const clickConfigureBack = () => {
+    const backButtons = screen.getAllByRole('button', { name: /^back$/i });
+    fireEvent.click(backButtons[0]);
+  };
+
   it('uses the selected folder as the exact install target instead of appending the branch name', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
     fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
-    fireEvent.click(await screen.findByRole('button', { name: /beta/i }));
+    clickBranchCard('Beta');
 
     const installFolderInput = await screen.findByLabelText(/install folder/i);
     expect((installFolderInput as HTMLInputElement).value).toBe('C:\\Games\\Default Install');
@@ -115,6 +133,32 @@ describe('EnvironmentCreationWizard', () => {
           outputDir: 'D:\\Games\\Custom Install',
         })
       );
+    });
+  });
+
+  it('refreshes the auto-derived name when switching branches but preserves user edits', async () => {
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
+    clickBranchCard('Beta');
+
+    const nameInput = await screen.findByLabelText(/^name$/i);
+    expect((nameInput as HTMLInputElement).value).toBe('Beta');
+
+    clickConfigureBack();
+    clickBranchCard('Alternate Beta');
+    await waitFor(() => {
+      expect((screen.getByLabelText(/^name$/i) as HTMLInputElement).value).toBe('Alternate Beta');
+    });
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: 'My Custom Install' },
+    });
+
+    clickConfigureBack();
+    clickBranchCard('Beta');
+    await waitFor(() => {
+      expect((screen.getByLabelText(/^name$/i) as HTMLInputElement).value).toBe('My Custom Install');
     });
   });
 });

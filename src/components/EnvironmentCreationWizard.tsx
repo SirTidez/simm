@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { ApiService } from '../services/api';
@@ -11,6 +11,10 @@ interface Props {
 type WizardMode = 'landing' | 'download-select' | 'download-configure' | 'import-configure';
 type DirectoryPurpose = 'download' | 'import';
 type SteamInstallation = { path: string; executablePath: string; appId: string };
+
+function deriveBranchName(branch: BranchConfig): string {
+  return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
+}
 
 function getParentPath(currentPath: string): string | null {
   if (!currentPath) return null;
@@ -69,6 +73,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
   const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
+  const previousDerivedNameRef = useRef('');
 
   const hasSteamEnvironment = environments.some(
     env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
@@ -266,10 +271,14 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const handleBranchSelect = (branch: BranchConfig) => {
     if (depotDownloaderInstalled !== true) return;
 
+    const nextDerivedName = deriveBranchName(branch);
     setSelectedBranch(branch);
     setName((currentName) => {
-      if (currentName) return currentName;
-      return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
+      if (currentName && currentName !== previousDerivedNameRef.current) {
+        return currentName;
+      }
+      previousDerivedNameRef.current = nextDerivedName;
+      return nextDerivedName;
     });
     setOutputDir((currentOutput) => currentOutput || settings?.defaultDownloadDir || '');
     setWizardMode('download-configure');
