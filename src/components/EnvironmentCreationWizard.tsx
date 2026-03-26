@@ -70,7 +70,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
 
   const hasSteamEnvironment = environments.some(
-    env => env.environmentType === 'steam' || env.id.startsWith('steam-')
+    env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
   );
   const isSteamAuthenticated = Boolean(settings?.steamUsername);
   const steamDetected = steamInstallations.length > 0;
@@ -205,13 +205,26 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     setError(null);
     try {
       await ApiService.createSteamEnvironment(steamPath, name || undefined, description.trim() || undefined);
-      await refreshEnvironments();
-      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create Steam environment');
-    } finally {
       setLoading(false);
+      return;
     }
+
+    try {
+      await refreshEnvironments();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Steam environment created, but SIMM could not refresh the environment list: ${err.message}`
+          : 'Steam environment created, but SIMM could not refresh the environment list.'
+      );
+      setLoading(false);
+      return;
+    }
+
+    setLoading(false);
+    onClose();
   };
 
   const handleAutoInstallDepotDownloader = async () => {
@@ -303,7 +316,13 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     try {
       await refreshEnvironments();
     } catch (err) {
-      console.warn('Environment imported, but SIMM could not refresh the environment list.', err);
+      setError(
+        err instanceof Error
+          ? `Environment imported, but SIMM could not refresh the environment list: ${err.message}`
+          : 'Environment imported, but SIMM could not refresh the environment list.'
+      );
+      setImportingLocal(false);
+      return;
     }
 
     setImportingLocal(false);

@@ -53,14 +53,17 @@ impl LogsService {
         }
     }
 
-    fn parse_log_timestamp_local(timestamp: &str) -> Option<DateTime<Local>> {
+    fn parse_log_timestamp_local(
+        timestamp: &str,
+        reference_dt: DateTime<Local>,
+        live_rollover: bool,
+    ) -> Option<DateTime<Local>> {
         let parsed_time = NaiveTime::parse_from_str(timestamp, "%H:%M:%S%.3f").ok()?;
-        let now = Local::now();
         let mut parsed = Local
-            .from_local_datetime(&now.date_naive().and_time(parsed_time))
+            .from_local_datetime(&reference_dt.date_naive().and_time(parsed_time))
             .single()?;
 
-        if parsed > now {
+        if live_rollover && parsed > reference_dt {
             parsed -= ChronoDuration::days(1);
         }
 
@@ -445,9 +448,21 @@ impl LogsService {
 
         let normalized_filter_tag = filter_mod_tag.map(normalize_mod_tag);
         let normalized_filter_category = filter_category.map(|value| value.to_ascii_lowercase());
-        let now = Local::now();
-        let custom_start = custom_time_start.and_then(Self::parse_log_timestamp_local);
-        let custom_end = custom_time_end.and_then(Self::parse_log_timestamp_local);
+        let reference_dt = fs::metadata(Path::new(log_path))
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(|modified| DateTime::<Utc>::from(modified).with_timezone(&Local))
+            .unwrap_or_else(Local::now);
+        let live_rollover = Path::new(log_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| matches!(name.to_ascii_lowercase().as_str(), "latest.log" | "player.log"))
+            .unwrap_or(false);
+        let custom_start =
+            custom_time_start.and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
+        let custom_end =
+            custom_time_end.and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
 
         let filtered_lines = log_lines
             .iter()
@@ -499,11 +514,19 @@ impl LogsService {
                 if let Some(period) = time_period {
                     if !period.eq_ignore_ascii_case("all") {
                         if let Some(timestamp) = line.timestamp.as_deref() {
-                            if let Some(log_time) = Self::parse_log_timestamp_local(timestamp) {
+                            if let Some(log_time) =
+                                Self::parse_log_timestamp_local(timestamp, reference_dt, live_rollover)
+                            {
                                 let matches_period = match period {
-                                    "last5min" => log_time >= now - ChronoDuration::minutes(5),
-                                    "last15min" => log_time >= now - ChronoDuration::minutes(15),
-                                    "last1hour" => log_time >= now - ChronoDuration::hours(1),
+                                    "last5min" => {
+                                        log_time >= reference_dt - ChronoDuration::minutes(5)
+                                    }
+                                    "last15min" => {
+                                        log_time >= reference_dt - ChronoDuration::minutes(15)
+                                    }
+                                    "last1hour" => {
+                                        log_time >= reference_dt - ChronoDuration::hours(1)
+                                    }
                                     "custom" => {
                                         if custom_start.is_none() && custom_end.is_none() {
                                             true
@@ -527,7 +550,11 @@ impl LogsService {
                                 if !matches_period {
                                     return false;
                                 }
+                            } else {
+                                return false;
                             }
+                        } else {
+                            return false;
                         }
                     }
                 }

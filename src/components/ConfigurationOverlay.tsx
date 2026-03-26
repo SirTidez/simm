@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
@@ -78,6 +78,17 @@ function createDraft(document: ConfigDocument): FileDraft {
     dirty: false,
     dirtyMode: null,
   };
+}
+
+function toConfigSections(sections: EditableSection[]): ConfigSection[] {
+  return sections.map((section) => ({
+    name: section.name,
+    entries: section.entries.map((entry) => ({
+      key: entry.key,
+      value: entry.value,
+      comment: entry.comment || undefined,
+    })),
+  }));
 }
 
 function formatRelativeTimestamp(timestamp?: number) {
@@ -223,9 +234,14 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
+  const selectedFilePathRef = useRef<string | null>(null);
 
   const activeDocument = selectedFilePath ? documentCache[selectedFilePath] ?? null : null;
   const activeDraft = selectedFilePath ? drafts[selectedFilePath] ?? null : null;
+
+  useEffect(() => {
+    selectedFilePathRef.current = selectedFilePath;
+  }, [selectedFilePath]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -283,16 +299,19 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
 
     let cancelled = false;
     const loadDocument = async () => {
+      const requestedFilePath = selectedFilePath;
       setLoadingDocument(true);
       setError(null);
       try {
-        const document = await ApiService.getConfigDocument(environmentId, selectedFilePath);
+        const document = await ApiService.getConfigDocument(environmentId, requestedFilePath);
         if (cancelled) return;
 
-        setDocumentCache((current) => ({ ...current, [selectedFilePath]: document }));
-        setDrafts((current) => current[selectedFilePath] ? current : { ...current, [selectedFilePath]: createDraft(document) });
-        const draft = drafts[selectedFilePath];
-        setEditorMode(draft?.dirtyMode ?? (document.summary.supportsStructuredEdit ? 'structured' : 'raw'));
+        setDocumentCache((current) => ({ ...current, [requestedFilePath]: document }));
+        setDrafts((current) => current[requestedFilePath] ? current : { ...current, [requestedFilePath]: createDraft(document) });
+        const draft = drafts[requestedFilePath];
+        if (selectedFilePathRef.current === requestedFilePath) {
+          setEditorMode(draft?.dirtyMode ?? (document.summary.supportsStructuredEdit ? 'structured' : 'raw'));
+        }
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load configuration file');
@@ -422,15 +441,16 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
 
   const handleReload = async () => {
     if (!selectedFilePath) return;
+    const requestedFilePath = selectedFilePath;
 
     const reloadFile = async () => {
       setLoadingDocument(true);
       setError(null);
       try {
-        const document = await ApiService.getConfigDocument(environmentId, selectedFilePath);
-        setDocumentCache((current) => ({ ...current, [selectedFilePath]: document }));
-        setDrafts((current) => ({ ...current, [selectedFilePath]: createDraft(document) }));
-        if (!document.summary.supportsStructuredEdit) {
+        const document = await ApiService.getConfigDocument(environmentId, requestedFilePath);
+        setDocumentCache((current) => ({ ...current, [requestedFilePath]: document }));
+        setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(document) }));
+        if (selectedFilePathRef.current === requestedFilePath && !document.summary.supportsStructuredEdit) {
           setEditorMode('raw');
         }
       } catch (err) {
@@ -550,13 +570,14 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
 
   const handleSave = async () => {
     if (!selectedFilePath || !activeDocument || !activeDraft) return;
+    const requestedFilePath = selectedFilePath;
 
     setSaving(true);
     setError(null);
 
     try {
       if (editorMode === 'raw') {
-        await ApiService.saveRawConfig(environmentId, selectedFilePath, activeDraft.rawContent);
+        await ApiService.saveRawConfig(environmentId, requestedFilePath, activeDraft.rawContent);
       } else {
         const validationError = validateStructuredDraft(activeDraft.sections);
         if (validationError) {
@@ -566,22 +587,40 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
         }
 
         const operations = buildOperations(activeDocument.sections, activeDraft.sections);
-        await ApiService.applyConfigEdits(environmentId, selectedFilePath, operations);
+        await ApiService.applyConfigEdits(environmentId, requestedFilePath, operations);
       }
 
-      const [nextCatalog, nextDocument] = await Promise.all([
-        ApiService.getConfigCatalog(environmentId),
-        ApiService.getConfigDocument(environmentId, selectedFilePath),
-      ]);
+      const savedDocument: ConfigDocument = {
+        ...activeDocument,
+        rawContent: editorMode === 'raw' ? activeDraft.rawContent : activeDocument.rawContent,
+        sections: editorMode === 'raw' ? activeDocument.sections : toConfigSections(activeDraft.sections),
+      };
+      setDocumentCache((current) => ({ ...current, [requestedFilePath]: savedDocument }));
+      setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(savedDocument) }));
 
-      setCatalog(nextCatalog);
-      setDocumentCache((current) => ({ ...current, [selectedFilePath]: nextDocument }));
-      setDrafts((current) => ({ ...current, [selectedFilePath]: createDraft(nextDocument) }));
-      setEditorMode((currentMode) => (
-        currentMode === 'structured' && !nextDocument.summary.supportsStructuredEdit
-          ? 'raw'
-          : currentMode
-      ));
+      try {
+        const [nextCatalog, nextDocument] = await Promise.all([
+          ApiService.getConfigCatalog(environmentId),
+          ApiService.getConfigDocument(environmentId, requestedFilePath),
+        ]);
+
+        setCatalog(nextCatalog);
+        setDocumentCache((current) => ({ ...current, [requestedFilePath]: nextDocument }));
+        setDrafts((current) => ({ ...current, [requestedFilePath]: createDraft(nextDocument) }));
+        if (selectedFilePathRef.current === requestedFilePath) {
+          setEditorMode((currentMode) => (
+            currentMode === 'structured' && !nextDocument.summary.supportsStructuredEdit
+              ? 'raw'
+              : currentMode
+          ));
+        }
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Changes saved, but SIMM could not refresh the editor state: ${err.message}`
+            : 'Changes saved, but SIMM could not refresh the editor state.'
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save configuration changes');
     } finally {

@@ -333,15 +333,18 @@ async fn database_requires_migration_backup(
         return Ok(true);
     }
 
-    let applied_versions: Vec<i64> =
-        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+    let applied_migrations: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(pool)
             .await
             .context("Failed to read applied migration versions")?;
 
-    let expected_versions: Vec<i64> = migrator.iter().map(|migration| migration.version).collect();
+    let expected_migrations: Vec<(i64, Vec<u8>)> = migrator
+        .iter()
+        .map(|migration| (migration.version, migration.checksum.as_ref().to_vec()))
+        .collect();
 
-    Ok(applied_versions != expected_versions)
+    Ok(applied_migrations != expected_migrations)
 }
 
 async fn maybe_create_startup_backup(
@@ -358,7 +361,7 @@ async fn maybe_create_startup_backup(
     let version_increase = previous_version
         .as_deref()
         .map(|previous| is_version_increase(previous, current_version))
-        .unwrap_or(false);
+        .unwrap_or(true);
     let migration_backup_needed = database_requires_migration_backup(pool, migrator).await?;
 
     if !version_increase && !migration_backup_needed {
@@ -414,7 +417,9 @@ pub async fn create_database_backup(pool: &SqlitePool, reason: &str) -> Result<P
         backup_path.display()
     );
 
-    prune_old_database_backups(pool).await?;
+    if let Err(error) = prune_old_database_backups(pool).await {
+        log::warn!("Failed to prune old database backups: {}", error);
+    }
 
     Ok(backup_path)
 }
@@ -1087,6 +1092,57 @@ mod tests {
             .collect();
 
         assert!(!backup_files.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_creates_backup_when_existing_db_has_no_app_version() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query("DELETE FROM app_meta WHERE key = ?")
+            .bind(APP_VERSION_KEY)
+            .execute(&*pool)
+            .await?;
+        pool.close().await;
+
+        let _reopened = initialize_pool().await?;
+        let backups_dir = get_backups_dir()?;
+        let backup_files: Vec<_> = std::fs::read_dir(backups_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.contains("pre-version-upgrade"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert!(!backup_files.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn database_requires_migration_backup_detects_checksum_mismatch() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(vec![0_u8; 48])
+            .bind(1_i64)
+            .execute(&*pool)
+            .await?;
+
+        let migrator = sqlx::migrate!();
+        assert!(database_requires_migration_backup(&pool, &migrator).await?);
 
         Ok(())
     }
