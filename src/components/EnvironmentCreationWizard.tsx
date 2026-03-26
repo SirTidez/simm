@@ -60,6 +60,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [steamInstallations, setSteamInstallations] = useState<SteamInstallation[]>([]);
   const [detectingSteam, setDetectingSteam] = useState(false);
   const [showSteamInstallations, setShowSteamInstallations] = useState(false);
+  const [steamDetectionError, setSteamDetectionError] = useState<string | null>(null);
 
   const [importPath, setImportPath] = useState('');
   const [importingLocal, setImportingLocal] = useState(false);
@@ -73,7 +74,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
   );
   const isSteamAuthenticated = Boolean(settings?.steamUsername);
-  const steamDetected = steamInstallations.length > 0;
+  const steamDetected = steamInstallations.length > 0 && !steamDetectionError;
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -120,8 +121,12 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       try {
         const installations = await ApiService.detectSteamInstallations();
         setSteamInstallations(installations);
-      } catch {
+        setSteamDetectionError(null);
+      } catch (err) {
         setSteamInstallations([]);
+        setSteamDetectionError(
+          err instanceof Error ? err.message : 'Unable to detect Steam installations right now.'
+        );
       }
     };
 
@@ -190,10 +195,14 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     try {
       const installations = await ApiService.detectSteamInstallations();
       setSteamInstallations(installations);
+      setSteamDetectionError(null);
       setShowSteamInstallations(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to detect Steam installations');
       setSteamInstallations([]);
+      setSteamDetectionError(
+        err instanceof Error ? err.message : 'Unable to detect Steam installations right now.'
+      );
       setShowSteamInstallations(true);
     } finally {
       setDetectingSteam(false);
@@ -214,13 +223,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     try {
       await refreshEnvironments();
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? `Steam environment created, but SIMM could not refresh the environment list: ${err.message}`
-          : 'Steam environment created, but SIMM could not refresh the environment list.'
-      );
-      setLoading(false);
-      return;
+      console.warn('Steam environment created, but SIMM could not refresh the environment list.', err);
     }
 
     setLoading(false);
@@ -330,7 +333,16 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   };
 
   const wizardStats = [
-    { label: 'Steam', value: hasSteamEnvironment ? 'Managed' : steamDetected ? 'Detected' : 'Not linked' },
+    {
+      label: 'Steam',
+      value: hasSteamEnvironment
+        ? 'Managed'
+        : steamDetectionError
+          ? 'Check failed'
+          : steamDetected
+            ? 'Detected'
+            : 'Not linked'
+    },
     {
       label: 'DepotDownloader',
       value: depotDownloaderDetectionError
@@ -390,11 +402,21 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
               <div>
                 <span className="settings-eyebrow">Steam Detection</span>
-                <h3>{hasSteamEnvironment ? 'Steam install already managed' : steamDetected ? 'Steam install detected' : 'No Steam install detected yet'}</h3>
+                <h3>
+                  {hasSteamEnvironment
+                    ? 'Steam install already managed'
+                    : steamDetectionError
+                      ? 'Steam detection is unavailable right now'
+                      : steamDetected
+                        ? 'Steam install detected'
+                        : 'No Steam install detected yet'}
+                </h3>
                 <p>
                   {hasSteamEnvironment
                     ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates while SIMM handles mods, plugins, and support tools.'
-                    : steamDetected
+                    : steamDetectionError
+                      ? 'SIMM could not verify Steam installations on this machine. Retry detection if you expect an existing install to appear.'
+                      : steamDetected
                       ? 'A Steam installation for Schedule I was found on this machine. You can add it to SIMM without making Steam a primary entry card in this flow.'
                       : 'Detect an existing Steam installation if you want to manage your current install inside SIMM without downloading a separate branch copy.'}
                 </p>

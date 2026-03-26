@@ -1343,6 +1343,46 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
     return !!entry.storageId;
   }, []);
 
+  const getEntryStorageIds = useCallback((entry: ModLibraryEntry) => {
+    return Array.from(
+      new Set(
+        [entry.storageId, ...Object.values(entry.storageIdsByRuntime || {})].filter(
+          (id): id is string => Boolean(id)
+        )
+      )
+    );
+  }, []);
+
+  const getContainingDownloadedGroup = useCallback((entry: ModLibraryEntry) => {
+    const entryStorageIds = new Set(getEntryStorageIds(entry));
+    return downloadedGroups.find((group) =>
+      group.entries.some((candidate) =>
+        getEntryStorageIds(candidate).some((storageId) => entryStorageIds.has(storageId))
+      )
+    ) || null;
+  }, [downloadedGroups, getEntryStorageIds]);
+
+  const hasSiblingVersionInstalledInEnvironment = useCallback((
+    entry: ModLibraryEntry,
+    environment: Environment,
+  ) => {
+    const containingGroup = getContainingDownloadedGroup(entry);
+    if (!containingGroup) {
+      return false;
+    }
+
+    const targetStorageIds = new Set(getEntryStorageIds(entry));
+    return containingGroup.entries.some((candidate) => {
+      const candidateStorageIds = getEntryStorageIds(candidate);
+      if (candidateStorageIds.some((storageId) => targetStorageIds.has(storageId))) {
+        return false;
+      }
+      const siblingInstalledIds =
+        candidate.installedInByRuntime?.[environment.runtime] || candidate.installedIn || [];
+      return siblingInstalledIds.includes(environment.id);
+    });
+  }, [getContainingDownloadedGroup, getEntryStorageIds]);
+
   const closeInstallDialog = useCallback(() => {
     setInstallDialog({
       isOpen: false,
@@ -1362,6 +1402,9 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       if (!entrySupportsRuntime(entry, environment.runtime)) {
         continue;
       }
+      if (hasSiblingVersionInstalledInEnvironment(entry, environment)) {
+        continue;
+      }
       const existing = runtimeGroups.get(environment.runtime) || [];
       existing.push(environment.id);
       runtimeGroups.set(environment.runtime, existing);
@@ -1374,29 +1417,18 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       }
       await ApiService.installDownloadedMod(storageId, targetIds);
     }
-  }, [entrySupportsRuntime, environments]);
+  }, [entrySupportsRuntime, environments, hasSiblingVersionInstalledInEnvironment]);
 
   const promptInstallTargets = useCallback(async (entry: ModLibraryEntry, title: string, installMoreOnly: boolean) => {
-    const containingGroup = downloadedGroups.find((group) =>
-      group.entries.some((candidate) => candidate.storageId === entry.storageId)
-    );
-
     const compatible = environments.filter((environment) => {
       if (!entrySupportsRuntime(entry, environment.runtime)) {
         return false;
       }
+      if (hasSiblingVersionInstalledInEnvironment(entry, environment)) {
+        return false;
+      }
       if (!installMoreOnly) {
         return true;
-      }
-      const hasSiblingVersionInstalled = containingGroup?.entries.some((candidate) => {
-        if (candidate.storageId === entry.storageId) {
-          return false;
-        }
-        const siblingInstalledIds = candidate.installedInByRuntime?.[environment.runtime] || candidate.installedIn || [];
-        return siblingInstalledIds.includes(environment.id);
-      }) || false;
-      if (hasSiblingVersionInstalled) {
-        return false;
       }
       const installedIds = entry.installedInByRuntime?.[environment.runtime] || entry.installedIn || [];
       return !installedIds.includes(environment.id);
@@ -1431,7 +1463,7 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       compatibleEnvironments: compatible,
       excludedEnvironments: excluded,
     });
-  }, [downloadedGroups, entrySupportsRuntime, environments, installEntryToEnvironmentIds, notifyLibraryUpdated, notifyModUpdateStateChanged, refreshLibrary, showLibraryNotice]);
+  }, [downloadedGroups, entrySupportsRuntime, environments, hasSiblingVersionInstalledInEnvironment, installEntryToEnvironmentIds, notifyLibraryUpdated, notifyModUpdateStateChanged, refreshLibrary, showLibraryNotice]);
 
   const handleConfirmInstallTargets = useCallback(async () => {
     if (!installDialog.entry || selectedInstallEnvironmentIds.size === 0) {
@@ -1545,13 +1577,6 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
       setDownloadingMlvscan(false);
       setSelectedMlvscanVersion('');
     }
-  };
-
-  const getEntryStorageIds = (entry: ModLibraryEntry): string[] => {
-    const ids = Object.values(entry.storageIdsByRuntime || {}).filter(Boolean) as string[];
-    const unique = Array.from(new Set(ids));
-    if (unique.length > 0) return unique;
-    return entry.storageId ? [entry.storageId] : [];
   };
 
   const handleDeleteDownloadedGroup = async (group: DownloadedModGroup) => {
