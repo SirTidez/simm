@@ -5055,7 +5055,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "simmrust"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "aes-gcm",
  "anyhow",

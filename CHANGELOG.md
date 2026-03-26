@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.6]
+
+- Polished the final desktop editor surfaces, including a redesigned Configuration editor with sidebar-driven file/raw navigation, section tabs, denser structured rows, horizontal tab overflow controls, and corrected raw-editor/full-height behavior.
+- Finished the last high-traffic UI cleanup across Logs, Downloads, Accounts, and Home, tightening overflow handling, flattening redundant cards, and improving dense desktop layout behavior for real-world data.
+- Restyled app scrollbars with a softer glass treatment, removed legacy scrollbar arrows, and standardized hover-based visibility across panes and editors.
+- Fixed environment creation so a user-selected install folder is used as the actual target directory instead of being forcibly renamed to the branch name.
+- Improved DepotDownloader progress parsing and download display behavior so file-count progress is captured more reliably and stale placeholder file counters are no longer shown.
+- Consolidated application logging into a single per-launch `SIMM-log-<timestamp>.log` file, routed more frontend/backend/external-tool output through the shared logger, and expanded sanitization/redaction coverage.
+- Hardened database safety and release maintenance flows with configurable backup retention, manual backup controls in Settings, automatic pre-upgrade/pre-migration snapshots, and additional review-driven fixes across config, mod-library, and wizard behavior.
+
 ## [0.7.5]
 
 - Completed the desktop UI refactor across the app shell and primary workspaces, replacing older modal-first and card-heavy surfaces with a docked workspace model for Home, Welcome, Wizard, Settings, Help, Accounts, Logs, Configuration, Mods, Plugins, UserLibs, and supporting dialogs.
