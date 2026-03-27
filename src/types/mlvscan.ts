@@ -1,4 +1,5 @@
 export type Severity = 'Critical' | 'High' | 'Medium' | 'Low';
+export type ThreatDispositionClassification = 'Clean' | 'Suspicious' | 'KnownThreat';
 
 export interface ScanMetadata {
   coreVersion?: string;
@@ -19,6 +20,15 @@ export interface ScanSummary {
   totalFindings: number;
   countBySeverity: Partial<Record<Severity, number>>;
   triggeredRules?: string[];
+}
+
+export interface ThreatDisposition {
+  classification: ThreatDispositionClassification;
+  headline: string;
+  summary: string;
+  blockingRecommended: boolean;
+  primaryThreatFamilyId?: string | null;
+  relatedFindingIds: string[];
 }
 
 export interface DeveloperGuidance {
@@ -102,6 +112,7 @@ export interface ScanResult {
   metadata: ScanMetadata;
   input: ScanInput;
   summary: ScanSummary;
+  disposition?: ThreatDisposition | null;
   findings: Finding[];
   callChains?: CallChain[];
   dataFlows?: DataFlowChain[];

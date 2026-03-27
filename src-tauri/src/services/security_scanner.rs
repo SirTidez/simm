@@ -1,7 +1,8 @@
 use crate::db;
 use crate::types::{
-    SecurityFindingSeverity, SecurityScanFileReport, SecurityScanPolicy, SecurityScanReport,
-    SecurityScanState, SecurityScanSummary, SecurityScannerStatus, Settings,
+    SecurityFindingSeverity, SecurityScanDisposition, SecurityScanDispositionClassification,
+    SecurityScanFileReport, SecurityScanPolicy, SecurityScanReport, SecurityScanState,
+    SecurityScanSummary, SecurityScannerStatus, Settings,
 };
 use crate::utils::http_identity;
 use anyhow::{Context, Result};
@@ -284,7 +285,9 @@ impl SecurityScannerService {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.lines().any(|line| line.trim_start().starts_with("8.")))
+        Ok(stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("8.")))
     }
 
     async fn detect_global_mlvscan(&self) -> Result<Option<PathBuf>> {
@@ -767,10 +770,21 @@ impl SecurityScannerService {
             .iter()
             .map(|file| file.threat_family_count)
             .sum::<usize>();
+        let disposition = Self::aggregate_disposition(&files);
         let exact_hash_match = files
             .iter()
             .any(|file| Self::has_exact_hash_match(&file.result));
-        let verified = total_findings == 0 && threat_family_count == 0;
+        let known_threat = disposition.as_ref().is_some_and(|value| {
+            value.classification == SecurityScanDispositionClassification::KnownThreat
+        });
+        let suspicious = disposition.as_ref().is_some_and(|value| {
+            value.classification == SecurityScanDispositionClassification::Suspicious
+        });
+        let verified = disposition
+            .as_ref()
+            .map_or(total_findings == 0 && threat_family_count == 0, |value| {
+                value.classification == SecurityScanDispositionClassification::Clean
+            });
 
         let mut summary = SecurityScanSummary {
             state: if verified {
@@ -779,6 +793,7 @@ impl SecurityScannerService {
                 SecurityScanState::Review
             },
             verified,
+            disposition: disposition.clone(),
             highest_severity: highest_severity.clone(),
             total_findings,
             threat_family_count,
@@ -798,7 +813,26 @@ impl SecurityScannerService {
         };
 
         if verified {
-            let message = "MLVScan verified this download with no triggered findings.".to_string();
+            let message = Self::clean_status_message(disposition.as_ref());
+            summary.status_message = Some(message.clone());
+            policy.status_message = Some(message);
+        } else if known_threat && policy.block_critical_findings {
+            let message = Self::known_threat_status_message(true);
+            policy.blocked = true;
+            summary.status_message = Some(message.clone());
+            policy.status_message = Some(message);
+        } else if known_threat {
+            let message = Self::known_threat_status_message(false);
+            policy.requires_confirmation = true;
+            summary.status_message = Some(message.clone());
+            policy.status_message = Some(message);
+        } else if suspicious && policy.prompt_on_high_findings {
+            let message = Self::suspicious_status_message(true);
+            policy.requires_confirmation = true;
+            summary.status_message = Some(message.clone());
+            policy.status_message = Some(message);
+        } else if suspicious {
+            let message = Self::suspicious_status_message(false);
             summary.status_message = Some(message.clone());
             policy.status_message = Some(message);
         } else if exact_hash_match && policy.block_critical_findings {
@@ -858,6 +892,7 @@ impl SecurityScannerService {
             summary: SecurityScanSummary {
                 state: SecurityScanState::Disabled,
                 verified: false,
+                disposition: None,
                 highest_severity: None,
                 total_findings: 0,
                 threat_family_count: 0,
@@ -883,6 +918,7 @@ impl SecurityScannerService {
             summary: SecurityScanSummary {
                 state: SecurityScanState::Unavailable,
                 verified: false,
+                disposition: None,
                 highest_severity: None,
                 total_findings: 0,
                 threat_family_count: 0,
@@ -912,6 +948,7 @@ impl SecurityScannerService {
             summary: SecurityScanSummary {
                 state: SecurityScanState::Skipped,
                 verified: false,
+                disposition: None,
                 highest_severity: None,
                 total_findings: 0,
                 threat_family_count: 0,
@@ -930,6 +967,83 @@ impl SecurityScannerService {
             },
             files: Vec::new(),
         }
+    }
+
+    fn aggregate_disposition(files: &[SecurityScanFileReport]) -> Option<SecurityScanDisposition> {
+        files
+            .iter()
+            .filter_map(Self::file_disposition)
+            .max_by_key(|value| {
+                (
+                    Self::disposition_rank(value.classification),
+                    if value.blocking_recommended { 1 } else { 0 },
+                )
+            })
+    }
+
+    fn file_disposition(file: &SecurityScanFileReport) -> Option<SecurityScanDisposition> {
+        Self::disposition(&file.result).or_else(|| Self::inferred_disposition(&file.result))
+    }
+
+    fn disposition(result: &serde_json::Value) -> Option<SecurityScanDisposition> {
+        result
+            .get("disposition")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<SecurityScanDisposition>(value).ok())
+    }
+
+    fn inferred_disposition(result: &serde_json::Value) -> Option<SecurityScanDisposition> {
+        let total_findings = Self::total_findings(result);
+        let threat_family_count = Self::threat_family_count(result);
+        let exact_hash_match = Self::has_exact_hash_match(result);
+        let highest_severity = Self::highest_severity(result);
+        let primary_threat_family_id = Self::primary_threat_family_id(result);
+
+        let (classification, headline, summary, blocking_recommended) = if exact_hash_match {
+            (
+                SecurityScanDispositionClassification::KnownThreat,
+                "Known threat detected".to_string(),
+                "This file matched a known malicious sample.".to_string(),
+                true,
+            )
+        } else if threat_family_count > 0 {
+            (
+                SecurityScanDispositionClassification::KnownThreat,
+                "Known threat family match".to_string(),
+                "This file matched known threat intelligence indicators.".to_string(),
+                true,
+            )
+        } else if total_findings == 0 {
+            (
+                SecurityScanDispositionClassification::Clean,
+                "No malicious indicators detected".to_string(),
+                "MLVScan classified this file as safe.".to_string(),
+                false,
+            )
+        } else {
+            let severity = highest_severity
+                .as_ref()
+                .map(Self::severity_label)
+                .unwrap_or("suspicious");
+            (
+                SecurityScanDispositionClassification::Suspicious,
+                "Potentially malicious indicators detected".to_string(),
+                format!(
+                    "MLVScan identified {} risk indicators in this file.",
+                    severity
+                ),
+                false,
+            )
+        };
+
+        Some(SecurityScanDisposition {
+            classification,
+            headline,
+            summary,
+            blocking_recommended,
+            primary_threat_family_id,
+            related_finding_ids: Self::related_finding_ids(result),
+        })
     }
 
     fn total_findings(result: &serde_json::Value) -> usize {
@@ -997,6 +1111,57 @@ impl SecurityScannerService {
             .unwrap_or(false)
     }
 
+    fn primary_threat_family_id(result: &serde_json::Value) -> Option<String> {
+        result
+            .get("threatFamilies")
+            .and_then(|value| value.as_array())
+            .and_then(|families| {
+                families.iter().max_by(|left, right| {
+                    let left_exact = left
+                        .get("exactHashMatch")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let right_exact = right
+                        .get("exactHashMatch")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false);
+                    let left_confidence = left
+                        .get("confidence")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or_default();
+                    let right_confidence = right
+                        .get("confidence")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or_default();
+
+                    left_exact
+                        .cmp(&right_exact)
+                        .then_with(|| left_confidence.total_cmp(&right_confidence))
+                })
+            })
+            .and_then(|family| family.get("familyId"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+    }
+
+    fn related_finding_ids(result: &serde_json::Value) -> Vec<String> {
+        result
+            .get("findings")
+            .and_then(|value| value.as_array())
+            .map(|findings| {
+                findings
+                    .iter()
+                    .filter_map(|finding| {
+                        finding
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn severity_rank(severity: &SecurityFindingSeverity) -> usize {
         match severity {
             SecurityFindingSeverity::Low => 1,
@@ -1004,6 +1169,59 @@ impl SecurityScannerService {
             SecurityFindingSeverity::High => 3,
             SecurityFindingSeverity::Critical => 4,
         }
+    }
+
+    fn disposition_rank(classification: SecurityScanDispositionClassification) -> usize {
+        match classification {
+            SecurityScanDispositionClassification::Clean => 1,
+            SecurityScanDispositionClassification::Suspicious => 2,
+            SecurityScanDispositionClassification::KnownThreat => 3,
+        }
+    }
+
+    fn severity_label(severity: &SecurityFindingSeverity) -> &'static str {
+        match severity {
+            SecurityFindingSeverity::Low => "low",
+            SecurityFindingSeverity::Medium => "medium",
+            SecurityFindingSeverity::High => "high",
+            SecurityFindingSeverity::Critical => "critical",
+        }
+    }
+
+    fn clean_status_message(disposition: Option<&SecurityScanDisposition>) -> String {
+        disposition
+            .and_then(|value| Self::non_empty_disposition_text(value))
+            .unwrap_or_else(|| "MLVScan classified this download as safe.".to_string())
+    }
+
+    fn suspicious_status_message(requires_confirmation: bool) -> String {
+        if requires_confirmation {
+            "MLVScan classified this download as potentially malicious. Review the report before continuing.".to_string()
+        } else {
+            "MLVScan classified this download as potentially malicious, but your settings allow installation without confirmation.".to_string()
+        }
+    }
+
+    fn known_threat_status_message(blocked: bool) -> String {
+        if blocked {
+            "MLVScan classified this download as a known threat. Current policy blocked installation.".to_string()
+        } else {
+            "MLVScan classified this download as a known threat. Critical blocking is disabled in settings, so review the report before continuing.".to_string()
+        }
+    }
+
+    fn non_empty_disposition_text(disposition: &SecurityScanDisposition) -> Option<String> {
+        let summary = disposition.summary.trim();
+        if !summary.is_empty() {
+            return Some(summary.to_string());
+        }
+
+        let headline = disposition.headline.trim();
+        if !headline.is_empty() {
+            return Some(headline.to_string());
+        }
+
+        None
     }
 
     fn hash_bytes(bytes: &[u8]) -> String {
@@ -1031,4 +1249,276 @@ impl Default for SecurityScannerService {
 enum ArchiveKind {
     Zip,
     Rar,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Platform, Theme};
+    use serde_json::json;
+
+    fn test_cli_info() -> CliInfo {
+        CliInfo {
+            platform_version: "1.2.3".to_string(),
+            schema_version: "2026-03".to_string(),
+        }
+    }
+
+    fn test_settings() -> Settings {
+        Settings {
+            default_download_dir: "C:/mods".to_string(),
+            depot_downloader_path: None,
+            steam_username: None,
+            max_concurrent_downloads: 1,
+            platform: Platform::Windows,
+            language: "en-US".to_string(),
+            theme: Theme::Dark,
+            melon_loader_version: None,
+            auto_install_melon_loader: None,
+            enable_security_scanner: Some(true),
+            auto_install_security_scanner: Some(true),
+            block_critical_scans: Some(true),
+            prompt_on_high_scans: Some(true),
+            show_security_scan_badges: Some(true),
+            update_check_interval: None,
+            auto_check_updates: None,
+            log_level: None,
+            nexus_mods_api_key: None,
+            nexus_mods_rate_limits: None,
+            nexus_mods_game_id: None,
+            nexus_mods_app_slug: None,
+            thunderstore_game_id: None,
+            auto_update_mods: None,
+            mod_update_check_interval: None,
+            mod_icon_cache_limit_mb: None,
+            database_backup_count: None,
+            log_retention_days: None,
+        }
+    }
+
+    fn file_report(result: serde_json::Value) -> SecurityScanFileReport {
+        SecurityScanFileReport {
+            file_name: "Example.dll".to_string(),
+            display_path: "Example.dll".to_string(),
+            sha256_hash: SecurityScannerService::input_hash(&result),
+            highest_severity: SecurityScannerService::highest_severity(&result),
+            total_findings: SecurityScannerService::total_findings(&result),
+            threat_family_count: SecurityScannerService::threat_family_count(&result),
+            result,
+        }
+    }
+
+    #[test]
+    fn build_report_uses_clean_disposition_for_verified_badges() {
+        let report = SecurityScannerService::build_report(
+            vec![file_report(json!({
+                "schemaVersion": "1.0.0",
+                "metadata": {
+                    "platformVersion": "1.2.3",
+                    "schemaVersion": "2026-03",
+                    "timestamp": "2026-03-26T00:00:00Z"
+                },
+                "input": {
+                    "fileName": "Example.dll",
+                    "sizeBytes": 128,
+                    "sha256Hash": "abc123"
+                },
+                "summary": {
+                    "totalFindings": 0,
+                    "countBySeverity": {}
+                },
+                "findings": [],
+                "threatFamilies": [],
+                "disposition": {
+                    "classification": "Clean",
+                    "headline": "Safe",
+                    "summary": "No malicious indicators were identified.",
+                    "blockingRecommended": false,
+                    "relatedFindingIds": []
+                }
+            }))],
+            test_cli_info(),
+            &test_settings(),
+        );
+
+        assert_eq!(report.summary.state, SecurityScanState::Verified);
+        assert!(report.summary.verified);
+        assert_eq!(
+            report
+                .summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::Clean)
+        );
+        assert_eq!(
+            report.summary.status_message.as_deref(),
+            Some("No malicious indicators were identified.")
+        );
+        assert!(!report.policy.blocked);
+        assert!(!report.policy.requires_confirmation);
+    }
+
+    #[test]
+    fn build_report_requires_confirmation_for_suspicious_disposition() {
+        let report = SecurityScannerService::build_report(
+            vec![file_report(json!({
+                "schemaVersion": "1.0.0",
+                "metadata": {
+                    "platformVersion": "1.2.3",
+                    "schemaVersion": "2026-03",
+                    "timestamp": "2026-03-26T00:00:00Z"
+                },
+                "input": {
+                    "fileName": "Example.dll",
+                    "sizeBytes": 128,
+                    "sha256Hash": "abc123"
+                },
+                "summary": {
+                    "totalFindings": 1,
+                    "countBySeverity": {
+                        "High": 1
+                    }
+                },
+                "findings": [
+                    {
+                        "id": "finding-1",
+                        "description": "Downloads and runs external payloads",
+                        "severity": "High",
+                        "location": "Example::Run()"
+                    }
+                ],
+                "threatFamilies": [],
+                "disposition": {
+                    "classification": "Suspicious",
+                    "headline": "Potentially malicious",
+                    "summary": "Heuristic checks identified suspicious behavior.",
+                    "blockingRecommended": false,
+                    "relatedFindingIds": ["finding-1"]
+                }
+            }))],
+            test_cli_info(),
+            &test_settings(),
+        );
+
+        assert_eq!(report.summary.state, SecurityScanState::Review);
+        assert!(!report.summary.verified);
+        assert_eq!(
+            report
+                .summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::Suspicious)
+        );
+        assert!(!report.policy.blocked);
+        assert!(report.policy.requires_confirmation);
+        assert_eq!(
+            report.summary.status_message.as_deref(),
+            Some(
+                "MLVScan classified this download as potentially malicious. Review the report before continuing."
+            )
+        );
+    }
+
+    #[test]
+    fn build_report_aggregates_to_known_threat_and_blocks() {
+        let report = SecurityScannerService::build_report(
+            vec![
+                file_report(json!({
+                    "schemaVersion": "1.0.0",
+                    "metadata": {
+                        "platformVersion": "1.2.3",
+                        "schemaVersion": "2026-03",
+                        "timestamp": "2026-03-26T00:00:00Z"
+                    },
+                    "input": {
+                        "fileName": "Safe.dll",
+                        "sizeBytes": 128,
+                        "sha256Hash": "safe"
+                    },
+                    "summary": {
+                        "totalFindings": 0,
+                        "countBySeverity": {}
+                    },
+                    "findings": [],
+                    "threatFamilies": [],
+                    "disposition": {
+                        "classification": "Clean",
+                        "headline": "Safe",
+                        "summary": "No malicious indicators were identified.",
+                        "blockingRecommended": false,
+                        "relatedFindingIds": []
+                    }
+                })),
+                file_report(json!({
+                    "schemaVersion": "1.0.0",
+                    "metadata": {
+                        "platformVersion": "1.2.3",
+                        "schemaVersion": "2026-03",
+                        "timestamp": "2026-03-26T00:00:00Z"
+                    },
+                    "input": {
+                        "fileName": "Threat.dll",
+                        "sizeBytes": 128,
+                        "sha256Hash": "threat"
+                    },
+                    "summary": {
+                        "totalFindings": 1,
+                        "countBySeverity": {
+                            "Critical": 1
+                        }
+                    },
+                    "findings": [
+                        {
+                            "id": "finding-9",
+                            "description": "Matches known credential stealer",
+                            "severity": "Critical",
+                            "location": "Threat::Run()"
+                        }
+                    ],
+                    "threatFamilies": [
+                        {
+                            "familyId": "stealer",
+                            "variantId": "v1",
+                            "displayName": "Credential Stealer",
+                            "summary": "Known credential theft malware",
+                            "matchKind": "heuristic",
+                            "confidence": 0.97,
+                            "exactHashMatch": false,
+                            "matchedRules": ["RULE-1"],
+                            "advisorySlugs": [],
+                            "evidence": []
+                        }
+                    ],
+                    "disposition": {
+                        "classification": "KnownThreat",
+                        "headline": "Known threat",
+                        "summary": "Threat intelligence matched this file to a known malware family.",
+                        "blockingRecommended": true,
+                        "primaryThreatFamilyId": "stealer",
+                        "relatedFindingIds": ["finding-9"]
+                    }
+                })),
+            ],
+            test_cli_info(),
+            &test_settings(),
+        );
+
+        assert_eq!(
+            report
+                .summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::KnownThreat)
+        );
+        assert!(!report.summary.verified);
+        assert!(report.policy.blocked);
+        assert!(!report.policy.requires_confirmation);
+        assert_eq!(
+            report.summary.status_message.as_deref(),
+            Some("MLVScan classified this download as a known threat. Current policy blocked installation.")
+        );
+    }
 }

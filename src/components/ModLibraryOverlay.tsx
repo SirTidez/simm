@@ -7,6 +7,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { SecurityScanReportOverlay } from './SecurityScanReportOverlay';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { InstallTargetsDialog } from './InstallTargetsDialog';
+import { getSecurityBadgeConfig } from './securityScanHelpers';
 import type { Environment, ModLibraryEntry, ModLibraryResult, NexusMod, NexusModFile, SecurityScanReport, SecurityScanSummary } from '../types';
 
 interface ThunderstorePackage {
@@ -207,57 +208,6 @@ const areVersionsEquivalent = (a?: string, b?: string): boolean => {
 
 const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
   return !!value && typeof value === 'object' && 'summary' in (value as Record<string, unknown>) && Array.isArray((value as { files?: unknown[] }).files);
-};
-
-const getSecurityBadgeConfig = (summary?: SecurityScanSummary) => {
-  if (!summary) {
-    return null;
-  }
-
-  if (summary.state === 'verified') {
-    return {
-      label: 'Scanned for Viruses',
-      icon: 'fa-shield-check',
-      background: 'rgba(31, 105, 72, 0.24)',
-      border: '#3cc79055',
-      color: '#bdf3d8',
-    };
-  }
-
-  if (summary.state === 'review') {
-    const severityLabel = summary.highestSeverity 
-      ? `${summary.highestSeverity} Risk`
-      : 'Needs Review';
-    return {
-      label: severityLabel,
-      icon: 'fa-shield-exclamation',
-      background: 'rgba(104, 72, 27, 0.28)',
-      border: '#f0b35e55',
-      color: '#ffd9aa',
-    };
-  }
-
-  if (summary.state === 'unavailable') {
-    return {
-      label: 'Scan Unavailable',
-      icon: 'fa-circle-question',
-      background: 'rgba(48, 67, 96, 0.32)',
-      border: '#7fa1c855',
-      color: '#d2e3fa',
-    };
-  }
-
-  if (summary.state === 'skipped') {
-    return {
-      label: 'Scan Not Applicable',
-      icon: 'fa-file-circle-question',
-      background: 'rgba(48, 67, 96, 0.24)',
-      border: '#7fa1c833',
-      color: '#c7d8ef',
-    };
-  }
-
-  return null;
 };
 
 const getSourceBadgeLabel = (source?: ModLibraryEntry['source']): string => {
@@ -3824,6 +3774,15 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
         onConfirm={() => void handleConfirmInstallTargets()}
         installing={installingTargets}
       />
+      <SecurityScanReportOverlay
+        isOpen={!!activeSecurityReport}
+        title={activeSecurityReport?.title || 'Security Findings'}
+        report={activeSecurityReport?.report || null}
+        onClose={closeSecurityReport}
+        onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
+        confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Download'}
+        busy={securityActionBusy}
+      />
       {runtimePrompt && (
         <div className="modal-overlay modal-overlay-nested" onClick={() => setRuntimePrompt(null)}>
           <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px' }}>
@@ -4061,6 +4020,9 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                     <div className="workspace-collection__list">
                       {displayedDownloadedGroups.map((group) => {
                         const activeEntry = getActiveEntryForGroup(group) || group.entries[0];
+                        const securityBadge = settings?.showSecurityScanBadges !== false
+                          ? getSecurityBadgeConfig(activeEntry?.securityScan)
+                          : null;
                         const isSelected = activeModView?.kind === 'downloaded' && activeModView.id === group.key;
                         return (
                           <div
@@ -4081,6 +4043,18 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                                 <span className="workspace-pill">{`${group.installedIn.length} env${group.installedIn.length === 1 ? '' : 's'}`}</span>
                                 {group.availableRuntimes.map((runtime) => <span key={`${group.key}-${runtime}`} className="workspace-pill">{runtime}</span>)}
                                 {isGroupUpdateAvailable(group) && <span className="workspace-pill workspace-pill--warning">Update available</span>}
+                                {securityBadge && (
+                                  <span
+                                    className="workspace-pill"
+                                    style={{
+                                      border: `1px solid ${securityBadge.border}`,
+                                      background: securityBadge.background,
+                                      color: securityBadge.color,
+                                    }}
+                                  >
+                                    {securityBadge.label}
+                                  </span>
+                                )}
                               </div>
                               <p className="workspace-collection__row-summary">{activeEntry?.summary || 'No summary provided.'}</p>
                             </div>
@@ -4108,6 +4082,28 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                       {selectedDownloadedGroup.author ? ` • ${selectedDownloadedGroup.author}` : ''}
                       {` • ${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? '' : 's'}`}
                     </div>
+                    {settings?.showSecurityScanBadges !== false && getSecurityBadgeConfig(selectedDownloadedEntry.securityScan) && (
+                      <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                            borderRadius: '999px',
+                            border: `1px solid ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.border}`,
+                            background: getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.background,
+                            color: getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.color,
+                            padding: '0.1rem 0.4rem',
+                            fontSize: '0.72rem',
+                            whiteSpace: 'nowrap',
+                            lineHeight: 1,
+                          }}
+                        >
+                          <i className={`fas ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                          {getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.label}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <p className="workspace-inspector-card__summary">{selectedDownloadedEntry.summary || 'No summary provided.'}</p>
@@ -4136,6 +4132,14 @@ export function ModLibraryOverlay({ isOpen, onClose, focusStorageId, focusReques
                   </select>
                 </div>
                 <div className="workspace-inspector-card__actions">
+                  {selectedDownloadedEntry.storageId && selectedDownloadedEntry.securityScan && (
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => void openStoredSecurityReport(selectedDownloadedEntry.storageId, `Security Findings - ${selectedDownloadedEntry.displayName}`)}
+                    >
+                      Security Report
+                    </button>
+                  )}
                   <button className="btn btn-primary" onClick={() => void promptInstallTargets(selectedDownloadedEntry, `Install ${selectedDownloadedEntry.displayName}`, selectedDownloadedGroup.installedIn.length > 0)}>
                     {selectedDownloadedGroup.installedIn.length > 0 ? 'Install to more…' : 'Install…'}
                   </button>

@@ -272,6 +272,7 @@ export class ApiService {
       updatedAt?: string;
       tags?: string[];
       installedAt?: number;
+      securityScan?: SecurityScanSummary;
     }>;
     modsDirectory: string;
     count: number;

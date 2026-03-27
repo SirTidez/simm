@@ -6,6 +6,7 @@ import type {
   Severity,
   ThreatFamily,
 } from '../types';
+import { getSecurityDispositionBadgeConfig } from './securityScanHelpers';
 
 interface SecurityScanReportOverlayProps {
   isOpen: boolean;
@@ -40,6 +41,13 @@ const summaryStyles = {
     border: '#f0a94b55',
     glow: 'rgba(240, 169, 75, 0.16)',
     icon: 'fa-shield-exclamation',
+  },
+  threat: {
+    label: 'Known Threat',
+    tone: '#d15a64',
+    border: '#ff7b8655',
+    glow: 'rgba(209, 90, 100, 0.16)',
+    icon: 'fa-ban',
   },
   blocked: {
     label: 'Blocked by Policy',
@@ -94,6 +102,14 @@ const getFindingKey = (finding: Finding, index: number): string => finding.id ||
 const getSummaryStyle = (summary: SecurityScanSummary, blocked: boolean) => {
   if (blocked) {
     return summaryStyles.blocked;
+  }
+
+  if (summary.disposition?.classification === 'KnownThreat') {
+    return summaryStyles.threat;
+  }
+
+  if (summary.disposition?.classification === 'Clean') {
+    return summaryStyles.verified;
   }
 
   if (summary.state === 'verified') {
@@ -185,6 +201,10 @@ export function SecurityScanReportOverlay({
   const summaryStyle = getSummaryStyle(report.summary, report.policy.blocked);
   const threatFamilyLabel = getThreatFamilyLabel(families);
   const topFindings = findings.slice(0, 3);
+  const summaryDisposition = report.summary.disposition;
+  const activeDisposition = activeResult?.disposition || summaryDisposition;
+  const summaryDispositionBadge = getSecurityDispositionBadgeConfig(summaryDisposition);
+  const activeDispositionBadge = getSecurityDispositionBadgeConfig(activeDisposition);
 
   return (
     <div className="modal-overlay modal-overlay-nested" onClick={onClose}>
@@ -194,7 +214,7 @@ export function SecurityScanReportOverlay({
         style={{
           maxWidth: '1240px',
           width: 'min(1240px, calc(100vw - 2rem))',
-          maxHeight: 'calc(100vh - 2rem)',
+          maxHeight: 'calc(100vh - max(clamp(8rem, 16vw, 10rem), 140px))',
           display: 'flex',
           flexDirection: 'column',
           padding: 0,
@@ -230,7 +250,16 @@ export function SecurityScanReportOverlay({
           <button className="modal-close" onClick={onClose}>×</button>
         </div>
 
-        <div style={{ padding: '1rem 1.25rem 1.25rem', overflowY: 'auto', display: 'grid', gap: '1rem' }}>
+        <div
+          style={{
+            flex: '1 1 auto',
+            minHeight: 0,
+            padding: '1rem 1.25rem 1.25rem',
+            overflowY: 'auto',
+            display: 'grid',
+            gap: '1rem',
+          }}
+        >
           {files.length > 1 && (
             <div style={{ display: 'grid', gap: '0.55rem' }}>
               {files.map((file, index) => (
@@ -279,7 +308,37 @@ export function SecurityScanReportOverlay({
                       Highest: {report.summary.highestSeverity}
                     </span>
                   )}
+                  {summaryDispositionBadge && (
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '0.24rem 0.55rem',
+                        borderRadius: '999px',
+                        border: `1px solid ${summaryDispositionBadge.border}`,
+                        background: summaryDispositionBadge.background,
+                        color: summaryDispositionBadge.color,
+                        fontSize: '0.74rem',
+                        lineHeight: 1,
+                        whiteSpace: 'nowrap',
+                        verticalAlign: 'middle',
+                      }}
+                    >
+                      {summaryDispositionBadge.label}
+                    </span>
+                  )}
                 </div>
+                {summaryDisposition && (summaryDisposition.headline || summaryDisposition.summary) && (
+                  <div style={{ padding: '0.8rem 0.9rem', borderRadius: '12px', border: '1px solid #324158', background: 'rgba(18, 24, 36, 0.68)', color: '#d7e4f6' }}>
+                    {summaryDisposition.headline && (
+                      <strong style={{ display: 'block', marginBottom: summaryDisposition.summary ? '0.2rem' : 0, color: '#eef5ff' }}>
+                        {summaryDisposition.headline}
+                      </strong>
+                    )}
+                    {summaryDisposition.summary && <span>{summaryDisposition.summary}</span>}
+                  </div>
+                )}
                 {threatFamilyLabel && (
                   <div style={{ padding: '0.8rem 0.9rem', borderRadius: '12px', border: '1px solid #d67a2f55', background: 'rgba(95, 53, 19, 0.36)', color: '#ffd7ab' }}>
                     <strong style={{ display: 'block', marginBottom: '0.2rem' }}>Threat intelligence</strong>
@@ -307,6 +366,27 @@ export function SecurityScanReportOverlay({
                   <span style={{ color: '#8ea7c6' }}>Scanned</span>
                   <strong style={{ color: '#edf5ff', textAlign: 'right' }}>{formatTimestamp(report.summary.scannedAt)}</strong>
                 </div>
+                {activeDispositionBadge && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
+                    <span style={{ color: '#8ea7c6' }}>Disposition</span>
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '0.24rem 0.55rem',
+                        borderRadius: '999px',
+                        border: `1px solid ${activeDispositionBadge.border}`,
+                        background: activeDispositionBadge.background,
+                        color: activeDispositionBadge.color,
+                        fontSize: '0.74rem',
+                        lineHeight: 1,
+                      }}
+                    >
+                      {activeDispositionBadge.label}
+                    </span>
+                  </div>
+                )}
                 <div style={{ display: 'grid', gap: '0.35rem' }}>
                   <span style={{ color: '#8ea7c6' }}>SHA256</span>
                   <div style={{ borderRadius: '10px', border: '1px solid #324158', background: 'rgba(16, 22, 33, 0.88)', padding: '0.75rem', color: '#dce9fb', fontFamily: 'monospace', fontSize: '0.73rem', wordBreak: 'break-all' }}>
@@ -477,7 +557,17 @@ export function SecurityScanReportOverlay({
           </section>
         </div>
 
-        <div style={{ padding: '0.95rem 1.25rem 1.15rem', borderTop: '1px solid #2c3a50', display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', flexWrap: 'wrap' }}>
+        <div
+          style={{
+            flexShrink: 0,
+            padding: '0.95rem 1.25rem 1.15rem',
+            borderTop: '1px solid #2c3a50',
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: '0.6rem',
+            flexWrap: 'wrap',
+          }}
+        >
           <button className="btn btn-secondary" onClick={onClose}>
             Close
           </button>

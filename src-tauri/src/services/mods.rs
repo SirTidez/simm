@@ -1,6 +1,8 @@
 use crate::services::settings::SettingsService;
 use crate::types::{
-    Environment, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, SecurityScanReport,
+    Environment, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource,
+    SecurityFindingSeverity, SecurityScanDisposition, SecurityScanDispositionClassification,
+    SecurityScanPolicy, SecurityScanReport, SecurityScanState, SecurityScanSummary,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -69,6 +71,7 @@ struct ModInfo {
     tags: Option<Vec<String>>,
     #[serde(with = "chrono::serde::ts_seconds_option")]
     installed_at: Option<chrono::DateTime<chrono::Utc>>,
+    security_scan: Option<crate::types::SecurityScanSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -381,6 +384,147 @@ impl ModsService {
         }
     }
 
+    fn parse_security_scan_state_compat(raw: &str) -> Option<SecurityScanState> {
+        match raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "")
+            .as_str()
+        {
+            "verified" => Some(SecurityScanState::Verified),
+            "review" => Some(SecurityScanState::Review),
+            "unavailable" => Some(SecurityScanState::Unavailable),
+            "disabled" => Some(SecurityScanState::Disabled),
+            "skipped" => Some(SecurityScanState::Skipped),
+            _ => None,
+        }
+    }
+
+    fn parse_security_finding_severity_compat(raw: &str) -> Option<SecurityFindingSeverity> {
+        match raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "")
+            .as_str()
+        {
+            "low" => Some(SecurityFindingSeverity::Low),
+            "medium" => Some(SecurityFindingSeverity::Medium),
+            "high" => Some(SecurityFindingSeverity::High),
+            "critical" => Some(SecurityFindingSeverity::Critical),
+            _ => None,
+        }
+    }
+
+    fn parse_security_disposition_classification_compat(
+        raw: &str,
+    ) -> Option<SecurityScanDispositionClassification> {
+        match raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-', ' '], "")
+            .as_str()
+        {
+            "clean" => Some(SecurityScanDispositionClassification::Clean),
+            "suspicious" => Some(SecurityScanDispositionClassification::Suspicious),
+            "knownthreat" => Some(SecurityScanDispositionClassification::KnownThreat),
+            _ => None,
+        }
+    }
+
+    fn parse_security_scan_disposition_compat(
+        value: &serde_json::Value,
+    ) -> Option<SecurityScanDisposition> {
+        if let Ok(disposition) = serde_json::from_value::<SecurityScanDisposition>(value.clone()) {
+            return Some(disposition);
+        }
+
+        if !value.is_object() {
+            return None;
+        }
+
+        let classification = Self::metadata_string_from_keys(value, &["classification"])
+            .and_then(|raw| Self::parse_security_disposition_classification_compat(&raw))?;
+
+        Some(SecurityScanDisposition {
+            classification,
+            headline: Self::metadata_string_from_keys(value, &["headline"]).unwrap_or_default(),
+            summary: Self::metadata_string_from_keys(value, &["summary"]).unwrap_or_default(),
+            blocking_recommended: Self::metadata_bool_from_keys(
+                value,
+                &["blockingRecommended", "blocking_recommended"],
+            )
+            .unwrap_or(false),
+            primary_threat_family_id: Self::metadata_string_from_keys(
+                value,
+                &["primaryThreatFamilyId", "primary_threat_family_id"],
+            ),
+            related_finding_ids: Self::metadata_tags_from_keys(
+                value,
+                &["relatedFindingIds", "related_finding_ids"],
+            )
+            .unwrap_or_default(),
+        })
+    }
+
+    fn parse_security_scan_summary_compat(
+        value: &serde_json::Value,
+    ) -> Option<SecurityScanSummary> {
+        if let Ok(summary) = serde_json::from_value::<SecurityScanSummary>(value.clone()) {
+            return Some(summary);
+        }
+
+        if !value.is_object() {
+            return None;
+        }
+
+        let state = Self::metadata_string_from_keys(value, &["state"])
+            .and_then(|raw| Self::parse_security_scan_state_compat(&raw))?;
+
+        Some(SecurityScanSummary {
+            state: state.clone(),
+            verified: Self::metadata_bool_from_keys(value, &["verified"])
+                .unwrap_or(matches!(state, SecurityScanState::Verified)),
+            disposition: value
+                .get("disposition")
+                .and_then(Self::parse_security_scan_disposition_compat),
+            highest_severity: Self::metadata_string_from_keys(
+                value,
+                &["highestSeverity", "highest_severity"],
+            )
+            .and_then(|raw| Self::parse_security_finding_severity_compat(&raw)),
+            total_findings: Self::metadata_u64_from_keys(
+                value,
+                &["totalFindings", "total_findings"],
+            )
+            .unwrap_or(0) as usize,
+            threat_family_count: Self::metadata_u64_from_keys(
+                value,
+                &["threatFamilyCount", "threat_family_count"],
+            )
+            .unwrap_or(0) as usize,
+            scanned_at: Self::metadata_datetime_from_keys(value, &["scannedAt", "scanned_at"]),
+            scanner_version: Self::metadata_string_from_keys(
+                value,
+                &["scannerVersion", "scanner_version"],
+            ),
+            schema_version: Self::metadata_string_from_keys(
+                value,
+                &["schemaVersion", "schema_version"],
+            ),
+            status_message: Self::metadata_string_from_keys(
+                value,
+                &["statusMessage", "status_message"],
+            ),
+        })
+    }
+
+    fn security_scan_summary_from_metadata(
+        value: &serde_json::Value,
+    ) -> Option<SecurityScanSummary> {
+        Self::metadata_field(value, &["securityScan", "security_scan"])
+            .and_then(Self::parse_security_scan_summary_compat)
+    }
+
     fn parse_storage_metadata_compat(value: &serde_json::Value) -> Option<ModMetadata> {
         if !value.is_object() {
             return None;
@@ -466,11 +610,7 @@ impl ModsService {
                 &["modStorageId", "mod_storage_id", "storageId", "storage_id"],
             ),
             symlink_paths: Self::metadata_tags_from_keys(value, &["symlinkPaths", "symlink_paths"]),
-            security_scan: value
-                .get("securityScan")
-                .cloned()
-                .or_else(|| value.get("security_scan").cloned())
-                .and_then(|scan| serde_json::from_value(scan).ok()),
+            security_scan: Self::security_scan_summary_from_metadata(value),
         })
     }
 
@@ -1032,13 +1172,25 @@ impl ModsService {
             .await
             .context("Failed to read storage metadata file")?;
         match serde_json::from_str::<ModMetadata>(&content) {
-            Ok(metadata) => Ok(Some(metadata)),
+            Ok(mut metadata) => {
+                if let Some(summary) = self.load_security_scan_report_summary(storage_path).await? {
+                    metadata.security_scan = Some(summary);
+                }
+
+                Ok(Some(metadata))
+            }
             Err(parse_error) => {
                 let migrated = serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
                     .and_then(|value| Self::parse_storage_metadata_compat(&value));
 
-                if let Some(metadata) = migrated {
+                if let Some(mut metadata) = migrated {
+                    if let Some(summary) =
+                        self.load_security_scan_report_summary(storage_path).await?
+                    {
+                        metadata.security_scan = Some(summary);
+                    }
+
                     if let Err(save_error) =
                         self.save_storage_metadata(storage_path, &metadata).await
                     {
@@ -1080,6 +1232,88 @@ impl ModsService {
         storage_path.join(STORAGE_SECURITY_SCAN_FILE)
     }
 
+    async fn load_security_scan_report_summary(
+        &self,
+        storage_path: &Path,
+    ) -> Result<Option<SecurityScanSummary>> {
+        let report_path = self.storage_security_scan_path(storage_path);
+        if !report_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&report_path)
+            .await
+            .context("Failed to read security scan report")?;
+
+        if let Ok(report) = serde_json::from_str::<SecurityScanReport>(&content) {
+            return Ok(Some(report.summary));
+        }
+
+        let summary = serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("summary")
+                    .and_then(Self::parse_security_scan_summary_compat)
+            });
+
+        Ok(summary)
+    }
+
+    fn build_summary_only_security_scan_report(summary: SecurityScanSummary) -> SecurityScanReport {
+        let status_message = summary.status_message.clone();
+        let disposition = summary
+            .disposition
+            .as_ref()
+            .map(|value| value.classification);
+        let enabled = !matches!(summary.state, SecurityScanState::Disabled);
+        let blocked = matches!(
+            disposition,
+            Some(SecurityScanDispositionClassification::KnownThreat)
+        );
+        let requires_confirmation = matches!(
+            disposition,
+            Some(SecurityScanDispositionClassification::Suspicious)
+        );
+
+        SecurityScanReport {
+            summary,
+            policy: SecurityScanPolicy {
+                enabled,
+                requires_confirmation,
+                blocked,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message,
+            },
+            files: Vec::new(),
+        }
+    }
+
+    async fn resolve_storage_security_scan_summary(
+        &self,
+        storage_id: &str,
+        fallback: Option<SecurityScanSummary>,
+    ) -> Result<Option<SecurityScanSummary>> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_path = storage_root.join(storage_id);
+
+        if let Some(summary) = self
+            .load_security_scan_report_summary(&storage_path)
+            .await?
+        {
+            return Ok(Some(summary));
+        }
+
+        if let Some(metadata) = self.load_storage_metadata(&storage_path).await? {
+            if metadata.security_scan.is_some() {
+                return Ok(metadata.security_scan);
+            }
+        }
+
+        Ok(fallback)
+    }
+
     pub async fn save_security_scan_report(
         &self,
         storage_id: &str,
@@ -1107,16 +1341,21 @@ impl ModsService {
         let storage_root = self.get_mods_storage_dir().await?;
         let storage_path = storage_root.join(storage_id);
         let report_path = self.storage_security_scan_path(&storage_path);
-        if !report_path.exists() {
-            return Ok(None);
+        if report_path.exists() {
+            let content = fs::read_to_string(&report_path)
+                .await
+                .context("Failed to read security scan report")?;
+            let report = serde_json::from_str::<SecurityScanReport>(&content)
+                .context("Failed to parse security scan report")?;
+            return Ok(Some(report));
         }
 
-        let content = fs::read_to_string(&report_path)
-            .await
-            .context("Failed to read security scan report")?;
-        let report = serde_json::from_str::<SecurityScanReport>(&content)
-            .context("Failed to parse security scan report")?;
-        Ok(Some(report))
+        let fallback_summary = self
+            .load_storage_metadata(&storage_path)
+            .await?
+            .and_then(|metadata| metadata.security_scan);
+
+        Ok(fallback_summary.map(Self::build_summary_only_security_scan_report))
     }
 
     pub async fn upsert_storage_metadata_by_id(
@@ -2195,6 +2434,15 @@ impl ModsService {
             let updated_at = file_metadata.as_ref().and_then(|m| m.updated_at.clone());
             let tags = file_metadata.as_ref().and_then(|m| m.tags.clone());
             let installed_at = file_metadata.as_ref().and_then(|m| m.installed_at);
+            let security_scan = if let Some(storage_id) = mod_storage_id.as_deref() {
+                self.resolve_storage_security_scan_summary(
+                    storage_id,
+                    file_metadata.as_ref().and_then(|m| m.security_scan.clone()),
+                )
+                .await?
+            } else {
+                file_metadata.as_ref().and_then(|m| m.security_scan.clone())
+            };
 
             mods.push(ModInfo {
                 name: mod_name.clone(),
@@ -2214,6 +2462,7 @@ impl ModsService {
                 updated_at,
                 tags,
                 installed_at,
+                security_scan,
             });
         }
 
@@ -2706,10 +2955,7 @@ impl ModsService {
             runtime_match: None,
             mod_storage_id: Some(mod_id.clone()),
             symlink_paths: None,
-            security_scan: metadata_ref
-                .and_then(|m| m.get("securityScan"))
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok()),
+            security_scan: metadata_ref.and_then(Self::security_scan_summary_from_metadata),
         };
 
         self.save_storage_metadata(&mod_storage_base, &storage_metadata)
@@ -2735,7 +2981,10 @@ impl ModsService {
         env_runtime: &crate::types::Runtime,
     ) -> Result<()> {
         if !source_dir.exists() {
-            eprintln!("[install_storage_entries] Source dir does not exist: {}", source_dir.display());
+            eprintln!(
+                "[install_storage_entries] Source dir does not exist: {}",
+                source_dir.display()
+            );
             return Ok(());
         }
 
@@ -2778,7 +3027,11 @@ impl ModsService {
             }
 
             if metadata.is_dir() {
-                eprintln!("[install_storage_entries] Creating directory symlink: {} -> {}", path.display(), dest_path.display());
+                eprintln!(
+                    "[install_storage_entries] Creating directory symlink: {} -> {}",
+                    path.display(),
+                    dest_path.display()
+                );
                 match self.create_symlink_dir(&path, &dest_path).await {
                     Ok(_) => {
                         installed_files.push(file_name.to_string());
@@ -2789,7 +3042,11 @@ impl ModsService {
                     }
                 }
             } else {
-                eprintln!("[install_storage_entries] Creating file symlink: {} -> {}", path.display(), dest_path.display());
+                eprintln!(
+                    "[install_storage_entries] Creating file symlink: {} -> {}",
+                    path.display(),
+                    dest_path.display()
+                );
                 match self.create_symlink_file(&path, &dest_path).await {
                     Ok(_) => {
                         installed_files.push(file_name.to_string());
@@ -2876,7 +3133,12 @@ impl ModsService {
             metadata_map.insert(file_name.to_string(), meta);
         }
 
-        eprintln!("[install_storage_entries] Processed {} entries from {}, installed {} files", file_count, source_dir.display(), installed_files.len());
+        eprintln!(
+            "[install_storage_entries] Processed {} entries from {}, installed {} files",
+            file_count,
+            source_dir.display(),
+            installed_files.len()
+        );
 
         Ok(())
     }
@@ -2889,7 +3151,10 @@ impl ModsService {
         let storage_dir = self.get_mods_storage_dir().await?;
         let storage_base = storage_dir.join(storage_id);
         if !storage_base.exists() {
-            return Err(anyhow::anyhow!("Mod storage not found at: {}", storage_base.display()));
+            return Err(anyhow::anyhow!(
+                "Mod storage not found at: {}",
+                storage_base.display()
+            ));
         }
 
         let storage_mods = storage_base.join("Mods");
@@ -2897,10 +3162,25 @@ impl ModsService {
         let storage_userlibs = storage_base.join("UserLibs");
 
         // Debug logging to help diagnose issues
-        eprintln!("[install_storage_mod_to_envs] Storage base: {}", storage_base.display());
-        eprintln!("[install_storage_mod_to_envs] Mods dir exists: {}, path: {}", storage_mods.exists(), storage_mods.display());
-        eprintln!("[install_storage_mod_to_envs] Plugins dir exists: {}, path: {}", storage_plugins.exists(), storage_plugins.display());
-        eprintln!("[install_storage_mod_to_envs] UserLibs dir exists: {}, path: {}", storage_userlibs.exists(), storage_userlibs.display());
+        eprintln!(
+            "[install_storage_mod_to_envs] Storage base: {}",
+            storage_base.display()
+        );
+        eprintln!(
+            "[install_storage_mod_to_envs] Mods dir exists: {}, path: {}",
+            storage_mods.exists(),
+            storage_mods.display()
+        );
+        eprintln!(
+            "[install_storage_mod_to_envs] Plugins dir exists: {}, path: {}",
+            storage_plugins.exists(),
+            storage_plugins.display()
+        );
+        eprintln!(
+            "[install_storage_mod_to_envs] UserLibs dir exists: {}, path: {}",
+            storage_userlibs.exists(),
+            storage_userlibs.display()
+        );
 
         let template_meta = self
             .find_metadata_template_for_storage_id(storage_id)
@@ -2978,7 +3258,11 @@ impl ModsService {
                 ));
             }
 
-            eprintln!("[install_storage_mod_to_envs] Installed {} files for env {}", installed_files.len(), env_id);
+            eprintln!(
+                "[install_storage_mod_to_envs] Installed {} files for env {}",
+                installed_files.len(),
+                env_id
+            );
 
             self.save_mod_metadata(&mods_dir, &metadata_map).await?;
             results.push(serde_json::json!({
@@ -3969,9 +4253,7 @@ impl ModsService {
                 meta.mod_storage_id = Some(mod_id.clone());
                 meta.symlink_paths = Some(symlink_paths.clone());
                 meta.security_scan = metadata_ref
-                    .and_then(|m| m.get("securityScan"))
-                    .cloned()
-                    .and_then(|value| serde_json::from_value(value).ok())
+                    .and_then(Self::security_scan_summary_from_metadata)
                     .or(meta.security_scan.clone());
                 if meta.library_added_at.is_none() {
                     meta.library_added_at = Some(Utc::now());
@@ -4007,10 +4289,7 @@ impl ModsService {
                     runtime_match,
                     mod_storage_id: Some(mod_id.clone()),
                     symlink_paths: Some(symlink_paths.clone()),
-                    security_scan: metadata_ref
-                        .and_then(|m| m.get("securityScan"))
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok()),
+                    security_scan: metadata_ref.and_then(Self::security_scan_summary_from_metadata),
                 };
                 mod_metadata.insert(file_name.clone(), new_meta);
             }
@@ -4742,10 +5021,7 @@ impl ModsService {
                 runtime_match,
                 mod_storage_id: Some(mod_id.clone()),
                 symlink_paths: Some(vec![symlink_path.to_string_lossy().to_string()]),
-                security_scan: metadata_ref
-                    .and_then(|m| m.get("securityScan"))
-                    .cloned()
-                    .and_then(|value| serde_json::from_value(value).ok()),
+                security_scan: metadata_ref.and_then(Self::security_scan_summary_from_metadata),
             },
         );
 
@@ -5079,7 +5355,11 @@ mod tests {
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
     use crate::services::settings::SettingsService;
-    use crate::types::{schedule_i_config, ModMetadata, ModSource, Runtime};
+    use crate::types::{
+        schedule_i_config, ModMetadata, ModSource, Runtime, SecurityScanDisposition,
+        SecurityScanDispositionClassification, SecurityScanFileReport, SecurityScanPolicy,
+        SecurityScanReport, SecurityScanState, SecurityScanSummary,
+    };
     use serial_test::serial;
     use std::fs::File;
     use std::io::Write;
@@ -6163,6 +6443,344 @@ mod tests {
         let normalized_content = fs::read_to_string(&metadata_path).await?;
         let normalized = serde_json::from_str::<ModMetadata>(&normalized_content)?;
         assert!(matches!(normalized.detected_runtime, Some(Runtime::Mono)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn load_storage_metadata_prefers_report_summary_disposition() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let storage_dir = download_dir.join("Mods").join("report-wins");
+        fs::create_dir_all(&storage_dir).await?;
+
+        let stale_summary = serde_json::json!({
+            "state": "review",
+            "verified": false,
+            "highestSeverity": "Medium",
+            "totalFindings": 2,
+            "threatFamilyCount": 0,
+            "statusMessage": "Legacy rule hits"
+        });
+
+        fs::write(
+            storage_dir.join(STORAGE_METADATA_FILE),
+            serde_json::json!({
+                "source": "local",
+                "modStorageId": "report-wins",
+                "modName": "Report Wins",
+                "securityScan": stale_summary
+            })
+            .to_string(),
+        )
+        .await?;
+
+        let report = SecurityScanReport {
+            summary: SecurityScanSummary {
+                state: SecurityScanState::Verified,
+                verified: true,
+                disposition: Some(SecurityScanDisposition {
+                    classification: SecurityScanDispositionClassification::Clean,
+                    headline: "Clean".to_string(),
+                    summary: "Disposition is clean.".to_string(),
+                    blocking_recommended: false,
+                    primary_threat_family_id: None,
+                    related_finding_ids: Vec::new(),
+                }),
+                highest_severity: Some(SecurityFindingSeverity::Medium),
+                total_findings: 2,
+                threat_family_count: 0,
+                scanned_at: None,
+                scanner_version: Some("1.0.0".to_string()),
+                schema_version: Some("1".to_string()),
+                status_message: Some("Disposition is clean.".to_string()),
+            },
+            policy: SecurityScanPolicy {
+                enabled: true,
+                requires_confirmation: false,
+                blocked: false,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message: Some("Disposition is clean.".to_string()),
+            },
+            files: vec![SecurityScanFileReport {
+                file_name: "ReportWins.dll".to_string(),
+                display_path: "Mods/ReportWins.dll".to_string(),
+                sha256_hash: None,
+                highest_severity: Some(SecurityFindingSeverity::Medium),
+                total_findings: 2,
+                threat_family_count: 0,
+                result: serde_json::json!({
+                    "findings": [
+                        {
+                            "id": "legacy-medium",
+                            "severity": "Medium",
+                            "description": "Legacy heuristic match"
+                        }
+                    ],
+                    "disposition": {
+                        "classification": "Clean",
+                        "headline": "Clean",
+                        "summary": "Disposition is clean.",
+                        "blockingRecommended": false,
+                        "relatedFindingIds": []
+                    }
+                }),
+            }],
+        };
+
+        service
+            .save_security_scan_report("report-wins", &report)
+            .await?;
+
+        let parsed = service
+            .load_storage_metadata(&storage_dir)
+            .await?
+            .expect("storage metadata should parse");
+
+        let disposition = parsed
+            .security_scan
+            .and_then(|summary| summary.disposition)
+            .expect("disposition should come from stored report");
+        assert_eq!(
+            disposition.classification,
+            SecurityScanDispositionClassification::Clean
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_security_scan_report_falls_back_to_summary_when_report_file_missing() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let storage_dir = download_dir.join("Mods").join("summary-only");
+        fs::create_dir_all(&storage_dir).await?;
+        fs::write(
+            storage_dir.join(STORAGE_METADATA_FILE),
+            serde_json::json!({
+                "source": "local",
+                "modStorageId": "summary-only",
+                "modName": "Summary Only",
+                "securityScan": {
+                    "state": "verified",
+                    "verified": true,
+                    "disposition": {
+                        "classification": "Clean",
+                        "headline": "Clean",
+                        "summary": "No malware identified.",
+                        "blockingRecommended": false,
+                        "relatedFindingIds": []
+                    },
+                    "totalFindings": 0,
+                    "threatFamilyCount": 0,
+                    "statusMessage": "No malware identified."
+                }
+            })
+            .to_string(),
+        )
+        .await?;
+
+        let report = service
+            .get_security_scan_report("summary-only")
+            .await?
+            .expect("summary-only fallback report");
+
+        assert!(report.files.is_empty());
+        assert_eq!(report.summary.state, SecurityScanState::Verified);
+        assert_eq!(
+            report
+                .summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::Clean)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_mods_prefers_storage_report_summary_over_stale_env_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-security-summary");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("DispositionWins.dll"), b"data").await?;
+
+        let storage_id = "disposition-wins";
+        let mut env_meta = sample_metadata(Some(storage_id), Some("example/source"), Some("1.0.0"));
+        env_meta.mod_name = Some("Disposition Wins".to_string());
+        env_meta.security_scan = Some(SecurityScanSummary {
+            state: SecurityScanState::Review,
+            verified: false,
+            disposition: None,
+            highest_severity: Some(SecurityFindingSeverity::Medium),
+            total_findings: 1,
+            threat_family_count: 0,
+            scanned_at: None,
+            scanner_version: None,
+            schema_version: None,
+            status_message: Some("Legacy rule-only summary".to_string()),
+        });
+
+        let mut env_metadata = HashMap::new();
+        env_metadata.insert("DispositionWins.dll".to_string(), env_meta);
+        service.save_mod_metadata(&mods_dir, &env_metadata).await?;
+
+        let storage_dir = download_dir.join("Mods").join(storage_id);
+        fs::create_dir_all(storage_dir.join("Mods")).await?;
+        fs::write(
+            storage_dir.join("Mods").join("DispositionWins.dll"),
+            b"data",
+        )
+        .await?;
+        fs::write(
+            storage_dir.join(STORAGE_METADATA_FILE),
+            serde_json::json!({
+                "source": "local",
+                "modStorageId": storage_id,
+                "modName": "Disposition Wins"
+            })
+            .to_string(),
+        )
+        .await?;
+
+        service
+            .save_security_scan_report(
+                storage_id,
+                &SecurityScanReport {
+                    summary: SecurityScanSummary {
+                        state: SecurityScanState::Verified,
+                        verified: true,
+                        disposition: Some(SecurityScanDisposition {
+                            classification: SecurityScanDispositionClassification::Clean,
+                            headline: "Clean".to_string(),
+                            summary: "Disposition is clean.".to_string(),
+                            blocking_recommended: false,
+                            primary_threat_family_id: None,
+                            related_finding_ids: Vec::new(),
+                        }),
+                        highest_severity: Some(SecurityFindingSeverity::Medium),
+                        total_findings: 1,
+                        threat_family_count: 0,
+                        scanned_at: None,
+                        scanner_version: Some("1.0.0".to_string()),
+                        schema_version: Some("1".to_string()),
+                        status_message: Some("Disposition is clean.".to_string()),
+                    },
+                    policy: SecurityScanPolicy {
+                        enabled: true,
+                        requires_confirmation: false,
+                        blocked: false,
+                        prompt_on_high_findings: false,
+                        block_critical_findings: false,
+                        status_message: Some("Disposition is clean.".to_string()),
+                    },
+                    files: vec![SecurityScanFileReport {
+                        file_name: "DispositionWins.dll".to_string(),
+                        display_path: "Mods/DispositionWins.dll".to_string(),
+                        sha256_hash: None,
+                        highest_severity: Some(SecurityFindingSeverity::Medium),
+                        total_findings: 1,
+                        threat_family_count: 0,
+                        result: serde_json::json!({
+                            "findings": [
+                                {
+                                    "id": "rule-medium",
+                                    "severity": "Medium",
+                                    "description": "Rule hit"
+                                }
+                            ],
+                            "disposition": {
+                                "classification": "Clean",
+                                "headline": "Clean",
+                                "summary": "Disposition is clean.",
+                                "blockingRecommended": false,
+                                "relatedFindingIds": []
+                            }
+                        }),
+                    }],
+                },
+            )
+            .await?;
+
+        let result = service
+            .list_mods(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let mods = result
+            .get("mods")
+            .and_then(|value| value.as_array())
+            .expect("mods array");
+        let security_scan = mods[0]
+            .get("securityScan")
+            .cloned()
+            .expect("security scan summary should be present");
+        let summary = serde_json::from_value::<SecurityScanSummary>(security_scan)?;
+
+        assert_eq!(summary.state, SecurityScanState::Verified);
+        assert_eq!(
+            summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::Clean)
+        );
 
         Ok(())
     }

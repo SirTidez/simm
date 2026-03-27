@@ -5,6 +5,7 @@ import { SecurityScanReportOverlay } from './SecurityScanReportOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
+import { getSecurityBadgeConfig } from './securityScanHelpers';
 import type { Environment, ModLibraryEntry, NexusMod, NexusModFile, SecurityScanReport, SecurityScanSummary } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 
@@ -26,10 +27,12 @@ interface ModInfo {
   updatedAt?: string;
   tags?: string[];
   installedAt?: number;
+  securityScan?: SecurityScanSummary;
 }
 
 interface ModViewState {
   id: string;
+  storageId?: string;
   name: string;
   source: string;
   summary?: string;
@@ -44,6 +47,7 @@ interface ModViewState {
   installedVersion?: string;
   latestVersion?: string;
   installedAt?: number;
+  securityScan?: SecurityScanSummary;
   kind: 'installed' | 'library' | 'thunderstore' | 'nexusmods';
 }
 
@@ -251,57 +255,6 @@ function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] 
   return merged;
 }
 
-const getSecurityBadgeConfig = (summary?: SecurityScanSummary) => {
-  if (!summary) {
-    return null;
-  }
-
-  if (summary.state === 'verified') {
-    return {
-      label: 'Scanned for Viruses',
-      icon: 'fa-shield-check',
-      background: 'rgba(31, 105, 72, 0.24)',
-      border: '#3cc79055',
-      color: '#bdf3d8',
-    };
-  }
-
-  if (summary.state === 'review') {
-    const severityLabel = summary.highestSeverity 
-      ? `${summary.highestSeverity} Risk`
-      : 'Needs Review';
-    return {
-      label: severityLabel,
-      icon: 'fa-shield-exclamation',
-      background: 'rgba(104, 72, 27, 0.28)',
-      border: '#f0b35e55',
-      color: '#ffd9aa',
-    };
-  }
-
-  if (summary.state === 'unavailable') {
-    return {
-      label: 'Scan Unavailable',
-      icon: 'fa-circle-question',
-      background: 'rgba(48, 67, 96, 0.32)',
-      border: '#7fa1c855',
-      color: '#d2e3fa',
-    };
-  }
-
-  if (summary.state === 'skipped') {
-    return {
-      label: 'Scan Not Applicable',
-      icon: 'fa-file-circle-question',
-      background: 'rgba(48, 67, 96, 0.24)',
-      border: '#7fa1c833',
-      color: '#c7d8ef',
-    };
-  }
-
-  return null;
-};
-
 export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked, onOpenAccounts, onOpenModLibrary, onOpenConfig }: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
 
@@ -365,6 +318,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
+  const activeModViewSecurityBadge = getSecurityBadgeConfig(activeModView?.securityScan);
 
   const libraryVersionCountByName = useMemo(() => {
     const counts = new Map<string, number>();
@@ -459,6 +413,23 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
 
     return false;
+  };
+
+  const openStoredSecurityReport = async (storageId: string, title: string) => {
+    try {
+      const report = await ApiService.getModSecurityScanReport(storageId);
+      if (report) {
+        setActiveSecurityReport({
+          title,
+          report,
+          onConfirm: null,
+        });
+      } else {
+        setError('No security report available for this mod');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load security report');
+    }
   };
 
   const startNexusManualTimeout = () => {
@@ -980,20 +951,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       return;
     }
 
-    try {
-      const report = await ApiService.getModSecurityScanReport(storageId);
-      if (report) {
-        setActiveSecurityReport({
-          title: `Security Report - ${entry.displayName}`,
-          report,
-          onConfirm: null,
-        });
-      } else {
-        setError('No security report available for this mod');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load security report');
-    }
+    await openStoredSecurityReport(storageId, `Security Report - ${entry.displayName}`);
   };
 
   const handleConfirmDialog = () => {
@@ -1800,6 +1758,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     const update = modUpdates.get(mod.fileName);
     openModView({
       id: `${mod.fileName}-${mod.path}`,
+      storageId: mod.modStorageId,
       name: mod.name,
       source: mod.source || 'unknown',
       summary: mod.summary,
@@ -1813,6 +1772,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       installedVersion: mod.version,
       latestVersion: update?.latestVersion,
       installedAt: mod.installedAt,
+      securityScan: mod.securityScan,
       kind: 'installed',
     });
   };
@@ -1820,6 +1780,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const openLibraryModView = (entry: ModLibraryEntry) => {
     openModView({
       id: entry.storageId,
+      storageId: entry.storageId,
       name: entry.displayName,
       source: entry.source || 'unknown',
       summary: entry.summary,
@@ -1832,6 +1793,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       tags: entry.tags,
       installedVersion: entry.installedVersion || entry.sourceVersion,
       installedAt: entry.installedAt,
+      securityScan: entry.securityScan,
       kind: 'library',
     });
   };
@@ -1880,6 +1842,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
     return mods.find((mod) => `${mod.fileName}-${mod.path}` === activeModView.id) || null;
   }, [activeModView, mods]);
+  const selectedInstalledSecurityBadge = getSecurityBadgeConfig(selectedInstalledMod?.securityScan);
 
   useEffect(() => {
     if (!isOpen || filteredMods.length === 0) {
@@ -3007,6 +2970,28 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   <div style={{ marginTop: '0.35rem', color: '#9ab0cb', fontSize: '0.85rem' }}>
                     Source: {getSourceLabel(activeModView.source)} {activeModView.author ? `• ${activeModView.author}` : ''}
                   </div>
+                  {activeModViewSecurityBadge && (
+                    <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.35rem',
+                          borderRadius: '999px',
+                          border: `1px solid ${activeModViewSecurityBadge.border}`,
+                          background: activeModViewSecurityBadge.background,
+                          color: activeModViewSecurityBadge.color,
+                          padding: '0.1rem 0.4rem',
+                          fontSize: '0.72rem',
+                          whiteSpace: 'nowrap',
+                          lineHeight: 1,
+                        }}
+                      >
+                        <i className={`fas ${activeModViewSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                        {activeModViewSecurityBadge.label}
+                      </span>
+                    </div>
+                  )}
                   {activeModView.summary && (
                     <p style={{ margin: '0.65rem 0 0', color: '#d5dfec', lineHeight: 1.55 }}>
                       {activeModView.summary}
@@ -3047,6 +3032,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
               )}
 
               <div className="mod-view-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                {activeModView.storageId && activeModView.securityScan && (
+                  <button
+                    className="btn btn-secondary btn-small"
+                    onClick={() => void openStoredSecurityReport(activeModView.storageId!, `Security Report - ${activeModView.name}`)}
+                  >
+                    <i className="fas fa-shield-alt" style={{ marginRight: '0.45rem' }}></i>
+                    Security Report
+                  </button>
+                )}
                 {activeModViewSourceUrl && (
                   <a
                     href={activeModViewSourceUrl}
@@ -3111,6 +3105,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         confirmText={confirmDialog?.confirmText}
         cancelText={confirmDialog?.cancelText}
         isNested
+      />
+      <SecurityScanReportOverlay
+        isOpen={!!activeSecurityReport}
+        title={activeSecurityReport?.title || 'Security Findings'}
+        report={activeSecurityReport?.report || null}
+        onClose={closeSecurityReport}
+        onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
+        confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}
+        busy={securityActionBusy}
       />
       {pendingRuntimeSelection && (
         <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
@@ -3236,6 +3239,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                     const updateInfo = modUpdates.get(mod.fileName);
                     const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
                     const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
+                    const securityBadge = getSecurityBadgeConfig(mod.securityScan);
                     return (
                       <div
                         key={`${mod.fileName}-${mod.path}`}
@@ -3290,6 +3294,18 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             {updateInfo?.updateAvailable && <span className="workspace-pill workspace-pill--warning">Update available</span>}
                             {mod.source && <span className="workspace-pill workspace-pill--source">{getSourceLabel(mod.source)}</span>}
                             {mod.version && <span className="workspace-pill">{mod.version}</span>}
+                            {securityBadge && (
+                              <span
+                                className="workspace-pill"
+                                style={{
+                                  border: `1px solid ${securityBadge.border}`,
+                                  background: securityBadge.background,
+                                  color: securityBadge.color,
+                                }}
+                              >
+                                {securityBadge.label}
+                              </span>
+                            )}
                           </div>
                           <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
                         </div>
@@ -3312,6 +3328,28 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                     <div className="workspace-inspector-card__subtle">
                       {getSourceLabel(selectedInstalledMod.source)} {selectedInstalledMod.version ? `• ${selectedInstalledMod.version}` : ''}
                     </div>
+                    {selectedInstalledSecurityBadge && (
+                      <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                        <span
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                            borderRadius: '999px',
+                            border: `1px solid ${selectedInstalledSecurityBadge.border}`,
+                            background: selectedInstalledSecurityBadge.background,
+                            color: selectedInstalledSecurityBadge.color,
+                            padding: '0.1rem 0.4rem',
+                            fontSize: '0.72rem',
+                            whiteSpace: 'nowrap',
+                            lineHeight: 1,
+                          }}
+                        >
+                          <i className={`fas ${selectedInstalledSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                          {selectedInstalledSecurityBadge.label}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <p className="workspace-inspector-card__summary">{selectedInstalledMod.summary || selectedInstalledMod.fileName}</p>
@@ -3321,6 +3359,14 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   <div><span>Latest</span><strong>{modUpdates.get(selectedInstalledMod.fileName)?.latestVersion || 'unknown'}</strong></div>
                 </div>
                 <div className="workspace-inspector-card__actions">
+                  {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
+                    >
+                      Security Report
+                    </button>
+                  )}
                   {selectedInstalledMod.disabled ? (
                     <button className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</button>
                   ) : (

@@ -345,11 +345,36 @@ pub enum SecurityFindingSeverity {
     Critical,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecurityScanDispositionClassification {
+    #[serde(rename = "Clean")]
+    Clean,
+    #[serde(rename = "Suspicious")]
+    Suspicious,
+    #[serde(rename = "KnownThreat")]
+    KnownThreat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScanDisposition {
+    pub classification: SecurityScanDispositionClassification,
+    pub headline: String,
+    pub summary: String,
+    #[serde(default)]
+    pub blocking_recommended: bool,
+    pub primary_threat_family_id: Option<String>,
+    #[serde(default)]
+    pub related_finding_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityScanSummary {
     pub state: SecurityScanState,
     pub verified: bool,
+    #[serde(default)]
+    pub disposition: Option<SecurityScanDisposition>,
     pub highest_severity: Option<SecurityFindingSeverity>,
     pub total_findings: usize,
     pub threat_family_count: usize,

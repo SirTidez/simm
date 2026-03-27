@@ -159,7 +159,9 @@ fn backup_file_sort_key(path: &Path) -> std::time::SystemTime {
         .and_then(|name| name.to_str())
         .and_then(|stem| stem.strip_prefix("SIMM-db-backup-"))
         .and_then(|stem| stem.get(stem.len().saturating_sub(19)..))
-        .and_then(|timestamp| chrono::NaiveDateTime::parse_from_str(timestamp, "%Y%m%d-%H%M%S-%3f").ok())
+        .and_then(|timestamp| {
+            chrono::NaiveDateTime::parse_from_str(timestamp, "%Y%m%d-%H%M%S-%3f").ok()
+        })
         .map(|naive| chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
         .map(std::time::SystemTime::from);
 

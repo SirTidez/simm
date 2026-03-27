@@ -1,4 +1,7 @@
-import type { ScanResult } from './mlvscan';
+import type {
+  ScanResult,
+  ThreatDisposition,
+} from './mlvscan';
 
 export interface DepotDownloaderInfo {
   installed: boolean;
@@ -248,6 +251,7 @@ export type SecurityFindingSeverity = 'Low' | 'Medium' | 'High' | 'Critical';
 export interface SecurityScanSummary {
   state: SecurityScanState;
   verified: boolean;
+  disposition?: ThreatDisposition | null;
   highestSeverity?: SecurityFindingSeverity;
   totalFindings: number;
   threatFamilyCount: number;
@@ -295,4 +299,15 @@ export interface SecurityScannerStatus {
   lastError?: string;
 }
 
-export type { ScanResult, Finding, ThreatFamily, ThreatFamilyEvidence, DeveloperGuidance, Severity, CallChain, DataFlowChain } from './mlvscan';
+export type {
+  ScanResult,
+  Finding,
+  ThreatDisposition,
+  ThreatDispositionClassification,
+  ThreatFamily,
+  ThreatFamilyEvidence,
+  DeveloperGuidance,
+  Severity,
+  CallChain,
+  DataFlowChain,
+} from './mlvscan';

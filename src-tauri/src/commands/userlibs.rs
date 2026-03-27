@@ -210,8 +210,8 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
         )
-            .await
-            .expect("disable");
+        .await
+        .expect("disable");
 
         let listed = get_userlibs_impl(pool.clone(), env.id.clone())
             .await
@@ -239,8 +239,8 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
         )
-            .await
-            .expect("enable");
+        .await
+        .expect("enable");
 
         let final_list = get_userlibs_impl(pool.clone(), env.id.clone())
             .await
