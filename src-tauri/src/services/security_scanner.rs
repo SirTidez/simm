@@ -645,7 +645,10 @@ impl SecurityScannerService {
                 .by_index(index)
                 .context("Failed to read ZIP entry")?;
             let relative_path = entry.name().to_string();
-            let output_path = target_dir.join(&relative_path);
+            let enclosed_path = entry.enclosed_name().ok_or_else(|| {
+                anyhow::anyhow!("ZIP entry contains an unsafe path: {}", relative_path)
+            })?;
+            let output_path = target_dir.join(enclosed_path);
 
             if relative_path.ends_with('/') {
                 std::fs::create_dir_all(&output_path).with_context(|| {
@@ -1256,6 +1259,10 @@ mod tests {
     use super::*;
     use crate::types::{Platform, Theme};
     use serde_json::json;
+    use std::io::Write;
+    use tempfile::tempdir;
+    use zip::write::FileOptions;
+    use zip::ZipWriter;
 
     fn test_cli_info() -> CliInfo {
         CliInfo {
@@ -1520,5 +1527,31 @@ mod tests {
             report.summary.status_message.as_deref(),
             Some("MLVScan classified this download as a known threat. Current policy blocked installation.")
         );
+    }
+
+    #[tokio::test]
+    async fn extract_zip_to_directory_rejects_traversal_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("scanner.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let archive_file = File::create(&archive_path)?;
+        let mut archive = ZipWriter::new(archive_file);
+        archive.start_file("../escape.txt", FileOptions::default())?;
+        archive.write_all(b"unsafe")?;
+        archive.finish()?;
+
+        let service = SecurityScannerService::new();
+        let err = service
+            .extract_zip_to_directory(&archive_path, &target_dir)
+            .await
+            .expect_err("expected invalid ZIP entry path error");
+
+        assert!(err.to_string().contains("unsafe path"));
+        assert!(!temp.path().join("escape.txt").exists());
+        assert!(!target_dir.join("escape.txt").exists());
+
+        Ok(())
     }
 }

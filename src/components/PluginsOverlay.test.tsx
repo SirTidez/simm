@@ -89,7 +89,7 @@ describe('PluginsOverlay', () => {
 
     expect((await screen.findAllByText('MLVScan.dll')).length).toBeGreaterThan(0);
     expect(screen.getByText(/Plugin inventory/i)).toBeTruthy();
-    expect(screen.getByText('C:/env/Plugins/MLVScan.dll')).toBeTruthy();
+    expect(await screen.findByText('C:/env/Plugins/MLVScan.dll')).toBeTruthy();
   });
 
   it('filters plugins from the toolbar search', async () => {

@@ -3032,30 +3032,32 @@ impl ModsService {
                     path.display(),
                     dest_path.display()
                 );
-                match self.create_symlink_dir(&path, &dest_path).await {
-                    Ok(_) => {
-                        installed_files.push(file_name.to_string());
-                        eprintln!("[install_storage_entries] Successfully created directory symlink and added {} to installed_files", file_name);
-                    }
-                    Err(e) => {
-                        eprintln!("[install_storage_entries] ERROR: Failed to create directory symlink for {}: {}", file_name, e);
-                    }
-                }
+                self.create_symlink_dir(&path, &dest_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to create directory symlink for storage entry {}",
+                            file_name
+                        )
+                    })?;
+                installed_files.push(file_name.to_string());
+                eprintln!("[install_storage_entries] Successfully created directory symlink and added {} to installed_files", file_name);
             } else {
                 eprintln!(
                     "[install_storage_entries] Creating file symlink: {} -> {}",
                     path.display(),
                     dest_path.display()
                 );
-                match self.create_symlink_file(&path, &dest_path).await {
-                    Ok(_) => {
-                        installed_files.push(file_name.to_string());
-                        eprintln!("[install_storage_entries] Successfully created file symlink and added {} to installed_files", file_name);
-                    }
-                    Err(e) => {
-                        eprintln!("[install_storage_entries] ERROR: Failed to create file symlink for {}: {}", file_name, e);
-                    }
-                }
+                self.create_symlink_file(&path, &dest_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to create file symlink for storage entry {}",
+                            file_name
+                        )
+                    })?;
+                installed_files.push(file_name.to_string());
+                eprintln!("[install_storage_entries] Successfully created file symlink and added {} to installed_files", file_name);
             }
 
             let detected_runtime = match file_runtime {
@@ -7186,6 +7188,43 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Failed to create directory symlink"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn install_storage_entries_propagates_symlink_failures() -> Result<()> {
+        let temp = tempdir()?;
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+
+        let source_dir = temp.path().join("storage").join("Mods");
+        fs::create_dir_all(&source_dir).await?;
+        fs::write(source_dir.join("Example.dll"), b"data").await?;
+
+        let dest_dir = temp.path().join("missing").join("Mods");
+        let mut metadata_map = HashMap::new();
+        let mut installed_files = Vec::new();
+
+        let err = service
+            .install_storage_entries(
+                &source_dir,
+                &dest_dir,
+                false,
+                "unknown",
+                &None,
+                "storage-1",
+                &mut metadata_map,
+                &mut installed_files,
+                &Runtime::Il2cpp,
+            )
+            .await
+            .expect_err("expected symlink installation failure");
+
+        assert!(err
+            .to_string()
+            .contains("Failed to create file symlink for storage entry Example.dll"));
+        assert!(installed_files.is_empty());
+        assert!(metadata_map.is_empty());
 
         Ok(())
     }
