@@ -295,7 +295,9 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
                   {nexusBusy ? 'Waiting for Nexus authorization...' : 'Login with Nexus'}
                 </button>
               )}
-              <span className="account-action-note">Free accounts confirm each download on the website. Premium accounts can use direct manager downloads when available.</span>
+              <span className="account-action-note">
+                Free accounts confirm each download on the website. Premium accounts can use direct manager downloads when available.
+              </span>
             </div>
           </section>
 

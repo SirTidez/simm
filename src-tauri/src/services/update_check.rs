@@ -96,6 +96,10 @@ impl UpdateCheckService {
                         &manifest_id,
                         "Steam environment",
                     );
+                    Self::accept_remote_manifest_after_local_version_advance(
+                        &effective_env,
+                        &mut result,
+                    );
                 }
                 Err(e) => {
                     // For Steam environments, errors in manifest check are not critical
@@ -121,6 +125,10 @@ impl UpdateCheckService {
 
                     result.update_available =
                         Self::compare_manifest_ids(&effective_env, &manifest_id, "Environment");
+                    Self::accept_remote_manifest_after_local_version_advance(
+                        &effective_env,
+                        &mut result,
+                    );
                 }
                 Err(e) => {
                     result.error = Some(e.to_string());
@@ -173,6 +181,8 @@ impl UpdateCheckService {
 
         Self::infer_updates_for_missing_manifest_baselines(envs, &mut results);
         Self::heal_stale_manifest_baselines(envs, &mut results);
+        Self::reconcile_peer_versions_for_shared_remote_manifest(envs, &mut results);
+        Self::infer_updates_from_release_track_versions(envs, &mut results);
 
         Ok(results)
     }
@@ -268,12 +278,14 @@ impl UpdateCheckService {
                 };
                 if candidate_id == &env.id
                     || candidate_env.app_id != env.app_id
+                    || candidate_env.branch != env.branch
                     || candidate_result.update_available
                 {
                     return false;
                 }
 
                 candidate_result.current_game_version.as_deref() == Some(current_version.as_str())
+                    && candidate_result.remote_manifest_id == current_result.remote_manifest_id
             });
 
             if has_current_peer {
@@ -331,6 +343,184 @@ impl UpdateCheckService {
                 );
                 false
             }
+        }
+    }
+
+    fn reconcile_peer_versions_for_shared_remote_manifest(
+        envs: &[Environment],
+        results: &mut HashMap<String, UpdateCheckResult>,
+    ) {
+        let env_map: HashMap<&str, &Environment> =
+            envs.iter().map(|env| (env.id.as_str(), env)).collect();
+
+        for env in envs {
+            let Some(current_result) = results.get(env.id.as_str()) else {
+                continue;
+            };
+            let Some(remote_manifest_id) = current_result.remote_manifest_id.clone() else {
+                continue;
+            };
+            let Some(current_version) = current_result.current_game_version.clone() else {
+                continue;
+            };
+
+            let best_peer_version = results
+                .iter()
+                .filter_map(|(candidate_id, candidate_result)| {
+                    let candidate_env = env_map.get(candidate_id.as_str())?;
+                    let candidate_remote_manifest =
+                        candidate_result.remote_manifest_id.as_deref()?;
+                    let candidate_version = candidate_result.current_game_version.as_deref()?;
+
+                    if candidate_env.app_id != env.app_id
+                        || candidate_env.branch != env.branch
+                        || candidate_remote_manifest != remote_manifest_id.as_str()
+                    {
+                        return None;
+                    }
+
+                    Some(candidate_version)
+                })
+                .max_by(|left, right| Self::compare_game_versions(left, right))
+                .map(str::to_string);
+
+            let Some(best_peer_version) = best_peer_version else {
+                continue;
+            };
+
+            let ordering = Self::compare_game_versions(&current_version, &best_peer_version);
+            let Some(result) = results.get_mut(env.id.as_str()) else {
+                continue;
+            };
+
+            if ordering.is_lt() {
+                if !result.update_available
+                    || result.update_game_version.as_deref() != Some(best_peer_version.as_str())
+                {
+                    log::info!(
+                        "Inferring update for {} from shared remote manifest {} and peer version {} -> {}",
+                        env.name,
+                        remote_manifest_id,
+                        current_version,
+                        best_peer_version
+                    );
+                    result.update_available = true;
+                    result.update_game_version = Some(best_peer_version);
+                }
+            } else if ordering.is_eq() && result.update_available {
+                log::info!(
+                    "Healing stale update state for {} by accepting shared remote manifest {} at current version {}",
+                    env.name,
+                    remote_manifest_id,
+                    current_version
+                );
+                result.update_available = false;
+                result.current_manifest_id = Some(remote_manifest_id);
+                result.update_game_version = None;
+            } else if !result.update_available {
+                result.update_game_version = None;
+            }
+        }
+    }
+
+    fn infer_updates_from_release_track_versions(
+        envs: &[Environment],
+        results: &mut HashMap<String, UpdateCheckResult>,
+    ) {
+        let env_map: HashMap<&str, &Environment> =
+            envs.iter().map(|env| (env.id.as_str(), env)).collect();
+
+        for env in envs {
+            let Some(current_result) = results.get(env.id.as_str()) else {
+                continue;
+            };
+            let Some(current_version) = current_result.current_game_version.clone() else {
+                continue;
+            };
+
+            let release_track = Self::release_track_for_branch(&env.branch);
+            let best_track_version = results
+                .iter()
+                .filter_map(|(candidate_id, candidate_result)| {
+                    let candidate_env = env_map.get(candidate_id.as_str())?;
+                    let candidate_version = candidate_result.current_game_version.as_deref()?;
+
+                    if candidate_env.app_id != env.app_id
+                        || Self::release_track_for_branch(&candidate_env.branch) != release_track
+                    {
+                        return None;
+                    }
+
+                    Some(candidate_version)
+                })
+                .max_by(|left, right| Self::compare_game_versions(left, right))
+                .map(str::to_string);
+
+            let Some(best_track_version) = best_track_version else {
+                continue;
+            };
+
+            let Some(result) = results.get_mut(env.id.as_str()) else {
+                continue;
+            };
+
+            if Self::compare_game_versions(&current_version, &best_track_version).is_lt() {
+                if !result.update_available
+                    || result.update_game_version.as_deref() != Some(best_track_version.as_str())
+                {
+                    log::info!(
+                        "Inferring update for {} from {} release-track version {} -> {}",
+                        env.name,
+                        release_track,
+                        current_version,
+                        best_track_version
+                    );
+                    result.update_available = true;
+                    result.update_game_version = Some(best_track_version);
+                }
+            } else if !result.update_available {
+                result.update_game_version = None;
+            }
+        }
+    }
+
+    fn release_track_for_branch(branch: &str) -> &str {
+        match branch {
+            "alternate" => "main",
+            "alternate-beta" => "beta",
+            other => other,
+        }
+    }
+
+    fn accept_remote_manifest_after_local_version_advance(
+        env: &Environment,
+        result: &mut UpdateCheckResult,
+    ) {
+        if !result.update_available {
+            return;
+        }
+
+        let Some(remote_manifest_id) = result.remote_manifest_id.clone() else {
+            return;
+        };
+        let Some(previous_version) = env.current_game_version.as_deref() else {
+            return;
+        };
+        let Some(current_version) = result.current_game_version.as_deref() else {
+            return;
+        };
+
+        if Self::compare_game_versions(current_version, previous_version).is_gt() {
+            log::info!(
+                "Detected local version advance for {} ({} -> {}); accepting remote manifest {} as current",
+                env.name,
+                previous_version,
+                current_version,
+                remote_manifest_id
+            );
+            result.update_available = false;
+            result.current_manifest_id = Some(remote_manifest_id);
+            result.update_game_version = None;
         }
     }
 
@@ -745,8 +935,8 @@ mod tests {
                 beta_env.id.clone(),
                 UpdateCheckResult {
                     update_available: false,
-                    current_manifest_id: Some("802".to_string()),
-                    remote_manifest_id: Some("802".to_string()),
+                    current_manifest_id: Some("317".to_string()),
+                    remote_manifest_id: Some("317".to_string()),
                     remote_build_id: None,
                     branch: beta_env.branch.clone(),
                     app_id: beta_env.app_id.clone(),
@@ -784,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn heal_stale_manifest_baseline_accepts_peer_matched_current_version() {
+    fn heal_stale_manifest_baseline_accepts_same_branch_peer_matched_current_version() {
         let alternate_beta_env = Environment {
             id: "alternate-beta".to_string(),
             name: "Alternate Beta".to_string(),
@@ -810,7 +1000,7 @@ mod tests {
         let beta_env = Environment {
             id: "beta".to_string(),
             name: "Beta".to_string(),
-            branch: "beta".to_string(),
+            branch: "alternate-beta".to_string(),
             runtime: Runtime::Il2cpp,
             environment_type: Some(EnvironmentType::DepotDownloader),
             ..alternate_beta_env.clone()
@@ -836,8 +1026,8 @@ mod tests {
                 beta_env.id.clone(),
                 UpdateCheckResult {
                     update_available: false,
-                    current_manifest_id: Some("802".to_string()),
-                    remote_manifest_id: Some("802".to_string()),
+                    current_manifest_id: Some("317".to_string()),
+                    remote_manifest_id: Some("317".to_string()),
                     remote_build_id: None,
                     branch: beta_env.branch.clone(),
                     app_id: beta_env.app_id.clone(),
@@ -859,5 +1049,318 @@ mod tests {
             .expect("alternate-beta result");
         assert!(!healed.update_available);
         assert_eq!(healed.current_manifest_id.as_deref(), Some("317"));
+    }
+
+    #[test]
+    fn heal_stale_manifest_baseline_does_not_cross_branch_boundaries() {
+        let alternate_beta_env = Environment {
+            id: "alternate-beta".to_string(),
+            name: "Alternate Beta".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "alternate-beta".to_string(),
+            output_dir: "C:\\alternate-beta".to_string(),
+            runtime: Runtime::Mono,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("560".to_string()),
+            last_update_check: None,
+            update_available: Some(true),
+            remote_manifest_id: Some("317".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.4f6".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        let beta_env = Environment {
+            id: "beta".to_string(),
+            name: "Beta".to_string(),
+            branch: "alternate-beta".to_string(),
+            runtime: Runtime::Il2cpp,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+            ..alternate_beta_env.clone()
+        };
+
+        let mut results = HashMap::from([
+            (
+                alternate_beta_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: true,
+                    current_manifest_id: Some("560".to_string()),
+                    remote_manifest_id: Some("317".to_string()),
+                    remote_build_id: None,
+                    branch: alternate_beta_env.branch.clone(),
+                    app_id: alternate_beta_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.4f6".to_string()),
+                    update_game_version: None,
+                },
+            ),
+            (
+                beta_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: false,
+                    current_manifest_id: Some("317".to_string()),
+                    remote_manifest_id: Some("317".to_string()),
+                    remote_build_id: None,
+                    branch: beta_env.branch.clone(),
+                    app_id: beta_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.4f6".to_string()),
+                    update_game_version: None,
+                },
+            ),
+        ]);
+
+        UpdateCheckService::heal_stale_manifest_baselines(
+            &[alternate_beta_env.clone(), beta_env.clone()],
+            &mut results,
+        );
+
+        let healed = results
+            .get("alternate-beta")
+            .expect("alternate-beta result");
+        assert!(!healed.update_available);
+        assert_eq!(healed.current_manifest_id.as_deref(), Some("317"));
+    }
+
+    #[test]
+    fn accept_remote_manifest_after_local_version_advance_clears_stale_update() {
+        let env = Environment {
+            id: "steam-main".to_string(),
+            name: "Steam".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "main".to_string(),
+            output_dir: "C:\\steam".to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("100".to_string()),
+            last_update_check: None,
+            update_available: Some(true),
+            remote_manifest_id: Some("100".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.4f6".to_string()),
+            update_game_version: Some("0.4.5f1".to_string()),
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::Steam),
+        };
+
+        let mut result = UpdateCheckResult {
+            update_available: true,
+            current_manifest_id: Some("100".to_string()),
+            remote_manifest_id: Some("200".to_string()),
+            remote_build_id: None,
+            branch: env.branch.clone(),
+            app_id: env.app_id.clone(),
+            checked_at: Utc::now(),
+            error: None,
+            current_game_version: Some("0.4.5f1".to_string()),
+            update_game_version: Some("0.4.5f1".to_string()),
+        };
+
+        UpdateCheckService::accept_remote_manifest_after_local_version_advance(&env, &mut result);
+
+        assert!(!result.update_available);
+        assert_eq!(result.current_manifest_id.as_deref(), Some("200"));
+        assert!(result.update_game_version.is_none());
+    }
+
+    #[test]
+    fn reconcile_peer_versions_heals_latest_and_flags_older_branch_peer() {
+        let steam_env = Environment {
+            id: "steam-beta".to_string(),
+            name: "Steam Installation".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "beta".to_string(),
+            output_dir: "C:\\steam-beta".to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("3347041993176785453".to_string()),
+            last_update_check: None,
+            update_available: Some(true),
+            remote_manifest_id: Some("3828069228120160165".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.5f1".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::Steam),
+        };
+
+        let beta_env = Environment {
+            id: "beta".to_string(),
+            name: "Beta".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "beta".to_string(),
+            output_dir: "C:\\beta".to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("3828069228120160165".to_string()),
+            last_update_check: None,
+            update_available: Some(false),
+            remote_manifest_id: Some("3828069228120160165".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.4f10".to_string()),
+            update_game_version: Some("0.4.4f6".to_string()),
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        let mut results = HashMap::from([
+            (
+                steam_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: true,
+                    current_manifest_id: Some("3347041993176785453".to_string()),
+                    remote_manifest_id: Some("3828069228120160165".to_string()),
+                    remote_build_id: None,
+                    branch: steam_env.branch.clone(),
+                    app_id: steam_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.5f1".to_string()),
+                    update_game_version: None,
+                },
+            ),
+            (
+                beta_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: false,
+                    current_manifest_id: Some("3828069228120160165".to_string()),
+                    remote_manifest_id: Some("3828069228120160165".to_string()),
+                    remote_build_id: None,
+                    branch: beta_env.branch.clone(),
+                    app_id: beta_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.4f10".to_string()),
+                    update_game_version: Some("0.4.4f6".to_string()),
+                },
+            ),
+        ]);
+
+        UpdateCheckService::reconcile_peer_versions_for_shared_remote_manifest(
+            &[steam_env, beta_env],
+            &mut results,
+        );
+
+        let healed_steam = results.get("steam-beta").expect("steam result");
+        assert!(!healed_steam.update_available);
+        assert_eq!(
+            healed_steam.current_manifest_id.as_deref(),
+            Some("3828069228120160165")
+        );
+        assert!(healed_steam.update_game_version.is_none());
+
+        let updated_beta = results.get("beta").expect("beta result");
+        assert!(updated_beta.update_available);
+        assert_eq!(updated_beta.update_game_version.as_deref(), Some("0.4.5f1"));
+    }
+
+    #[test]
+    fn infer_updates_from_release_track_versions_pairs_beta_and_alternate_beta() {
+        let beta_env = Environment {
+            id: "beta".to_string(),
+            name: "Beta".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "beta".to_string(),
+            output_dir: "C:\\beta".to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("3828069228120160165".to_string()),
+            last_update_check: None,
+            update_available: Some(false),
+            remote_manifest_id: Some("3828069228120160165".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.5f1".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        let alternate_beta_env = Environment {
+            id: "alternate-beta".to_string(),
+            name: "Alternate Beta".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "alternate-beta".to_string(),
+            output_dir: "C:\\alternate-beta".to_string(),
+            runtime: Runtime::Mono,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("6863174197092412323".to_string()),
+            last_update_check: None,
+            update_available: Some(false),
+            remote_manifest_id: Some("6863174197092412323".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.4f10".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        let mut results = HashMap::from([
+            (
+                beta_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: false,
+                    current_manifest_id: Some("3828069228120160165".to_string()),
+                    remote_manifest_id: Some("3828069228120160165".to_string()),
+                    remote_build_id: None,
+                    branch: beta_env.branch.clone(),
+                    app_id: beta_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.5f1".to_string()),
+                    update_game_version: None,
+                },
+            ),
+            (
+                alternate_beta_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: false,
+                    current_manifest_id: Some("6863174197092412323".to_string()),
+                    remote_manifest_id: Some("6863174197092412323".to_string()),
+                    remote_build_id: None,
+                    branch: alternate_beta_env.branch.clone(),
+                    app_id: alternate_beta_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.4f10".to_string()),
+                    update_game_version: None,
+                },
+            ),
+        ]);
+
+        UpdateCheckService::infer_updates_from_release_track_versions(
+            &[beta_env, alternate_beta_env],
+            &mut results,
+        );
+
+        let alternate_beta = results
+            .get("alternate-beta")
+            .expect("alternate-beta result");
+        assert!(alternate_beta.update_available);
+        assert_eq!(
+            alternate_beta.update_game_version.as_deref(),
+            Some("0.4.5f1")
+        );
     }
 }

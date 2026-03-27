@@ -4909,11 +4909,14 @@ body::before {
 .auth-modal {
   width: min(860px, calc(100vw - 2rem));
   max-width: none;
+  max-height: min(92vh, 760px);
   border-radius: 0.9rem;
   overflow: hidden;
   border: 1px solid rgba(101, 132, 172, 0.28);
   background: linear-gradient(180deg, rgba(19, 30, 45, 0.97), rgba(12, 20, 32, 0.97));
   box-shadow: 0 20px 44px rgba(0, 0, 0, 0.34);
+  display: flex;
+  flex-direction: column;
 }
 
 .auth-modal--nested {
@@ -4921,6 +4924,8 @@ body::before {
 }
 
 .auth-modal__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start;
   gap: 1rem;
 }
@@ -4928,29 +4933,34 @@ body::before {
 .auth-modal__heading {
   display: grid;
   gap: 0.35rem;
+  min-width: 0;
 }
 
 .auth-modal__heading h2 {
   margin: 0;
+  line-height: 1.18;
+  overflow-wrap: anywhere;
 }
 
 .auth-modal__heading p {
   margin: 0;
   color: #9fb5d2;
   line-height: 1.5;
+  max-width: 60ch;
 }
 
 .auth-modal__status-strip {
   display: flex;
   flex-wrap: wrap;
   gap: 0.55rem;
-  padding: 0 1.2rem 1rem;
+  padding: 0.7rem 1.2rem 1rem;
 }
 
 .auth-modal__status-pill {
   display: inline-flex;
   align-items: center;
   gap: 0.42rem;
+  min-width: 0;
   padding: 0.38rem 0.6rem;
   border-radius: 999px;
   border: 1px solid rgba(101, 132, 172, 0.22);
@@ -4958,13 +4968,16 @@ body::before {
   color: #cfe0f7;
   font-size: 0.74rem;
   font-weight: 600;
+  white-space: normal;
 }
 
 .auth-modal__body {
   display: grid;
-  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
   gap: 1rem;
   padding: 0 1.2rem 1.2rem;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .auth-modal__panel {
@@ -5138,7 +5151,7 @@ body::before {
     flex-wrap: wrap;
   }
 
-  .auth-modal__actions .btn {
+.auth-modal__actions .btn {
     width: 100%;
   }
 
@@ -5149,6 +5162,12 @@ body::before {
   .environment-actions-grid > .btn,
   .environment-actions-grid > .launch-game-cell {
     width: 100%;
+  }
+}
+
+@media (max-width: 980px) {
+  .auth-modal__body {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

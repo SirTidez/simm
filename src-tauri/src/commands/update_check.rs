@@ -25,6 +25,61 @@ static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
 static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 
+fn build_environment_update_fields_from_result(
+    result: &UpdateCheckResult,
+) -> Vec<(String, serde_json::Value)> {
+    let mut updates = Vec::new();
+    updates.push((
+        "lastUpdateCheck".to_string(),
+        serde_json::json!(result.checked_at.timestamp()),
+    ));
+    updates.push((
+        "updateAvailable".to_string(),
+        serde_json::json!(result.update_available),
+    ));
+
+    if let Some(ref current_manifest_id) = result.current_manifest_id {
+        updates.push((
+            "lastManifestId".to_string(),
+            serde_json::json!(current_manifest_id),
+        ));
+    }
+
+    if let Some(ref remote_manifest_id) = result.remote_manifest_id {
+        updates.push((
+            "remoteManifestId".to_string(),
+            serde_json::json!(remote_manifest_id),
+        ));
+    }
+
+    updates.push((
+        "remoteBuildId".to_string(),
+        result
+            .remote_build_id
+            .as_ref()
+            .map(|value| serde_json::json!(value))
+            .unwrap_or(serde_json::Value::Null),
+    ));
+
+    if let Some(ref current_game_version) = result.current_game_version {
+        updates.push((
+            "currentGameVersion".to_string(),
+            serde_json::json!(current_game_version),
+        ));
+    }
+
+    updates.push((
+        "updateGameVersion".to_string(),
+        result
+            .update_game_version
+            .as_ref()
+            .map(|value| serde_json::json!(value))
+            .unwrap_or(serde_json::Value::Null),
+    ));
+
+    updates
+}
+
 fn extract_mod_name_for_event(result: &serde_json::Value) -> String {
     result
         .get("packageInfo")
@@ -216,6 +271,17 @@ pub async fn check_update(
         .await
         .map_err(|e| e.to_string())?;
 
+    if let Err(e) = env_service
+        .update_environment(&environment_id, build_environment_update_fields_from_result(&result))
+        .await
+    {
+        log::warn!(
+            "[UpdateCheck] Failed to persist update state for environment {}: {:#}",
+            environment_id,
+            e
+        );
+    }
+
     // Emit update check complete event
     let _ = events::emit_update_check_complete(&app, environment_id.clone(), result.clone());
 
@@ -270,52 +336,10 @@ pub async fn check_all_updates(
 
     // Persist and emit environment update-check results before running the slower mod update scan.
     for (env_id, result) in &results {
-        let mut updates = Vec::new();
-        updates.push((
-            "lastUpdateCheck".to_string(),
-            serde_json::json!(result.checked_at.timestamp()),
-        ));
-        updates.push((
-            "updateAvailable".to_string(),
-            serde_json::json!(result.update_available),
-        ));
-
-        if let Some(ref current_manifest_id) = result.current_manifest_id {
-            updates.push((
-                "lastManifestId".to_string(),
-                serde_json::json!(current_manifest_id),
-            ));
-        }
-
-        if let Some(ref remote_manifest_id) = result.remote_manifest_id {
-            updates.push((
-                "remoteManifestId".to_string(),
-                serde_json::json!(remote_manifest_id),
-            ));
-        }
-
-        if let Some(ref remote_build_id) = result.remote_build_id {
-            updates.push((
-                "remoteBuildId".to_string(),
-                serde_json::json!(remote_build_id),
-            ));
-        }
-
-        if let Some(ref current_game_version) = result.current_game_version {
-            updates.push((
-                "currentGameVersion".to_string(),
-                serde_json::json!(current_game_version),
-            ));
-        }
-
-        if let Some(ref update_game_version) = result.update_game_version {
-            updates.push((
-                "updateGameVersion".to_string(),
-                serde_json::json!(update_game_version),
-            ));
-        }
-
-        if let Err(e) = env_service.update_environment(env_id, updates).await {
+        if let Err(e) = env_service
+            .update_environment(env_id, build_environment_update_fields_from_result(result))
+            .await
+        {
             log::warn!(
                 "[UpdateCheck] Failed to update environment {}: {:#}",
                 env_id,

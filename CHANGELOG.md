@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.7]
+
+- Corrected environment update detection so same-track installs no longer invert their update state after a branch release, including beta / alternate-beta paired runtime inference and stale update-field clearing.
+- Fixed persisted update-check state so stale `updateGameVersion` data is cleared correctly and single-environment checks use the same backend persistence rules as batch checks.
+- Removed the temporary manual Nexus browser fallback from the Accounts view after confirming the report was mistaken, keeping the OAuth flow on the standard in-app handoff path.
+
 ## [0.7.6]
 
 - Polished the final desktop editor surfaces, including a redesigned Configuration editor with sidebar-driven file/raw navigation, section tabs, denser structured rows, horizontal tab overflow controls, and corrected raw-editor/full-height behavior.

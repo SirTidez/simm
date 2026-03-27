@@ -611,6 +611,8 @@ impl EnvironmentService {
                 "lastManifestId" => {
                     if let Some(v) = value.as_str() {
                         env.last_manifest_id = Some(v.to_string());
+                    } else if value.is_null() {
+                        env.last_manifest_id = None;
                     }
                 }
                 "lastUpdateCheck" => {
@@ -634,21 +636,29 @@ impl EnvironmentService {
                 "remoteManifestId" => {
                     if let Some(v) = value.as_str() {
                         env.remote_manifest_id = Some(v.to_string());
+                    } else if value.is_null() {
+                        env.remote_manifest_id = None;
                     }
                 }
                 "remoteBuildId" => {
                     if let Some(v) = value.as_str() {
                         env.remote_build_id = Some(v.to_string());
+                    } else if value.is_null() {
+                        env.remote_build_id = None;
                     }
                 }
                 "currentGameVersion" => {
                     if let Some(v) = value.as_str() {
                         env.current_game_version = Some(v.to_string());
+                    } else if value.is_null() {
+                        env.current_game_version = None;
                     }
                 }
                 "updateGameVersion" => {
                     if let Some(v) = value.as_str() {
                         env.update_game_version = Some(v.to_string());
+                    } else if value.is_null() {
+                        env.update_game_version = None;
                     }
                 }
                 "melonLoaderVersion" => {

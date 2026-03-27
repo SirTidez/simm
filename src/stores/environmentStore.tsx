@@ -35,6 +35,22 @@ interface EnvironmentStoreContextValue {
 
 const EnvironmentStoreContext = createContext<EnvironmentStoreContextValue | null>(null);
 
+function mergeUpdateResultIntoEnvironment(
+  env: Environment,
+  updateResult: import('../types').UpdateCheckResult
+): Environment {
+  return {
+    ...env,
+    lastUpdateCheck: updateResult.checkedAt,
+    lastManifestId: updateResult.currentManifestId ?? env.lastManifestId,
+    updateAvailable: updateResult.updateAvailable,
+    remoteManifestId: updateResult.remoteManifestId ?? env.remoteManifestId,
+    remoteBuildId: updateResult.remoteBuildId,
+    currentGameVersion: updateResult.currentGameVersion ?? env.currentGameVersion,
+    updateGameVersion: updateResult.updateGameVersion,
+  };
+}
+
 export function EnvironmentStoreProvider({ children }: { children: React.ReactNode }) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -147,19 +163,13 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const checkUpdate = useCallback(async (environmentId: string, manual: boolean = false) => {
     try {
       const result = await ApiService.checkUpdate(environmentId, manual);
-      await updateEnvironment(environmentId, {
-        lastUpdateCheck: result.checkedAt,
-        ...(result.currentManifestId ? { lastManifestId: result.currentManifestId } : {}),
-        updateAvailable: result.updateAvailable,
-        remoteManifestId: result.remoteManifestId,
-        remoteBuildId: result.remoteBuildId,
-        ...(result.currentGameVersion ? { currentGameVersion: result.currentGameVersion } : {}),
-        ...(result.updateGameVersion ? { updateGameVersion: result.updateGameVersion } : {})
-      });
+      setEnvironments(prev => prev.map(env => (
+        env.id === environmentId ? mergeUpdateResultIntoEnvironment(env, result) : env
+      )));
     } catch (err) {
       throw err;
     }
-  }, [updateEnvironment]);
+  }, []);
 
   const refreshGameVersion = useCallback(async (environmentId: string) => {
     try {
@@ -186,16 +196,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         const updated = prev.map(env => {
           const result = results.find(r => r.environmentId === env.id);
           if (result) {
-            return {
-              ...env,
-              lastUpdateCheck: result.checkedAt,
-              ...(result.currentManifestId ? { lastManifestId: result.currentManifestId } : {}),
-              updateAvailable: result.updateAvailable,
-              remoteManifestId: result.remoteManifestId,
-              remoteBuildId: result.remoteBuildId,
-              ...(result.currentGameVersion ? { currentGameVersion: result.currentGameVersion } : {}),
-              ...(result.updateGameVersion ? { updateGameVersion: result.updateGameVersion } : {})
-            };
+            return mergeUpdateResultIntoEnvironment(env, result);
           }
           return env;
         });
@@ -219,16 +220,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         return env;
       }
 
-      return {
-        ...env,
-        lastUpdateCheck: updateResult.checkedAt,
-        ...(updateResult.currentManifestId ? { lastManifestId: updateResult.currentManifestId } : {}),
-        updateAvailable: updateResult.updateAvailable,
-        remoteManifestId: updateResult.remoteManifestId,
-        remoteBuildId: updateResult.remoteBuildId,
-        ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
-        ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
-      };
+      return mergeUpdateResultIntoEnvironment(env, updateResult);
     }));
   }, []);
 
