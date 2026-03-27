@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.8]
+
+- Added managed MLVScan integration for protected downloads, including automatic scanner setup, status reporting, local security scans for `.dll` / `.zip` / `.rar` payloads, and report-driven block / confirm decisions before files enter the library.
+- Surfaced MLVScan results across the desktop UI with security badges, full report overlays, scanner controls in Settings, and library / installed-mod flows that can retry after an explicit user confirmation when policy allows it.
+- Hardened the release with follow-up fixes for update-check inference, ZIP extraction safety, storage path validation, cached security-report handling, grouped runtime scan summaries, and CI-facing frontend timing regressions.
+- Contributors:
+  - `ifBars`: MLVScan scanner integration, security policy/report plumbing, overlays, badges, and scanner-facing UI.
+  - `SirTidez`: follow-up hardening and CI fixes, including update-check inference, archive/path safety, symlink/install correctness, grouped scan summary handling, and flaky test cleanup.
+
 ## [0.7.7]
 
 - Corrected environment update detection so same-track installs no longer invert their update state after a branch release, including beta / alternate-beta paired runtime inference and stale update-field clearing.

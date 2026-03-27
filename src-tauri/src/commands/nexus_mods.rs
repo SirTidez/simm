@@ -2183,13 +2183,13 @@ pub async fn install_nexus_mods_mod(
 
     let _ = tokio::fs::remove_file(&archive_path).await;
 
-    crate::commands::mods::persist_security_scan_report(
+    Ok(crate::commands::mods::finalize_security_scan_response(
         &mods_service,
-        &result,
+        result,
         security_report.as_ref(),
+        "installing a Nexus mod archive",
     )
-    .await?;
-    crate::commands::mods::attach_security_scan_summary(result, security_report.as_ref())
+    .await)
 }
 
 #[cfg(test)]

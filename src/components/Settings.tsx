@@ -1,13 +1,37 @@
-import { useState, useEffect, useRef } from 'react';
-import { useSettingsStore } from '../stores/settingsStore';
-import { useEnvironmentStore } from '../stores/environmentStore';
-import { ApiService } from '../services/api';
-import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
-import type { SecurityScannerStatus } from '../types';
+import { useState, useEffect, useRef } from "react";
+import { useSettingsStore } from "../stores/settingsStore";
+import { useEnvironmentStore } from "../stores/environmentStore";
+import { ApiService } from "../services/api";
+import {
+  batchUpdateCheckRef,
+  lastUpdateCheckTimeRef,
+  notifyBatchUpdateCheckStarted,
+} from "./EnvironmentList";
+import type { SecurityScannerStatus } from "../types";
 
 type SettingsProps = {
   isOpen: boolean;
   onClose: () => void;
+};
+
+type SettingsFormData = {
+  defaultDownloadDir: string;
+  maxConcurrentDownloads: number;
+  platform: "windows" | "macos" | "linux";
+  language: string;
+  theme: "light" | "dark" | "modern-blue";
+  melonLoaderVersion: string;
+  autoInstallMelonLoader: boolean;
+  enableSecurityScanner?: boolean;
+  autoInstallSecurityScanner?: boolean;
+  blockCriticalScans?: boolean;
+  promptOnHighScans?: boolean;
+  showSecurityScanBadges?: boolean;
+  updateCheckInterval: number;
+  autoCheckUpdates: boolean;
+  logLevel: "debug" | "info" | "warn" | "error";
+  modIconCacheLimitMb: number;
+  databaseBackupCount: number;
 };
 
 const MIN_MOD_ICON_CACHE_LIMIT_MB = 100;
@@ -17,33 +41,41 @@ const MAX_DATABASE_BACKUP_COUNT = 100;
 
 export function normalizeModIconCacheLimitMb(value: unknown): number {
   const parsed =
-    typeof value === 'number'
+    typeof value === "number"
       ? value
-      : Number.parseInt(String(value ?? ''), 10);
+      : Number.parseInt(String(value ?? ""), 10);
 
   if (!Number.isFinite(parsed)) {
     return 500;
   }
 
   const rounded = Math.trunc(parsed as number);
-  return Math.min(MAX_MOD_ICON_CACHE_LIMIT_MB, Math.max(MIN_MOD_ICON_CACHE_LIMIT_MB, rounded));
+  return Math.min(
+    MAX_MOD_ICON_CACHE_LIMIT_MB,
+    Math.max(MIN_MOD_ICON_CACHE_LIMIT_MB, rounded),
+  );
 }
 
 export function normalizeDatabaseBackupCount(value: unknown): number {
   const parsed =
-    typeof value === 'number'
+    typeof value === "number"
       ? value
-      : Number.parseInt(String(value ?? ''), 10);
+      : Number.parseInt(String(value ?? ""), 10);
 
   if (!Number.isFinite(parsed)) {
     return 10;
   }
 
   const rounded = Math.trunc(parsed as number);
-  return Math.min(MAX_DATABASE_BACKUP_COUNT, Math.max(MIN_DATABASE_BACKUP_COUNT, rounded));
+  return Math.min(
+    MAX_DATABASE_BACKUP_COUNT,
+    Math.max(MIN_DATABASE_BACKUP_COUNT, rounded),
+  );
 }
 
-function extractReleaseApiLastUpdated(health: Record<string, unknown> | null): string | null {
+function extractReleaseApiLastUpdated(
+  health: Record<string, unknown> | null,
+): string | null {
   if (!health) return null;
 
   const data = (health as { data?: Record<string, unknown> }).data;
@@ -60,7 +92,7 @@ function extractReleaseApiLastUpdated(health: Record<string, unknown> | null): s
   ];
 
   for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
       const parsed = new Date(candidate);
       if (!Number.isNaN(parsed.getTime())) {
         return parsed.toLocaleString();
@@ -73,25 +105,34 @@ function extractReleaseApiLastUpdated(health: Record<string, unknown> | null): s
 }
 
 export function Settings({ isOpen, onClose }: SettingsProps) {
-  const { settings, depotDownloader, loading, updateSettings, refreshDepotDownloader } = useSettingsStore();
+  const {
+    settings,
+    depotDownloader,
+    loading,
+    updateSettings,
+    refreshDepotDownloader,
+  } = useSettingsStore();
   const { environments, checkAllUpdates } = useEnvironmentStore();
   const [checkingAllUpdates, setCheckingAllUpdates] = useState(false);
-  const [releaseApiHealth, setReleaseApiHealth] = useState<Record<string, unknown> | null>(null);
+  const [releaseApiHealth, setReleaseApiHealth] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
   const [releaseApiError, setReleaseApiError] = useState<string | null>(null);
   const [checkingReleaseApi, setCheckingReleaseApi] = useState(false);
   const [backingUpDatabase, setBackingUpDatabase] = useState(false);
   const [openingBackupsFolder, setOpeningBackupsFolder] = useState(false);
   const [databaseBackupFeedback, setDatabaseBackupFeedback] = useState<{
-    tone: 'success' | 'error';
+    tone: "success" | "error";
     message: string;
   } | null>(null);
-  const [formData, setFormData] = useState({
-    defaultDownloadDir: '',
+  const [formData, setFormData] = useState<SettingsFormData>({
+    defaultDownloadDir: "",
     maxConcurrentDownloads: 2,
-    platform: 'windows' as 'windows' | 'macos' | 'linux',
-    language: 'english',
-    theme: 'modern-blue' as 'light' | 'dark' | 'modern-blue',
-    melonLoaderVersion: '',
+    platform: "windows" as "windows" | "macos" | "linux",
+    language: "english",
+    theme: "modern-blue" as "light" | "dark" | "modern-blue",
+    melonLoaderVersion: "",
     autoInstallMelonLoader: false,
     enableSecurityScanner: true,
     autoInstallSecurityScanner: true,
@@ -100,22 +141,29 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
-    logLevel: 'info' as 'debug' | 'info' | 'warn' | 'error',
+    logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
   });
   const [error, setError] = useState<string | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
-  const [directoryPath, setDirectoryPath] = useState('');
-  const [directoryList, setDirectoryList] = useState<Array<{ name: string; path: string }>>([]);
+  const [directoryPath, setDirectoryPath] = useState("");
+  const [directoryList, setDirectoryList] = useState<
+    Array<{ name: string; path: string }>
+  >([]);
   const [browsing, setBrowsing] = useState(false);
-  const [newFolderName, setNewFolderName] = useState('');
+  const [newFolderName, setNewFolderName] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
-  const [melonLoaderVersions, setMelonLoaderVersions] = useState<Array<{ tag: string; name: string }>>([]);
+  const [melonLoaderVersions, setMelonLoaderVersions] = useState<
+    Array<{ tag: string; name: string }>
+  >([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
-  const [securityScannerStatus, setSecurityScannerStatus] = useState<SecurityScannerStatus | null>(null);
-  const [loadingSecurityScannerStatus, setLoadingSecurityScannerStatus] = useState(false);
-  const [installingSecurityScanner, setInstallingSecurityScanner] = useState(false);
+  const [securityScannerStatus, setSecurityScannerStatus] =
+    useState<SecurityScannerStatus | null>(null);
+  const [loadingSecurityScannerStatus, setLoadingSecurityScannerStatus] =
+    useState(false);
+  const [installingSecurityScanner, setInstallingSecurityScanner] =
+    useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const runCheckAllUpdates = async () => {
@@ -125,12 +173,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       batchUpdateCheckRef.current = true;
       notifyBatchUpdateCheckStarted(
         environments
-          .filter(env => env.status === 'completed')
-          .map(env => env.id)
+          .filter((env) => env.status === "completed")
+          .map((env) => env.id),
       );
       await checkAllUpdates(true);
     } catch (err) {
-      setError(`Failed to check for updates: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      setError(
+        `Failed to check for updates: ${err instanceof Error ? err.message : "Unknown error"}`,
+      );
     } finally {
       batchUpdateCheckRef.current = false;
       setCheckingAllUpdates(false);
@@ -140,7 +190,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   // Keep escape close behavior predictable in docked mode
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === "Escape" && isOpen) {
         if (showDirectoryPicker) {
           setShowDirectoryPicker(false);
           return;
@@ -150,36 +200,44 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     };
 
     if (isOpen) {
-      document.addEventListener('keydown', handleEscape);
+      document.addEventListener("keydown", handleEscape);
     }
 
     return () => {
-      document.removeEventListener('keydown', handleEscape);
+      document.removeEventListener("keydown", handleEscape);
     };
   }, [isOpen, onClose, showDirectoryPicker]);
 
   useEffect(() => {
     if (settings) {
       setFormData({
-        defaultDownloadDir: settings.defaultDownloadDir || '',
+        defaultDownloadDir: settings.defaultDownloadDir || "",
         maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
-        platform: 'windows' as 'windows' | 'macos' | 'linux', // Always Windows
-        language: 'english', // Always English
-        theme: (settings.theme === 'light' || settings.theme === 'dark' || settings.theme === 'modern-blue')
-          ? settings.theme
-          : 'modern-blue',
-        melonLoaderVersion: settings.melonLoaderVersion || '',
+        platform: "windows" as "windows" | "macos" | "linux", // Always Windows
+        language: "english", // Always English
+        theme:
+          settings.theme === "light" ||
+          settings.theme === "dark" ||
+          settings.theme === "modern-blue"
+            ? settings.theme
+            : "modern-blue",
+        melonLoaderVersion: settings.melonLoaderVersion || "",
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
-        enableSecurityScanner: settings.enableSecurityScanner !== false,
-        autoInstallSecurityScanner: settings.autoInstallSecurityScanner !== false,
-        blockCriticalScans: settings.blockCriticalScans !== false,
-        promptOnHighScans: settings.promptOnHighScans !== false,
-        showSecurityScanBadges: settings.showSecurityScanBadges !== false,
+        enableSecurityScanner: settings.enableSecurityScanner,
+        autoInstallSecurityScanner: settings.autoInstallSecurityScanner,
+        blockCriticalScans: settings.blockCriticalScans,
+        promptOnHighScans: settings.promptOnHighScans,
+        showSecurityScanBadges: settings.showSecurityScanBadges,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
-        logLevel: (settings.logLevel as 'debug' | 'info' | 'warn' | 'error') || 'info',
-        modIconCacheLimitMb: normalizeModIconCacheLimitMb(settings.modIconCacheLimitMb),
-        databaseBackupCount: normalizeDatabaseBackupCount(settings.databaseBackupCount),
+        logLevel:
+          (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
+        modIconCacheLimitMb: normalizeModIconCacheLimitMb(
+          settings.modIconCacheLimitMb,
+        ),
+        databaseBackupCount: normalizeDatabaseBackupCount(
+          settings.databaseBackupCount,
+        ),
       });
     }
   }, [settings]);
@@ -195,7 +253,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         setReleaseApiHealth(health);
       } catch (err) {
         setReleaseApiHealth(null);
-        setReleaseApiError(err instanceof Error ? err.message : 'Release API is unavailable');
+        setReleaseApiError(
+          err instanceof Error ? err.message : "Release API is unavailable",
+        );
       } finally {
         setCheckingReleaseApi(false);
       }
@@ -209,12 +269,12 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     if (isOpen && melonLoaderVersions.length === 0) {
       setLoadingVersions(true);
       ApiService.getAvailableMelonLoaderVersions()
-        .then(versions => {
+        .then((versions) => {
           setMelonLoaderVersions(versions);
         })
-        .catch(err => {
-          console.error('Failed to load MelonLoader versions:', err);
-          setError('Failed to load MelonLoader versions');
+        .catch((err) => {
+          console.error("Failed to load MelonLoader versions:", err);
+          setError("Failed to load MelonLoader versions");
         })
         .finally(() => {
           setLoadingVersions(false);
@@ -233,7 +293,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         setSecurityScannerStatus(status);
       })
       .catch((err) => {
-        console.error('Failed to load security scanner status:', err);
+        console.error("Failed to load security scanner status:", err);
         setSecurityScannerStatus(null);
       })
       .finally(() => {
@@ -257,14 +317,20 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         // Always set platform to 'windows' and language to 'english' since they're not user-configurable
         const normalizedFormData = {
           ...formData,
-          modIconCacheLimitMb: normalizeModIconCacheLimitMb(formData.modIconCacheLimitMb),
-          databaseBackupCount: normalizeDatabaseBackupCount(formData.databaseBackupCount),
-          platform: 'windows' as const,
-          language: 'english',
+          modIconCacheLimitMb: normalizeModIconCacheLimitMb(
+            formData.modIconCacheLimitMb,
+          ),
+          databaseBackupCount: normalizeDatabaseBackupCount(
+            formData.databaseBackupCount,
+          ),
+          platform: "windows" as const,
+          language: "english",
         };
         await updateSettings(normalizedFormData);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to save settings');
+        setError(
+          err instanceof Error ? err.message : "Failed to save settings",
+        );
       }
     }, 500);
 
@@ -283,24 +349,26 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     if (isWindowsRoot) return null;
 
     // Handle Unix paths (/)
-    if (currentPath === '/' || currentPath === '\\') return null;
+    if (currentPath === "/" || currentPath === "\\") return null;
 
     // Get parent by removing last segment
-    const separator = currentPath.includes('/') ? '/' : '\\';
-    const parts = currentPath.split(separator).filter(p => p);
+    const separator = currentPath.includes("/") ? "/" : "\\";
+    const parts = currentPath.split(separator).filter((p) => p);
 
     // If we're at a drive root (C:\), return null
-    if (parts.length <= 1 && currentPath.includes(':')) return null;
+    if (parts.length <= 1 && currentPath.includes(":")) return null;
 
     // Remove last part
     parts.pop();
 
     if (parts.length === 0) {
       // Return root
-      return separator === '/' ? '/' : (currentPath.match(/^[A-Z]:/i)?.[0] + '\\' || '\\');
+      return separator === "/"
+        ? "/"
+        : currentPath.match(/^[A-Z]:/i)?.[0] + "\\" || "\\";
     }
 
-    return parts.join(separator) + (separator === '/' ? '/' : '');
+    return parts.join(separator) + (separator === "/" ? "/" : "");
   };
 
   const loadDirectory = async (path: string) => {
@@ -311,7 +379,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setDirectoryPath(result.currentPath);
       setDirectoryList(result.directories);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to browse directory');
+      setError(
+        err instanceof Error ? err.message : "Failed to browse directory",
+      );
       setDirectoryList([]);
     } finally {
       setBrowsing(false);
@@ -319,9 +389,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   };
 
   const openDirectoryPicker = async () => {
-    const currentPath = formData.defaultDownloadDir || settings?.defaultDownloadDir || '';
+    const currentPath =
+      formData.defaultDownloadDir || settings?.defaultDownloadDir || "";
     setDirectoryPath(currentPath);
-    setNewFolderName('');
+    setNewFolderName("");
     setShowDirectoryPicker(true);
     if (currentPath) {
       await loadDirectory(currentPath);
@@ -335,17 +406,17 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       return;
     }
 
-    const separator = directoryPath.includes('/') ? '/' : '\\';
-    const basePath = directoryPath.replace(/[\\/]+$/, '');
+    const separator = directoryPath.includes("/") ? "/" : "\\";
+    const basePath = directoryPath.replace(/[\\/]+$/, "");
     const nextPath = `${basePath}${separator}${newFolderName.trim()}`;
 
     setCreatingFolder(true);
     try {
       await ApiService.createDirectory(nextPath);
-      setNewFolderName('');
+      setNewFolderName("");
       await loadDirectory(directoryPath);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create folder');
+      setError(err instanceof Error ? err.message : "Failed to create folder");
     } finally {
       setCreatingFolder(false);
     }
@@ -354,25 +425,33 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const handleDirectorySelect = (selectedPath: string) => {
     setFormData({ ...formData, defaultDownloadDir: selectedPath });
     setShowDirectoryPicker(false);
-    setNewFolderName('');
+    setNewFolderName("");
   };
 
-  const depotStatusLabel = depotDownloader ? 'Installed' : 'Missing';
+  const depotStatusLabel = depotDownloader ? "Installed" : "Missing";
   const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
-  const releaseApiTone = checkingReleaseApi ? 'checking' : releaseApiError ? 'offline' : 'online';
-  const releaseApiLabel = checkingReleaseApi ? 'Checking' : releaseApiError ? 'Offline' : 'Online';
+  const releaseApiTone = checkingReleaseApi
+    ? "checking"
+    : releaseApiError
+      ? "offline"
+      : "online";
+  const releaseApiLabel = checkingReleaseApi
+    ? "Checking"
+    : releaseApiError
+      ? "Offline"
+      : "Online";
   const depotStatusDetail = depotDownloader
     ? depotDownloader.method
       ? `Managed via ${depotDownloader.method}`
-      : 'Managed automatically for protected branches'
-    : 'Installed automatically when protected downloads need it';
+      : "Managed automatically for protected branches"
+    : "Installed automatically when protected downloads need it";
   const releaseApiDetail = checkingReleaseApi
-    ? 'Checking release metadata'
+    ? "Checking release metadata"
     : releaseApiError
-      ? 'Unable to reach release metadata'
+      ? "Unable to reach release metadata"
       : releaseApiLastUpdated
         ? `Last updated ${releaseApiLastUpdated}`
-        : 'Release metadata available';
+        : "Release metadata available";
 
   const handleBackupDatabase = async () => {
     try {
@@ -380,13 +459,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
       setDatabaseBackupFeedback(null);
       const result = await ApiService.backupDatabase();
       setDatabaseBackupFeedback({
-        tone: 'success',
+        tone: "success",
         message: `Backup created at ${result.path}`,
       });
     } catch (err) {
       setDatabaseBackupFeedback({
-        tone: 'error',
-        message: err instanceof Error ? err.message : 'Failed to back up the database',
+        tone: "error",
+        message:
+          err instanceof Error ? err.message : "Failed to back up the database",
       });
     } finally {
       setBackingUpDatabase(false);
@@ -397,12 +477,15 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     try {
       setOpeningBackupsFolder(true);
       const homeDirectory = await ApiService.getHomeDirectory();
-      const normalizedHome = homeDirectory.replace(/[\\/]+$/, '');
+      const normalizedHome = homeDirectory.replace(/[\\/]+$/, "");
       await ApiService.openPath(`${normalizedHome}\\backups`);
     } catch (err) {
       setDatabaseBackupFeedback({
-        tone: 'error',
-        message: err instanceof Error ? err.message : 'Failed to open the backups folder',
+        tone: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to open the backups folder",
       });
     } finally {
       setOpeningBackupsFolder(false);
@@ -412,493 +495,773 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   return (
     <>
       {isOpen && (
-        <section className="modal-content workspace-panel settings-panel" aria-label="Settings panel">
-            <div className="modal-header">
-              <h2>Settings</h2>
-              <button className="modal-close" onClick={onClose} aria-label="Close settings panel">×</button>
+        <section
+          className="modal-content workspace-panel settings-panel"
+          aria-label="Settings panel"
+        >
+          <div className="modal-header">
+            <h2>Settings</h2>
+            <button
+              className="modal-close"
+              onClick={onClose}
+              aria-label="Close settings panel"
+            >
+              ×
+            </button>
+          </div>
+
+          {error && <div className="settings-error-banner">{error}</div>}
+
+          <div className="settings-content settings-content--desktop">
+            <div className="settings-overview">
+              <div className="settings-overview__copy">
+                <span className="settings-eyebrow">Application Settings</span>
+                <h3>Adjust appearance, downloads, updates, and tooling.</h3>
+                <p>
+                  Changes save automatically. Use this pane to keep SIMM’s
+                  environment setup, update cadence, and theme behavior aligned
+                  with your workflow.
+                </p>
+              </div>
+              <div className="settings-overview__statusline">
+                <span
+                  className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
+                  title={releaseApiError || undefined}
+                >
+                  <i
+                    className={
+                      checkingReleaseApi
+                        ? "fas fa-spinner fa-spin"
+                        : releaseApiError
+                          ? "fas fa-exclamation-circle"
+                          : "fas fa-check-circle"
+                    }
+                  ></i>
+                  GitHub API {releaseApiLabel}
+                </span>
+              </div>
             </div>
 
-            {error && <div className="settings-error-banner">{error}</div>}
-
-            <div className="settings-content settings-content--desktop">
-              <div className="settings-overview">
-                <div className="settings-overview__copy">
-                  <span className="settings-eyebrow">Application Settings</span>
-                  <h3>Adjust appearance, downloads, updates, and tooling.</h3>
-                  <p>Changes save automatically. Use this pane to keep SIMM’s environment setup, update cadence, and theme behavior aligned with your workflow.</p>
-                </div>
-                <div className="settings-overview__statusline">
-                  <span className={`settings-status-pill settings-status-pill--${releaseApiTone}`} title={releaseApiError || undefined}>
-                    <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
-                    GitHub API {releaseApiLabel}
-                  </span>
-                </div>
-              </div>
-
-              <div className="settings-shell settings-shell--single">
-                <section className="settings-sheet">
-                  <div className="settings-subsection">
-                    <div className="settings-subsection__header">
-                      <div>
-                        <span className="settings-section__eyebrow">Interface</span>
-                        <h3><i className="fas fa-sliders"></i> App defaults</h3>
-                      </div>
-                      <p>Pick the built-in app palette and the amount of diagnostic detail SIMM writes while it runs.</p>
+            <div className="settings-shell settings-shell--single">
+              <section className="settings-sheet">
+                <div className="settings-subsection">
+                  <div className="settings-subsection__header">
+                    <div>
+                      <span className="settings-section__eyebrow">
+                        Interface
+                      </span>
+                      <h3>
+                        <i className="fas fa-sliders"></i> App defaults
+                      </h3>
                     </div>
-
-                    <div className="settings-field-grid">
-                      <div className="settings-field">
-                        <label>Theme preset</label>
-                        <select
-                          value={formData.theme || 'modern-blue'}
-                          onChange={(e) => {
-                            const nextTheme = e.target.value as 'light' | 'dark' | 'modern-blue';
-                            setFormData({ ...formData, theme: nextTheme });
-                          }}
-                          disabled={loading}
-                        >
-                          <option value="modern-blue">Modern Blue</option>
-                          <option value="dark">Dark</option>
-                          <option value="light">Light</option>
-                        </select>
-                        <small>Built-in SIMM palettes only. Modern Blue remains the default app theme.</small>
-                      </div>
-
-                      <div className="settings-field">
-                        <label>Log level</label>
-                        <select
-                          value={formData.logLevel || 'info'}
-                          onChange={(e) => setFormData({ ...formData, logLevel: e.target.value as any })}
-                        >
-                          <option value="debug">Debug</option>
-                          <option value="info">Info</option>
-                          <option value="warn">Warning</option>
-                          <option value="error">Error</option>
-                        </select>
-                        <small>Minimum log detail written to disk for SIMM troubleshooting.</small>
-                      </div>
-                    </div>
+                    <p>
+                      Pick the built-in app palette and the amount of diagnostic
+                      detail SIMM writes while it runs.
+                    </p>
                   </div>
 
-                  <hr className="settings-divider" />
-
-                  <div className="settings-subsection">
-                    <div className="settings-subsection__header">
-                      <div>
-                        <span className="settings-section__eyebrow">Install Defaults</span>
-                        <h3><i className="fas fa-folder-tree"></i> Downloads, storage, and loader setup</h3>
-                      </div>
-                      <p>Control where installs stage by default, how many transfers SIMM runs at once, and which MelonLoader version new environments prefer.</p>
+                  <div className="settings-field-grid">
+                    <div className="settings-field">
+                      <label>Theme preset</label>
+                      <select
+                        value={formData.theme || "modern-blue"}
+                        onChange={(e) => {
+                          const nextTheme = e.target.value as
+                            | "light"
+                            | "dark"
+                            | "modern-blue";
+                          setFormData({ ...formData, theme: nextTheme });
+                        }}
+                        disabled={loading}
+                      >
+                        <option value="modern-blue">Modern Blue</option>
+                        <option value="dark">Dark</option>
+                        <option value="light">Light</option>
+                      </select>
+                      <small>
+                        Built-in SIMM palettes only. Modern Blue remains the
+                        default app theme.
+                      </small>
                     </div>
 
-                    <div className="settings-field-grid">
-                      <div className="settings-field settings-field--span">
-                        <label>Default download directory</label>
-                        <div className="settings-inline-row">
-                          <input
-                            type="text"
-                            value={formData.defaultDownloadDir}
-                            onChange={(e) => setFormData({ ...formData, defaultDownloadDir: e.target.value })}
-                            placeholder="C:\DevEnvironments"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => void openDirectoryPicker()}
-                            className="btn btn-secondary"
-                          >
-                            Browse
-                          </button>
-                        </div>
-                        <small>New downloads and extracted install payloads default to this path.</small>
-                      </div>
-
-                      <div className="settings-field settings-field--compact">
-                        <label>Max concurrent downloads</label>
-                        <input
-                          type="number"
-                          value={formData.maxConcurrentDownloads}
-                          onChange={(e) => setFormData({ ...formData, maxConcurrentDownloads: parseInt(e.target.value) || 2 })}
-                          min="1"
-                          max="10"
-                        />
-                        <small>Higher values improve throughput but use more bandwidth and disk I/O.</small>
-                      </div>
-
-                      <div className="settings-field">
-                        <label>Preferred MelonLoader version</label>
-                        <select
-                          value={formData.melonLoaderVersion || ''}
-                          onChange={(e) => setFormData({ ...formData, melonLoaderVersion: e.target.value })}
-                          disabled={loadingVersions}
-                        >
-                          <option value="">None (Manual Installation)</option>
-                          {loadingVersions ? (
-                            <option disabled>Loading versions...</option>
-                          ) : (
-                            melonLoaderVersions.map(version => (
-                              <option key={version.tag} value={version.tag}>
-                                {version.name}
-                              </option>
-                            ))
-                          )}
-                        </select>
-                        <small>Use this version when creating new managed environments.</small>
-                      </div>
-
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.autoInstallMelonLoader || false}
-                            onChange={(e) => setFormData({ ...formData, autoInstallMelonLoader: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Auto-install after download</strong>
-                            <small>Apply MelonLoader automatically when an environment finishes downloading.</small>
-                          </span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div className="settings-inline-status-grid">
-                      <div className="settings-inline-status">
-                        <span>DepotDownloader</span>
-                        <strong>{depotStatusLabel}</strong>
-                        <small>{depotStatusDetail}</small>
-                      </div>
-                      {depotDownloader?.path && (
-                        <div className="settings-inline-status settings-inline-status--path">
-                          <span>Detected Path</span>
-                          <strong title={depotDownloader.path}>{depotDownloader.path}</strong>
-                        </div>
-                      )}
-                      <div className="settings-inline-status settings-inline-status--action">
-                        <span>Tooling Check</span>
-                        <button onClick={refreshDepotDownloader} className="btn btn-secondary btn-small">
-                          Refresh
-                        </button>
-                      </div>
+                    <div className="settings-field">
+                      <label>Log level</label>
+                      <select
+                        value={formData.logLevel || "info"}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            logLevel: e.target.value as any,
+                          })
+                        }
+                      >
+                        <option value="debug">Debug</option>
+                        <option value="info">Info</option>
+                        <option value="warn">Warning</option>
+                        <option value="error">Error</option>
+                      </select>
+                      <small>
+                        Minimum log detail written to disk for SIMM
+                        troubleshooting.
+                      </small>
                     </div>
                   </div>
+                </div>
 
-                  <hr className="settings-divider" />
+                <hr className="settings-divider" />
 
-                  <div className="settings-subsection">
-                    <div className="settings-subsection__header">
-                      <div>
-                        <span className="settings-section__eyebrow">Updates & Maintenance</span>
-                        <h3><i className="fas fa-rotate"></i> Cadence, cache, and service state</h3>
-                      </div>
-                      <p>Balance background checks, cache size, and manual update runs without leaving the main settings sheet.</p>
+                <div className="settings-subsection">
+                  <div className="settings-subsection__header">
+                    <div>
+                      <span className="settings-section__eyebrow">
+                        Install Defaults
+                      </span>
+                      <h3>
+                        <i className="fas fa-folder-tree"></i> Downloads,
+                        storage, and loader setup
+                      </h3>
                     </div>
+                    <p>
+                      Control where installs stage by default, how many
+                      transfers SIMM runs at once, and which MelonLoader version
+                      new environments prefer.
+                    </p>
+                  </div>
 
-                    <div className="settings-field-grid">
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.autoCheckUpdates !== false}
-                            onChange={(e) => setFormData({ ...formData, autoCheckUpdates: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Automatically check for updates</strong>
-                            <small>Run background update checks using the interval below.</small>
-                          </span>
-                        </label>
-                      </div>
-
-                      <div className="settings-field settings-field--compact">
-                        <label>Check interval (minutes)</label>
+                  <div className="settings-field-grid">
+                    <div className="settings-field settings-field--span">
+                      <label>Default download directory</label>
+                      <div className="settings-inline-row">
                         <input
-                          type="number"
-                          value={formData.updateCheckInterval || 60}
-                          onChange={(e) => setFormData({ ...formData, updateCheckInterval: parseInt(e.target.value) || 60 })}
-                          min="1"
-                          max="1440"
+                          type="text"
+                          value={formData.defaultDownloadDir}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              defaultDownloadDir: e.target.value,
+                            })
+                          }
+                          placeholder="C:\DevEnvironments"
                         />
-                        <small>Allowed range: 1 to 1440 minutes.</small>
-                      </div>
-
-                      <div className="settings-field settings-field--compact">
-                        <label>Mod icon cache limit (MB)</label>
-                        <input
-                          type="number"
-                          value={formData.modIconCacheLimitMb ?? 500}
-                          onChange={(e) => setFormData({
-                            ...formData,
-                            modIconCacheLimitMb: normalizeModIconCacheLimitMb(e.target.value),
-                          })}
-                          min="100"
-                          max="8192"
-                        />
-                        <small>Disk budget for cached mod icons. Default is 500 MB.</small>
-                      </div>
-
-                      <div className="settings-field settings-field--compact">
-                        <label>Database backups to keep</label>
-                        <input
-                          type="number"
-                          value={formData.databaseBackupCount ?? 10}
-                          onChange={(e) => setFormData({
-                            ...formData,
-                            databaseBackupCount: normalizeDatabaseBackupCount(e.target.value),
-                          })}
-                          min="1"
-                          max="100"
-                        />
-                        <small>Automatic and manual backups prune the oldest snapshots above this count.</small>
-                      </div>
-
-                      <div className="settings-field settings-field--compact">
-                        <label>Manual batch actions</label>
                         <button
                           type="button"
-                          onClick={() => void runCheckAllUpdates()}
-                          disabled={checkingAllUpdates}
+                          onClick={() => void openDirectoryPicker()}
                           className="btn btn-secondary"
                         >
-                          {checkingAllUpdates ? 'Checking...' : 'Check All Updates'}
+                          Browse
                         </button>
-                        <small>Run an immediate check across all completed environments.</small>
                       </div>
+                      <small>
+                        New downloads and extracted install payloads default to
+                        this path.
+                      </small>
                     </div>
 
-                    <div className="settings-inline-status-grid">
-                      <div className="settings-inline-status">
-                        <span>Release API</span>
-                        <strong>
-                          <span className={`settings-status-pill settings-status-pill--${releaseApiTone}`} title={releaseApiError || undefined}>
-                            <i className={checkingReleaseApi ? 'fas fa-spinner fa-spin' : releaseApiError ? 'fas fa-exclamation-circle' : 'fas fa-check-circle'}></i>
-                            {releaseApiLabel}
-                          </span>
+                    <div className="settings-field settings-field--compact">
+                      <label>Max concurrent downloads</label>
+                      <input
+                        type="number"
+                        value={formData.maxConcurrentDownloads}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            maxConcurrentDownloads:
+                              parseInt(e.target.value) || 2,
+                          })
+                        }
+                        min="1"
+                        max="10"
+                      />
+                      <small>
+                        Higher values improve throughput but use more bandwidth
+                        and disk I/O.
+                      </small>
+                    </div>
+
+                    <div className="settings-field">
+                      <label>Preferred MelonLoader version</label>
+                      <select
+                        value={formData.melonLoaderVersion || ""}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            melonLoaderVersion: e.target.value,
+                          })
+                        }
+                        disabled={loadingVersions}
+                      >
+                        <option value="">None (Manual Installation)</option>
+                        {loadingVersions ? (
+                          <option disabled>Loading versions...</option>
+                        ) : (
+                          melonLoaderVersions.map((version) => (
+                            <option key={version.tag} value={version.tag}>
+                              {version.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                      <small>
+                        Use this version when creating new managed environments.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.autoInstallMelonLoader || false}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              autoInstallMelonLoader: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Auto-install after download</strong>
+                          <small>
+                            Apply MelonLoader automatically when an environment
+                            finishes downloading.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="settings-inline-status-grid">
+                    <div className="settings-inline-status">
+                      <span>DepotDownloader</span>
+                      <strong>{depotStatusLabel}</strong>
+                      <small>{depotStatusDetail}</small>
+                    </div>
+                    {depotDownloader?.path && (
+                      <div className="settings-inline-status settings-inline-status--path">
+                        <span>Detected Path</span>
+                        <strong title={depotDownloader.path}>
+                          {depotDownloader.path}
                         </strong>
-                        <small>{releaseApiDetail}</small>
                       </div>
-                      <div className="settings-inline-status">
-                        <span>Update Checks</span>
-                        <strong>{formData.autoCheckUpdates ? 'Enabled' : 'Disabled'}</strong>
-                        <small>{formData.autoCheckUpdates ? 'Background checks follow the configured interval.' : 'Checks only run when you trigger them manually.'}</small>
-                      </div>
-                    </div>
-
-                    <div className="settings-backup-panel">
-                      <div className="settings-backup-panel__header">
-                        <div>
-                          <span className="settings-section__eyebrow">Database Backups</span>
-                          <h4>Snapshots before upgrades and migrations</h4>
-                        </div>
-                        <p>SIMM automatically backs up the SQLite database before app-version upgrades and migration work. You can also create a manual snapshot at any time.</p>
-                      </div>
-
-                      <div className="settings-backup-panel__actions">
-                        <button
-                          type="button"
-                          onClick={() => void handleBackupDatabase()}
-                          disabled={backingUpDatabase}
-                          className="btn btn-secondary"
-                        >
-                          {backingUpDatabase ? 'Backing Up...' : 'Back Up Database'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleOpenBackupsFolder()}
-                          disabled={openingBackupsFolder}
-                          className="btn btn-secondary"
-                        >
-                          {openingBackupsFolder ? 'Opening...' : 'Open Backups Folder'}
-                        </button>
-                      </div>
-
-                      {databaseBackupFeedback && (
-                        <div
-                          className={`settings-inline-feedback settings-inline-feedback--${databaseBackupFeedback.tone}`}
-                          role={databaseBackupFeedback.tone === 'error' ? 'alert' : 'status'}
-                        >
-                          {databaseBackupFeedback.message}
-                        </div>
-                      )}
+                    )}
+                    <div className="settings-inline-status settings-inline-status--action">
+                      <span>Tooling Check</span>
+                      <button
+                        onClick={refreshDepotDownloader}
+                        className="btn btn-secondary btn-small"
+                      >
+                        Refresh
+                      </button>
                     </div>
                   </div>
-                  <hr className="settings-divider" />
+                </div>
 
-                  <div className="settings-subsection">
-                    <div className="settings-subsection__header">
+                <hr className="settings-divider" />
+
+                <div className="settings-subsection">
+                  <div className="settings-subsection__header">
+                    <div>
+                      <span className="settings-section__eyebrow">
+                        Updates & Maintenance
+                      </span>
+                      <h3>
+                        <i className="fas fa-rotate"></i> Cadence, cache, and
+                        service state
+                      </h3>
+                    </div>
+                    <p>
+                      Balance background checks, cache size, and manual update
+                      runs without leaving the main settings sheet.
+                    </p>
+                  </div>
+
+                  <div className="settings-field-grid">
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.autoCheckUpdates !== false}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              autoCheckUpdates: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Automatically check for updates</strong>
+                          <small>
+                            Run background update checks using the interval
+                            below.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>Check interval (minutes)</label>
+                      <input
+                        type="number"
+                        value={formData.updateCheckInterval || 60}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            updateCheckInterval: parseInt(e.target.value) || 60,
+                          })
+                        }
+                        min="1"
+                        max="1440"
+                      />
+                      <small>Allowed range: 1 to 1440 minutes.</small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>Mod icon cache limit (MB)</label>
+                      <input
+                        type="number"
+                        value={formData.modIconCacheLimitMb ?? 500}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            modIconCacheLimitMb: normalizeModIconCacheLimitMb(
+                              e.target.value,
+                            ),
+                          })
+                        }
+                        min="100"
+                        max="8192"
+                      />
+                      <small>
+                        Disk budget for cached mod icons. Default is 500 MB.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>Database backups to keep</label>
+                      <input
+                        type="number"
+                        value={formData.databaseBackupCount ?? 10}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            databaseBackupCount: normalizeDatabaseBackupCount(
+                              e.target.value,
+                            ),
+                          })
+                        }
+                        min="1"
+                        max="100"
+                      />
+                      <small>
+                        Automatic and manual backups prune the oldest snapshots
+                        above this count.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>Manual batch actions</label>
+                      <button
+                        type="button"
+                        onClick={() => void runCheckAllUpdates()}
+                        disabled={checkingAllUpdates}
+                        className="btn btn-secondary"
+                      >
+                        {checkingAllUpdates
+                          ? "Checking..."
+                          : "Check All Updates"}
+                      </button>
+                      <small>
+                        Run an immediate check across all completed
+                        environments.
+                      </small>
+                    </div>
+                  </div>
+
+                  <div className="settings-inline-status-grid">
+                    <div className="settings-inline-status">
+                      <span>Release API</span>
+                      <strong>
+                        <span
+                          className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
+                          title={releaseApiError || undefined}
+                        >
+                          <i
+                            className={
+                              checkingReleaseApi
+                                ? "fas fa-spinner fa-spin"
+                                : releaseApiError
+                                  ? "fas fa-exclamation-circle"
+                                  : "fas fa-check-circle"
+                            }
+                          ></i>
+                          {releaseApiLabel}
+                        </span>
+                      </strong>
+                      <small>{releaseApiDetail}</small>
+                    </div>
+                    <div className="settings-inline-status">
+                      <span>Update Checks</span>
+                      <strong>
+                        {formData.autoCheckUpdates ? "Enabled" : "Disabled"}
+                      </strong>
+                      <small>
+                        {formData.autoCheckUpdates
+                          ? "Background checks follow the configured interval."
+                          : "Checks only run when you trigger them manually."}
+                      </small>
+                    </div>
+                  </div>
+
+                  <div className="settings-backup-panel">
+                    <div className="settings-backup-panel__header">
                       <div>
-                        <span className="settings-section__eyebrow">MLVScan</span>
-                        <h3><i className="fas fa-shield-virus"></i> Security scanning and trust signals</h3>
+                        <span className="settings-section__eyebrow">
+                          Database Backups
+                        </span>
+                        <h4>Snapshots before upgrades and migrations</h4>
                       </div>
-                      <p>Control when SIMM runs MLVScan, how aggressive the safety gates are, and whether scan badges appear in the library and installed mod views.</p>
+                      <p>
+                        SIMM automatically backs up the SQLite database before
+                        app-version upgrades and migration work. You can also
+                        create a manual snapshot at any time.
+                      </p>
                     </div>
 
-                    <div className="settings-field-grid">
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.enableSecurityScanner}
-                            onChange={(e) => setFormData({ ...formData, enableSecurityScanner: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Enable download-time scanning</strong>
-                            <small>Run MLVScan against supported downloads before they enter the library.</small>
-                          </span>
-                        </label>
-                      </div>
-
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.autoInstallSecurityScanner}
-                            onChange={(e) => setFormData({ ...formData, autoInstallSecurityScanner: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Auto-install scanner</strong>
-                            <small>Let SIMM acquire or repair the scanner when a protected download needs it.</small>
-                          </span>
-                        </label>
-                      </div>
-
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.blockCriticalScans}
-                            onChange={(e) => setFormData({ ...formData, blockCriticalScans: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Block critical findings</strong>
-                            <small>Stop downloads automatically when MLVScan reports a critical risk.</small>
-                          </span>
-                        </label>
-                      </div>
-
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.promptOnHighScans}
-                            onChange={(e) => setFormData({ ...formData, promptOnHighScans: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Prompt on high-risk results</strong>
-                            <small>Require manual confirmation before continuing when a scan needs review.</small>
-                          </span>
-                        </label>
-                      </div>
-
-                      <div className="settings-field settings-field--toggle">
-                        <label className="settings-toggle">
-                          <input
-                            type="checkbox"
-                            checked={formData.showSecurityScanBadges}
-                            onChange={(e) => setFormData({ ...formData, showSecurityScanBadges: e.target.checked })}
-                          />
-                          <span className="settings-toggle__control" aria-hidden="true"></span>
-                          <span>
-                            <strong>Show scan badges</strong>
-                            <small>Display verified, review, and unavailable states across library and installed mod cards.</small>
-                          </span>
-                        </label>
-                      </div>
+                    <div className="settings-backup-panel__actions">
+                      <button
+                        type="button"
+                        onClick={() => void handleBackupDatabase()}
+                        disabled={backingUpDatabase}
+                        className="btn btn-secondary"
+                      >
+                        {backingUpDatabase
+                          ? "Backing Up..."
+                          : "Back Up Database"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenBackupsFolder()}
+                        disabled={openingBackupsFolder}
+                        className="btn btn-secondary"
+                      >
+                        {openingBackupsFolder
+                          ? "Opening..."
+                          : "Open Backups Folder"}
+                      </button>
                     </div>
 
-                    <div className="settings-inline-status-grid">
-                      <div className="settings-inline-status">
-                        <span>Scanner Status</span>
-                        <strong>{loadingSecurityScannerStatus ? 'Checking' : securityScannerStatus?.installed ? 'Installed' : 'Not Installed'}</strong>
-                        <small>
-                          {securityScannerStatus?.installedVersion
-                            ? `Installed ${securityScannerStatus.installedVersion}`
-                            : 'Install the scanner to enforce protected download checks.'}
-                        </small>
-                      </div>
-                      <div className="settings-inline-status">
-                        <span>Install Method</span>
-                        <strong>{securityScannerStatus?.installMethod || 'None'}</strong>
-                        <small>{securityScannerStatus?.latestVersion ? `Latest ${securityScannerStatus.latestVersion}` : 'Release metadata unavailable'}</small>
-                      </div>
-                      {securityScannerStatus?.executablePath && (
-                        <div className="settings-inline-status settings-inline-status--path">
-                          <span>Executable Path</span>
-                          <strong title={securityScannerStatus.executablePath}>{securityScannerStatus.executablePath}</strong>
-                        </div>
-                      )}
-                      <div className="settings-inline-status settings-inline-status--action">
-                        <span>Scanner Actions</span>
-                        <div className="settings-backup-panel__actions">
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-small"
-                            disabled={loadingSecurityScannerStatus || installingSecurityScanner}
-                            onClick={async () => {
-                              setLoadingSecurityScannerStatus(true);
-                              try {
-                                const status = await ApiService.getSecurityScannerStatus();
-                                setSecurityScannerStatus(status);
-                              } catch (err) {
-                                setError(err instanceof Error ? err.message : 'Failed to refresh the security scanner status');
-                              } finally {
-                                setLoadingSecurityScannerStatus(false);
-                              }
-                            }}
-                          >
-                            {loadingSecurityScannerStatus ? 'Refreshing...' : 'Refresh'}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-small"
-                            disabled={installingSecurityScanner}
-                            onClick={async () => {
-                              setInstallingSecurityScanner(true);
-                              try {
-                                const status = await ApiService.installSecurityScanner();
-                                setSecurityScannerStatus(status);
-                              } catch (err) {
-                                setError(err instanceof Error ? err.message : 'Failed to install the security scanner');
-                              } finally {
-                                setInstallingSecurityScanner(false);
-                              }
-                            }}
-                          >
-                            {installingSecurityScanner ? 'Installing...' : securityScannerStatus?.installed ? 'Repair / Update' : 'Install Scanner'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {securityScannerStatus?.lastError && (
-                      <div className="settings-inline-feedback settings-inline-feedback--error" role="alert">
-                        {securityScannerStatus.lastError}
+                    {databaseBackupFeedback && (
+                      <div
+                        className={`settings-inline-feedback settings-inline-feedback--${databaseBackupFeedback.tone}`}
+                        role={
+                          databaseBackupFeedback.tone === "error"
+                            ? "alert"
+                            : "status"
+                        }
+                      >
+                        {databaseBackupFeedback.message}
                       </div>
                     )}
                   </div>
-                </section>
-              </div>
+                </div>
+                <hr className="settings-divider" />
+
+                <div className="settings-subsection">
+                  <div className="settings-subsection__header">
+                    <div>
+                      <span className="settings-section__eyebrow">MLVScan</span>
+                      <h3>
+                        <i className="fas fa-shield-virus"></i> Security
+                        scanning and trust signals
+                      </h3>
+                    </div>
+                    <p>
+                      Control when SIMM runs MLVScan, how aggressive the safety
+                      gates are, and whether scan badges appear in the library
+                      and installed mod views.
+                    </p>
+                  </div>
+
+                  <div className="settings-field-grid">
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.enableSecurityScanner ?? true}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              enableSecurityScanner: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Enable download-time scanning</strong>
+                          <small>
+                            Run MLVScan against supported downloads before they
+                            enter the library.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.autoInstallSecurityScanner ?? true}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              autoInstallSecurityScanner: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Auto-install scanner</strong>
+                          <small>
+                            Let SIMM acquire or repair the scanner when a
+                            protected download needs it.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.blockCriticalScans ?? true}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              blockCriticalScans: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Block critical findings</strong>
+                          <small>
+                            Stop downloads automatically when MLVScan reports a
+                            critical risk.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.promptOnHighScans ?? true}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              promptOnHighScans: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Prompt on high-risk results</strong>
+                          <small>
+                            Require manual confirmation before continuing when a
+                            scan needs review.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <label className="settings-toggle">
+                        <input
+                          type="checkbox"
+                          checked={formData.showSecurityScanBadges ?? true}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              showSecurityScanBadges: e.target.checked,
+                            })
+                          }
+                        />
+                        <span
+                          className="settings-toggle__control"
+                          aria-hidden="true"
+                        ></span>
+                        <span>
+                          <strong>Show scan badges</strong>
+                          <small>
+                            Display verified, review, and unavailable states
+                            across library and installed mod cards.
+                          </small>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="settings-inline-status-grid">
+                    <div className="settings-inline-status">
+                      <span>Scanner Status</span>
+                      <strong>
+                        {loadingSecurityScannerStatus
+                          ? "Checking"
+                          : securityScannerStatus?.installed
+                            ? "Installed"
+                            : "Not Installed"}
+                      </strong>
+                      <small>
+                        {securityScannerStatus?.installedVersion
+                          ? `Installed ${securityScannerStatus.installedVersion}`
+                          : "Install the scanner to enforce protected download checks."}
+                      </small>
+                    </div>
+                    <div className="settings-inline-status">
+                      <span>Install Method</span>
+                      <strong>
+                        {securityScannerStatus?.installMethod || "None"}
+                      </strong>
+                      <small>
+                        {securityScannerStatus?.latestVersion
+                          ? `Latest ${securityScannerStatus.latestVersion}`
+                          : "Release metadata unavailable"}
+                      </small>
+                    </div>
+                    {securityScannerStatus?.executablePath && (
+                      <div className="settings-inline-status settings-inline-status--path">
+                        <span>Executable Path</span>
+                        <strong title={securityScannerStatus.executablePath}>
+                          {securityScannerStatus.executablePath}
+                        </strong>
+                      </div>
+                    )}
+                    <div className="settings-inline-status settings-inline-status--action">
+                      <span>Scanner Actions</span>
+                      <div className="settings-backup-panel__actions">
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-small"
+                          disabled={
+                            loadingSecurityScannerStatus ||
+                            installingSecurityScanner
+                          }
+                          onClick={async () => {
+                            setLoadingSecurityScannerStatus(true);
+                            try {
+                              const status =
+                                await ApiService.getSecurityScannerStatus();
+                              setSecurityScannerStatus(status);
+                            } catch (err) {
+                              setError(
+                                err instanceof Error
+                                  ? err.message
+                                  : "Failed to refresh the security scanner status",
+                              );
+                            } finally {
+                              setLoadingSecurityScannerStatus(false);
+                            }
+                          }}
+                        >
+                          {loadingSecurityScannerStatus
+                            ? "Refreshing..."
+                            : "Refresh"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-small"
+                          disabled={installingSecurityScanner}
+                          onClick={async () => {
+                            setInstallingSecurityScanner(true);
+                            try {
+                              const status =
+                                await ApiService.installSecurityScanner();
+                              setSecurityScannerStatus(status);
+                            } catch (err) {
+                              setError(
+                                err instanceof Error
+                                  ? err.message
+                                  : "Failed to install the security scanner",
+                              );
+                            } finally {
+                              setInstallingSecurityScanner(false);
+                            }
+                          }}
+                        >
+                          {installingSecurityScanner
+                            ? "Installing..."
+                            : securityScannerStatus?.installed
+                              ? "Repair / Update"
+                              : "Install Scanner"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {securityScannerStatus?.lastError && (
+                    <div
+                      className="settings-inline-feedback settings-inline-feedback--error"
+                      role="alert"
+                    >
+                      {securityScannerStatus.lastError}
+                    </div>
+                  )}
+                </div>
+              </section>
             </div>
+          </div>
         </section>
       )}
 
       {/* Directory Picker Modal */}
       {showDirectoryPicker && (
-        <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDirectoryPicker(false)}>
-          <div className="modal-content modal-content-nested wizard-directory-dialog settings-directory-dialog" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="modal-overlay modal-overlay-nested"
+          onClick={() => setShowDirectoryPicker(false)}
+        >
+          <div
+            className="modal-content modal-content-nested wizard-directory-dialog settings-directory-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="modal-header">
               <h2>Select Download Directory</h2>
-              <button className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">×</button>
+              <button
+                className="modal-close"
+                onClick={() => setShowDirectoryPicker(false)}
+                aria-label="Close directory picker"
+              >
+                ×
+              </button>
             </div>
 
             <div className="wizard-directory-dialog__body">
               <div className="wizard-directory-dialog__overview">
                 <span className="settings-eyebrow">Directory Browser</span>
                 <h3>Choose the default download location</h3>
-                <p>Browse folders, create a new subdirectory if needed, and confirm the current location when you are ready.</p>
+                <p>
+                  Browse folders, create a new subdirectory if needed, and
+                  confirm the current location when you are ready.
+                </p>
               </div>
 
               <div className="settings-field-card settings-field-card--full">
@@ -910,7 +1273,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     value={directoryPath}
                     onChange={(e) => setDirectoryPath(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
+                      if (e.key === "Enter") {
                         void loadDirectory(directoryPath);
                       }
                     }}
@@ -922,14 +1285,23 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     className="btn btn-secondary"
                     disabled={browsing}
                   >
-                    <i className={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'} aria-hidden="true"></i>
-                    {browsing ? 'Loading…' : 'Go to Path'}
+                    <i
+                      className={
+                        browsing
+                          ? "fas fa-spinner fa-spin"
+                          : "fas fa-location-crosshairs"
+                      }
+                      aria-hidden="true"
+                    ></i>
+                    {browsing ? "Loading…" : "Go to Path"}
                   </button>
                 </div>
               </div>
 
               <div className="settings-field-card settings-field-card--full">
-                <label htmlFor="settings-new-folder">Create a folder in the current location</label>
+                <label htmlFor="settings-new-folder">
+                  Create a folder in the current location
+                </label>
                 <div className="settings-inline-field">
                   <input
                     id="settings-new-folder"
@@ -937,7 +1309,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     value={newFolderName}
                     onChange={(e) => setNewFolderName(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && newFolderName.trim()) {
+                      if (e.key === "Enter" && newFolderName.trim()) {
                         void handleCreateFolder();
                       }
                     }}
@@ -948,10 +1320,19 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void handleCreateFolder()}
-                    disabled={creatingFolder || !newFolderName.trim() || !directoryPath}
+                    disabled={
+                      creatingFolder || !newFolderName.trim() || !directoryPath
+                    }
                   >
-                    <i className={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} aria-hidden="true"></i>
-                    {creatingFolder ? 'Creating…' : 'Create Folder'}
+                    <i
+                      className={
+                        creatingFolder
+                          ? "fas fa-spinner fa-spin"
+                          : "fas fa-folder-plus"
+                      }
+                      aria-hidden="true"
+                    ></i>
+                    {creatingFolder ? "Creating…" : "Create Folder"}
                   </button>
                 </div>
               </div>
@@ -969,7 +1350,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       <button
                         type="button"
                         className="wizard-directory-row wizard-directory-row--parent"
-                        onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
+                        onClick={() =>
+                          void loadDirectory(getParentPath(directoryPath) || "")
+                        }
                       >
                         <i className="fas fa-arrow-up"></i>
                         <span>Parent Directory</span>
@@ -979,7 +1362,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       <div className="wizard-empty-card">
                         <i className="fas fa-folder-open"></i>
                         <strong>No subdirectories found</strong>
-                        <p>This location does not contain any folders that SIMM can browse into right now.</p>
+                        <p>
+                          This location does not contain any folders that SIMM
+                          can browse into right now.
+                        </p>
                       </div>
                     ) : (
                       directoryList.map((dir) => (
@@ -999,7 +1385,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               </div>
 
               <div className="wizard-panel__actions wizard-panel__actions--dialog">
-                <button type="button" onClick={() => setShowDirectoryPicker(false)} className="btn btn-secondary">
+                <button
+                  type="button"
+                  onClick={() => setShowDirectoryPicker(false)}
+                  className="btn btn-secondary"
+                >
                   Cancel
                 </button>
                 <button
@@ -1018,4 +1408,3 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     </>
   );
 }
-

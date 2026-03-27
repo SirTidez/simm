@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
 use unrar::Archive;
@@ -59,6 +60,8 @@ impl SecurityScannerService {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .user_agent(http_identity::user_agent())
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(300))
             .build()
             .expect("Failed to build security scanner HTTP client");
 

@@ -181,6 +181,14 @@ pub(crate) async fn persist_security_scan_report(
         return Ok(());
     };
 
+    if response
+        .get("alreadyStored")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
     mods_service
         .save_security_scan_report(storage_id, report)
         .await
@@ -201,6 +209,34 @@ pub(crate) fn attach_security_scan_summary(
     }
 
     Ok(response)
+}
+
+pub(crate) async fn finalize_security_scan_response(
+    mods_service: &ModsService,
+    response: serde_json::Value,
+    report: Option<&SecurityScanReport>,
+    operation: &str,
+) -> serde_json::Value {
+    if let Err(error) = persist_security_scan_report(mods_service, &response, report).await {
+        log::warn!(
+            "Failed to persist security scan report after {}: {}",
+            operation,
+            error
+        );
+    }
+
+    let original_response = response.clone();
+    match attach_security_scan_summary(response, report) {
+        Ok(updated) => updated,
+        Err(error) => {
+            log::warn!(
+                "Failed to attach security scan summary after {}: {}",
+                operation,
+                error
+            );
+            original_response
+        }
+    }
 }
 
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
@@ -607,8 +643,13 @@ pub async fn upload_mod(
         UploadKind::Unsupported => return Err("Only .zip and .dll files are supported".to_string()),
     };
 
-    persist_security_scan_report(&mods_service, &response, security_report.as_ref()).await?;
-    attach_security_scan_summary(response, security_report.as_ref())
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        response,
+        security_report.as_ref(),
+        "installing a local mod upload",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -652,8 +693,13 @@ pub async fn store_mod_archive(
         let _ = tokio::fs::remove_file(&file_path).await;
     }
 
-    persist_security_scan_report(&mods_service, &result, security_report.as_ref()).await?;
-    attach_security_scan_summary(result, security_report.as_ref())
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "storing a mod archive",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -979,8 +1025,13 @@ pub async fn download_s1api_to_library(
     let _ = tokio::fs::remove_file(&temp_zip_path).await;
 
     let result = result.map_err(|e| e.to_string())?;
-    persist_security_scan_report(&mods_service, &result, security_report.as_ref()).await?;
-    attach_security_scan_summary(result, security_report.as_ref())
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "downloading S1API to the library",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -1148,8 +1199,13 @@ pub async fn download_mlvscan_to_library(
     let _ = tokio::fs::remove_file(&temp_path).await;
 
     let result = result.map_err(|e| e.to_string())?;
-    persist_security_scan_report(&mods_service, &result, security_report.as_ref()).await?;
-    attach_security_scan_summary(result, security_report.as_ref())
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "downloading MLVScan to the library",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -1179,8 +1235,40 @@ pub async fn uninstall_s1api(
 mod tests {
     use super::{
         build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
-        parse_runtime_label, UploadKind,
+        parse_runtime_label, persist_security_scan_report, UploadKind,
     };
+    use crate::db::initialize_pool;
+    use crate::services::mods::ModsService;
+    use crate::services::settings::SettingsService;
+    use crate::types::{
+        SecurityScanDisposition, SecurityScanDispositionClassification, SecurityScanPolicy,
+        SecurityScanReport, SecurityScanState, SecurityScanSummary,
+    };
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn detect_upload_kind_matches_supported_extensions() {
@@ -1240,5 +1328,115 @@ mod tests {
             metadata.get("sourceVersion").and_then(|v| v.as_str()),
             Some("v0.9.1")
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn persist_security_scan_report_skips_already_stored_responses() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let original_report = SecurityScanReport {
+            summary: SecurityScanSummary {
+                state: SecurityScanState::Verified,
+                verified: true,
+                disposition: Some(SecurityScanDisposition {
+                    classification: SecurityScanDispositionClassification::Clean,
+                    headline: "Clean".to_string(),
+                    summary: "Original report".to_string(),
+                    blocking_recommended: false,
+                    primary_threat_family_id: None,
+                    related_finding_ids: Vec::new(),
+                }),
+                highest_severity: None,
+                total_findings: 0,
+                threat_family_count: 0,
+                scanned_at: None,
+                scanner_version: None,
+                schema_version: None,
+                status_message: Some("Original report".to_string()),
+            },
+            policy: SecurityScanPolicy {
+                enabled: true,
+                requires_confirmation: false,
+                blocked: false,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message: Some("Original report".to_string()),
+            },
+            files: Vec::new(),
+        };
+        service
+            .save_security_scan_report("existing-storage", &original_report)
+            .await?;
+
+        let replacement_report = SecurityScanReport {
+            summary: SecurityScanSummary {
+                state: SecurityScanState::Review,
+                verified: false,
+                disposition: Some(SecurityScanDisposition {
+                    classification: SecurityScanDispositionClassification::Suspicious,
+                    headline: "Suspicious".to_string(),
+                    summary: "Replacement report".to_string(),
+                    blocking_recommended: false,
+                    primary_threat_family_id: None,
+                    related_finding_ids: vec!["finding-1".to_string()],
+                }),
+                highest_severity: None,
+                total_findings: 1,
+                threat_family_count: 1,
+                scanned_at: None,
+                scanner_version: None,
+                schema_version: None,
+                status_message: Some("Replacement report".to_string()),
+            },
+            policy: SecurityScanPolicy {
+                enabled: true,
+                requires_confirmation: true,
+                blocked: false,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message: Some("Replacement report".to_string()),
+            },
+            files: Vec::new(),
+        };
+
+        persist_security_scan_report(
+            &service,
+            &serde_json::json!({
+                "storageId": "existing-storage",
+                "alreadyStored": true
+            }),
+            Some(&replacement_report),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let persisted = service
+            .get_security_scan_report("existing-storage")
+            .await?
+            .expect("report should still exist");
+        assert_eq!(
+            persisted
+                .summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::Clean)
+        );
+
+        Ok(())
     }
 }
