@@ -30,11 +30,6 @@ pub fn initialize_simm_directory() -> Result<bool> {
 
 /// Initialize services (async part)
 pub async fn initialize_services(app: AppHandle) -> Result<()> {
-    // Initialize the LoggerService for the global logger (starts background thread)
-    log::info!("Initializing LoggerService for global logger");
-    crate::utils::global_logger::init_logger_service();
-    log::info!("LoggerService initialized - logs will now be written to file");
-
     // Initialize filesystem watcher service
     let mut watcher = FileSystemWatcherService::new();
     watcher.set_app_handle(app.clone());

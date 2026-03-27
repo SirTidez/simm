@@ -59,8 +59,28 @@ vi.mock('./PluginsOverlay', () => ({ PluginsOverlay: () => null }));
 vi.mock('./UserLibsOverlay', () => ({ UserLibsOverlay: () => null }));
 vi.mock('./LogsOverlay', () => ({ LogsOverlay: () => null }));
 vi.mock('./ConfigurationOverlay', () => ({ ConfigurationOverlay: () => null }));
-vi.mock('./MessageOverlay', () => ({ MessageOverlay: () => null }));
-vi.mock('./ConfirmOverlay', () => ({ ConfirmOverlay: () => null }));
+vi.mock('./MessageOverlay', () => ({
+  MessageOverlay: ({ isOpen, title, message }: any) =>
+    isOpen ? (
+      <div data-testid="message-overlay">
+        <h2>{title}</h2>
+        <p>{message}</p>
+      </div>
+    ) : null,
+}));
+vi.mock('./ConfirmOverlay', () => ({
+  ConfirmOverlay: ({ isOpen, title, message, confirmText = 'Confirm', onConfirm, bodyContent }: any) =>
+    isOpen ? (
+      <div data-testid="confirm-overlay">
+        <h2>{title}</h2>
+        <p>{message}</p>
+        {bodyContent}
+        <button type="button" onClick={onConfirm}>
+          {confirmText}
+        </button>
+      </div>
+    ) : null,
+}));
 
 const completedEnv: Environment = {
   id: 'env-1',
@@ -130,6 +150,7 @@ describe('EnvironmentList', () => {
       settings: {
         autoCheckUpdates: false,
         updateCheckInterval: 60,
+        steamUsername: 'tester',
       },
     });
   });
@@ -159,7 +180,7 @@ describe('EnvironmentList', () => {
 
     render(<EnvironmentList />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Check Updates' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
 
     await waitFor(() => {
       expect(checkUpdate).toHaveBeenCalledWith('env-1', true);
@@ -196,5 +217,37 @@ describe('EnvironmentList', () => {
     for (const fn of unlistenFns) {
       expect(fn).toHaveBeenCalled();
     }
+  });
+
+  it('routes start download failures through the shared message dialog', async () => {
+    const queuedEnv: Environment = {
+      ...completedEnv,
+      id: 'env-download',
+      name: 'Queued Install',
+      status: 'not_downloaded',
+    };
+    const startDownload = vi.fn().mockRejectedValue(new Error('Network unavailable'));
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [queuedEnv],
+      loading: false,
+      error: null,
+      progress: new Map(),
+      startDownload,
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Download Failed')).toBeTruthy();
+      expect(screen.getByText('Failed to start download: Network unavailable')).toBeTruthy();
+    });
   });
 });

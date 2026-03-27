@@ -25,3 +25,4 @@ bun.lock
 AGENTS.md
 TEST_PLAN.md
 .serena/project.yml
+/test-results

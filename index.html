@@ -8,13 +8,25 @@
     <style>
       :root {
         color-scheme: dark;
+        --boot-body-bg: #0f141d;
+        --boot-body-text: #edf4ff;
+        --boot-screen-bg:
+          radial-gradient(circle at 20% 0%, rgba(81, 143, 220, 0.18), transparent 34%),
+          linear-gradient(180deg, rgba(12, 18, 28, 0.98), rgba(8, 12, 20, 0.99));
+        --boot-card-bg: linear-gradient(180deg, rgba(20, 31, 47, 0.95), rgba(14, 23, 35, 0.96));
+        --boot-card-border: rgba(99, 132, 177, 0.28);
+        --boot-card-shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
+        --boot-subtitle: #9fb4d0;
+        --boot-dot: rgba(124, 169, 230, 0.42);
+        --boot-bar-bg: rgba(255, 255, 255, 0.08);
+        --boot-bar-fill: linear-gradient(90deg, rgba(92, 152, 230, 0.18), #4e8ad9, rgba(92, 152, 230, 0.18));
       }
 
       body {
         margin: 0;
-        background-color: #1a1a1a;
+        background-color: var(--boot-body-bg);
         font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        color: rgba(255, 255, 255, 0.87);
+        color: var(--boot-body-text);
       }
 
       .boot-screen {
@@ -23,14 +35,15 @@
         align-items: center;
         justify-content: center;
         padding: 32px;
+        background: var(--boot-screen-bg);
       }
 
       .boot-card {
         width: min(480px, 90vw);
-        background-color: #2a2a2a;
-        border: 1px solid #3a3a3a;
+        background: var(--boot-card-bg);
+        border: 1px solid var(--boot-card-border);
         border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+        box-shadow: var(--boot-card-shadow);
         padding: 32px 32px 28px;
         display: grid;
         gap: 16px;
@@ -48,7 +61,7 @@
       .boot-subtitle {
         font-size: 14px;
         font-weight: 400;
-        color: #cccccc;
+        color: var(--boot-subtitle);
       }
 
       .boot-loader {
@@ -62,7 +75,7 @@
         width: 10px;
         height: 10px;
         border-radius: 50%;
-        background: #646cff;
+        background: var(--boot-dot);
         animation: bounce 1s ease-in-out infinite;
       }
 
@@ -77,7 +90,7 @@
       .boot-bar {
         height: 6px;
         border-radius: 4px;
-        background-color: #3a3a3a;
+        background-color: var(--boot-bar-bg);
         overflow: hidden;
         position: relative;
       }
@@ -86,7 +99,7 @@
         content: '';
         position: absolute;
         inset: 0;
-        background: linear-gradient(90deg, rgba(100, 108, 255, 0.2), #646cff, rgba(100, 108, 255, 0.2));
+        background: var(--boot-bar-fill);
         animation: slide 1.6s ease-in-out infinite;
       }
 
@@ -114,6 +127,46 @@
         }
       }
     </style>
+    <script>
+      (function() {
+        try {
+          var theme = localStorage.getItem('simm-theme') || 'modern-blue';
+          var root = document.documentElement;
+          var body = document.body;
+          if (theme === 'light') {
+            root.style.colorScheme = 'light';
+            root.style.setProperty('--boot-body-bg', '#e8eef6');
+            root.style.setProperty('--boot-body-text', '#1f2835');
+            root.style.setProperty('--boot-screen-bg', 'radial-gradient(circle at 20% 0%, rgba(82, 137, 214, 0.14), transparent 34%), linear-gradient(180deg, rgba(248, 250, 253, 0.98), rgba(231, 237, 245, 0.99))');
+            root.style.setProperty('--boot-card-bg', 'linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 248, 252, 0.98))');
+            root.style.setProperty('--boot-card-border', '#d6e0ec');
+            root.style.setProperty('--boot-card-shadow', '0 18px 40px rgba(106, 129, 162, 0.18)');
+            root.style.setProperty('--boot-subtitle', '#607086');
+            root.style.setProperty('--boot-dot', '#3f74c9');
+            root.style.setProperty('--boot-bar-bg', 'rgba(31, 40, 53, 0.08)');
+            root.style.setProperty('--boot-bar-fill', 'linear-gradient(90deg, rgba(63, 116, 201, 0.18), #3f74c9, rgba(63, 116, 201, 0.18))');
+          } else if (theme === 'dark') {
+            root.style.colorScheme = 'dark';
+            root.style.setProperty('--boot-body-bg', '#11161d');
+            root.style.setProperty('--boot-body-text', '#e9eef6');
+            root.style.setProperty('--boot-screen-bg', 'radial-gradient(circle at 20% 0%, rgba(83, 127, 197, 0.14), transparent 34%), linear-gradient(180deg, rgba(13, 17, 23, 0.98), rgba(17, 22, 29, 0.99))');
+            root.style.setProperty('--boot-card-bg', 'linear-gradient(180deg, rgba(29, 38, 49, 0.96), rgba(22, 30, 39, 0.97))');
+            root.style.setProperty('--boot-card-border', '#344253');
+            root.style.setProperty('--boot-card-shadow', '0 18px 40px rgba(0, 0, 0, 0.34)');
+            root.style.setProperty('--boot-subtitle', '#a4afbf');
+            root.style.setProperty('--boot-dot', '#6493e5');
+            root.style.setProperty('--boot-bar-bg', 'rgba(255, 255, 255, 0.08)');
+            root.style.setProperty('--boot-bar-fill', 'linear-gradient(90deg, rgba(100, 147, 229, 0.18), #537fd4, rgba(100, 147, 229, 0.18))');
+          }
+          if (body) {
+            body.style.backgroundColor = getComputedStyle(root).getPropertyValue('--boot-body-bg');
+            body.style.color = getComputedStyle(root).getPropertyValue('--boot-body-text');
+          }
+        } catch (_) {
+          // Ignore startup theme cache failures and fall back to modern blue defaults.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app">

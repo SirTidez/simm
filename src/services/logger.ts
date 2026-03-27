@@ -1,5 +1,7 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+import { logger as backendLogger } from '../utils/logger';
+
 class Logger {
   private enabled: boolean = true;
 
@@ -8,7 +10,7 @@ class Logger {
    */
   debug(message: string, data?: any): void {
     if (!this.enabled) return;
-    console.debug(`[Frontend] ${message}`, data || '');
+    backendLogger.debug(`[Frontend] ${message}`, ...(data === undefined ? [] : [data]));
   }
 
   /**
@@ -16,7 +18,7 @@ class Logger {
    */
   info(message: string, data?: any): void {
     if (!this.enabled) return;
-    console.info(`[Frontend] ${message}`, data || '');
+    backendLogger.info(`[Frontend] ${message}`, ...(data === undefined ? [] : [data]));
   }
 
   /**
@@ -24,7 +26,7 @@ class Logger {
    */
   warn(message: string, data?: any): void {
     if (!this.enabled) return;
-    console.warn(`[Frontend] ${message}`, data || '');
+    backendLogger.warn(`[Frontend] ${message}`, ...(data === undefined ? [] : [data]));
   }
 
   /**
@@ -32,7 +34,7 @@ class Logger {
    */
   error(message: string, data?: any): void {
     if (!this.enabled) return;
-    console.error(`[Frontend] ${message}`, data || '');
+    backendLogger.error(`[Frontend] ${message}`, ...(data === undefined ? [] : [data]));
   }
 
   /**

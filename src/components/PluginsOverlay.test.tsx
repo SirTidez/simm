@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { open } from '@tauri-apps/plugin-dialog';
+
 import { PluginsOverlay } from './PluginsOverlay';
 import type { Environment } from '../types';
-import { open } from '@tauri-apps/plugin-dialog';
 
 const apiMocks = vi.hoisted(() => ({
   getEnvironment: vi.fn(),
@@ -10,6 +11,8 @@ const apiMocks = vi.hoisted(() => ({
   uploadPlugin: vi.fn(),
   deletePlugin: vi.fn(),
   openPluginsFolder: vi.fn(),
+  enablePlugin: vi.fn(),
+  disablePlugin: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -39,6 +42,8 @@ describe('PluginsOverlay', () => {
     apiMocks.uploadPlugin.mockReset();
     apiMocks.deletePlugin.mockReset();
     apiMocks.openPluginsFolder.mockReset();
+    apiMocks.enablePlugin.mockReset();
+    apiMocks.disablePlugin.mockReset();
     openMock.mockReset();
 
     apiMocks.getEnvironment.mockResolvedValue(baseEnvironment);
@@ -49,21 +54,31 @@ describe('PluginsOverlay', () => {
           fileName: 'MLVScan.dll',
           path: 'C:/env/Plugins/MLVScan.dll',
           source: 'local',
+          disabled: false,
+        },
+        {
+          name: 'RuntimeFix',
+          fileName: 'RuntimeFix.dll',
+          path: 'C:/env/Plugins/RuntimeFix.dll',
+          source: 'github',
+          disabled: true,
         },
       ],
       pluginsDirectory: 'C:/env/Plugins',
-      count: 1,
+      count: 2,
     });
     apiMocks.uploadPlugin.mockResolvedValue({ success: true });
     apiMocks.deletePlugin.mockResolvedValue({ success: true });
     apiMocks.openPluginsFolder.mockResolvedValue({ success: true });
+    apiMocks.enablePlugin.mockResolvedValue({ success: true });
+    apiMocks.disablePlugin.mockResolvedValue({ success: true });
   });
 
   afterEach(() => {
     cleanup();
   });
 
-  it('displays MLVScan.dll in the plugins list', async () => {
+  it('auto-selects the first plugin and renders inspector details', async () => {
     render(
       <PluginsOverlay
         isOpen={true}
@@ -72,7 +87,45 @@ describe('PluginsOverlay', () => {
       />
     );
 
-    expect(await screen.findByText('MLVScan.dll')).toBeTruthy();
+    expect((await screen.findAllByText('MLVScan.dll')).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Plugin inventory/i)).toBeTruthy();
+    expect(screen.getByText('C:/env/Plugins/MLVScan.dll')).toBeTruthy();
+  });
+
+  it('filters plugins from the toolbar search', async () => {
+    render(
+      <PluginsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.change(await screen.findByPlaceholderText('Search plugins'), {
+      target: { value: 'runtime' },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryAllByText('MLVScan.dll')).toHaveLength(0);
+      expect(screen.getAllByText('RuntimeFix.dll').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('toggles plugin state from the inspector', async () => {
+    render(
+      <PluginsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click((await screen.findAllByText('RuntimeFix'))[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
+
+    await waitFor(() => {
+      expect(apiMocks.enablePlugin).toHaveBeenCalledWith('env-1', 'RuntimeFix.dll');
+    });
   });
 
   it('uploads plugin and notifies parent on success', async () => {

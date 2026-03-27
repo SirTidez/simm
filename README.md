@@ -79,8 +79,17 @@ React component -> `ApiService` -> `invoke()` -> Rust command -> service -> resu
 
 - **Rust (stable)**: https://rustup.rs/
 - **Node.js v18+**: https://nodejs.org/
-- **DepotDownloader**:
-  - `winget install --exact --id SteamRE.DepotDownloader`
+
+## Windows Installer
+
+Windows releases now ship as an `NSIS` installer with a prerequisite step. Before SIMM installs, the setup wizard detects, installs, and verifies:
+
+- Microsoft Visual C++ Redistributable x64
+- .NET Desktop Runtime 6 x64
+- DepotDownloader
+
+If `winget` cannot install DepotDownloader automatically, the installer blocks and asks the user to install it manually before continuing.
+The installed Windows app is also marked `requireAdministrator`, so every launch path prompts for elevation and symlink operations do not rely on Developer Mode.
 
 ## Development
 
@@ -145,4 +154,4 @@ The file **`app-icon.png`** in the project root is the source image for the appl
 
 ## License
 
-MIT. See `LICENSE`.
+GNU Affero General Public License v3.0 (AGPLv3). See `LICENSE`.

@@ -175,7 +175,7 @@ pub struct Settings {
     pub auto_update_mods: Option<bool>,
     pub mod_update_check_interval: Option<u32>, // minutes
     pub mod_icon_cache_limit_mb: Option<u32>,
-    pub custom_theme: Option<CustomTheme>,
+    pub database_backup_count: Option<u32>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
 }
 
@@ -195,49 +195,8 @@ pub struct NexusRateLimits {
 pub enum Theme {
     Light,
     Dark,
-    #[serde(rename = "modern-blue")]
+    #[serde(rename = "modern-blue", alias = "custom")]
     ModernBlue,
-    Custom,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomTheme {
-    pub app_bg_color: String,
-    pub app_text_color: String,
-    pub header_bg_color: String,
-    pub border_color: String,
-    pub card_bg_color: String,
-    pub card_border_color: String,
-    pub text_secondary: String,
-    pub input_bg_color: String,
-    pub input_border_color: String,
-    pub input_text_color: String,
-    pub btn_secondary_bg: String,
-    pub btn_secondary_hover: String,
-    pub btn_secondary_text: String,
-    pub btn_secondary_border: String,
-    pub info_box_bg: String,
-    pub info_box_border: String,
-    pub warning_box_bg: String,
-    pub warning_box_border: String,
-    pub info_panel_bg: String,
-    pub info_panel_border: String,
-    pub modal_overlay: String,
-    pub bg_gradient: String,
-    pub bg_pattern: String,
-    pub badge_gray: String,
-    pub badge_blue: String,
-    pub badge_orange_red: String,
-    pub badge_yellow: String,
-    pub badge_green: String,
-    pub badge_red: String,
-    pub badge_orange: String,
-    pub badge_cyan: String,
-    pub update_version_color: String,
-    pub update_version_bg: String,
-    pub primary_btn_color: String,
-    pub primary_btn_hover: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +206,99 @@ pub enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConfigFileType {
+    #[serde(rename = "MelonPreferences", alias = "melonPreferences")]
+    MelonPreferences,
+    #[serde(rename = "LoaderConfig", alias = "loaderConfig")]
+    LoaderConfig,
+    #[serde(rename = "Json", alias = "json")]
+    Json,
+    #[serde(rename = "Other", alias = "other")]
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSection {
+    pub name: String,
+    pub entries: Vec<ConfigEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigGroup {
+    pub id: String,
+    pub label: String,
+    pub section_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigFileSummary {
+    pub name: String,
+    pub path: String,
+    pub file_type: ConfigFileType,
+    pub format: String,
+    pub relative_path: String,
+    pub group_name: String,
+    pub last_modified: Option<i64>,
+    pub section_count: usize,
+    pub entry_count: usize,
+    pub supports_structured_edit: bool,
+    pub supports_raw_edit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDocument {
+    pub summary: ConfigFileSummary,
+    pub raw_content: String,
+    pub sections: Vec<ConfigSection>,
+    pub parse_warnings: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<ConfigGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ConfigEditOperation {
+    SetValue {
+        section: String,
+        key: String,
+        value: String,
+    },
+    SetComment {
+        section: String,
+        key: String,
+        comment: Option<String>,
+    },
+    AddSection {
+        section: String,
+    },
+    DeleteSection {
+        section: String,
+    },
+    AddEntry {
+        section: String,
+        key: String,
+        value: String,
+        comment: Option<String>,
+    },
+    DeleteEntry {
+        section: String,
+        key: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

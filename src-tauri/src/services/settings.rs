@@ -77,6 +77,22 @@ impl SettingsService {
         String::from_utf8(plaintext).context("Invalid UTF-8 in decrypted data")
     }
 
+    fn sanitize_legacy_settings_value(mut value: serde_json::Value) -> serde_json::Value {
+        if let Some(settings) = value.as_object_mut() {
+            if matches!(settings.get("theme"), Some(serde_json::Value::String(theme)) if theme == "custom")
+            {
+                settings.insert(
+                    "theme".to_string(),
+                    serde_json::Value::String("modern-blue".to_string()),
+                );
+            }
+            settings.remove("customTheme");
+            settings.remove("custom_theme");
+        }
+
+        value
+    }
+
     pub async fn load_settings(&mut self) -> Result<Settings> {
         let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
             .bind(SETTINGS_ID)
@@ -87,6 +103,13 @@ impl SettingsService {
         if let Some(data) = stored {
             if let Ok(settings) = serde_json::from_str::<Settings>(&data) {
                 return Ok(settings);
+            }
+
+            if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&data) {
+                let sanitized = Self::sanitize_legacy_settings_value(raw_value);
+                if let Ok(settings) = serde_json::from_value::<Settings>(sanitized) {
+                    return Ok(settings);
+                }
             }
         }
 
@@ -130,7 +153,7 @@ impl SettingsService {
             auto_update_mods: None,
             mod_update_check_interval: None,
             mod_icon_cache_limit_mb: Some(500),
-            custom_theme: None,
+            database_backup_count: Some(10),
             log_retention_days: Some(7),
         };
 
@@ -141,7 +164,8 @@ impl SettingsService {
         let current = self.load_settings().await?;
 
         let current_json = serde_json::to_value(&current)?;
-        let merged = Self::merge_json(&current_json, &updates);
+        let merged =
+            Self::sanitize_legacy_settings_value(Self::merge_json(&current_json, &updates));
         let updated: Settings = serde_json::from_value(merged)?;
 
         let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
@@ -456,6 +480,7 @@ mod tests {
         let updates = serde_json::json!({
             "maxConcurrentDownloads": 5,
             "theme": "dark",
+            "databaseBackupCount": 12,
             "logRetentionDays": 10,
             "autoCheckUpdates": false
         });
@@ -465,6 +490,7 @@ mod tests {
 
         assert_eq!(loaded.max_concurrent_downloads, 5);
         assert!(matches!(loaded.theme, Theme::Dark));
+        assert_eq!(loaded.database_backup_count, Some(12));
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
 

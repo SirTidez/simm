@@ -36,6 +36,13 @@ export interface TrackedDownload {
   finishedAt?: number | null;
 }
 
+/** Result of `extract_game_version` (Steam entries include reconciled branch/runtime). */
+export interface ExtractGameVersionResult {
+  version: string | null;
+  branch?: string;
+  runtime?: 'IL2CPP' | 'Mono';
+}
+
 export interface Environment {
   id: string;
   name: string;
@@ -91,8 +98,7 @@ export interface Settings {
   maxConcurrentDownloads: number;
   platform: 'windows' | 'macos' | 'linux';
   language: string;
-  theme: 'light' | 'dark' | 'modern-blue' | 'custom';
-  customTheme?: CustomTheme;
+  theme: 'light' | 'dark' | 'modern-blue';
   melonLoaderVersion?: string;
   autoInstallMelonLoader?: boolean;
   enableSecurityScanner?: boolean;
@@ -110,6 +116,7 @@ export interface Settings {
   autoUpdateMods?: boolean;
   modUpdateCheckInterval?: number;
   modIconCacheLimitMb?: number;
+  databaseBackupCount?: number;
 }
 
 export interface NexusRateLimits {
@@ -121,45 +128,7 @@ export interface NexusRateLimits {
   hourlyUsed?: number;
 }
 
-export interface CustomTheme {
-  appBgColor: string;
-  appTextColor: string;
-  headerBgColor: string;
-  borderColor: string;
-  cardBgColor: string;
-  cardBorderColor: string;
-  textSecondary: string;
-  inputBgColor: string;
-  inputBorderColor: string;
-  inputTextColor: string;
-  btnSecondaryBg: string;
-  btnSecondaryHover: string;
-  btnSecondaryText: string;
-  btnSecondaryBorder: string;
-  infoBoxBg: string;
-  infoBoxBorder: string;
-  warningBoxBg: string;
-  warningBoxBorder: string;
-  infoPanelBg: string;
-  infoPanelBorder: string;
-  modalOverlay: string;
-  bgGradient: string;
-  bgPattern: string;
-  badgeGray: string;
-  badgeBlue: string;
-  badgeOrangeRed: string;
-  badgeYellow: string;
-  badgeGreen: string;
-  badgeRed: string;
-  badgeOrange: string;
-  badgeCyan: string;
-  updateVersionColor: string;
-  updateVersionBg: string;
-  primaryBtnColor: string;
-  primaryBtnHover: string;
-}
-
-export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Other';
+export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Json' | 'Other';
 
 export interface ConfigEntry {
   key: string;
@@ -172,18 +141,41 @@ export interface ConfigSection {
   entries: ConfigEntry[];
 }
 
-export interface ConfigFile {
+export interface ConfigGroup {
+  id: string;
+  label: string;
+  sectionNames: string[];
+}
+
+export interface ConfigFileSummary {
   name: string;
   path: string;
   fileType: ConfigFileType;
-  sections: ConfigSection[];
+  format: string;
+  relativePath: string;
+  groupName: string;
+  lastModified?: number;
+  sectionCount: number;
+  entryCount: number;
+  supportsStructuredEdit: boolean;
+  supportsRawEdit: boolean;
 }
 
-export interface ConfigUpdate {
-  section: string;
-  key: string;
-  value: string;
+export interface ConfigDocument {
+  summary: ConfigFileSummary;
+  rawContent: string;
+  sections: ConfigSection[];
+  parseWarnings: string[];
+  groups: ConfigGroup[];
 }
+
+export type ConfigEditOperation =
+  | { kind: 'setValue'; section: string; key: string; value: string }
+  | { kind: 'setComment'; section: string; key: string; comment?: string | null }
+  | { kind: 'addSection'; section: string }
+  | { kind: 'deleteSection'; section: string }
+  | { kind: 'addEntry'; section: string; key: string; value: string; comment?: string | null }
+  | { kind: 'deleteEntry'; section: string; key: string };
 
 export interface NexusMod {
   mod_id: number;

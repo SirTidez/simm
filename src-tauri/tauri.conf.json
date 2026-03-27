@@ -1,6 +1,6 @@
 {
   "productName": "Schedule I Mod Manager",
-  "version": "0.7.4",
+  "version": "0.7.7",
   "identifier": "com.s1devenvmanager.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -16,6 +16,8 @@
         "resizable": true,
         "decorations": false,
         "title": "Schedule I Mod Manager",
+        "minWidth": 1024,
+        "minHeight": 600,
         "width": 1270,
         "height": 884
       }
@@ -38,8 +40,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "publisher": "LockWire Labs",
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi",
+        "headerImage": "windows/assets/installer-header.bmp",
+        "sidebarImage": "windows/assets/installer-sidebar.bmp"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

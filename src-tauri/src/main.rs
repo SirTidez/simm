@@ -21,6 +21,7 @@ use tauri_plugin_deep_link::DeepLinkExt;
 fn main() {
     // Initialize global logger FIRST to capture all output
     crate::utils::global_logger::init_global_logger();
+    crate::utils::global_logger::init_logger_service();
     log::info!("Initializing Tauri application...");
 
     let app = tauri::Builder::default()
@@ -116,7 +117,6 @@ fn main() {
                 }
             });
 
-            // Ensure window stays open even if frontend has errors
             // Explicitly set window icon (taskbar + title bar) from bundle icon
             if let Some(window) = app.get_webview_window("main") {
                 log::info!("Main window found");
@@ -126,11 +126,6 @@ fn main() {
                     }
                 } else {
                     log::warn!("No default window icon available");
-                }
-                #[cfg(debug_assertions)]
-                {
-                    window.open_devtools();
-                    log::info!("DevTools opened");
                 }
             } else {
                 log::warn!("Main window not found!");
@@ -149,6 +144,7 @@ fn main() {
             // Settings
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::settings::backup_database,
             commands::settings::save_credentials,
             commands::settings::clear_credentials,
             commands::settings::save_nexus_mods_api_key,
@@ -176,6 +172,8 @@ fn main() {
             commands::auth::authenticate,
             // Filesystem
             commands::filesystem::open_folder,
+            commands::filesystem::open_path,
+            commands::filesystem::reveal_path,
             commands::filesystem::launch_game,
             commands::filesystem::browse_directory,
             commands::filesystem::browse_files,
@@ -269,9 +267,10 @@ fn main() {
             commands::logs::list_app_log_files,
             commands::logs::read_app_log_file,
             // Config
-            commands::config::get_config_files,
-            commands::config::get_grouped_config,
-            commands::config::update_config,
+            commands::config::get_config_catalog,
+            commands::config::get_config_document,
+            commands::config::apply_config_edits,
+            commands::config::save_raw_config,
             // FOMOD
             commands::fomod::detect_fomod,
             commands::fomod::parse_fomod_xml,
@@ -293,7 +292,10 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
-            eprintln!("Failed to build Tauri application: {}", e);
+            crate::utils::logging::route_stderr_log(format!(
+                "Failed to build Tauri application: {}",
+                e
+            ));
             std::process::exit(1);
         });
 

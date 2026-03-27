@@ -3,7 +3,7 @@ import { useEnvironmentStore } from '../stores/environmentStore';
 import { logger } from '../services/logger';
 import { ApiService } from '../services/api';
 import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/events';
-import { batchUpdateCheckRef, lastUpdateCheckTimeRef } from './EnvironmentList';
+import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
 
 interface ModUpdatesEntry {
   count: number;
@@ -173,6 +173,11 @@ export function Footer() {
       setCheckingAll(true);
       batchUpdateCheckRef.current = true;
       lastUpdateCheckTimeRef.current = Date.now();
+      notifyBatchUpdateCheckStarted(
+        environments
+          .filter(env => env.status === 'completed')
+          .map(env => env.id)
+      );
       await checkAllUpdates(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';

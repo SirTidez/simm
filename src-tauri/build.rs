@@ -60,5 +60,16 @@ fn main() {
         }
     }
 
-    tauri_build::build()
+    // Don't require elevation for `tauri dev`.
+    // We use a separate manifest for release builds if/when elevation is desired.
+    let app_manifest = if cfg!(debug_assertions) {
+        include_str!("windows/app.dev.manifest")
+    } else {
+        include_str!("windows/app.manifest")
+    };
+
+    let attributes = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new().app_manifest(app_manifest));
+
+    tauri_build::try_build(attributes).expect("failed to run tauri build script");
 }

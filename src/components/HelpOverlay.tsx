@@ -1,6 +1,128 @@
 import { useEffect } from 'react';
 
-export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+interface HelpOverlayProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onOpenWizard: () => void;
+  onOpenSettings: () => void;
+  onOpenAccounts: () => void;
+}
+
+const quickStartSteps = [
+  {
+    icon: 'fas fa-plus-circle',
+    title: 'Create an install',
+    body: 'Use New Game to choose a branch, confirm the target folder, and create a managed environment.',
+  },
+  {
+    icon: 'fas fa-user-circle',
+    title: 'Authenticate when needed',
+    body: 'Reconnect Steam for protected branch downloads and link Nexus when you want manager download support.',
+  },
+  {
+    icon: 'fas fa-download',
+    title: 'Download and maintain',
+    body: 'Track updates, install mods, and manage support tools from each environment workspace.',
+  },
+];
+
+const primaryHelpCards = [
+  {
+    icon: 'fas fa-hard-drive',
+    title: 'Manage Game Installs',
+    copy: 'Use install actions from the Home workspace to keep each environment healthy and easy to launch.',
+    items: [
+      'Download new builds into the selected directory.',
+      'Run Check Updates when you want an immediate refresh.',
+      'Use Update to apply the newest available branch build.',
+      'Launch Game and Open Folder for quick verification and support work.',
+      'Delete only removes the SIMM entry. Files remain on disk.',
+    ],
+  },
+  {
+    icon: 'fas fa-user-gear',
+    title: 'Settings and Accounts',
+    copy: 'Use the utility panes for environment defaults, tools, update cadence, and linked service access.',
+    items: [
+      'Settings controls download paths, theme, cache size, update checks, and logging.',
+      'Accounts keeps Steam and Nexus links current and shows what each service can do.',
+      'Credentials and tokens are stored locally and encrypted.',
+    ],
+  },
+  {
+    icon: 'fas fa-boxes-stacked',
+    title: 'Mods, Plugins, and UserLibs',
+    copy: 'SIMM separates global acquisition from per-environment management so you can browse once and manage locally.',
+    items: [
+      'Mod Library is the global place to discover, download, and update shared mod assets.',
+      'Mods is the environment-specific place to enable, disable, update, and inspect installed mods.',
+      'Plugins and UserLibs expose the files found in those runtime folders.',
+    ],
+  },
+  {
+    icon: 'fas fa-triangle-exclamation',
+    title: 'Troubleshooting',
+    copy: 'Start with the most common causes before assuming the install itself is broken.',
+    items: [
+      'Download failures usually point to Steam auth or network issues.',
+      'Launch failures usually mean the executable path or loader setup needs review.',
+      'If DepotDownloader is missing, repair prerequisites or install it manually with winget.',
+      'Use Logs and Settings together when you need deeper diagnostics.',
+    ],
+  },
+];
+
+const referenceCards = [
+  {
+    icon: 'fas fa-pen-to-square',
+    title: 'Edit Install Details',
+    items: [
+      'Rename installs when you want clearer environment labels.',
+      'Add descriptions to keep test builds and stable builds easy to distinguish.',
+    ],
+  },
+  {
+    icon: 'fas fa-rotate',
+    title: 'Update Checks',
+    items: [
+      'Automatic checks run on the interval configured in Settings.',
+      'Manual checks bypass the wait and refresh status immediately.',
+      'Update badges show when a newer version is available.',
+    ],
+  },
+  {
+    icon: 'fas fa-puzzle-piece',
+    title: 'MelonLoader',
+    items: [
+      'Preferred MelonLoader versions are managed from Settings.',
+      'SIMM keeps version handling aligned with the target runtime when possible.',
+      'Per-install loader state is tracked with the environment.',
+    ],
+  },
+];
+
+const quickActions = [
+  {
+    icon: 'fas fa-plus-circle',
+    title: 'Create Environment',
+    body: 'Start a new managed install or import an existing folder into SIMM.',
+    action: 'wizard' as const,
+  },
+  {
+    icon: 'fas fa-user-gear',
+    title: 'Open Accounts',
+    body: 'Reconnect Steam or Nexus when protected downloads or manager support need attention.',
+    action: 'accounts' as const,
+  },
+  {
+    icon: 'fas fa-sliders',
+    title: 'Open Settings',
+    body: 'Adjust paths, update cadence, theme, tools, and logging behavior.',
+    action: 'settings' as const,
+  },
+];
+
+export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onOpenAccounts }: HelpOverlayProps) {
   useEffect(() => {
     if (!isOpen) return;
 
@@ -17,136 +139,181 @@ export function HelpOverlay({ isOpen, onClose }: { isOpen: boolean; onClose: () 
   if (!isOpen) return null;
 
   return (
-    <section
-      className="modal-content help-overlay"
-      style={{
-        width: '100%',
-        height: '100%',
-        maxWidth: 'none',
-        margin: 0,
-        borderRadius: '0.75rem',
-        display: 'flex',
-        flexDirection: 'column'
-      }}
-      aria-label="Help panel"
-    >
+    <section className="modal-content help-overlay workspace-panel" aria-label="Help panel">
       <div className="modal-header">
         <h2>Help Center</h2>
         <button className="modal-close" onClick={onClose} aria-label="Close help panel">×</button>
       </div>
 
-      <div className="help-content" style={{ flex: 1, overflowY: 'auto' }}>
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-info-circle" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Quick Start
-            </h3>
-            <p>
-              Welcome to Schedule I Mod Manager. Use this workspace to manage installs, mods, and support tools in one place.
-            </p>
-            <ol>
-              <li>Select <i className="fas fa-plus-circle" style={{ color: '#646cff' }}></i> to create a new game install.</li>
-              <li>Pick a branch, then confirm your install path.</li>
-              <li>Authenticate Steam with <i className="fas fa-user-circle" style={{ color: '#646cff' }}></i> when required.</li>
-              <li>Download and manage your install from the environment list.</li>
-            </ol>
-          </section>
+      <div className="help-pane">
+        <div className="help-overview">
+          <div className="help-overview__copy">
+            <span className="help-eyebrow">Operator Guide</span>
+            <h3>Use SIMM as a desktop workspace for installs, updates, mods, accounts, and support tools.</h3>
+            <p>Start with environment creation, then move into account access, updates, mod management, and diagnostics as your install matures.</p>
+          </div>
+          <div className="help-overview__stats">
+            <div className="help-stat-card">
+              <span>Quick start</span>
+              <strong>3 core steps</strong>
+            </div>
+            <div className="help-stat-card">
+              <span>Primary areas</span>
+              <strong>Installs, accounts, mods</strong>
+            </div>
+            <div className="help-stat-card">
+              <span>Support focus</span>
+              <strong>Auth, updates, logs</strong>
+            </div>
+          </div>
+        </div>
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-download" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Manage Game Installs
-            </h3>
-            <ul>
-              <li><strong>Download:</strong> Pull a branch into the selected directory.</li>
-              <li><strong>Check Updates:</strong> Check for newer branch builds.</li>
-              <li><strong>Update:</strong> Install the newest version when available.</li>
-              <li><strong>Launch Game:</strong> Start the executable from that install.</li>
-              <li><strong>Open Folder:</strong> Open install files in File Explorer.</li>
-              <li><strong>Delete:</strong> Remove the install entry (downloaded files stay on disk).</li>
-              <li><strong>Icon buttons:</strong> Hover action icons for quick tooltips.</li>
-            </ul>
-          </section>
+        <section className="help-action-strip">
+          <div className="help-section-group__header">
+            <span className="help-eyebrow">Next Actions</span>
+            <h3>Jump directly to the workspace you need most often.</h3>
+          </div>
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-user-cog" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Settings & Authentication
-            </h3>
-            <ul>
-              <li><strong>Settings <i className="fas fa-cog" style={{ color: '#646cff' }}></i>:</strong> Configure directories, tools, updates, and logs.</li>
-              <li><strong>Steam Account <i className="fas fa-user-circle" style={{ color: '#646cff' }}></i>:</strong> Verify or refresh account authentication.</li>
-              <li>Credentials and API secrets are encrypted and stored locally.</li>
-            </ul>
-          </section>
+          <div className="help-action-grid">
+            {quickActions.map((actionCard) => {
+              const handleClick = actionCard.action === 'wizard'
+                ? onOpenWizard
+                : actionCard.action === 'accounts'
+                  ? onOpenAccounts
+                  : onOpenSettings;
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-edit" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Edit Install Details
-            </h3>
-            <ul>
-              <li>Use <i className="fas fa-edit" style={{ color: '#646cff' }}></i> near an install name to rename it.</li>
-              <li>Use <i className="fas fa-edit" style={{ color: '#646cff' }}></i> near the description to add context.</li>
-              <li>Descriptions make multi-install setups easier to track.</li>
-            </ul>
-          </section>
+              return (
+                <button
+                  key={actionCard.title}
+                  type="button"
+                  className="help-action-card"
+                  onClick={handleClick}
+                >
+                  <div className="help-card-header__icon">
+                    <i className={actionCard.icon}></i>
+                  </div>
+                  <div className="help-action-card__content">
+                    <h4>{actionCard.title}</h4>
+                    <p>{actionCard.body}</p>
+                  </div>
+                  <i className="fas fa-arrow-right help-action-card__chevron" aria-hidden="true"></i>
+                </button>
+              );
+            })}
+          </div>
+        </section>
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-sync-alt" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Update Checks
-            </h3>
-            <ul>
-              <li>Automatic checks run on your configured interval.</li>
-              <li>You can run manual checks with "Check Updates".</li>
-              <li>Cards show available update versions when found.</li>
-              <li>Use "Update" to download and apply the new build.</li>
-            </ul>
-          </section>
+        <div className="help-layout">
+          <div className="help-layout__primary">
+            <section className="help-hero-card">
+              <div className="help-card-header">
+                <div className="help-card-header__icon">
+                  <i className="fas fa-circle-info"></i>
+                </div>
+                <div>
+                  <span className="help-eyebrow">Quick Start</span>
+                  <h3>Get from first launch to a managed environment quickly.</h3>
+                  <p>These are the actions most users need first. Everything else in this pane is supporting reference.</p>
+                </div>
+              </div>
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-puzzle-piece" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              MelonLoader (ML) Management
-            </h3>
-            <ul>
-              <li><strong>Status:</strong> The ML section shows the currently installed version.</li>
-              <li><strong>Version selection:</strong> Use <i className="fas fa-download" style={{ color: '#646cff' }}></i> to pick a specific release.</li>
-              <li><strong>Releases:</strong> Stable releases are listed first, with optional nightly builds.</li>
-              <li><strong>Per install:</strong> Stored version is tracked for each game install.</li>
-              <li><strong>Compatibility:</strong> Unsupported versions are excluded automatically.</li>
-            </ul>
-          </section>
+              <div className="help-step-list">
+                {quickStartSteps.map((step, index) => (
+                  <div key={step.title} className="help-step-card">
+                    <span className="help-step-card__index">{index + 1}</span>
+                    <div className="help-step-card__body">
+                      <h4>
+                        <i className={step.icon}></i>
+                        {step.title}
+                      </h4>
+                      <p>{step.body}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-boxes" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Mods, Plugins, and UserLibs
-            </h3>
-            <ul>
-              <li><strong>Counts:</strong> Each section shows discovered file totals.</li>
-              <li><strong>Details:</strong> Open lists with <i className="fas fa-list" style={{ color: '#646cff' }}></i> to inspect entries.</li>
-              <li><strong>Mods:</strong> `.dll` files from the `Mods` directory.</li>
-              <li><strong>Plugins:</strong> `.dll` files from the `Plugins` directory.</li>
-              <li><strong>UserLibs:</strong> User library files from `UserLibs` (read-only).</li>
-            </ul>
-          </section>
+            <section className="help-section-group">
+              <div className="help-section-group__header">
+                <span className="help-eyebrow">Task Guides</span>
+                <h3>Find the right workspace for the job.</h3>
+              </div>
 
-          <section className="help-section">
-            <h3>
-              <i className="fas fa-question-circle" style={{ marginRight: '0.5rem', color: '#646cff' }}></i>
-              Troubleshooting
-            </h3>
-            <ul>
-              <li><strong>Download fails:</strong> Recheck Steam auth and network connectivity.</li>
-              <li><strong>Game won't launch:</strong> Confirm the executable exists in the install folder.</li>
-              <li><strong>DepotDownloader missing:</strong> Install with <code>winget install --exact --id SteamRE.DepotDownloader</code>.</li>
-              <li><strong>Auth issues:</strong> Re-authenticate in the Steam Account panel.</li>
-            </ul>
-          </section>
+              <div className="help-task-grid">
+                {primaryHelpCards.map((card) => (
+                  <article key={card.title} className="help-task-card">
+                    <div className="help-task-card__header">
+                      <div className="help-card-header__icon">
+                        <i className={card.icon}></i>
+                      </div>
+                      <div>
+                        <h4>{card.title}</h4>
+                        <p>{card.copy}</p>
+                      </div>
+                    </div>
+                    <ul className="help-list">
+                      {card.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </div>
+
+          <aside className="help-layout__secondary">
+            <section className="help-reference-card help-reference-card--summary">
+              <div className="help-reference-card__header">
+                <i className="fas fa-compass"></i>
+                <h4>Where to Start</h4>
+              </div>
+              <ul className="help-list help-list--compact">
+                <li>Create or import an environment first.</li>
+                <li>Use Accounts when Steam or Nexus access becomes a blocker.</li>
+                <li>Open Logs and Config together when deeper diagnostics are needed.</li>
+              </ul>
+            </section>
+
+            <section className="help-section-group">
+              <div className="help-section-group__header">
+                <span className="help-eyebrow">Reference</span>
+                <h3>Supporting details for common maintenance tasks.</h3>
+              </div>
+
+              <div className="help-reference-grid">
+                {referenceCards.map((card) => (
+                  <article key={card.title} className="help-reference-card">
+                    <div className="help-reference-card__header">
+                      <i className={card.icon}></i>
+                      <h4>{card.title}</h4>
+                    </div>
+                    <ul className="help-list help-list--compact">
+                      {card.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="help-callout-card">
+              <div className="help-card-header">
+                <div className="help-card-header__icon">
+                  <i className="fas fa-wrench"></i>
+                </div>
+                <div>
+                  <span className="help-eyebrow">Repair Hint</span>
+                  <h3>DepotDownloader is required for Steam depot workflows.</h3>
+                  <p>If SIMM reports that DepotDownloader is missing, repair prerequisites or install it manually before retrying a protected branch download.</p>
+                </div>
+              </div>
+              <code>winget install --exact --id SteamRE.DepotDownloader</code>
+            </section>
+          </aside>
+        </div>
       </div>
     </section>
   );
 }
-

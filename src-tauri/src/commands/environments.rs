@@ -203,11 +203,18 @@ pub async fn get_environments(
             .unwrap_or(false);
 
         if is_current_path_valid {
-            let runtime_from_files = crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
-                std::path::Path::new(&env.output_dir),
-            );
+            let output_path = std::path::Path::new(&env.output_dir);
+            let data_dir = output_path.join("Schedule I_Data");
+            let has_mono_bleeding_edge = data_dir.join("MonoBleedingEdge").exists();
+            let has_il2cpp_data = data_dir.join("il2cpp_data").exists();
+            let has_game_assembly = output_path.join("GameAssembly.dll").exists();
+
+            let runtime_from_files =
+                crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
+                    output_path,
+                );
             let detected_branch = steam_service
-                .detect_installed_branch(std::path::Path::new(&env.output_dir))
+                .detect_installed_branch(output_path)
                 .await
                 .ok()
                 .flatten()
@@ -224,11 +231,26 @@ pub async fn get_environments(
 
             let mut changed = false;
             if env.runtime != detected_runtime {
+                log::info!(
+                    "Steam env {} runtime changed: {:?} -> {:?} (markers: mono_bleeding_edge={}, il2cpp_data={}, gameassembly={})",
+                    env.id,
+                    env.runtime,
+                    detected_runtime,
+                    has_mono_bleeding_edge,
+                    has_il2cpp_data,
+                    has_game_assembly
+                );
                 env.runtime = detected_runtime;
                 changed = true;
             }
 
             if env.branch != detected_branch {
+                log::info!(
+                    "Steam env {} branch changed: {} -> {}",
+                    env.id,
+                    env.branch,
+                    detected_branch
+                );
                 env.branch = detected_branch;
                 changed = true;
             }

@@ -4,6 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        crate::utils::logging::route_stderr_log(format!($($arg)*));
+    }};
+}
+
 #[derive(Clone)]
 pub struct NexusModsService {
     api_key: Arc<RwLock<Option<String>>>,

@@ -132,7 +132,9 @@ export function interceptConsole() {
     sendToBackend('debug', message);
   };
 
-  originalConsole.info('[Logger] Console interception enabled - all console output will be logged to file');
+  const readyMessage = '[Logger] Console interception enabled - all console output will be logged to file';
+  originalConsole.info(readyMessage);
+  sendToBackend('info', readyMessage);
 }
 
 

@@ -1,5 +1,19 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import type { Environment, DownloadProgress } from '../types';
+import type { Environment, DownloadProgress, ExtractGameVersionResult } from '../types';
+
+function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partial<Environment> {
+  const out: Partial<Environment> = {};
+  if (res.version) {
+    out.currentGameVersion = res.version;
+  }
+  if (res.branch) {
+    out.branch = res.branch;
+  }
+  if (res.runtime === 'IL2CPP' || res.runtime === 'Mono') {
+    out.runtime = res.runtime;
+  }
+  return out;
+}
 import { ApiService } from '../services/api';
 import { onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete } from '../services/events';
 
@@ -21,6 +35,22 @@ interface EnvironmentStoreContextValue {
 
 const EnvironmentStoreContext = createContext<EnvironmentStoreContextValue | null>(null);
 
+function mergeUpdateResultIntoEnvironment(
+  env: Environment,
+  updateResult: import('../types').UpdateCheckResult
+): Environment {
+  return {
+    ...env,
+    lastUpdateCheck: updateResult.checkedAt,
+    lastManifestId: updateResult.currentManifestId ?? env.lastManifestId,
+    updateAvailable: updateResult.updateAvailable,
+    remoteManifestId: updateResult.remoteManifestId ?? env.remoteManifestId,
+    remoteBuildId: updateResult.remoteBuildId,
+    currentGameVersion: updateResult.currentGameVersion ?? env.currentGameVersion,
+    updateGameVersion: updateResult.updateGameVersion,
+  };
+}
+
 export function EnvironmentStoreProvider({ children }: { children: React.ReactNode }) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,11 +70,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       );
 
       if (envsNeedingVersion.length > 0) {
-        const detectedVersions = await Promise.all(
+        const detectedPatches = await Promise.all(
           envsNeedingVersion.map(async (env) => {
             try {
-              const version = await ApiService.extractGameVersion(env.id);
-              return version ? { id: env.id, version } : null;
+              const extracted = await ApiService.extractGameVersion(env.id);
+              const patch = partialEnvFromExtractGameVersion(extracted);
+              return Object.keys(patch).length > 0 ? { id: env.id, patch } : null;
             } catch (err) {
               // Silently fail - version extraction can be done manually later
               console.warn(`Failed to auto-extract version for environment ${env.id}:`, err);
@@ -53,18 +84,16 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           })
         );
 
-        const versionMap = new Map(
-          detectedVersions
-            .filter((entry): entry is { id: string; version: string } => entry !== null)
-            .map(entry => [entry.id, entry.version])
+        const patchMap = new Map(
+          detectedPatches
+            .filter((entry): entry is { id: string; patch: Partial<Environment> } => entry !== null)
+            .map(entry => [entry.id, entry.patch])
         );
 
-        if (versionMap.size > 0) {
+        if (patchMap.size > 0) {
           setEnvironments(prev => prev.map(env => {
-            const detectedVersion = versionMap.get(env.id);
-            return detectedVersion
-              ? { ...env, currentGameVersion: detectedVersion }
-              : env;
+            const patch = patchMap.get(env.id);
+            return patch ? { ...env, ...patch } : env;
           }));
         }
       }
@@ -134,26 +163,22 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const checkUpdate = useCallback(async (environmentId: string, manual: boolean = false) => {
     try {
       const result = await ApiService.checkUpdate(environmentId, manual);
-      await updateEnvironment(environmentId, {
-        lastUpdateCheck: result.checkedAt,
-        updateAvailable: result.updateAvailable,
-        remoteManifestId: result.remoteManifestId,
-        remoteBuildId: result.remoteBuildId,
-        ...(result.currentGameVersion ? { currentGameVersion: result.currentGameVersion } : {}),
-        ...(result.updateGameVersion ? { updateGameVersion: result.updateGameVersion } : {})
-      });
+      setEnvironments(prev => prev.map(env => (
+        env.id === environmentId ? mergeUpdateResultIntoEnvironment(env, result) : env
+      )));
     } catch (err) {
       throw err;
     }
-  }, [updateEnvironment]);
+  }, []);
 
   const refreshGameVersion = useCallback(async (environmentId: string) => {
     try {
-      const version = await ApiService.extractGameVersion(environmentId);
-      await updateEnvironment(environmentId, {
-        ...(version ? { currentGameVersion: version } : {})
-      });
-      return version;
+      const extracted = await ApiService.extractGameVersion(environmentId);
+      const patch = partialEnvFromExtractGameVersion(extracted);
+      if (Object.keys(patch).length > 0) {
+        await updateEnvironment(environmentId, patch);
+      }
+      return extracted.version ?? null;
     } catch (err) {
       throw err;
     }
@@ -171,15 +196,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         const updated = prev.map(env => {
           const result = results.find(r => r.environmentId === env.id);
           if (result) {
-            return {
-              ...env,
-              lastUpdateCheck: result.checkedAt,
-              updateAvailable: result.updateAvailable,
-              remoteManifestId: result.remoteManifestId,
-              remoteBuildId: result.remoteBuildId,
-              ...(result.currentGameVersion ? { currentGameVersion: result.currentGameVersion } : {}),
-              ...(result.updateGameVersion ? { updateGameVersion: result.updateGameVersion } : {})
-            };
+            return mergeUpdateResultIntoEnvironment(env, result);
           }
           return env;
         });
@@ -203,15 +220,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         return env;
       }
 
-      return {
-        ...env,
-        lastUpdateCheck: updateResult.checkedAt,
-        updateAvailable: updateResult.updateAvailable,
-        remoteManifestId: updateResult.remoteManifestId,
-        remoteBuildId: updateResult.remoteBuildId,
-        ...(updateResult.currentGameVersion ? { currentGameVersion: updateResult.currentGameVersion } : {}),
-        ...(updateResult.updateGameVersion ? { updateGameVersion: updateResult.updateGameVersion } : {})
-      };
+      return mergeUpdateResultIntoEnvironment(env, updateResult);
     }));
   }, []);
 
@@ -250,9 +259,14 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         });
 
         unlistenComplete = await onComplete(async ({ downloadId, manifestId }: { downloadId: string; manifestId?: string }) => {
-          const updates: any = { status: 'completed', lastUpdated: new Date().toISOString() };
+          const updates: any = {
+            status: 'completed',
+            lastUpdated: new Date().toISOString(),
+            updateAvailable: false
+          };
           if (manifestId) {
             updates.lastManifestId = manifestId;
+            updates.remoteManifestId = manifestId;
           }
           await updateEnvironment(downloadId, updates);
           setProgress(prev => {
@@ -263,13 +277,29 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
           // Automatically extract game version when download completes
           try {
-            const version = await ApiService.extractGameVersion(downloadId);
-            if (version) {
-              await updateEnvironment(downloadId, { currentGameVersion: version });
+            const extracted = await ApiService.extractGameVersion(downloadId);
+            const patch = partialEnvFromExtractGameVersion(extracted);
+            if (Object.keys(patch).length > 0) {
+              await updateEnvironment(downloadId, patch);
             }
           } catch (err) {
             // Silently fail - version extraction can be done manually later
             console.warn('Failed to auto-extract game version:', err);
+          }
+
+          if (!manifestId) {
+            try {
+              const updateResult = await ApiService.checkUpdate(downloadId, true);
+              if (updateResult.remoteManifestId) {
+                await updateEnvironment(downloadId, {
+                  lastManifestId: updateResult.remoteManifestId,
+                  remoteManifestId: updateResult.remoteManifestId,
+                  updateAvailable: false
+                });
+              }
+            } catch (err) {
+              console.warn('Failed to backfill manifest after download completion:', err);
+            }
           }
         });
 
