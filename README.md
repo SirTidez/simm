@@ -154,4 +154,4 @@ The file **`app-icon.png`** in the project root is the source image for the appl
 
 ## License
 
-MIT. See `LICENSE`.
+GNU Affero General Public License v3.0 (AGPLv3). See `LICENSE`.
