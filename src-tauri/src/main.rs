@@ -151,6 +151,9 @@ fn main() {
             commands::settings::get_nexus_mods_api_key,
             commands::settings::has_nexus_mods_api_key,
             commands::settings::clear_nexus_mods_api_key,
+            commands::security_scanner::get_security_scanner_status,
+            commands::security_scanner::install_security_scanner,
+            commands::security_scanner::get_mod_security_scan_report,
             // Environments
             commands::environments::get_environments,
             commands::environments::get_environment,

@@ -433,6 +433,7 @@ impl ModUpdateService {
                 runtime_match: None,
                 mod_storage_id: Some(entry.storage_id.clone()),
                 symlink_paths: None,
+                security_scan: None,
             };
 
             match mods_service
@@ -1275,6 +1276,7 @@ mod tests {
                 runtime_match: None,
                 mod_storage_id: None,
                 symlink_paths: None,
+                security_scan: None,
             },
         );
         mods_service.save_mod_metadata(&mods_dir, &metadata).await?;

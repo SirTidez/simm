@@ -230,7 +230,11 @@ impl ConfigService {
         Ok(self.parse_ini_like_content(raw_content))
     }
 
-    fn parse_rendered_document(&self, raw_content: &str, file_type: ConfigFileType) -> ParsedDocument {
+    fn parse_rendered_document(
+        &self,
+        raw_content: &str,
+        file_type: ConfigFileType,
+    ) -> ParsedDocument {
         if file_type == ConfigFileType::Json {
             ParsedDocument {
                 raw_content: raw_content.to_string(),

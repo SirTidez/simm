@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
   downloadThunderstoreToLibrary: vi.fn(),
   uninstallDownloadedMod: vi.fn(),
   installDownloadedMod: vi.fn(),
+  getModSecurityScanReport: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -24,6 +25,10 @@ vi.mock('../services/api', () => ({
 
 const eventMocks = vi.hoisted(() => ({
   onModMetadataRefreshStatus: vi.fn(),
+}));
+
+const settingsStoreMocks = vi.hoisted(() => ({
+  useSettingsStore: vi.fn(),
 }));
 
 function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
@@ -46,6 +51,10 @@ vi.mock('../services/events', () => ({
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
 
+vi.mock('../stores/settingsStore', () => ({
+  useSettingsStore: settingsStoreMocks.useSettingsStore,
+}));
+
 describe('ModLibraryOverlay', () => {
   beforeEach(() => {
     apiMocks.getModLibrary.mockReset();
@@ -60,7 +69,9 @@ describe('ModLibraryOverlay', () => {
     apiMocks.downloadThunderstoreToLibrary.mockReset();
     apiMocks.uninstallDownloadedMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
+    apiMocks.getModSecurityScanReport.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
+    settingsStoreMocks.useSettingsStore.mockReset();
 
     apiMocks.getS1APIReleases.mockResolvedValue([]);
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
@@ -71,7 +82,13 @@ describe('ModLibraryOverlay', () => {
     apiMocks.downloadThunderstoreToLibrary.mockResolvedValue({ success: true });
     apiMocks.uninstallDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
+    apiMocks.getModSecurityScanReport.mockResolvedValue(null);
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        showSecurityScanBadges: true,
+      },
+    });
     apiMocks.getMLVScanLatestRelease.mockResolvedValue({
       tag_name: 'v1.0.0',
       name: 'v1.0.0',
@@ -145,6 +162,103 @@ describe('ModLibraryOverlay', () => {
     expect((await screen.findAllByText('v1.2.3')).length).toBeGreaterThan(0);
     expect(await screen.findByText('Update available')).toBeTruthy();
     expect(await screen.findByText('Mono')).toBeTruthy();
+  });
+
+  it('renders MLVScan disposition badges for downloaded mods', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Questionable Mod',
+          securityScan: {
+            state: 'review',
+            verified: false,
+            disposition: {
+              classification: 'Suspicious',
+              headline: 'Potentially malicious',
+              summary: 'Heuristic checks flagged this download.',
+              blockingRecommended: false,
+              relatedFindingIds: ['finding-1'],
+            },
+            highestSeverity: 'High',
+            totalFindings: 1,
+            threatFamilyCount: 0,
+          },
+        }),
+      ],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    expect((await screen.findAllByText('Potentially Malicious')).length).toBeGreaterThan(0);
+  });
+
+  it('opens the security report overlay for downloaded mods', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Questionable Mod',
+          storageId: 'questionable-storage',
+          securityScan: {
+            state: 'review',
+            verified: false,
+            disposition: {
+              classification: 'Suspicious',
+              headline: 'Potentially malicious',
+              summary: 'Heuristic checks flagged this download.',
+              blockingRecommended: false,
+              relatedFindingIds: ['finding-1'],
+            },
+            highestSeverity: 'High',
+            totalFindings: 1,
+            threatFamilyCount: 0,
+          },
+        }),
+      ],
+    });
+    apiMocks.getModSecurityScanReport.mockResolvedValue({
+      summary: {
+        state: 'review',
+        verified: false,
+        disposition: {
+          classification: 'Suspicious',
+          headline: 'Potentially malicious',
+          summary: 'Heuristic checks flagged this download.',
+          blockingRecommended: false,
+          relatedFindingIds: ['finding-1'],
+        },
+        highestSeverity: 'High',
+        totalFindings: 1,
+        threatFamilyCount: 0,
+      },
+      policy: {
+        enabled: true,
+        requiresConfirmation: false,
+        blocked: false,
+        promptOnHighFindings: false,
+        blockCriticalFindings: false,
+      },
+      files: [],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+
+    expect(await screen.findByText('Security Findings - Questionable Mod')).toBeTruthy();
   });
 
   it('shows downloaded mod details in the preselected inspector state', async () => {

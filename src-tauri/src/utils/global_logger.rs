@@ -37,7 +37,10 @@ impl GlobalLogger {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     LOGGER_SERVICE_STARTED.store(false, Ordering::SeqCst);
-                    eprintln!("[GlobalLogger] Failed to create runtime for LoggerService: {}", error);
+                    eprintln!(
+                        "[GlobalLogger] Failed to create runtime for LoggerService: {}",
+                        error
+                    );
                     return;
                 }
             };

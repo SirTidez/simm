@@ -159,6 +159,11 @@ pub struct Settings {
     pub theme: Theme,
     pub melon_loader_version: Option<String>,
     pub auto_install_melon_loader: Option<bool>,
+    pub enable_security_scanner: Option<bool>,
+    pub auto_install_security_scanner: Option<bool>,
+    pub block_critical_scans: Option<bool>,
+    pub prompt_on_high_scans: Option<bool>,
+    pub show_security_scan_badges: Option<bool>,
     pub update_check_interval: Option<u32>, // minutes
     pub auto_check_updates: Option<bool>,
     pub log_level: Option<LogLevel>,
@@ -322,6 +327,110 @@ pub enum ModSource {
     Unknown,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SecurityScanState {
+    Verified,
+    Review,
+    Unavailable,
+    Disabled,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecurityFindingSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecurityScanDispositionClassification {
+    #[serde(rename = "Clean")]
+    Clean,
+    #[serde(rename = "Suspicious")]
+    Suspicious,
+    #[serde(rename = "KnownThreat")]
+    KnownThreat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScanDisposition {
+    pub classification: SecurityScanDispositionClassification,
+    pub headline: String,
+    pub summary: String,
+    #[serde(default)]
+    pub blocking_recommended: bool,
+    pub primary_threat_family_id: Option<String>,
+    #[serde(default)]
+    pub related_finding_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScanSummary {
+    pub state: SecurityScanState,
+    pub verified: bool,
+    #[serde(default)]
+    pub disposition: Option<SecurityScanDisposition>,
+    pub highest_severity: Option<SecurityFindingSeverity>,
+    pub total_findings: usize,
+    pub threat_family_count: usize,
+    #[serde(with = "chrono::serde::ts_seconds_option")]
+    pub scanned_at: Option<DateTime<Utc>>,
+    pub scanner_version: Option<String>,
+    pub schema_version: Option<String>,
+    pub status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScanPolicy {
+    pub enabled: bool,
+    pub requires_confirmation: bool,
+    pub blocked: bool,
+    pub prompt_on_high_findings: bool,
+    pub block_critical_findings: bool,
+    pub status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScanFileReport {
+    pub file_name: String,
+    pub display_path: String,
+    pub sha256_hash: Option<String>,
+    pub highest_severity: Option<SecurityFindingSeverity>,
+    pub total_findings: usize,
+    pub threat_family_count: usize,
+    pub result: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScanReport {
+    pub summary: SecurityScanSummary,
+    pub policy: SecurityScanPolicy,
+    pub files: Vec<SecurityScanFileReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityScannerStatus {
+    pub enabled: bool,
+    pub auto_install: bool,
+    pub installed: bool,
+    pub install_method: Option<String>,
+    pub installed_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub schema_version: Option<String>,
+    pub executable_path: Option<String>,
+    pub update_available: Option<bool>,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModMetadata {
@@ -353,6 +462,7 @@ pub struct ModMetadata {
     pub runtime_match: Option<bool>,
     pub mod_storage_id: Option<String>,
     pub symlink_paths: Option<Vec<String>>,
+    pub security_scan: Option<SecurityScanSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,6 +496,7 @@ pub struct ModLibraryEntry {
     pub storage_ids_by_runtime: std::collections::HashMap<String, String>,
     pub installed_in_by_runtime: std::collections::HashMap<String, Vec<String>>,
     pub files_by_runtime: std::collections::HashMap<String, Vec<String>>,
+    pub security_scan: Option<SecurityScanSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,6 +618,7 @@ mod tests {
             storage_ids_by_runtime: std::collections::HashMap::new(),
             installed_in_by_runtime: std::collections::HashMap::new(),
             files_by_runtime: std::collections::HashMap::new(),
+            security_scan: None,
         };
 
         let json = serde_json::to_value(entry).expect("serialize");

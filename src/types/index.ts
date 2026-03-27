@@ -1,3 +1,8 @@
+import type {
+  ScanResult,
+  ThreatDisposition,
+} from './mlvscan';
+
 export interface DepotDownloaderInfo {
   installed: boolean;
   path?: string;
@@ -99,6 +104,11 @@ export interface Settings {
   theme: 'light' | 'dark' | 'modern-blue';
   melonLoaderVersion?: string;
   autoInstallMelonLoader?: boolean;
+  enableSecurityScanner?: boolean;
+  autoInstallSecurityScanner?: boolean;
+  blockCriticalScans?: boolean;
+  promptOnHighScans?: boolean;
+  showSecurityScanBadges?: boolean;
   updateCheckInterval?: number;
   autoCheckUpdates?: boolean;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
@@ -228,8 +238,76 @@ export interface ModLibraryEntry {
   storageIdsByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>>;
   installedInByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
   filesByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
+  securityScan?: SecurityScanSummary;
 }
 
 export interface ModLibraryResult {
   downloaded: ModLibraryEntry[];
 }
+
+export type SecurityScanState = 'verified' | 'review' | 'unavailable' | 'disabled' | 'skipped';
+export type SecurityFindingSeverity = 'Low' | 'Medium' | 'High' | 'Critical';
+
+export interface SecurityScanSummary {
+  state: SecurityScanState;
+  verified: boolean;
+  disposition?: ThreatDisposition | null;
+  highestSeverity?: SecurityFindingSeverity;
+  totalFindings: number;
+  threatFamilyCount: number;
+  scannedAt?: number;
+  scannerVersion?: string;
+  schemaVersion?: string;
+  statusMessage?: string;
+}
+
+export interface SecurityScanPolicy {
+  enabled: boolean;
+  requiresConfirmation: boolean;
+  blocked: boolean;
+  promptOnHighFindings: boolean;
+  blockCriticalFindings: boolean;
+  statusMessage?: string;
+}
+
+export interface SecurityScanFileReport {
+  fileName: string;
+  displayPath: string;
+  sha256Hash?: string;
+  highestSeverity?: SecurityFindingSeverity;
+  totalFindings: number;
+  threatFamilyCount: number;
+  result: ScanResult;
+}
+
+export interface SecurityScanReport {
+  summary: SecurityScanSummary;
+  policy: SecurityScanPolicy;
+  files: SecurityScanFileReport[];
+}
+
+export interface SecurityScannerStatus {
+  enabled: boolean;
+  autoInstall: boolean;
+  installed: boolean;
+  installMethod?: string;
+  installedVersion?: string;
+  latestVersion?: string;
+  schemaVersion?: string;
+  executablePath?: string;
+  updateAvailable?: boolean;
+  lastError?: string;
+}
+
+export type {
+  ScanResult,
+  Finding,
+  ThreatDisposition,
+  ThreatDispositionClassification,
+  ThreatFamily,
+  ThreatFamilyEvidence,
+  DeveloperGuidance,
+  Severity,
+  CallChain,
+  DataFlowChain,
+} from './mlvscan';

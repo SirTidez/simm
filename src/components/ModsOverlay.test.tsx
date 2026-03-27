@@ -11,6 +11,7 @@ const apiMocks = vi.hoisted(() => ({
   checkModUpdates: vi.fn(),
   getModUpdatesSummary: vi.fn(),
   installDownloadedMod: vi.fn(),
+  getModSecurityScanReport: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   searchThunderstore: vi.fn(),
   searchNexusMods: vi.fn(),
@@ -58,6 +59,7 @@ describe('ModsOverlay', () => {
     apiMocks.checkModUpdates.mockReset();
     apiMocks.getModUpdatesSummary.mockReset();
     apiMocks.installDownloadedMod.mockReset();
+    apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.searchThunderstore.mockReset();
     apiMocks.searchNexusMods.mockReset();
@@ -77,6 +79,7 @@ describe('ModsOverlay', () => {
     apiMocks.checkModUpdates.mockResolvedValue([]);
     apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 0, updates: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
+    apiMocks.getModSecurityScanReport.mockResolvedValue(null);
     apiMocks.getNexusOAuthStatus.mockResolvedValue({ connected: false, account: { canDirectDownload: false, requiresSiteConfirmation: true } });
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
@@ -118,6 +121,112 @@ describe('ModsOverlay', () => {
     expect((await screen.findAllByText('S1API.Mono.MelonLoader.dll')).length).toBeGreaterThan(0);
   });
 
+  it('renders MLVScan disposition badges for installed mods', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Trusted Mod',
+          fileName: 'Trusted.Mod.dll',
+          path: 'C:/env/Mods/Trusted.Mod.dll',
+          source: 'github',
+          managed: true,
+          disabled: false,
+          securityScan: {
+            state: 'verified',
+            verified: true,
+            disposition: {
+              classification: 'Clean',
+              headline: 'Safe',
+              summary: 'No malicious indicators were identified.',
+              blockingRecommended: false,
+              relatedFindingIds: [],
+            },
+            totalFindings: 0,
+            threatFamilyCount: 0,
+          },
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    expect(await screen.findByText('Safe')).toBeTruthy();
+  });
+
+  it('opens the security report overlay for installed mods', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Trusted Mod',
+          fileName: 'Trusted.Mod.dll',
+          path: 'C:/env/Mods/Trusted.Mod.dll',
+          source: 'github',
+          managed: true,
+          disabled: false,
+          modStorageId: 'trusted-storage',
+          securityScan: {
+            state: 'verified',
+            verified: true,
+            disposition: {
+              classification: 'Clean',
+              headline: 'Safe',
+              summary: 'No malicious indicators were identified.',
+              blockingRecommended: false,
+              relatedFindingIds: [],
+            },
+            totalFindings: 0,
+            threatFamilyCount: 0,
+          },
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModSecurityScanReport.mockResolvedValue({
+      summary: {
+        state: 'verified',
+        verified: true,
+        disposition: {
+          classification: 'Clean',
+          headline: 'Safe',
+          summary: 'No malicious indicators were identified.',
+          blockingRecommended: false,
+          relatedFindingIds: [],
+        },
+        totalFindings: 0,
+        threatFamilyCount: 0,
+      },
+      policy: {
+        enabled: true,
+        requiresConfirmation: false,
+        blocked: false,
+        promptOnHighFindings: false,
+        blockCriticalFindings: false,
+      },
+      files: [],
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+
+    expect(await screen.findByText('Security Report - Trusted Mod')).toBeTruthy();
+  });
+
   it('prompts for runtime on ambiguous upload and forwards selected runtime metadata', async () => {
     openMock.mockResolvedValueOnce('C:/mods/Example.dll');
 
@@ -140,7 +249,8 @@ describe('ModsOverlay', () => {
         'C:/mods/Example.dll',
         'Example.dll',
         'IL2CPP',
-        expect.objectContaining({ detectedRuntime: 'Mono' })
+        expect.objectContaining({ detectedRuntime: 'Mono', source: 'unknown' }),
+        false,
       );
     });
   });

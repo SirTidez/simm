@@ -75,7 +75,7 @@ describe('UserLibsOverlay', () => {
     );
 
     expect((await screen.findAllByText('HarmonyX.dll')).length).toBeGreaterThan(0);
-    expect(screen.getByText('C:/env/UserLibs/HarmonyX.dll')).toBeTruthy();
+    expect(await screen.findByText('C:/env/UserLibs/HarmonyX.dll')).toBeTruthy();
   });
 
   it('filters user libraries from the toolbar search', async () => {

@@ -6,11 +6,21 @@ import type {
   DownloadProgress,
   AppConfig,
   UpdateCheckResult,
+  SecurityScannerStatus,
+  SecurityScanReport,
+  SecurityScanSummary,
   ConfigDocument,
   ConfigEditOperation,
   ConfigFileSummary,
   ExtractGameVersionResult,
 } from '../types';
+
+type SecurityGateResponse = {
+  securityScan?: SecurityScanSummary | SecurityScanReport;
+  securityScanBlocked?: boolean;
+  securityScanConfirmationRequired?: boolean;
+  error?: string;
+};
 
 export class ApiService {
   // DepotDownloader
@@ -262,6 +272,7 @@ export class ApiService {
       updatedAt?: string;
       tags?: string[];
       installedAt?: number;
+      securityScan?: SecurityScanSummary;
     }>;
     modsDirectory: string;
     count: number;
@@ -312,8 +323,9 @@ export class ApiService {
       tags?: string[];
     },
     target?: 'mods' | 'plugins',
-    cleanup?: boolean
-  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    cleanup?: boolean,
+    securityOverride?: boolean,
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
     return invoke('store_mod_archive', {
       filePath,
       originalFileName,
@@ -334,6 +346,7 @@ export class ApiService {
       } : null,
       target,
       cleanup,
+      securityOverride,
     });
   }
 
@@ -389,11 +402,13 @@ export class ApiService {
       likesOrEndorsements?: number;
       updatedAt?: string;
       tags?: string[];
-    }
+    },
+    securityOverride?: boolean,
   ): Promise<{
     success: boolean;
     message?: string;
     installedFiles?: string[];
+    storageId?: string;
     source?: string;
     error?: string;
     requiresManualDownload?: boolean;
@@ -404,7 +419,7 @@ export class ApiService {
       warning: string;
       requiresConfirmation: boolean;
     };
-  }> {
+  } & SecurityGateResponse> {
     return invoke('upload_mod', {
       environmentId,
       filePath,
@@ -426,6 +441,7 @@ export class ApiService {
         updatedAt: metadata.updatedAt,
         tags: metadata.tags,
       } : null,
+      securityOverride,
     });
   }
 
@@ -784,11 +800,13 @@ export class ApiService {
     environmentId: string,
     modId: number,
     fileId: number,
-    gameId?: string
+    gameId?: string,
+    securityOverride?: boolean,
   ): Promise<{
     success: boolean;
     message?: string;
     installedFiles?: string[];
+    storageId?: string;
     source?: string;
     error?: string;
     requiresManualDownload?: boolean;
@@ -799,12 +817,13 @@ export class ApiService {
       warning: string;
       requiresConfirmation: boolean;
     };
-  }> {
+  } & SecurityGateResponse> {
     return invoke('install_nexus_mods_mod', {
       environmentId,
       game_id_param: gameId ?? null,
       modId,
       fileId,
+      securityOverride,
     });
   }
 
@@ -1088,11 +1107,13 @@ export class ApiService {
 
   static async installThunderstoreMod(
     environmentId: string,
-    packageUuid: string
+    packageUuid: string,
+    securityOverride?: boolean,
   ): Promise<{
     success: boolean;
     message?: string;
     installedFiles?: string[];
+    storageId?: string;
     source?: string;
     error?: string;
     alreadyInstalled?: boolean;
@@ -1104,7 +1125,7 @@ export class ApiService {
       warning: string;
       requiresConfirmation: boolean;
     };
-  }> {
+  } & SecurityGateResponse> {
     // Use hardcoded game ID for Schedule I
     const gameId = 'schedule-i';
 
@@ -1194,13 +1215,15 @@ export class ApiService {
         updatedAt,
         tags,
       },
+      securityOverride,
     });
   }
 
   static async downloadThunderstoreToLibrary(
     packageUuid: string,
-    runtime?: 'IL2CPP' | 'Mono'
-  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    runtime?: 'IL2CPP' | 'Mono',
+    securityOverride?: boolean,
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
     const gameId = 'schedule-i';
     const packageInfo = await invoke<any>('get_thunderstore_package', {
       packageUuid,
@@ -1259,15 +1282,17 @@ export class ApiService {
         tags,
       },
       undefined,
-      true
+      true,
+      securityOverride,
     );
   }
 
   static async downloadNexusModToLibrary(
     modId: number,
     fileId: number,
-    runtime?: 'IL2CPP' | 'Mono'
-  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
+    runtime?: 'IL2CPP' | 'Mono',
+    securityOverride?: boolean,
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
     const gameId = 'schedule1';
     const modInfo = await invoke<any>('get_nexus_mods_mod', { gameId, modId });
     const files = await invoke<any[]>('get_nexus_mods_mod_files', { gameId, modId });
@@ -1304,16 +1329,35 @@ export class ApiService {
         tags: Array.isArray(modInfo?.tags) ? modInfo.tags : (Array.isArray(modInfo?.tag_list) ? modInfo.tag_list : []),
       },
       undefined,
-      true
+      true,
+      securityOverride,
     );
   }
 
-  static async downloadS1APIToLibrary(versionTag: string): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
-    return invoke('download_s1api_to_library', { versionTag });
+  static async downloadS1APIToLibrary(
+    versionTag: string,
+    securityOverride?: boolean,
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
+    return invoke('download_s1api_to_library', { versionTag, securityOverride });
   }
 
-  static async downloadMLVScanToLibrary(versionTag: string): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean }> {
-    return invoke('download_mlvscan_to_library', { versionTag });
+  static async downloadMLVScanToLibrary(
+    versionTag: string,
+    securityOverride?: boolean,
+  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
+    return invoke('download_mlvscan_to_library', { versionTag, securityOverride });
+  }
+
+  static async getSecurityScannerStatus(): Promise<SecurityScannerStatus> {
+    return invoke('get_security_scanner_status');
+  }
+
+  static async installSecurityScanner(): Promise<SecurityScannerStatus> {
+    return invoke('install_security_scanner');
+  }
+
+  static async getModSecurityScanReport(storageId: string): Promise<SecurityScanReport | null> {
+    return invoke('get_mod_security_scan_report', { storageId });
   }
 
   // Logs

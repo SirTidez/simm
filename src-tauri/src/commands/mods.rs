@@ -3,6 +3,7 @@ use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
+use crate::types::SecurityScanReport;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
@@ -24,6 +25,14 @@ enum UploadKind {
     Zip,
     Dll,
     Unsupported,
+}
+
+pub(crate) enum SecurityGateResult {
+    Continue {
+        metadata: Option<serde_json::Value>,
+        report: Option<SecurityScanReport>,
+    },
+    EarlyResponse(serde_json::Value),
 }
 
 fn detect_upload_kind(file_path: &str) -> UploadKind {
@@ -65,6 +74,169 @@ fn build_mlvscan_library_metadata(version_tag: &str) -> serde_json::Value {
         "modName": "MLVScan",
         "author": "ifBars",
     })
+}
+
+fn ensure_metadata_object(
+    metadata: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    metadata
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn should_skip_security_scan(metadata: &Option<serde_json::Value>) -> bool {
+    let source_id = metadata
+        .as_ref()
+        .and_then(|value| value.get("sourceId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    matches!(
+        source_id.as_str(),
+        "ifbars/mlvscan" | "ifbars/mlvscan.devcli"
+    )
+}
+
+fn security_scan_summary_value(report: &SecurityScanReport) -> Result<serde_json::Value, String> {
+    serde_json::to_value(&report.summary).map_err(|e| e.to_string())
+}
+
+fn security_gate_response(report: &SecurityScanReport) -> Option<serde_json::Value> {
+    if report.policy.blocked {
+        return Some(serde_json::json!({
+            "success": false,
+            "error": report.policy.status_message.clone().unwrap_or_else(|| "MLVScan blocked this download".to_string()),
+            "securityScan": report,
+            "securityScanBlocked": true,
+            "securityScanConfirmationRequired": false,
+        }));
+    }
+
+    if report.policy.requires_confirmation {
+        return Some(serde_json::json!({
+            "success": false,
+            "error": report.policy.status_message.clone().unwrap_or_else(|| "MLVScan requires confirmation before continuing".to_string()),
+            "securityScan": report,
+            "securityScanBlocked": false,
+            "securityScanConfirmationRequired": true,
+        }));
+    }
+
+    None
+}
+
+pub(crate) async fn prepare_security_scan(
+    db: Arc<SqlitePool>,
+    file_path: &str,
+    metadata: Option<serde_json::Value>,
+    security_override: bool,
+) -> Result<SecurityGateResult, String> {
+    if should_skip_security_scan(&metadata) {
+        return Ok(SecurityGateResult::Continue {
+            metadata,
+            report: None,
+        });
+    }
+
+    let report =
+        crate::commands::security_scanner::scan_artifact_for_security(db, file_path).await?;
+
+    if report.summary.state == crate::types::SecurityScanState::Disabled {
+        return Ok(SecurityGateResult::Continue {
+            metadata,
+            report: None,
+        });
+    }
+
+    if !security_override {
+        if let Some(response) = security_gate_response(&report) {
+            return Ok(SecurityGateResult::EarlyResponse(response));
+        }
+    }
+
+    let mut metadata_map = ensure_metadata_object(metadata);
+    metadata_map.insert(
+        "securityScan".to_string(),
+        security_scan_summary_value(&report)?,
+    );
+
+    Ok(SecurityGateResult::Continue {
+        metadata: Some(serde_json::Value::Object(metadata_map)),
+        report: Some(report),
+    })
+}
+
+pub(crate) async fn persist_security_scan_report(
+    mods_service: &ModsService,
+    response: &serde_json::Value,
+    report: Option<&SecurityScanReport>,
+) -> Result<(), String> {
+    let Some(report) = report else {
+        return Ok(());
+    };
+
+    let Some(storage_id) = response.get("storageId").and_then(|value| value.as_str()) else {
+        return Ok(());
+    };
+
+    if response
+        .get("alreadyStored")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    mods_service
+        .save_security_scan_report(storage_id, report)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn attach_security_scan_summary(
+    mut response: serde_json::Value,
+    report: Option<&SecurityScanReport>,
+) -> Result<serde_json::Value, String> {
+    if let Some(report) = report {
+        if let Some(object) = response.as_object_mut() {
+            object.insert(
+                "securityScan".to_string(),
+                security_scan_summary_value(report)?,
+            );
+        }
+    }
+
+    Ok(response)
+}
+
+pub(crate) async fn finalize_security_scan_response(
+    mods_service: &ModsService,
+    response: serde_json::Value,
+    report: Option<&SecurityScanReport>,
+    operation: &str,
+) -> serde_json::Value {
+    if let Err(error) = persist_security_scan_report(mods_service, &response, report).await {
+        log::warn!(
+            "Failed to persist security scan report after {}: {}",
+            operation,
+            error
+        );
+    }
+
+    let original_response = response.clone();
+    match attach_security_scan_summary(response, report) {
+        Ok(updated) => updated,
+        Err(error) => {
+            log::warn!(
+                "Failed to attach security scan summary after {}: {}",
+                operation,
+                error
+            );
+            original_response
+        }
+    }
 }
 
 async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
@@ -425,6 +597,7 @@ pub async fn upload_mod(
     runtime: String,
     branch: String,
     metadata: Option<serde_json::Value>,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = env_service
@@ -439,7 +612,19 @@ pub async fn upload_mod(
 
     let mods_service = ModsService::new(db.inner().clone());
 
-    match detect_upload_kind(&file_path) {
+    let (metadata, security_report) = match prepare_security_scan(
+        db.inner().clone(),
+        &file_path,
+        metadata,
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => return Ok(response),
+    };
+
+    let response = match detect_upload_kind(&file_path) {
         UploadKind::Zip => mods_service
             .install_zip_mod(
                 &env.output_dir,
@@ -450,13 +635,21 @@ pub async fn upload_mod(
                 metadata,
             )
             .await
-            .map_err(|e| e.to_string()),
+            .map_err(|e| e.to_string())?,
         UploadKind::Dll => mods_service
             .install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
             .await
-            .map_err(|e| e.to_string()),
-        UploadKind::Unsupported => Err("Only .zip and .dll files are supported".to_string()),
-    }
+            .map_err(|e| e.to_string())?,
+        UploadKind::Unsupported => return Err("Only .zip and .dll files are supported".to_string()),
+    };
+
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        response,
+        security_report.as_ref(),
+        "installing a local mod upload",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -468,10 +661,23 @@ pub async fn store_mod_archive(
     metadata: Option<serde_json::Value>,
     target: Option<String>,
     cleanup: Option<bool>,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let runtime_parsed = parse_runtime_label(runtime.as_deref());
 
     let mods_service = ModsService::new(db.inner().clone());
+    let (metadata, security_report) = match prepare_security_scan(
+        db.inner().clone(),
+        &file_path,
+        metadata,
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => return Ok(response),
+    };
+
     let result = mods_service
         .store_mod_archive(
             &file_path,
@@ -487,7 +693,13 @@ pub async fn store_mod_archive(
         let _ = tokio::fs::remove_file(&file_path).await;
     }
 
-    Ok(result)
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "storing a mod archive",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -697,6 +909,7 @@ pub async fn download_s1api_to_library(
     db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
     version_tag: String,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({
@@ -788,19 +1001,37 @@ pub async fn download_s1api_to_library(
     let metadata = build_s1api_library_metadata(&version_tag);
 
     let mods_service = ModsService::new(db.inner().clone());
+    let temp_zip_path_string = temp_zip_path.to_string_lossy().to_string();
+
+    let (metadata, security_report) = match prepare_security_scan(
+        db.inner().clone(),
+        &temp_zip_path_string,
+        Some(metadata),
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => {
+            let _ = tokio::fs::remove_file(&temp_zip_path).await;
+            return Ok(response);
+        }
+    };
+
     let result = mods_service
-        .store_mod_archive(
-            &temp_zip_path.to_string_lossy(),
-            "S1API.zip",
-            None,
-            Some(metadata),
-            None,
-        )
+        .store_mod_archive(&temp_zip_path_string, "S1API.zip", None, metadata, None)
         .await;
 
     let _ = tokio::fs::remove_file(&temp_zip_path).await;
 
-    result.map_err(|e| e.to_string())
+    let result = result.map_err(|e| e.to_string())?;
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "downloading S1API to the library",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -808,6 +1039,7 @@ pub async fn download_mlvscan_to_library(
     db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
     version_tag: String,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let error_json = |msg: String| -> Result<serde_json::Value, String> {
         Ok(serde_json::json!({
@@ -943,19 +1175,37 @@ pub async fn download_mlvscan_to_library(
     let metadata = build_mlvscan_library_metadata(&version_tag);
 
     let mods_service = ModsService::new(db.inner().clone());
+    let temp_path_string = temp_path.to_string_lossy().to_string();
+
+    let (metadata, security_report) = match prepare_security_scan(
+        db.inner().clone(),
+        &temp_path_string,
+        Some(metadata),
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Ok(response);
+        }
+    };
+
     let result = mods_service
-        .store_mod_archive(
-            &temp_path.to_string_lossy(),
-            &asset_name,
-            None,
-            Some(metadata),
-            target,
-        )
+        .store_mod_archive(&temp_path_string, &asset_name, None, metadata, target)
         .await;
 
     let _ = tokio::fs::remove_file(&temp_path).await;
 
-    result.map_err(|e| e.to_string())
+    let result = result.map_err(|e| e.to_string())?;
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "downloading MLVScan to the library",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -985,8 +1235,40 @@ pub async fn uninstall_s1api(
 mod tests {
     use super::{
         build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
-        parse_runtime_label, UploadKind,
+        parse_runtime_label, persist_security_scan_report, UploadKind,
     };
+    use crate::db::initialize_pool;
+    use crate::services::mods::ModsService;
+    use crate::services::settings::SettingsService;
+    use crate::types::{
+        SecurityScanDisposition, SecurityScanDispositionClassification, SecurityScanPolicy,
+        SecurityScanReport, SecurityScanState, SecurityScanSummary,
+    };
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn detect_upload_kind_matches_supported_extensions() {
@@ -1046,5 +1328,115 @@ mod tests {
             metadata.get("sourceVersion").and_then(|v| v.as_str()),
             Some("v0.9.1")
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn persist_security_scan_report_skips_already_stored_responses() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let original_report = SecurityScanReport {
+            summary: SecurityScanSummary {
+                state: SecurityScanState::Verified,
+                verified: true,
+                disposition: Some(SecurityScanDisposition {
+                    classification: SecurityScanDispositionClassification::Clean,
+                    headline: "Clean".to_string(),
+                    summary: "Original report".to_string(),
+                    blocking_recommended: false,
+                    primary_threat_family_id: None,
+                    related_finding_ids: Vec::new(),
+                }),
+                highest_severity: None,
+                total_findings: 0,
+                threat_family_count: 0,
+                scanned_at: None,
+                scanner_version: None,
+                schema_version: None,
+                status_message: Some("Original report".to_string()),
+            },
+            policy: SecurityScanPolicy {
+                enabled: true,
+                requires_confirmation: false,
+                blocked: false,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message: Some("Original report".to_string()),
+            },
+            files: Vec::new(),
+        };
+        service
+            .save_security_scan_report("existing-storage", &original_report)
+            .await?;
+
+        let replacement_report = SecurityScanReport {
+            summary: SecurityScanSummary {
+                state: SecurityScanState::Review,
+                verified: false,
+                disposition: Some(SecurityScanDisposition {
+                    classification: SecurityScanDispositionClassification::Suspicious,
+                    headline: "Suspicious".to_string(),
+                    summary: "Replacement report".to_string(),
+                    blocking_recommended: false,
+                    primary_threat_family_id: None,
+                    related_finding_ids: vec!["finding-1".to_string()],
+                }),
+                highest_severity: None,
+                total_findings: 1,
+                threat_family_count: 1,
+                scanned_at: None,
+                scanner_version: None,
+                schema_version: None,
+                status_message: Some("Replacement report".to_string()),
+            },
+            policy: SecurityScanPolicy {
+                enabled: true,
+                requires_confirmation: true,
+                blocked: false,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message: Some("Replacement report".to_string()),
+            },
+            files: Vec::new(),
+        };
+
+        persist_security_scan_report(
+            &service,
+            &serde_json::json!({
+                "storageId": "existing-storage",
+                "alreadyStored": true
+            }),
+            Some(&replacement_report),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let persisted = service
+            .get_security_scan_report("existing-storage")
+            .await?
+            .expect("report should still exist");
+        assert_eq!(
+            persisted
+                .summary
+                .disposition
+                .as_ref()
+                .map(|value| value.classification),
+            Some(SecurityScanDispositionClassification::Clean)
+        );
+
+        Ok(())
     }
 }

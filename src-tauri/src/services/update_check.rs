@@ -216,12 +216,10 @@ impl UpdateCheckService {
                 .filter_map(|(candidate_id, candidate_result)| {
                     let candidate_env = env_map.get(candidate_id.as_str())?;
                     let candidate_version = candidate_result.current_game_version.as_deref()?;
-                    let candidate_remote_manifest =
-                        candidate_result.remote_manifest_id.as_deref()?;
 
                     if candidate_id == &env.id
+                        || candidate_env.app_id != env.app_id
                         || candidate_env.branch != env.branch
-                        || candidate_remote_manifest != remote_manifest_id.as_str()
                     {
                         return None;
                     }
@@ -971,6 +969,82 @@ mod tests {
         let beta_result = results.get("beta").expect("beta result");
         assert!(beta_result.update_available);
         assert_eq!(beta_result.update_game_version.as_deref(), Some("0.4.4f6"));
+    }
+
+    #[test]
+    fn infer_updates_for_missing_manifest_baseline_ignores_other_app_ids() {
+        let beta_env = Environment {
+            id: "beta".to_string(),
+            name: "Beta".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id.clone(),
+            branch: "beta".to_string(),
+            output_dir: "C:\\beta".to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: Some("317".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.3f3".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        let other_app_peer = Environment {
+            id: "other-beta".to_string(),
+            name: "Other App Beta".to_string(),
+            app_id: "9999999".to_string(),
+            current_game_version: Some("0.4.4f6".to_string()),
+            environment_type: Some(EnvironmentType::Steam),
+            ..beta_env.clone()
+        };
+
+        let mut results = HashMap::from([
+            (
+                beta_env.id.clone(),
+                UpdateCheckResult {
+                    update_available: false,
+                    current_manifest_id: Some("317".to_string()),
+                    remote_manifest_id: Some("317".to_string()),
+                    remote_build_id: None,
+                    branch: beta_env.branch.clone(),
+                    app_id: beta_env.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.3f3".to_string()),
+                    update_game_version: None,
+                },
+            ),
+            (
+                other_app_peer.id.clone(),
+                UpdateCheckResult {
+                    update_available: false,
+                    current_manifest_id: Some("802".to_string()),
+                    remote_manifest_id: Some("802".to_string()),
+                    remote_build_id: None,
+                    branch: other_app_peer.branch.clone(),
+                    app_id: other_app_peer.app_id.clone(),
+                    checked_at: Utc::now(),
+                    error: None,
+                    current_game_version: Some("0.4.4f6".to_string()),
+                    update_game_version: None,
+                },
+            ),
+        ]);
+
+        UpdateCheckService::infer_updates_for_missing_manifest_baselines(
+            &[beta_env.clone(), other_app_peer.clone()],
+            &mut results,
+        );
+
+        let beta_result = results.get("beta").expect("beta result");
+        assert!(!beta_result.update_available);
+        assert!(beta_result.update_game_version.is_none());
     }
 
     #[test]

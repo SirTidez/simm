@@ -1922,6 +1922,7 @@ pub async fn install_nexus_mods_mod(
     game_id_param: Option<String>,
     mod_id: u32,
     file_id: u32,
+    security_override: Option<bool>,
 ) -> Result<Value, String> {
     use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
@@ -2150,6 +2151,24 @@ pub async fn install_nexus_mods_mod(
 
     let metadata = Value::Object(metadata_obj);
 
+    let security_scan = crate::commands::mods::prepare_security_scan(
+        db_pool.clone(),
+        &zip_path_str,
+        Some(metadata),
+        security_override.unwrap_or(false),
+    )
+    .await?;
+
+    let (metadata, security_report) = match security_scan {
+        crate::commands::mods::SecurityGateResult::Continue { metadata, report } => {
+            (metadata, report)
+        }
+        crate::commands::mods::SecurityGateResult::EarlyResponse(response) => {
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            return Ok(response);
+        }
+    };
+
     let result = mods_service
         .install_zip_mod(
             &env.output_dir,
@@ -2157,14 +2176,20 @@ pub async fn install_nexus_mods_mod(
             original_filename,
             runtime_str,
             &env.branch,
-            Some(metadata),
+            metadata,
         )
         .await
         .map_err(|e| format!("Failed to install mod {} file {}: {}", mod_id, file_id, e))?;
 
     let _ = tokio::fs::remove_file(&archive_path).await;
 
-    Ok(result)
+    Ok(crate::commands::mods::finalize_security_scan_response(
+        &mods_service,
+        result,
+        security_report.as_ref(),
+        "installing a Nexus mod archive",
+    )
+    .await)
 }
 
 #[cfg(test)]

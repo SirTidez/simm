@@ -272,7 +272,10 @@ pub async fn check_update(
         .map_err(|e| e.to_string())?;
 
     if let Err(e) = env_service
-        .update_environment(&environment_id, build_environment_update_fields_from_result(&result))
+        .update_environment(
+            &environment_id,
+            build_environment_update_fields_from_result(&result),
+        )
         .await
     {
         log::warn!(
@@ -557,6 +560,7 @@ pub async fn check_all_updates(
                 runtime_match: None,
                 mod_storage_id: Some(storage_id.clone()),
                 symlink_paths: None,
+                security_scan: None,
             };
 
             if let Err(error) = mods_service

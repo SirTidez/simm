@@ -64,7 +64,8 @@ impl UserLibsService {
             if let Some(stripped_name) = strip_disabled_suffix_case_insensitive(file_name) {
                 candidate_paths.push(normalized_path.with_file_name(stripped_name));
             } else {
-                candidate_paths.push(normalized_path.with_file_name(format!("{file_name}.disabled")));
+                candidate_paths
+                    .push(normalized_path.with_file_name(format!("{file_name}.disabled")));
             }
         }
 
@@ -88,7 +89,9 @@ impl UserLibsService {
         }
 
         if !normalized_path.starts_with(&normalized_root) {
-            return Err(anyhow::anyhow!("UserLib path must be within the UserLibs directory"));
+            return Err(anyhow::anyhow!(
+                "UserLib path must be within the UserLibs directory"
+            ));
         }
 
         Ok(normalized_path)
@@ -121,7 +124,8 @@ impl UserLibsService {
 
             let is_disabled = file_name.to_ascii_lowercase().ends_with(".disabled");
             let original_file_name = if is_disabled {
-                strip_disabled_suffix_case_insensitive(file_name).unwrap_or_else(|| file_name.to_string())
+                strip_disabled_suffix_case_insensitive(file_name)
+                    .unwrap_or_else(|| file_name.to_string())
             } else {
                 file_name.to_string()
             };
@@ -199,10 +203,7 @@ impl UserLibsService {
         if strip_disabled_suffix_case_insensitive(file_name).is_some() {
             return Err(anyhow::anyhow!("User lib is already disabled"));
         }
-        let disabled_path = enabled_path.with_file_name(format!(
-            "{}.disabled",
-            file_name
-        ));
+        let disabled_path = enabled_path.with_file_name(format!("{}.disabled", file_name));
 
         if !enabled_path.exists() {
             return Err(anyhow::anyhow!("User lib file not found"));
@@ -320,8 +321,14 @@ mod tests {
             .find(|value| value.get("name").and_then(|name| name.as_str()) == Some("SharedAssets"))
             .expect("shared assets entry");
 
-        assert_eq!(entry.get("disabled").and_then(|value| value.as_bool()), Some(true));
-        assert_eq!(entry.get("fileName").and_then(|value| value.as_str()), Some("SharedAssets"));
+        assert_eq!(
+            entry.get("disabled").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            entry.get("fileName").and_then(|value| value.as_str()),
+            Some("SharedAssets")
+        );
 
         service
             .enable_user_lib(

@@ -457,12 +457,17 @@ impl LogsService {
         let live_rollover = Path::new(log_path)
             .file_name()
             .and_then(|name| name.to_str())
-            .map(|name| matches!(name.to_ascii_lowercase().as_str(), "latest.log" | "player.log"))
+            .map(|name| {
+                matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "latest.log" | "player.log"
+                )
+            })
             .unwrap_or(false);
-        let custom_start =
-            custom_time_start.and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
-        let custom_end =
-            custom_time_end.and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
+        let custom_start = custom_time_start
+            .and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
+        let custom_end = custom_time_end
+            .and_then(|value| Self::parse_log_timestamp_local(value, reference_dt, false));
 
         let filtered_lines = log_lines
             .iter()
@@ -514,9 +519,11 @@ impl LogsService {
                 if let Some(period) = time_period {
                     if !period.eq_ignore_ascii_case("all") {
                         if let Some(timestamp) = line.timestamp.as_deref() {
-                            if let Some(log_time) =
-                                Self::parse_log_timestamp_local(timestamp, reference_dt, live_rollover)
-                            {
+                            if let Some(log_time) = Self::parse_log_timestamp_local(
+                                timestamp,
+                                reference_dt,
+                                live_rollover,
+                            ) {
                                 let matches_period = match period {
                                     "last5min" => {
                                         log_time >= reference_dt - ChronoDuration::minutes(5)
