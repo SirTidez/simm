@@ -31,7 +31,7 @@ function formatFileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChanged }: Props) {
+export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Props) {
   const [userLibs, setUserLibs] = useState<UserLibInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

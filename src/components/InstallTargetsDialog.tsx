@@ -18,7 +18,7 @@ interface Props {
   installing: boolean;
 }
 
-function runtimeLabel(environment: Pick<Environment, 'branch' | 'runtime'>) {
+function getNormalizedRuntime(environment: Pick<Environment, 'branch' | 'runtime'>): 'IL2CPP' | 'Mono' {
   const normalizedBranch = (environment.branch || '').toLowerCase().replace(/[\s_]+/g, '-');
   if (
     normalizedBranch === 'alternate' ||
@@ -58,8 +58,8 @@ export function InstallTargetsDialog({
   const selectedCount = selectedEnvironmentIds.size;
   const lockedIds = new Set(lockedEnvironmentIds);
   const byRuntime = {
-    IL2CPP: compatibleEnvironments.filter((environment) => environment.runtime === 'IL2CPP'),
-    Mono: compatibleEnvironments.filter((environment) => environment.runtime === 'Mono'),
+    IL2CPP: compatibleEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'IL2CPP'),
+    Mono: compatibleEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'Mono'),
   };
 
   return (
@@ -99,6 +99,7 @@ export function InstallTargetsDialog({
           <div className="workspace-install-dialog__list">
             {compatibleEnvironments.map((environment) => {
               const isLocked = lockedIds.has(environment.id);
+              const runtime = getNormalizedRuntime(environment);
               return (
               <label
                 key={environment.id}
@@ -114,7 +115,7 @@ export function InstallTargetsDialog({
                 <span className="workspace-install-dialog__row-main">
                   <strong>{environment.name}</strong>
                   <span>
-                    {runtimeLabel(environment)} • {environment.branch}
+                    {runtime} • {environment.branch}
                     {isLocked ? ' • already installed' : ''}
                   </span>
                 </span>

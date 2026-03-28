@@ -237,6 +237,7 @@ export interface ModLibraryEntry {
   storageId: string;
   displayName: string;
   files: string[];
+  attachedUserLibs: string[];
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceId?: string;
   sourceVersion?: string;

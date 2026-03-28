@@ -99,6 +99,12 @@ interface ThunderstoreVersionOption {
 }
 
 type DateLike = string | number | Date | undefined | null;
+type NexusModDateAliases = {
+  updatedAt?: string;
+  createdAt?: string;
+  updated_at?: string;
+  created_at?: string;
+};
 
 const FEATURED_THUNDERSTORE_PACKAGES = {
   s1api: {
@@ -249,6 +255,11 @@ const compareVersions = (a: string, b: string): number => {
   return 0;
 };
 
+const normalizeDateString = (value: DateLike): string | undefined => {
+  const timestamp = normalizeDateLike(value);
+  return timestamp ? new Date(timestamp).toISOString() : undefined;
+};
+
 const parseTimestamp = (value?: DateLike): number => normalizeDateLike(value);
 
 const getThunderstorePackageUpdatedAt = (
@@ -278,20 +289,20 @@ const getThunderstorePackageUpdatedAt = (
   );
 };
 
-const getNexusModUpdatedAt = (
-  mod?: NexusMod | (NexusMod & { updatedAt?: string; createdAt?: string; updated_at?: string; created_at?: string }) | null,
-): DateLike => {
+const getNexusModUpdatedAt = (mod?: (NexusMod & NexusModDateAliases) | null): DateLike => {
   if (!mod) {
     return undefined;
   }
 
+  const modWithAliases = mod as NexusMod & NexusModDateAliases;
+
   return (
-    mod.updated_time ||
-    mod.uploaded_time ||
-    mod.updated_at ||
-    mod.created_at ||
-    (mod as NexusMod & { updatedAt?: string; createdAt?: string }).updatedAt ||
-    (mod as NexusMod & { updatedAt?: string; createdAt?: string }).createdAt
+    modWithAliases.updated_time ||
+    modWithAliases.uploaded_time ||
+    modWithAliases.updated_at ||
+    modWithAliases.created_at ||
+    modWithAliases.updatedAt ||
+    modWithAliases.createdAt
   );
 };
 
@@ -468,14 +479,17 @@ const buildThunderstoreVersionOptions = (
         getThunderstorePackageUpdatedAt(runtimePackage) ||
         runtimePackage?.date_created ||
         (runtimePackage as ThunderstorePackage & { dateCreated?: string })?.dateCreated;
+      const normalizedResolvedUpdatedAt = normalizeDateString(resolvedUpdatedAt);
       const key = version.version_number || version.uuid4;
-      const existing = grouped.get(key) || {
+      const existing: ThunderstoreVersionOption = grouped.get(key) || {
         key,
         versionNumber: version.version_number || "unknown",
         runtimes: [],
-        packagesByRuntime: {},
-        versionsByRuntime: {},
-        updatedAt: resolvedUpdatedAt,
+        packagesByRuntime: {} as Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>,
+        versionsByRuntime: {} as Partial<
+          Record<ThunderstoreRuntime, ThunderstorePackageVersion>
+        >,
+        updatedAt: normalizedResolvedUpdatedAt,
         downloads: 0,
         description: version.description,
       };
@@ -489,8 +503,8 @@ const buildThunderstoreVersionOptions = (
         existing.description = version.description;
       }
       existing.updatedAt =
-        parseTimestamp(resolvedUpdatedAt) > parseTimestamp(existing.updatedAt)
-          ? resolvedUpdatedAt
+        parseTimestamp(normalizedResolvedUpdatedAt) > parseTimestamp(existing.updatedAt)
+          ? normalizedResolvedUpdatedAt
           : existing.updatedAt;
       existing.downloads = (existing.downloads || 0) + Number(version.downloads || 0);
       grouped.set(key, existing);
@@ -2492,25 +2506,6 @@ export function ModLibraryOverlay({
     [getSortedGroupEntries, selectedStorageByGroup],
   );
 
-  const findDownloadedEntryByStorageIds = useCallback(
-    (group: DownloadedModGroup, storageIds: string[]) => {
-      if (storageIds.length === 0) {
-        return null;
-      }
-
-      return (
-        group.entries.find(
-          (entry) =>
-            storageIds.includes(entry.storageId) ||
-            Object.values(entry.storageIdsByRuntime || {}).some((id) =>
-              id ? storageIds.includes(id) : false,
-            ),
-        ) || null
-      );
-    },
-    [],
-  );
-
   const entrySupportsRuntime = useCallback(
     (entry: ModLibraryEntry, runtime: "IL2CPP" | "Mono") => {
       if (entry.storageIdsByRuntime?.[runtime]) {
@@ -2582,6 +2577,7 @@ export function ModLibraryOverlay({
         ...(entry.filesByRuntime || {}),
       };
       const installedIn = new Set(entry.installedIn || []);
+      const attachedUserLibs = new Set(entry.attachedUserLibs || []);
 
       for (const candidate of matchingEntries) {
         const candidateRuntimes = candidate.availableRuntimes || [];
@@ -2619,11 +2615,16 @@ export function ModLibraryOverlay({
         for (const envId of candidate.installedIn || []) {
           installedIn.add(envId);
         }
+
+        for (const userLib of candidate.attachedUserLibs || []) {
+          attachedUserLibs.add(userLib);
+        }
       }
 
       return {
         ...entry,
         installedIn: Array.from(installedIn),
+        attachedUserLibs: Array.from(attachedUserLibs),
         availableRuntimes,
         storageIdsByRuntime,
         installedInByRuntime,
@@ -3265,7 +3266,8 @@ export function ModLibraryOverlay({
         const downloadedLabel =
           selectedFile?.version ||
           selectedFile?.mod_version ||
-          refreshedGroup?.latestVersion ||
+          refreshedGroup?.remoteVersion ||
+          refreshedGroup?.sourceVersion ||
           refreshedGroup?.entries[0]?.sourceVersion;
         showLibraryNotice(
           "Download Complete",
@@ -3507,7 +3509,7 @@ export function ModLibraryOverlay({
         sourceUrl: pkg.packageUrl,
         downloads,
         likesOrEndorsements: representative?.rating_score || 0,
-        updatedAt: getThunderstorePackageUpdatedAt(representative),
+        updatedAt: normalizeDateString(getThunderstorePackageUpdatedAt(representative)),
         tags: representative?.categories || [],
         installedVersion: version?.version_number,
         kind: "thunderstore",
@@ -3528,7 +3530,7 @@ export function ModLibraryOverlay({
         sourceUrl: `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`,
         downloads: mod.mod_downloads,
         likesOrEndorsements: mod.endorsement_count,
-        updatedAt: getNexusModUpdatedAt(mod),
+        updatedAt: normalizeDateString(getNexusModUpdatedAt(mod)),
         installedVersion: mod.version,
         kind: "nexusmods",
       });
@@ -6272,16 +6274,21 @@ export function ModLibraryOverlay({
                       </button>
                     </div>
                     <div className="workspace-collection__toolbar-group">
-                      <select
-                        value={discoverSort}
-                        onChange={(event) => setDiscoverSort(event.target.value as DiscoverSort)}
-                        style={{ minWidth: "9rem" }}
-                      >
-                        <option value="relevance">Relevance</option>
-                        <option value="updated">Last updated</option>
-                        <option value="popularity">Popularity</option>
-                        <option value="newest">Newest</option>
-                      </select>
+                      <label className="workspace-collection__toolbar-select">
+                        <span className="workspace-collection__toolbar-select-wrap">
+                          <select
+                            aria-label="Sort discover results"
+                            value={discoverSort}
+                            onChange={(event) => setDiscoverSort(event.target.value as DiscoverSort)}
+                          >
+                            <option value="relevance">Relevance</option>
+                            <option value="updated">Last updated</option>
+                            <option value="popularity">Popularity</option>
+                            <option value="newest">Newest</option>
+                          </select>
+                          <i className="fas fa-chevron-down" aria-hidden="true"></i>
+                        </span>
+                      </label>
                     </div>
                     <button
                       className="btn btn-secondary btn-small"

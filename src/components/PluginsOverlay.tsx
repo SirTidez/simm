@@ -42,7 +42,7 @@ function getPluginSourceLabel(source?: PluginInfo['source']): string {
   }
 }
 
-export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChanged }: Props) {
+export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Props) {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -217,6 +217,26 @@ describe('ApiService', () => {
     ]);
   });
 
+  it('downloadThunderstoreToLibrary rejects an invalid selected version UUID instead of falling back', async () => {
+    invokeMock.mockResolvedValueOnce({
+      package_url: 'https://thunderstore.io/c/schedule-i/p/ifBars/Example/',
+      name: 'Example',
+      owner: 'ifBars',
+      versions: [
+        {
+          uuid4: 'known-version',
+          version_number: '1.0.0',
+          downloads: 10,
+          date_updated: '2026-03-28T00:00:00Z',
+        },
+      ],
+    });
+
+    await expect(
+      ApiService.downloadThunderstoreToLibrary('package-1', 'Mono', undefined, 'missing-version'),
+    ).rejects.toThrow('Thunderstore version missing-version was not found for package package-1');
+  });
+
   it('config editor commands use the new document-oriented API', async () => {
     invokeMock.mockResolvedValueOnce([
       {

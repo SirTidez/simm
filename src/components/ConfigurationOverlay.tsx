@@ -113,10 +113,6 @@ function getPreferredConfigFilePath(catalog: ConfigFileSummary[], currentSelecti
   );
 }
 
-function hasDirtyDraft(drafts: Record<string, FileDraft>) {
-  return Object.values(drafts).some((draft) => draft.dirty);
-}
-
 function buildOperations(originalSections: ConfigSection[], draftSections: EditableSection[]): ConfigEditOperation[] {
   const operations: ConfigEditOperation[] = [];
   const originalSectionMap = new Map(originalSections.map((section) => [section.name, section]));
@@ -220,7 +216,7 @@ function validateStructuredDraft(sections: EditableSection[]) {
   return null;
 }
 
-export function ConfigurationOverlay({ isOpen, onClose, environmentId, environment }: Props) {
+export function ConfigurationOverlay({ isOpen, environmentId, environment }: Props) {
   const [catalog, setCatalog] = useState<ConfigFileSummary[]>([]);
   const [documentCache, setDocumentCache] = useState<Record<string, ConfigDocument>>({});
   const [drafts, setDrafts] = useState<Record<string, FileDraft>>({});

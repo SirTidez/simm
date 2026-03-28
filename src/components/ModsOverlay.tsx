@@ -279,7 +279,6 @@ function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] 
 
 export function ModsOverlay({
   isOpen,
-  onClose,
   environmentId,
   onModsChanged,
   onModUpdatesChecked,

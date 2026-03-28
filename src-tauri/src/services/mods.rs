@@ -45,6 +45,12 @@ enum FomodDestinationKind {
     UserLibs,
 }
 
+#[derive(Default)]
+struct StoragePayloadSummary {
+    primary_files: Vec<String>,
+    attached_userlibs: Vec<String>,
+}
+
 static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         Regex::new(r"(?i)\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$").expect("runtime suffix regex"),
@@ -1605,6 +1611,37 @@ impl ModsService {
         Ok(files)
     }
 
+    async fn collect_storage_payload_summary(
+        &self,
+        storage_path: &Path,
+    ) -> Result<StoragePayloadSummary> {
+        let mut summary = StoragePayloadSummary::default();
+
+        let mods_dir = storage_path.join("Mods");
+        if mods_dir.exists() {
+            self.collect_storage_files_recursive(&mods_dir, true, &mut summary.primary_files)
+                .await?;
+        }
+
+        let plugins_dir = storage_path.join("Plugins");
+        if plugins_dir.exists() {
+            self.collect_storage_files_recursive(&plugins_dir, true, &mut summary.primary_files)
+                .await?;
+        }
+
+        let userlibs_dir = storage_path.join("UserLibs");
+        if userlibs_dir.exists() {
+            self.collect_storage_relative_entries_recursive(
+                &userlibs_dir,
+                &userlibs_dir,
+                &mut summary.attached_userlibs,
+            )
+            .await?;
+        }
+
+        Ok(summary)
+    }
+
     async fn collect_storage_files_recursive(
         &self,
         dir: &Path,
@@ -1638,6 +1675,46 @@ impl ModsService {
                     }
                 } else {
                     files.push(file_name.to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn collect_storage_relative_entries_recursive(
+        &self,
+        root: &Path,
+        dir: &Path,
+        entries: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut pending = vec![dir.to_path_buf()];
+
+        while let Some(current) = pending.pop() {
+            let mut read_dir = match fs::read_dir(&current).await {
+                Ok(read_dir) => read_dir,
+                Err(_) => continue,
+            };
+
+            while let Some(entry) = read_dir.next_entry().await? {
+                let path = entry.path();
+                let metadata = match entry.metadata().await {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+
+                if metadata.is_dir() {
+                    pending.push(path.clone());
+                    continue;
+                }
+
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+
+                let normalized = relative.to_string_lossy().replace('\\', "/");
+                if !normalized.is_empty() {
+                    entries.push(normalized);
                 }
             }
         }
@@ -2680,8 +2757,10 @@ impl ModsService {
                 continue;
             }
 
-            let files = self.collect_storage_files(&entry_path).await?;
-            if files.is_empty() {
+            let payload_summary = self.collect_storage_payload_summary(&entry_path).await?;
+            if payload_summary.primary_files.is_empty()
+                && payload_summary.attached_userlibs.is_empty()
+            {
                 continue;
             }
 
@@ -2725,8 +2804,10 @@ impl ModsService {
             }
 
             let mut display_name = template_meta.mod_name.clone().unwrap_or_else(|| {
-                files
+                payload_summary
+                    .primary_files
                     .get(0)
+                    .or_else(|| payload_summary.attached_userlibs.get(0))
                     .cloned()
                     .unwrap_or_else(|| storage_id.clone())
                     .replace(".dll", "")
@@ -2742,9 +2823,15 @@ impl ModsService {
                 display_name = Self::normalize_runtime_suffix_token(&display_name);
             }
 
-            let available_runtimes =
-                self.detect_available_runtimes(&files, template_meta.detected_runtime.clone());
-            let files_by_runtime = self.build_files_by_runtime(&files, &available_runtimes);
+            let runtime_files = if payload_summary.primary_files.is_empty() {
+                &payload_summary.attached_userlibs
+            } else {
+                &payload_summary.primary_files
+            };
+            let available_runtimes = self
+                .detect_available_runtimes(runtime_files, template_meta.detected_runtime.clone());
+            let files_by_runtime =
+                self.build_files_by_runtime(runtime_files, &available_runtimes);
 
             let mut storage_ids_by_runtime = HashMap::new();
             for runtime in &available_runtimes {
@@ -2789,7 +2876,8 @@ impl ModsService {
             let entry = grouped.entry(key).or_insert_with(|| ModLibraryEntry {
                 storage_id: storage_id.clone(),
                 display_name: display_name.clone(),
-                files: files.clone(),
+                files: payload_summary.primary_files.clone(),
+                attached_userlibs: payload_summary.attached_userlibs.clone(),
                 source: template_meta.source.clone(),
                 source_id: template_meta.source_id.clone(),
                 source_version: template_meta.source_version.clone(),
@@ -2849,10 +2937,17 @@ impl ModsService {
             );
 
             let mut file_set: HashSet<String> = entry.files.iter().cloned().collect();
-            for file in files {
+            for file in payload_summary.primary_files {
                 file_set.insert(file);
             }
             entry.files = file_set.into_iter().collect();
+
+            let mut userlib_set: HashSet<String> =
+                entry.attached_userlibs.iter().cloned().collect();
+            for path in payload_summary.attached_userlibs {
+                userlib_set.insert(path);
+            }
+            entry.attached_userlibs = userlib_set.into_iter().collect();
 
             let mut installed_set: HashSet<String> = entry.installed_in.iter().cloned().collect();
             for env_id in installed_in {
@@ -3295,6 +3390,71 @@ impl ModsService {
         Ok(())
     }
 
+    async fn remove_storage_payload_entries(
+        &self,
+        source_dir: &Path,
+        dest_dir: &Path,
+        removed_entries: &mut HashSet<String>,
+    ) -> Result<()> {
+        if !source_dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(source_dir)
+            .await
+            .context("Failed to read storage directory for uninstall cleanup")?;
+        while let Some(entry) = entries.next_entry().await? {
+            let source_path = entry.path();
+            let file_name = source_path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("");
+            if file_name.is_empty() {
+                continue;
+            }
+
+            let dest_path = dest_dir.join(file_name);
+            let metadata = fs::metadata(&source_path).await?;
+
+            let mut removed = false;
+            if let Ok(did_remove) = self.remove_path_if_exists(&dest_path).await {
+                removed |= did_remove;
+            }
+
+            if !metadata.is_dir() {
+                let disabled_path = if file_name.ends_with(".disabled") {
+                    None
+                } else {
+                    Some(PathBuf::from(format!(
+                        "{}.disabled",
+                        dest_path.to_string_lossy()
+                    )))
+                };
+                if let Some(disabled) = disabled_path {
+                    if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await {
+                        removed |= did_remove;
+                    }
+                }
+            }
+
+            if removed {
+                removed_entries.insert(file_name.to_string());
+                continue;
+            }
+
+            if metadata.is_dir() {
+                Box::pin(self.remove_storage_payload_entries(
+                    &source_path,
+                    &dest_path,
+                    removed_entries,
+                ))
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn install_storage_mod_to_envs(
         &self,
         storage_id: &str,
@@ -3458,7 +3618,7 @@ impl ModsService {
                 .await
                 .unwrap_or_else(|_| HashMap::new());
 
-            let mut removed_files = Vec::new();
+            let mut removed_files: HashSet<String> = HashSet::new();
             let file_entries: Vec<(String, Option<Vec<String>>)> = metadata_map
                 .iter()
                 .filter_map(|(file_name, meta)| {
@@ -3517,16 +3677,37 @@ impl ModsService {
                 }
 
                 if removed {
-                    removed_files.push(file_name.clone());
+                    removed_files.insert(file_name.clone());
                 }
                 metadata_map.remove(&file_name);
             }
+
+            let storage_dir = self.get_mods_storage_dir().await?;
+            let storage_base = Self::validated_storage_path(&storage_dir, storage_id)?;
+            self.remove_storage_payload_entries(
+                &storage_base.join("Mods"),
+                &mods_dir,
+                &mut removed_files,
+            )
+            .await?;
+            self.remove_storage_payload_entries(
+                &storage_base.join("Plugins"),
+                &plugins_dir,
+                &mut removed_files,
+            )
+            .await?;
+            self.remove_storage_payload_entries(
+                &storage_base.join("UserLibs"),
+                &userlibs_dir,
+                &mut removed_files,
+            )
+            .await?;
 
             self.save_mod_metadata(&mods_dir, &metadata_map).await?;
 
             results.push(serde_json::json!({
                 "environmentId": env_id,
-                "removedFiles": removed_files,
+                "removedFiles": removed_files.into_iter().collect::<Vec<_>>(),
             }));
         }
 
@@ -4465,11 +4646,48 @@ impl ModsService {
         self.save_mod_metadata(&mods_directory, &mod_metadata)
             .await?;
 
-        // Also save storage metadata so the library can access runtime info
-        // Use the first mod's detected runtime for the storage entry
-        let first_meta = mod_metadata.values().next();
-        if let Some(meta) = first_meta {
+        // Also save storage metadata so the library can access runtime info even if the
+        // installed payload only lives in UserLibs and did not generate a Mods metadata row.
+        let storage_runtime = match metadata_detected_runtime
+            .map(|value| value.to_lowercase())
+            .as_deref()
+        {
+            Some("il2cpp") => Some(crate::types::Runtime::Il2cpp),
+            Some("mono") => Some(crate::types::Runtime::Mono),
+            _ => Some(env_runtime.clone()),
+        };
+        let fallback_storage_meta = ModMetadata {
+            source: mod_source.clone(),
+            source_id: source_id.clone(),
+            source_version: source_version.clone(),
+            author: author.clone(),
+            mod_name: mod_name.clone(),
+            source_url: source_url.clone(),
+            summary: summary.clone(),
+            icon_url: icon_url.clone(),
+            icon_cache_path: icon_cache_path.clone(),
+            downloads,
+            likes_or_endorsements,
+            updated_at: updated_at.clone(),
+            tags: tags.clone(),
+            installed_version: source_version.clone(),
+            library_added_at: Some(Utc::now()),
+            installed_at: Some(Utc::now()),
+            last_update_check: None,
+            metadata_last_refreshed: Some(Utc::now()),
+            update_available: None,
+            remote_version: None,
+            detected_runtime: storage_runtime,
+            runtime_match: None,
+            mod_storage_id: Some(mod_id.clone()),
+            symlink_paths: Some(symlink_paths.clone()),
+            security_scan: metadata_ref.and_then(Self::security_scan_summary_from_metadata),
+        };
+        if let Some(meta) = mod_metadata.values().next() {
             self.save_storage_metadata(&mod_storage_base, meta).await?;
+        } else {
+            self.save_storage_metadata(&mod_storage_base, &fallback_storage_meta)
+                .await?;
         }
 
         // Return the actual source that was installed, not hardcoded "local"
@@ -4880,6 +5098,7 @@ impl ModsService {
         }
 
         let mut installed_files = Vec::new();
+        let mut copied_any = false;
         for entry in &entries {
             if let (Some(target_runtime), Some(entry_runtime)) = (runtime, entry.runtime.as_deref())
             {
@@ -4896,11 +5115,16 @@ impl ModsService {
                 entry,
                 runtime,
                 &mut installed_files,
+                &mut copied_any,
             )
             .await?;
         }
 
-        Ok(Some(installed_files))
+        if copied_any {
+            Ok(Some(installed_files))
+        } else {
+            Ok(None)
+        }
     }
 
     fn find_fomod_config_path(content_root: &Path) -> Option<PathBuf> {
@@ -4923,8 +5147,9 @@ impl ModsService {
         entry: &FomodInstallEntry,
         runtime: Option<&str>,
         installed_files: &mut Vec<String>,
+        copied_any: &mut bool,
     ) -> Result<()> {
-        let source_relative = Self::path_buf_from_forward_slashes(&entry.source);
+        let source_relative = Self::validated_fomod_relative_path(&entry.source)?;
         let source_path = content_root.join(&source_relative);
         if !source_path.exists() {
             eprintln!(
@@ -4935,7 +5160,7 @@ impl ModsService {
         }
 
         let (destination_kind, destination_relative, explicit_file_target) =
-            self.resolve_fomod_destination(entry);
+            self.resolve_fomod_destination(entry)?;
         let destination_root = match destination_kind {
             FomodDestinationKind::Mods => mods_dir,
             FomodDestinationKind::Plugins => plugins_dir,
@@ -4955,6 +5180,7 @@ impl ModsService {
                 destination_kind,
                 runtime,
                 installed_files,
+                copied_any,
             )
             .await?;
             return Ok(());
@@ -4987,6 +5213,7 @@ impl ModsService {
         }
         fs::copy(&source_path, &destination_path).await?;
         self.track_fomod_installed_file(destination_kind, source_name, installed_files);
+        *copied_any = true;
         Ok(())
     }
 
@@ -4997,6 +5224,7 @@ impl ModsService {
         destination_kind: FomodDestinationKind,
         runtime: Option<&str>,
         installed_files: &mut Vec<String>,
+        copied_any: &mut bool,
     ) -> Result<()> {
         fs::create_dir_all(dest).await?;
 
@@ -5017,6 +5245,7 @@ impl ModsService {
                     destination_kind,
                     runtime,
                     installed_files,
+                    copied_any,
                 ))
                 .await?;
                 continue;
@@ -5034,6 +5263,7 @@ impl ModsService {
             }
             fs::copy(&entry_path, &dest_path).await?;
             self.track_fomod_installed_file(destination_kind, file_name, installed_files);
+            *copied_any = true;
         }
 
         Ok(())
@@ -5042,29 +5272,50 @@ impl ModsService {
     fn resolve_fomod_destination(
         &self,
         entry: &FomodInstallEntry,
-    ) -> (FomodDestinationKind, PathBuf, bool) {
+    ) -> Result<(FomodDestinationKind, PathBuf, bool)> {
+        let _validated_source = Self::validated_fomod_relative_path(&entry.source)?;
         let destination = Self::normalize_fomod_path_value(&entry.destination);
         let source = Self::normalize_fomod_path_value(&entry.source);
 
-        let destination_kind = if Self::path_targets_bucket(&destination, "plugins")
-            || Self::path_targets_bucket(&source, "plugins")
-        {
-            FomodDestinationKind::Plugins
-        } else if Self::path_targets_bucket(&destination, "userlibs")
-            || Self::path_targets_bucket(&source, "userlibs")
-        {
-            FomodDestinationKind::UserLibs
+        let (destination_kind, stripped_destination) = if !destination.is_empty() {
+            if Self::path_targets_bucket(&destination, "plugins") {
+                (
+                    FomodDestinationKind::Plugins,
+                    Self::strip_bucket_prefix(&destination, "plugins"),
+                )
+            } else if Self::path_targets_bucket(&destination, "userlibs") {
+                (
+                    FomodDestinationKind::UserLibs,
+                    Self::strip_bucket_prefix(&destination, "userlibs"),
+                )
+            } else if Self::path_targets_bucket(&destination, "mods") {
+                (
+                    FomodDestinationKind::Mods,
+                    Self::strip_bucket_prefix(&destination, "mods"),
+                )
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Unsupported FOMOD destination path: {}",
+                    entry.destination
+                ));
+            }
+        } else if Self::path_targets_bucket(&source, "plugins") {
+            (
+                FomodDestinationKind::Plugins,
+                Self::strip_bucket_prefix(&source, "plugins"),
+            )
+        } else if Self::path_targets_bucket(&source, "userlibs") {
+            (
+                FomodDestinationKind::UserLibs,
+                Self::strip_bucket_prefix(&source, "userlibs"),
+            )
         } else {
-            FomodDestinationKind::Mods
+            (
+                FomodDestinationKind::Mods,
+                Self::strip_bucket_prefix(&source, "mods"),
+            )
         };
 
-        let bucket_name = match destination_kind {
-            FomodDestinationKind::Mods => "mods",
-            FomodDestinationKind::Plugins => "plugins",
-            FomodDestinationKind::UserLibs => "userlibs",
-        };
-
-        let stripped_destination = Self::strip_bucket_prefix(&destination, bucket_name);
         let explicit_file_target = !entry.is_folder
             && !stripped_destination.is_empty()
             && Path::new(&stripped_destination)
@@ -5072,11 +5323,11 @@ impl ModsService {
                 .and_then(|value| value.to_str())
                 .is_some();
 
-        (
+        Ok((
             destination_kind,
-            Self::path_buf_from_forward_slashes(&stripped_destination),
+            Self::validated_fomod_relative_path(&stripped_destination)?,
             explicit_file_target,
-        )
+        ))
     }
 
     fn track_fomod_installed_file(
@@ -5124,6 +5375,24 @@ impl ModsService {
             .trim_start_matches("./")
             .trim_matches('/')
             .to_string()
+    }
+
+    fn validated_fomod_relative_path(path: &str) -> Result<PathBuf> {
+        let normalized = Self::normalize_fomod_path_value(path);
+        let candidate = Self::path_buf_from_forward_slashes(&normalized);
+
+        if candidate.is_absolute() {
+            return Err(anyhow::anyhow!("Invalid absolute FOMOD path: {}", path));
+        }
+
+        if !candidate
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(anyhow::anyhow!("Invalid FOMOD relative path: {}", path));
+        }
+
+        Ok(candidate)
     }
 
     fn path_buf_from_forward_slashes(path: &str) -> PathBuf {
@@ -8071,6 +8340,148 @@ mod tests {
             .join("Mods")
             .join("RuntimeSpecific.IL2CPP.dll")
             .exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn try_extract_fomod_content_returns_none_when_no_payload_is_materialized() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool);
+
+        let content_root = temp.path().join("content");
+        fs::create_dir_all(content_root.join("fomod")).await?;
+        fs::write(
+            content_root.join("fomod").join("moduleconfig.xml"),
+            br#"
+<config>
+  <moduleName>Missing Payload</moduleName>
+  <requiredInstallFiles>
+    <files>
+      <file source="Missing/Example.dll" destination="Mods" />
+    </files>
+  </requiredInstallFiles>
+</config>
+"#,
+        )
+        .await?;
+
+        let mods_dir = temp.path().join("mods");
+        let plugins_dir = temp.path().join("plugins");
+        let userlibs_dir = temp.path().join("userlibs");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::create_dir_all(&userlibs_dir).await?;
+
+        let result = service
+            .try_extract_fomod_content(
+                &content_root,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                None,
+            )
+            .await?;
+
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_fomod_destination_uses_explicit_destination_over_source_layout() -> Result<()> {
+        let pool = SqlitePool::connect_lazy("sqlite::memory:")?;
+        let service = ModsService::new(Arc::new(pool));
+        let entry = FomodInstallEntry {
+            source: "Plugins/Example.dll".to_string(),
+            destination: "Mods".to_string(),
+            is_folder: false,
+            priority: 0,
+            runtime: None,
+        };
+
+        let (kind, relative, explicit_file_target) = service.resolve_fomod_destination(&entry)?;
+
+        assert_eq!(kind, FomodDestinationKind::Mods);
+        assert!(relative.as_os_str().is_empty());
+        assert!(!explicit_file_target);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_fomod_destination_rejects_unsafe_paths() -> Result<()> {
+        let pool = SqlitePool::connect_lazy("sqlite::memory:")?;
+        let service = ModsService::new(Arc::new(pool));
+        let entry = FomodInstallEntry {
+            source: "../outside/Example.dll".to_string(),
+            destination: "Mods".to_string(),
+            is_folder: false,
+            priority: 0,
+            runtime: None,
+        };
+
+        let error = service
+            .resolve_fomod_destination(&entry)
+            .expect_err("expected unsafe FOMOD source path to be rejected");
+        assert!(error.to_string().contains("Invalid FOMOD relative path"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_attaches_userlibs_to_the_owning_mod() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let storage_dir = service.get_mods_storage_dir().await?.join("userlibs-owned");
+        fs::create_dir_all(storage_dir.join("Mods")).await?;
+        fs::create_dir_all(storage_dir.join("UserLibs").join("Config")).await?;
+        fs::write(storage_dir.join("Mods").join("Example.dll"), b"mod").await?;
+        fs::write(
+            storage_dir
+                .join("UserLibs")
+                .join("Config")
+                .join("settings.json"),
+            br#"{"enabled":true}"#,
+        )
+        .await?;
+
+        let mut storage_meta =
+            sample_metadata(Some("userlibs-owned"), Some("example/source"), Some("1.0.0"));
+        storage_meta.mod_name = Some("Example Mod".to_string());
+        service
+            .save_storage_metadata(&storage_dir, &storage_meta)
+            .await?;
+
+        let library = service.get_mod_library().await?;
+        let entry = library
+            .downloaded
+            .iter()
+            .find(|item| item.storage_id == "userlibs-owned")
+            .expect("library entry for userlibs-owned storage");
+
+        assert_eq!(entry.files, vec!["Example.dll".to_string()]);
+        assert_eq!(
+            entry.attached_userlibs,
+            vec!["Config/settings.json".to_string()]
+        );
 
         Ok(())
     }

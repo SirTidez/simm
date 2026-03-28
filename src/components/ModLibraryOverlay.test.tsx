@@ -43,6 +43,7 @@ function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
     storageId: 'storage-1',
     displayName: 'Example Mod',
     files: ['Example.dll'],
+    attachedUserLibs: [],
     source: 'local',
     managed: true,
     installedIn: [],

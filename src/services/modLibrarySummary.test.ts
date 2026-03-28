@@ -7,6 +7,7 @@ function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
     storageId: 'storage-1',
     displayName: 'Example Mod',
     files: ['Example.dll'],
+    attachedUserLibs: [],
     source: 'nexusmods',
     sourceId: '1234',
     sourceVersion: '1.0.0',

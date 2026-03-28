@@ -159,14 +159,6 @@ function AppContent() {
     });
   }, [createWorkspaceEntry, isSameWorkspaceRoute]);
 
-  const replaceWorkspace = useCallback((route: WorkspaceRoute, seed?: Partial<WorkspaceEntry>) => {
-    setWorkspaceStack((previous) => {
-      const next = [...previous];
-      next[next.length - 1] = createWorkspaceEntry(route, seed);
-      return next;
-    });
-  }, [createWorkspaceEntry]);
-
   const popWorkspace = useCallback(() => {
     setWorkspaceStack((previous) => {
       if (previous.length <= 1) {
@@ -380,11 +372,20 @@ function AppContent() {
   }, [updateSettings]);
 
   const openAppUpdateUrl = useCallback((url?: string | null) => {
-    const safeUrl = url?.trim();
-    if (!safeUrl) {
+    const rawUrl = url?.trim();
+    if (!rawUrl) {
       return;
     }
-    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        logger.warn('Refusing to open non-http app update URL', rawUrl);
+        return;
+      }
+      window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+    } catch {
+      logger.warn('Refusing to open invalid app update URL', rawUrl);
+    }
   }, []);
 
   useEffect(() => {

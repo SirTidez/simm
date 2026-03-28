@@ -1268,9 +1268,13 @@ export class ApiService {
       throw new Error('Package not found');
     }
 
-    const selectedVersion = Array.isArray(packageInfo.versions)
-      ? packageInfo.versions.find((version: any) => version?.uuid4 === versionUuid) || packageInfo.versions[0]
-      : undefined;
+    const versions = Array.isArray(packageInfo.versions) ? packageInfo.versions : [];
+    const selectedVersion = versionUuid
+      ? versions.find((version: any) => version?.uuid4 === versionUuid)
+      : versions[0];
+    if (versionUuid && !selectedVersion) {
+      throw new Error(`Thunderstore version ${versionUuid} was not found for package ${packageUuid}`);
+    }
     const packageUrl = packageInfo.package_url || '';
     const modName = packageInfo.name || '';
     const owner = packageInfo.owner || '';

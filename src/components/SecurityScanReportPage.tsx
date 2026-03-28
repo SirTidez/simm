@@ -48,6 +48,8 @@ export function SecurityScanReportPage({
       await onConfirm();
       resolvedRef.current = true;
       onReturn();
+    } catch (error) {
+      console.error('Security report confirmation failed:', error);
     } finally {
       setBusy(false);
     }
