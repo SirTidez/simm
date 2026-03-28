@@ -136,6 +136,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             // App Init
+            commands::app_update::get_app_update_status,
             commands::app_init::was_simm_directory_just_created,
             commands::app_init::get_home_directory,
             // DepotDownloader

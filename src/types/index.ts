@@ -94,6 +94,15 @@ export interface BranchConfig {
   requiresAuth: boolean;
 }
 
+export interface AppUpdatePreferences {
+  lastCheckedAt?: string | null;
+  lastSeenVersionRaw?: string | null;
+  lastSeenVersionNormalized?: string | null;
+  lastResolvedUrl?: string | null;
+  snoozedUntil?: string | null;
+  skippedVersionNormalized?: string | null;
+}
+
 export interface Settings {
   defaultDownloadDir: string;
   depotDownloaderPath?: string;
@@ -120,6 +129,19 @@ export interface Settings {
   modUpdateCheckInterval?: number;
   modIconCacheLimitMb?: number;
   databaseBackupCount?: number;
+  logRetentionDays?: number;
+  appUpdate?: AppUpdatePreferences | null;
+}
+
+export interface AppUpdateStatus {
+  currentVersionRaw: string;
+  currentVersionNormalized: string;
+  latestVersionRaw: string;
+  latestVersionNormalized: string;
+  updateAvailable: boolean;
+  targetUrl: string;
+  fallbackFilesUrl: string;
+  checkedAt: string;
 }
 
 export interface NexusRateLimits {

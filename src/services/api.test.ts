@@ -34,6 +34,27 @@ describe('ApiService', () => {
     });
   });
 
+  it('getAppUpdateStatus forwards the current app version to the backend', async () => {
+    invokeMock.mockResolvedValueOnce({
+      currentVersionRaw: '0.7.8',
+      currentVersionNormalized: '0.7.8',
+      latestVersionRaw: '0.7.9-beta',
+      latestVersionNormalized: '0.7.9',
+      updateAvailable: true,
+      targetUrl: 'https://www.nexusmods.com/schedule1/mods/999?tab=files&file_id=42',
+      fallbackFilesUrl: 'https://www.nexusmods.com/schedule1/mods/999?tab=files',
+      checkedAt: '2026-03-27T12:00:00Z',
+    });
+
+    const result = await ApiService.getAppUpdateStatus('0.7.8');
+
+    expect(invokeMock).toHaveBeenCalledWith('get_app_update_status', {
+      currentVersion: '0.7.8',
+    });
+    expect(result.updateAvailable).toBe(true);
+    expect(result.latestVersionNormalized).toBe('0.7.9');
+  });
+
   it('deleteEnvironment wraps boolean response', async () => {
     invokeMock.mockResolvedValueOnce(true);
     const result = await ApiService.deleteEnvironment('env-1');

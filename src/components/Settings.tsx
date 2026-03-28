@@ -1148,23 +1148,20 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           : "Release metadata unavailable"}
                       </small>
                     </div>
-                    {securityScannerStatus?.executablePath && (
-                      <div className="settings-inline-status settings-inline-status--path">
-                        <span>Executable Path</span>
-                        <strong title={securityScannerStatus.executablePath}>
-                          {securityScannerStatus.executablePath}
-                        </strong>
-                      </div>
-                    )}
                     <div className="settings-inline-status settings-inline-status--action">
-                      <span>Scanner Actions</span>
+                      <span>Scanner Management</span>
+                      <strong>Managed during setup</strong>
+                      <small>
+                        Install or repair MLVScan from the setup wizard
+                        prerequisites first. Use the fallback action here if
+                        setup failed or the scanner is still missing.
+                      </small>
                       <div className="settings-backup-panel__actions">
                         <button
                           type="button"
                           className="btn btn-secondary btn-small"
                           disabled={
-                            loadingSecurityScannerStatus ||
-                            installingSecurityScanner
+                            loadingSecurityScannerStatus || installingSecurityScanner
                           }
                           onClick={async () => {
                             setLoadingSecurityScannerStatus(true);
@@ -1187,33 +1184,33 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                             ? "Refreshing..."
                             : "Refresh"}
                         </button>
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-small"
-                          disabled={installingSecurityScanner}
-                          onClick={async () => {
-                            setInstallingSecurityScanner(true);
-                            try {
-                              const status =
-                                await ApiService.installSecurityScanner();
-                              setSecurityScannerStatus(status);
-                            } catch (err) {
-                              setError(
-                                err instanceof Error
-                                  ? err.message
-                                  : "Failed to install the security scanner",
-                              );
-                            } finally {
-                              setInstallingSecurityScanner(false);
-                            }
-                          }}
-                        >
-                          {installingSecurityScanner
-                            ? "Installing..."
-                            : securityScannerStatus?.installed
-                              ? "Repair / Update"
-                              : "Install Scanner"}
-                        </button>
+                        {!securityScannerStatus?.installed && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-small"
+                            disabled={installingSecurityScanner || loadingSecurityScannerStatus}
+                            onClick={async () => {
+                              setInstallingSecurityScanner(true);
+                              try {
+                                const status =
+                                  await ApiService.installSecurityScanner();
+                                setSecurityScannerStatus(status);
+                              } catch (err) {
+                                setError(
+                                  err instanceof Error
+                                    ? err.message
+                                    : "Failed to install the security scanner",
+                                );
+                              } finally {
+                                setInstallingSecurityScanner(false);
+                              }
+                            }}
+                          >
+                            {installingSecurityScanner
+                              ? "Installing..."
+                              : "Fallback Install"}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>

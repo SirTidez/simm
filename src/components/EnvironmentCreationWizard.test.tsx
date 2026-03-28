@@ -14,6 +14,8 @@ const settingsStoreMocks = vi.hoisted(() => ({
 const apiMocks = vi.hoisted(() => ({
   getSchedule1Config: vi.fn(),
   detectDepotDownloader: vi.fn(),
+  getSecurityScannerStatus: vi.fn(),
+  installSecurityScanner: vi.fn(),
   detectSteamInstallations: vi.fn(),
   browseDirectory: vi.fn(),
   getHomeDirectory: vi.fn(),
@@ -74,6 +76,22 @@ describe('EnvironmentCreationWizard', () => {
       ],
     });
     apiMocks.detectDepotDownloader.mockResolvedValue({ installed: true });
+    apiMocks.getSecurityScannerStatus.mockResolvedValue({
+      enabled: true,
+      autoInstall: true,
+      installed: true,
+      installMethod: 'managed',
+      installedVersion: '1.0.0',
+      latestVersion: '1.0.0',
+    });
+    apiMocks.installSecurityScanner.mockResolvedValue({
+      enabled: true,
+      autoInstall: true,
+      installed: true,
+      installMethod: 'managed',
+      installedVersion: '1.0.0',
+      latestVersion: '1.0.0',
+    });
     apiMocks.detectSteamInstallations.mockResolvedValue([]);
     apiMocks.browseDirectory.mockResolvedValue({
       currentPath: 'D:\\Games\\Custom Install',
@@ -133,6 +151,29 @@ describe('EnvironmentCreationWizard', () => {
           outputDir: 'D:\\Games\\Custom Install',
         })
       );
+    });
+  });
+
+  it('installs MLVScan from the wizard prerequisite instead of requiring Settings', async () => {
+    apiMocks.getSecurityScannerStatus.mockResolvedValueOnce({
+      enabled: true,
+      autoInstall: true,
+      installed: false,
+    });
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
+
+    const requirementHeading = await screen.findByText(/MLVScan is installed during setup/i);
+    const requirementCard = requirementHeading.closest('.wizard-prerequisite-card');
+    expect(requirementCard).toBeTruthy();
+    const installButton = requirementCard?.querySelector('.btn.btn-primary') as HTMLButtonElement | null;
+    expect(installButton).toBeTruthy();
+    fireEvent.click(installButton!);
+
+    await waitFor(() => {
+      expect(apiMocks.installSecurityScanner).toHaveBeenCalledTimes(1);
     });
   });
 

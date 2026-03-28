@@ -85,13 +85,20 @@ export function normalizeVersionToken(value?: string): string {
   return normalized.replace(/^v/i, '').toLowerCase();
 }
 
+function extractVersionParts(value?: string): number[] {
+  const normalized = normalizeVersionToken(value);
+  const matches = normalized.match(/\d+/g);
+  return (matches || []).map((segment) => Number.parseInt(segment, 10) || 0);
+}
+
+function hasPrereleaseMarker(value?: string): boolean {
+  const normalized = normalizeVersionToken(value);
+  return /(alpha|beta|preview|pre|rc|nightly|experimental|dev|test)/i.test(normalized);
+}
+
 export function compareVersionTokensDesc(a?: string, b?: string): number {
-  const aParts = normalizeVersionToken(a)
-    .split('.')
-    .map((v) => parseInt(v, 10) || 0);
-  const bParts = normalizeVersionToken(b)
-    .split('.')
-    .map((v) => parseInt(v, 10) || 0);
+  const aParts = extractVersionParts(a);
+  const bParts = extractVersionParts(b);
   const len = Math.max(aParts.length, bParts.length);
   for (let i = 0; i < len; i += 1) {
     const av = aParts[i] || 0;
@@ -99,6 +106,11 @@ export function compareVersionTokensDesc(a?: string, b?: string): number {
     if (av !== bv) {
       return bv - av;
     }
+  }
+  const aPrerelease = hasPrereleaseMarker(a);
+  const bPrerelease = hasPrereleaseMarker(b);
+  if (aPrerelease !== bPrerelease) {
+    return aPrerelease ? 1 : -1;
   }
   return 0;
 }
@@ -196,12 +208,19 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
   return Array.from(groups.values())
     .map((group) => {
       const remoteVersions = Array.from(group.remoteVersions).sort((a, b) => compareVersionTokensDesc(a, b));
-      const remoteVersion = remoteVersions[0];
-      const hasRemoteVersion = normalizeVersionToken(remoteVersion).length > 0;
-      const hasRemoteDownloaded = hasRemoteVersion && group.entries.some((entry) => {
-        return areVersionsEquivalent(entry.sourceVersion || entry.installedVersion, remoteVersion);
-      });
-      const updateAvailable = hasRemoteVersion ? !hasRemoteDownloaded : group.updateAvailable;
+      const sourceVersions = Array.from(group.sourceVersions).sort((a, b) => compareVersionTokensDesc(a, b));
+      const highestDownloadedVersion = sourceVersions[0];
+      const latestRemoteVersion = remoteVersions[0];
+      const hasRemoteVersion = normalizeVersionToken(latestRemoteVersion).length > 0;
+      const hasDownloadedVersion = normalizeVersionToken(highestDownloadedVersion).length > 0;
+      const effectiveLatestVersion = hasRemoteVersion && hasDownloadedVersion
+        ? (compareVersionTokensDesc(latestRemoteVersion, highestDownloadedVersion) < 0
+          ? latestRemoteVersion
+          : highestDownloadedVersion)
+        : (latestRemoteVersion || highestDownloadedVersion);
+      const updateAvailable = hasRemoteVersion && hasDownloadedVersion
+        ? compareVersionTokensDesc(latestRemoteVersion, highestDownloadedVersion) < 0
+        : (hasRemoteVersion ? group.updateAvailable : false);
 
       return {
         key: group.key,
@@ -216,9 +235,9 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
         },
         availableRuntimes: Array.from(group.availableRuntimes),
         author: group.authors.size === 1 ? Array.from(group.authors)[0] : undefined,
-        sourceVersion: group.sourceVersions.size === 1 ? Array.from(group.sourceVersions)[0] : undefined,
+        sourceVersion: highestDownloadedVersion,
         updateAvailable,
-        remoteVersion,
+        remoteVersion: effectiveLatestVersion,
       };
     })
     .sort((a, b) => a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase()));

@@ -149,6 +149,17 @@ pub struct BranchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppUpdateSettings {
+    pub last_checked_at: Option<String>,
+    pub last_seen_version_raw: Option<String>,
+    pub last_seen_version_normalized: Option<String>,
+    pub last_resolved_url: Option<String>,
+    pub snoozed_until: Option<String>,
+    pub skipped_version_normalized: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub default_download_dir: String,
     pub depot_downloader_path: Option<String>,
@@ -177,6 +188,7 @@ pub struct Settings {
     pub mod_icon_cache_limit_mb: Option<u32>,
     pub database_backup_count: Option<u32>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
+    pub app_update: Option<AppUpdateSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

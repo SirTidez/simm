@@ -12,6 +12,12 @@ const deepLinkMocks = vi.hoisted(() => ({
 const environmentStoreMocks = vi.hoisted(() => ({
   useEnvironmentStore: vi.fn(),
 }));
+const settingsStoreMocks = vi.hoisted(() => ({
+  useSettingsStore: vi.fn(),
+}));
+const modLibraryOverlayMocks = vi.hoisted(() => ({
+  lastNavigationState: null as any,
+}));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
@@ -49,6 +55,7 @@ vi.mock('../stores/downloadStatusStore', () => ({
 
 vi.mock('../stores/settingsStore', () => ({
   SettingsStoreProvider: ({ children }: { children: ReactNode }) => children,
+  useSettingsStore: settingsStoreMocks.useSettingsStore,
 }));
 
 vi.mock('../utils/logger', () => ({
@@ -75,10 +82,24 @@ vi.mock('./EnvironmentCreationWizard', () => ({
 }));
 
 vi.mock('./ModLibraryOverlay', () => ({
-  ModLibraryOverlay: ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) =>
+  ModLibraryOverlay: ({
+    isOpen,
+    onClose,
+    navigationState,
+    onNavigationStateChange,
+  }: {
+    isOpen: boolean;
+    onClose: () => void;
+    navigationState?: any;
+    onNavigationStateChange?: (state: any) => void;
+  }) =>
     isOpen ? (
       <div>
         <span>Mod Library Overlay</span>
+        <span>Active Library Tab: {navigationState?.libraryTab ?? 'discover'}</span>
+        <button onClick={() => onNavigationStateChange?.({ libraryTab: 'library', searchQuery: 'pack rat' })}>
+          Save Library State
+        </button>
         <button onClick={onClose}>Close Mod Library</button>
       </div>
     ) : null,
@@ -155,6 +176,7 @@ vi.mock('./DownloadsPanel', () => ({
 
 describe('App', () => {
   beforeEach(() => {
+    modLibraryOverlayMocks.lastNavigationState = null;
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
     deepLinkMocks.getCurrent.mockReset();
@@ -177,6 +199,11 @@ describe('App', () => {
     environmentStoreMocks.useEnvironmentStore.mockReset();
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({
       environments: [],
+    });
+    settingsStoreMocks.useSettingsStore.mockReset();
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: { appUpdate: null },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
     });
   });
 
@@ -217,6 +244,21 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('reuses the last mod library navigation state when reopening from the toolbar', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Active Library Tab: discover')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Library State' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
+
+    await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
   });
 
   it('uses window close for the custom close button', async () => {

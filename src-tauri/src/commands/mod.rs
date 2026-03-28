@@ -1,3 +1,4 @@
+pub mod app_update;
 pub mod app_init;
 pub mod auth;
 pub mod config;

@@ -12,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   startDownload: vi.fn(),
   getMelonLoaderStatus: vi.fn(),
   getEnvironments: vi.fn(),
+  getModLibrary: vi.fn(),
   getModsCount: vi.fn(),
   getModUpdatesSummary: vi.fn(),
   getPluginsCount: vi.fn(),
@@ -92,6 +93,13 @@ const completedEnv: Environment = {
   status: 'completed',
 };
 
+const secondCompletedEnv: Environment = {
+  ...completedEnv,
+  id: 'env-2',
+  name: 'Env Two',
+  outputDir: 'C:/env-2',
+};
+
 describe('EnvironmentList', () => {
   const unlistenFns: Array<ReturnType<typeof vi.fn>> = [];
   let modsChangedHandler: ((data: { environmentId: string }) => void) | null = null;
@@ -123,6 +131,26 @@ describe('EnvironmentList', () => {
     apiMocks.startDownload.mockResolvedValue({ success: true });
     apiMocks.getMelonLoaderStatus.mockResolvedValue({ installed: false });
     apiMocks.getEnvironments.mockResolvedValue([completedEnv]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        {
+          storageId: 'mod-1',
+          displayName: 'Example Mod',
+          files: [],
+          source: 'thunderstore',
+          sourceId: 'author/examplemod',
+          sourceVersion: '1.0.0',
+          managed: false,
+          installedIn: ['env-1'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'mod-1' },
+          installedInByRuntime: { IL2CPP: ['env-1'] },
+          filesByRuntime: { IL2CPP: [] },
+          updateAvailable: true,
+          remoteVersion: '1.1.0',
+        },
+      ],
+    });
     apiMocks.getModsCount.mockResolvedValue({ count: 2 });
     apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 1, updates: [] });
     apiMocks.getPluginsCount.mockResolvedValue({ count: 0 });
@@ -195,12 +223,12 @@ describe('EnvironmentList', () => {
       expect(modsChangedHandler).not.toBeNull();
     });
 
-    const initialCalls = apiMocks.getModsCount.mock.calls.length;
+    const initialLibraryCalls = apiMocks.getModLibrary.mock.calls.length;
     modsChangedHandler?.({ environmentId: 'env-1' });
 
     await waitFor(() => {
-      expect(apiMocks.getModsCount.mock.calls.length).toBeGreaterThan(initialCalls);
-      expect(apiMocks.getModUpdatesSummary.mock.calls.length).toBeGreaterThan(0);
+      expect(apiMocks.getModLibrary.mock.calls.length).toBeGreaterThan(initialLibraryCalls);
+      expect(screen.getByText('1 (1 Update)')).toBeTruthy();
     }, { timeout: 2000 });
   });
 
@@ -249,5 +277,42 @@ describe('EnvironmentList', () => {
       expect(screen.getByText('Download Failed')).toBeTruthy();
       expect(screen.getByText('Failed to start download: Network unavailable')).toBeTruthy();
     });
+  });
+
+  it('renders compact workspace rows as an active tab stack and preserves environment selection behavior', async () => {
+    const onSelectEnvironment = vi.fn();
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [completedEnv, secondCompletedEnv],
+      loading: false,
+      error: null,
+      progress: new Map(),
+      startDownload: vi.fn().mockResolvedValue(undefined),
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { container } = render(
+      <EnvironmentList
+        compactMode={true}
+        activeWorkspace={{ view: 'mods', environmentId: 'env-1' }}
+        onSelectEnvironment={onSelectEnvironment}
+      />,
+    );
+
+    const activeButton = screen.getByRole('button', { name: 'Env One' });
+    const inactiveButton = screen.getByRole('button', { name: 'Env Two' });
+
+    expect(activeButton.className).toContain('workspace-environment-sidebar__button--active');
+    expect(inactiveButton.className).not.toContain('workspace-environment-sidebar__button--active');
+    expect(activeButton.getAttribute('aria-current')).toBe('page');
+    expect(container.querySelector('.workspace-environment-sidebar__item--active')).toBeNull();
+
+    fireEvent.click(inactiveButton);
+
+    expect(onSelectEnvironment).toHaveBeenCalledWith('env-2');
   });
 });

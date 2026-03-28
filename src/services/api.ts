@@ -3,6 +3,7 @@ import type {
   DepotDownloaderInfo,
   Settings,
   Environment,
+  AppUpdateStatus,
   DownloadProgress,
   AppConfig,
   UpdateCheckResult,
@@ -35,6 +36,10 @@ export class ApiService {
   // App Init
   static async getHomeDirectory(): Promise<string> {
     return invoke('get_home_directory');
+  }
+
+  static async getAppUpdateStatus(currentVersion: string): Promise<AppUpdateStatus> {
+    return invoke('get_app_update_status', { currentVersion });
   }
 
   // Settings

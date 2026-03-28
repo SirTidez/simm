@@ -1686,17 +1686,22 @@ export function EnvironmentList({
         </p>
         <div className="workspace-environment-sidebar__list">
           {[...environments].sort((a, b) => a.name.localeCompare(b.name)).map((env) => (
-            <button
+            <div
               key={env.id}
-              onClick={() => {
-                rememberEnvironment(env.id);
-                onSelectEnvironment?.(env.id);
-              }}
-              className={`btn btn-secondary workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
-              title={env.name}
+              className="workspace-environment-sidebar__item"
             >
-              {env.name}
-            </button>
+              <button
+                onClick={() => {
+                  rememberEnvironment(env.id);
+                  onSelectEnvironment?.(env.id);
+                }}
+                className={`workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
+                title={env.name}
+                aria-current={selectedEnvironmentId === env.id ? 'page' : undefined}
+              >
+                <span className="workspace-environment-sidebar__button-label">{env.name}</span>
+              </button>
+            </div>
           ))}
         </div>
       </div>

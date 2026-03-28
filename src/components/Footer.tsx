@@ -17,9 +17,11 @@ const APP_VERSION = __APP_VERSION__;
 
 interface FooterProps {
   onOpenModUpdates?: () => void;
+  appUpdateAvailable?: boolean;
+  onOpenAppUpdate?: () => void;
 }
 
-export function Footer({ onOpenModUpdates }: FooterProps) {
+export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenAppUpdate }: FooterProps) {
   const { environments, checkAllUpdates } = useEnvironmentStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
@@ -298,6 +300,16 @@ export function Footer({ onOpenModUpdates }: FooterProps) {
         )}
       </div>
       <div className="statusbar-right">
+        {appUpdateAvailable && (
+          <button
+            type="button"
+            className="statusbar-app-update"
+            onClick={onOpenAppUpdate}
+            disabled={!onOpenAppUpdate}
+          >
+            SIMM Update Available
+          </button>
+        )}
         <span className="statusbar-version">v{APP_VERSION}</span>
       </div>
     </footer>

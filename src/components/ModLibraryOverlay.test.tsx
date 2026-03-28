@@ -447,7 +447,7 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText(/Could not resolve the latest Thunderstore package/i)).toBeTruthy();
   });
 
-  it('shows an error when a downloaded mod is missing update source metadata', async () => {
+  it('disables update actions when a downloaded mod has no newer remote version', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
         makeEntry({
@@ -474,10 +474,9 @@ describe('ModLibraryOverlay', () => {
 
     renderLibraryOverlay({ libraryTab: 'library' });
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Update and activate' }));
-
-    expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
-    expect(await screen.findByText(/missing Thunderstore or Nexus source metadata/i)).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Update and activate' })).toBeDisabled();
+    });
   });
 
   it('offers both Mono and IL2CPP environments for same-version Thunderstore runtime siblings', async () => {

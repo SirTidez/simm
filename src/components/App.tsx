@@ -17,14 +17,45 @@ import { PluginsOverlay } from './PluginsOverlay';
 import { UserLibsOverlay } from './UserLibsOverlay';
 import { LogsOverlay } from './LogsOverlay';
 import { ConfigurationOverlay } from './ConfigurationOverlay';
+import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
 import { DownloadStatusStoreProvider } from '../stores/downloadStatusStore';
-import { SettingsStoreProvider } from '../stores/settingsStore';
+import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
+import { logger } from '../services/logger';
+import type { AppUpdatePreferences, AppUpdateStatus } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DownloadsPanel } from './DownloadsPanel';
+
+declare const __APP_VERSION__: string;
+const APP_VERSION = __APP_VERSION__;
+const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const normalizeVersionCore = (value: string) => {
+  const match = value.trim().match(/\d+(?:\.\d+)*/i);
+  return match?.[0] ?? value.trim();
+};
+
+const compareVersionCores = (left: string, right: string) => {
+  const leftParts = normalizeVersionCore(left).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
+  const rightParts = normalizeVersionCore(right).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
+  const maxLength = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftValue = leftParts[index] ?? 0;
+    const rightValue = rightParts[index] ?? 0;
+    if (leftValue > rightValue) {
+      return 1;
+    }
+    if (leftValue < rightValue) {
+      return -1;
+    }
+  }
+
+  return 0;
+};
 
 function AppContent() {
   type PendingNexusRuntimeSelection = {
@@ -48,11 +79,16 @@ function AppContent() {
     modsState?: ModsOverlayNavigationState;
     libraryFocusRequest?: LibraryFocusRequest | null;
   };
+  type AppUpdateState =
+    | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
+    | { status: 'available'; result: AppUpdateStatus };
 
   const appWindow = getCurrentWindow();
   const { environments } = useEnvironmentStore();
+  const { settings, updateSettings } = useSettingsStore();
   const workspaceIdRef = useRef(0);
   const libraryFocusRequestIdRef = useRef(0);
+  const lastLibraryNavigationStateRef = useRef<ModLibraryNavigationState | undefined>(undefined);
   const createWorkspaceEntry = useCallback((route: WorkspaceRoute, seed?: Partial<WorkspaceEntry>): WorkspaceEntry => ({
     key: `workspace-${workspaceIdRef.current++}`,
     route,
@@ -72,6 +108,10 @@ function AppContent() {
   const inFlightNxmCallbackRef = useRef<string | null>(null);
   const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
+  const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
+  const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
+  const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
   const canGoBack = workspaceStack.length > 1;
@@ -135,20 +175,47 @@ function AppContent() {
     pushWorkspace(workspace);
   }, [pushWorkspace]);
 
-  const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
-    const requestId = ++libraryFocusRequestIdRef.current;
+  const openLibraryWorkspace = useCallback((options?: {
+    initialTab?: 'discover' | 'library' | 'updates';
+    navigationState?: Partial<ModLibraryNavigationState>;
+    focusRequest?: LibraryFocusRequest | null;
+  }) => {
+    const lastLibraryEntry = [...workspaceStack].reverse().find((entry) => entry.route.view === 'library');
+    const persistedLibraryState = lastLibraryNavigationStateRef.current;
+    const mergedNavigationState = (
+      lastLibraryEntry?.libraryState
+      || persistedLibraryState
+      || options?.navigationState
+      || options?.initialTab
+    ) ? {
+      ...(lastLibraryEntry?.libraryState ?? persistedLibraryState ?? {}),
+      ...(options?.initialTab ? { libraryTab: options.initialTab } : {}),
+      ...(options?.navigationState ?? {}),
+    } : undefined;
+
+    lastLibraryNavigationStateRef.current = mergedNavigationState;
+
     pushWorkspace(
-      { view: 'library', initialTab: 'library' },
+      options?.initialTab ? { view: 'library', initialTab: options.initialTab } : { view: 'library' },
       {
-        libraryState: { libraryTab: 'library' },
-        libraryFocusRequest: {
-          storageId: focus.storageId,
-          modTag: focus.modTag,
-          requestId,
-        },
+        libraryState: mergedNavigationState,
+        libraryFocusRequest: options?.focusRequest ?? null,
       },
     );
-  }, [pushWorkspace]);
+  }, [pushWorkspace, workspaceStack]);
+
+  const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
+    const requestId = ++libraryFocusRequestIdRef.current;
+    openLibraryWorkspace({
+      initialTab: 'library',
+      navigationState: { libraryTab: 'library' },
+      focusRequest: {
+        storageId: focus.storageId,
+        modTag: focus.modTag,
+        requestId,
+      },
+    });
+  }, [openLibraryWorkspace]);
 
   const getEnvironmentById = useCallback((environmentId: string) => {
     return environments.find((env) => env.id === environmentId) ?? null;
@@ -271,6 +338,143 @@ function AppContent() {
     }, 6000);
     return () => window.clearTimeout(timer);
   }, [appNotice]);
+
+  useEffect(() => {
+    appUpdateSettingsRef.current = settings?.appUpdate ?? null;
+  }, [settings?.appUpdate]);
+
+  const persistAppUpdateSettings = useCallback(async (updates: Partial<AppUpdatePreferences>) => {
+    const mergedSettings = {
+      ...(appUpdateSettingsRef.current ?? {}),
+      ...updates,
+    };
+    appUpdateSettingsRef.current = mergedSettings;
+    await updateSettings({
+      appUpdate: mergedSettings,
+    });
+  }, [updateSettings]);
+
+  const openAppUpdateUrl = useCallback((url?: string | null) => {
+    const safeUrl = url?.trim();
+    if (!safeUrl) {
+      return;
+    }
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+  }, []);
+
+  useEffect(() => {
+    if (!hasSettings || showStartupSplash) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const runAppUpdateCheck = async () => {
+      try {
+        setAppUpdateState((previous) =>
+          previous.status === 'available' ? previous : { status: 'checking', result: null },
+        );
+
+        const result = await ApiService.getAppUpdateStatus(APP_VERSION);
+        if (cancelled) {
+          return;
+        }
+
+        const currentAppUpdateSettings = appUpdateSettingsRef.current ?? {};
+        const expiredSnooze =
+          !!currentAppUpdateSettings.snoozedUntil
+          && Number.isFinite(Date.parse(currentAppUpdateSettings.snoozedUntil))
+          && Date.parse(currentAppUpdateSettings.snoozedUntil) <= Date.now();
+        const skippedVersionNormalized =
+          currentAppUpdateSettings.skippedVersionNormalized
+            && result.latestVersionNormalized
+            && currentAppUpdateSettings.skippedVersionNormalized !== result.latestVersionNormalized
+            && compareVersionCores(
+              currentAppUpdateSettings.skippedVersionNormalized,
+              result.latestVersionNormalized,
+            ) < 0
+            ? null
+            : currentAppUpdateSettings.skippedVersionNormalized ?? null;
+
+        const nextSettings = {
+          lastCheckedAt: result.checkedAt,
+          lastSeenVersionRaw: result.latestVersionRaw,
+          lastSeenVersionNormalized: result.latestVersionNormalized,
+          lastResolvedUrl: result.targetUrl || result.fallbackFilesUrl,
+          snoozedUntil: expiredSnooze ? null : (currentAppUpdateSettings.snoozedUntil ?? null),
+          skippedVersionNormalized,
+        };
+
+        const previousSerialized = JSON.stringify({
+          lastCheckedAt: currentAppUpdateSettings.lastCheckedAt ?? null,
+          lastSeenVersionRaw: currentAppUpdateSettings.lastSeenVersionRaw ?? null,
+          lastSeenVersionNormalized: currentAppUpdateSettings.lastSeenVersionNormalized ?? null,
+          lastResolvedUrl: currentAppUpdateSettings.lastResolvedUrl ?? null,
+          snoozedUntil: currentAppUpdateSettings.snoozedUntil ?? null,
+          skippedVersionNormalized: currentAppUpdateSettings.skippedVersionNormalized ?? null,
+        });
+        const nextSerialized = JSON.stringify(nextSettings);
+        if (previousSerialized !== nextSerialized) {
+          void persistAppUpdateSettings(nextSettings).catch((error) => {
+            logger.warn('Failed to persist app update settings', error);
+          });
+        }
+
+        setDismissedAppUpdateVersion((previous) =>
+          previous && previous !== result.latestVersionNormalized ? null : previous,
+        );
+        setAppUpdateState(result.updateAvailable
+          ? { status: 'available', result }
+          : { status: 'upToDate', result: null });
+      } catch (error) {
+        logger.warn('Failed to check for SIMM app updates', error);
+        if (!cancelled) {
+          setAppUpdateState((previous) => (
+            previous.status === 'idle' || previous.status === 'checking'
+              ? { status: 'error', result: null }
+              : previous
+          ));
+        }
+      }
+    };
+
+    void runAppUpdateCheck();
+    const intervalId = window.setInterval(() => {
+      void runAppUpdateCheck();
+    }, APP_UPDATE_CHECK_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [hasSettings, persistAppUpdateSettings, showStartupSplash]);
+
+  const handleSkipAppUpdateVersion = useCallback(() => {
+    if (appUpdateState.status !== 'available') {
+      return;
+    }
+    const latestVersionNormalized = appUpdateState.result.latestVersionNormalized;
+    setDismissedAppUpdateVersion(latestVersionNormalized);
+    void persistAppUpdateSettings({
+      skippedVersionNormalized: latestVersionNormalized,
+      snoozedUntil: null,
+    }).catch((error) => {
+      logger.warn('Failed to persist skipped app update version', error);
+    });
+  }, [appUpdateState, persistAppUpdateSettings]);
+
+  const handleSnoozeAppUpdate = useCallback((days: number) => {
+    if (appUpdateState.status !== 'available') {
+      return;
+    }
+    const snoozedUntil = new Date(Date.now() + (days * 24 * 60 * 60 * 1000)).toISOString();
+    setDismissedAppUpdateVersion(appUpdateState.result.latestVersionNormalized);
+    void persistAppUpdateSettings({
+      snoozedUntil,
+    }).catch((error) => {
+      logger.warn('Failed to persist app update snooze state', error);
+    });
+  }, [appUpdateState, persistAppUpdateSettings]);
 
   const handleNexusOAuthCallback = useCallback(async (callbackUrl: string) => {
     if (!callbackUrl.startsWith('simm://oauth/nexus/callback')) {
@@ -531,6 +735,7 @@ function AppContent() {
               libraryTab: workspace.initialTab,
             } : undefined)}
             onNavigationStateChange={(navigationState) => {
+              lastLibraryNavigationStateRef.current = navigationState;
               updateWorkspaceEntry(entry.key, (current) => ({
                 ...current,
                 libraryState: navigationState,
@@ -580,7 +785,7 @@ function AppContent() {
               }));
             }}
             onOpenAccounts={() => pushWorkspace({ view: 'accounts' })}
-            onOpenModLibrary={() => pushWorkspace({ view: 'library' })}
+            onOpenModLibrary={() => openLibraryWorkspace()}
             onOpenConfig={() => pushWorkspace({ view: 'config', environmentId: workspace.environmentId })}
             onModUpdatesChecked={(count) => {
               window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
@@ -626,11 +831,31 @@ function AppContent() {
       default:
         return null;
     }
-  }, [getEnvironmentById, openLibraryFromLogs, pushWorkspace, updateWorkspaceEntry]);
+  }, [getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, pushWorkspace, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
   };
+
+  const appUpdateTargetUrl = appUpdateState.status === 'available'
+    ? (appUpdateState.result.targetUrl || appUpdateState.result.fallbackFilesUrl)
+    : null;
+  const appUpdatePreferences = settings?.appUpdate ?? null;
+  const appUpdateSnoozedUntil = appUpdatePreferences?.snoozedUntil
+    && Number.isFinite(Date.parse(appUpdatePreferences.snoozedUntil))
+    ? Date.parse(appUpdatePreferences.snoozedUntil)
+    : null;
+  const isAppUpdateSnoozed = !!appUpdateTargetUrl
+    && appUpdateSnoozedUntil !== null
+    && appUpdateSnoozedUntil > Date.now();
+  const isAppUpdateSkipped = appUpdateState.status === 'available'
+    && appUpdatePreferences?.skippedVersionNormalized === appUpdateState.result.latestVersionNormalized;
+  const isAppUpdateDismissedForSession = appUpdateState.status === 'available'
+    && dismissedAppUpdateVersion === appUpdateState.result.latestVersionNormalized;
+  const showAppUpdateToast = appUpdateState.status === 'available'
+    && !isAppUpdateSnoozed
+    && !isAppUpdateSkipped
+    && !isAppUpdateDismissedForSession;
 
   return (
     <div className="app app-desktop-shell">
@@ -648,7 +873,7 @@ function AppContent() {
 
           <div className="window-toolbar-actions">
             <button
-              onClick={() => openWorkspace({ view: 'library', initialTab: 'discover' })}
+              onClick={() => openLibraryWorkspace()}
               className="btn btn-secondary btn-small"
               title="Open Mod Library"
             >
@@ -760,12 +985,28 @@ function AppContent() {
           </div>
         </div>
 
-        <Footer onOpenModUpdates={() => pushWorkspace({ view: 'library', initialTab: 'updates' }, {
-          libraryState: {
-            libraryTab: 'updates',
-          },
-        })} />
+        <Footer
+          onOpenModUpdates={() => openLibraryWorkspace({
+            initialTab: 'updates',
+            navigationState: {
+              libraryTab: 'updates',
+            },
+          })}
+          appUpdateAvailable={appUpdateState.status === 'available'}
+          onOpenAppUpdate={() => openAppUpdateUrl(appUpdateTargetUrl)}
+        />
       </div>
+
+      {showAppUpdateToast && appUpdateState.status === 'available' && (
+        <AppUpdateToast
+          currentVersion={appUpdateState.result.currentVersionRaw}
+          latestVersion={appUpdateState.result.latestVersionRaw}
+          onUpdate={() => openAppUpdateUrl(appUpdateTargetUrl)}
+          onSkip={handleSkipAppUpdateVersion}
+          onSnooze={handleSnoozeAppUpdate}
+          onDismiss={() => setDismissedAppUpdateVersion(appUpdateState.result.latestVersionNormalized)}
+        />
+      )}
 
       {appNotice && (
         <div className="app-notice app-notice--danger" role="alert" aria-live="assertive">
