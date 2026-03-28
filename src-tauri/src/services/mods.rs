@@ -3104,6 +3104,10 @@ impl ModsService {
             return Ok(());
         }
 
+        fs::create_dir_all(dest_dir)
+            .await
+            .context("Failed to create destination directory for storage installation")?;
+
         let mut file_count = 0usize;
         let mut storage_entries = fs::read_dir(source_dir)
             .await
@@ -3117,16 +3121,30 @@ impl ModsService {
             }
 
             let metadata = fs::metadata(&path).await?;
-            if metadata.is_dir() && !allow_dirs {
-                continue;
-            }
-
             let file_runtime = self.detect_mod_runtime_from_name(file_name);
             eprintln!("[install_storage_entries] Processing file: {}, detected runtime: {}, target runtime: {}", 
                      file_name, file_runtime, runtime_label);
+
             if file_runtime != "unknown" && file_runtime != runtime_label {
                 eprintln!("[install_storage_entries] Skipping file {} due to runtime mismatch (file: {}, env: {})", 
                          file_name, file_runtime, runtime_label);
+                continue;
+            }
+
+            if metadata.is_dir() && !allow_dirs {
+                let dest_path = dest_dir.join(file_name);
+                Box::pin(self.install_storage_entries(
+                    &path,
+                    &dest_path,
+                    false,
+                    runtime_label,
+                    template_meta,
+                    storage_id,
+                    metadata_map,
+                    installed_files,
+                    env_runtime,
+                ))
+                .await?;
                 continue;
             }
 
@@ -3307,7 +3325,22 @@ impl ModsService {
 
         for env_id in environment_ids {
             let env = self.load_environment(&env_id).await?;
-            let runtime_label = Self::runtime_label(&env.runtime);
+            let env_runtime = crate::services::environment::EnvironmentService::runtime_for_branch(
+                &env.branch,
+            )
+            .or_else(|| {
+                if env.output_dir.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
+                            Path::new(&env.output_dir),
+                        ),
+                    )
+                }
+            })
+            .unwrap_or(env.runtime.clone());
+            let runtime_label = Self::runtime_label(&env_runtime);
 
             let mods_dir = self.get_mods_directory(&env.output_dir);
             let plugins_dir = self.get_plugins_directory(&env.output_dir);
@@ -3338,7 +3371,7 @@ impl ModsService {
                 storage_id,
                 &mut metadata_map,
                 &mut installed_files,
-                &env.runtime,
+                &env_runtime,
             )
             .await?;
             self.install_storage_entries(
@@ -3350,7 +3383,7 @@ impl ModsService {
                 storage_id,
                 &mut metadata_map,
                 &mut installed_files,
-                &env.runtime,
+                &env_runtime,
             )
             .await?;
             self.install_storage_entries(
@@ -3362,7 +3395,7 @@ impl ModsService {
                 storage_id,
                 &mut metadata_map,
                 &mut installed_files,
-                &env.runtime,
+                &env_runtime,
             )
             .await?;
 
@@ -7494,6 +7527,68 @@ mod tests {
             .contains("Failed to create file symlink for storage entry Example.dll"));
         assert!(installed_files.is_empty());
         assert!(metadata_map.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_storage_mod_to_envs_installs_nested_mono_storage_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let mono_output_dir = temp.path().join("envs").join("env-mono");
+        let mono_env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate-beta".to_string(),
+                mono_output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let mut stale_env = mono_env.clone();
+        stale_env.runtime = Runtime::Il2cpp;
+        env_service.upsert_environment(&stale_env).await?;
+
+        let storage_base = download_dir.join("Mods").join("storage-mono-nested");
+        let nested_mods_dir = storage_base.join("Mods").join("Net35");
+        fs::create_dir_all(&nested_mods_dir).await?;
+        fs::write(nested_mods_dir.join("ScheduleToolbox.dll"), b"mono").await?;
+
+        let mut storage_meta = sample_metadata(
+            Some("storage-mono-nested"),
+            Some("Author/ScheduleToolbox"),
+            Some("1.2.0"),
+        );
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.mod_name = Some("ScheduleToolbox".to_string());
+        storage_meta.author = Some("Author".to_string());
+        storage_meta.detected_runtime = Some(Runtime::Mono);
+        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+
+        service
+            .install_storage_mod_to_envs("storage-mono-nested", vec![stale_env.id.clone()])
+            .await?;
+
+        let installed_path = mono_output_dir
+            .join("Mods")
+            .join("Net35")
+            .join("ScheduleToolbox.dll");
+        assert!(service.path_exists_or_symlink(&installed_path).await);
 
         Ok(())
     }

@@ -6,6 +6,8 @@ interface Props {
   entry: ModLibraryEntry | null;
   compatibleEnvironments: Environment[];
   excludedEnvironments: Environment[];
+  lockedEnvironmentIds: string[];
+  mode: 'select' | 'installed';
   selectedEnvironmentIds: Set<string>;
   onToggleEnvironment: (environmentId: string) => void;
   onSelectAllCompatible: () => void;
@@ -16,8 +18,19 @@ interface Props {
   installing: boolean;
 }
 
-function runtimeLabel(runtime: Environment['runtime']) {
-  return runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
+function runtimeLabel(environment: Pick<Environment, 'branch' | 'runtime'>) {
+  const normalizedBranch = (environment.branch || '').toLowerCase().replace(/[\s_]+/g, '-');
+  if (
+    normalizedBranch === 'alternate' ||
+    normalizedBranch === 'alternate-beta' ||
+    normalizedBranch === 'alternatebeta'
+  ) {
+    return 'Mono';
+  }
+  if (normalizedBranch === 'main' || normalizedBranch === 'beta') {
+    return 'IL2CPP';
+  }
+  return environment.runtime === 'IL2CPP' ? 'IL2CPP' : 'Mono';
 }
 
 export function InstallTargetsDialog({
@@ -26,6 +39,8 @@ export function InstallTargetsDialog({
   entry,
   compatibleEnvironments,
   excludedEnvironments,
+  lockedEnvironmentIds,
+  mode,
   selectedEnvironmentIds,
   onToggleEnvironment,
   onSelectAllCompatible,
@@ -41,6 +56,7 @@ export function InstallTargetsDialog({
 
   const compatibleCount = compatibleEnvironments.length;
   const selectedCount = selectedEnvironmentIds.size;
+  const lockedIds = new Set(lockedEnvironmentIds);
   const byRuntime = {
     IL2CPP: compatibleEnvironments.filter((environment) => environment.runtime === 'IL2CPP'),
     Mono: compatibleEnvironments.filter((environment) => environment.runtime === 'Mono'),
@@ -59,35 +75,51 @@ export function InstallTargetsDialog({
             <span>{compatibleCount} compatible environment{compatibleCount === 1 ? '' : 's'}</span>
           </div>
 
+          {mode === 'installed' && (
+            <div className="workspace-install-dialog__note">
+              This version is already installed in every compatible environment.
+            </div>
+          )}
+
           <div className="workspace-install-dialog__quick-actions">
-            <button type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible}>
+            <button type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible} disabled={mode === 'installed'}>
               All compatible
             </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={byRuntime.IL2CPP.length === 0}>
+            <button type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={mode === 'installed' || byRuntime.IL2CPP.length === 0}>
               All IL2CPP
             </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={byRuntime.Mono.length === 0}>
+            <button type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={mode === 'installed' || byRuntime.Mono.length === 0}>
               All Mono
             </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={onClear}>
+            <button type="button" className="btn btn-secondary btn-small" onClick={onClear} disabled={mode === 'installed'}>
               Clear
             </button>
           </div>
 
           <div className="workspace-install-dialog__list">
-            {compatibleEnvironments.map((environment) => (
-              <label key={environment.id} className="workspace-install-dialog__row">
+            {compatibleEnvironments.map((environment) => {
+              const isLocked = lockedIds.has(environment.id);
+              return (
+              <label
+                key={environment.id}
+                className="workspace-install-dialog__row"
+                style={isLocked ? { opacity: 0.72, cursor: 'default' } : undefined}
+              >
                 <input
                   type="checkbox"
                   checked={selectedEnvironmentIds.has(environment.id)}
+                  disabled={isLocked}
                   onChange={() => onToggleEnvironment(environment.id)}
                 />
                 <span className="workspace-install-dialog__row-main">
                   <strong>{environment.name}</strong>
-                  <span>{runtimeLabel(environment.runtime)} • {environment.branch}</span>
+                  <span>
+                    {runtimeLabel(environment)} • {environment.branch}
+                    {isLocked ? ' • already installed' : ''}
+                  </span>
                 </span>
               </label>
-            ))}
+            )})}
           </div>
 
           {excludedEnvironments.length > 0 && (
@@ -104,9 +136,13 @@ export function InstallTargetsDialog({
             type="button"
             className="btn btn-primary"
             onClick={onConfirm}
-            disabled={selectedCount === 0 || installing}
+            disabled={mode === 'installed' || selectedCount === 0 || installing}
           >
-            {installing ? 'Installing...' : `Install to selected (${selectedCount})`}
+            {mode === 'installed'
+              ? 'Already installed'
+              : installing
+                ? 'Installing...'
+                : `Install to selected (${selectedCount})`}
           </button>
         </div>
       </div>

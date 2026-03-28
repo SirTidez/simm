@@ -12,6 +12,7 @@ import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ApiService } from '../services/api';
+import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import {
   onAuthWaiting,
   onAuthSuccess,
@@ -73,8 +74,8 @@ interface EnvironmentListProps {
 
 export type WorkspaceRoute =
   | { view: 'home' }
-  | { view: 'library' }
-  | { view: 'mods'; environmentId: string }
+  | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
+  | { view: 'mods'; environmentId: string; initialTab?: 'installed' | 'updates' }
   | { view: 'plugins'; environmentId: string }
   | { view: 'userLibs'; environmentId: string }
   | { view: 'logs'; environmentId: string }
@@ -109,6 +110,7 @@ export function EnvironmentList({
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [modsCounts, setModsCounts] = useState<Map<string, number>>(new Map());
+  const [coreToolCounts, setCoreToolCounts] = useState<Map<string, number>>(new Map());
   const [modUpdatesCounts, setModUpdatesCounts] = useState<Map<string, number>>(new Map());
   const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
   const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
@@ -518,11 +520,28 @@ export function EnvironmentList({
         });
 
         unlistenModUpdatesChecked = await onModUpdatesChecked((data) => {
-          setModUpdatesCounts(prev => {
-            const next = new Map(prev);
-            next.set(data.environmentId, data.count);
-            return next;
-          });
+          void ApiService.getModLibrary()
+            .then((library) => {
+              const snapshot = buildEnvironmentModSnapshot(library, data.environmentId);
+              setModsCounts(prev => {
+                const next = new Map(prev);
+                next.set(data.environmentId, snapshot.userMods);
+                return next;
+              });
+              setCoreToolCounts(prev => {
+                const next = new Map(prev);
+                next.set(data.environmentId, snapshot.coreTools);
+                return next;
+              });
+              setModUpdatesCounts(prev => {
+                const next = new Map(prev);
+                next.set(data.environmentId, snapshot.updateCount);
+                return next;
+              });
+            })
+            .catch(() => {
+              // Ignore summary refresh failures; counts will update on the next successful refresh.
+            });
         });
 
         // Listen for filesystem change events (mods/plugins/userlibs)
@@ -541,18 +560,21 @@ export function EnvironmentList({
             // Set new timer to refresh count after 500ms of no events
             const timer = setTimeout(async () => {
               try {
-                const [result, modUpdatesResult] = await Promise.all([
-                  ApiService.getModsCount(data.environmentId),
-                  ApiService.getModUpdatesSummary(data.environmentId)
-                ]);
+                const library = await ApiService.getModLibrary();
+                const snapshot = buildEnvironmentModSnapshot(library, data.environmentId);
                 setModsCounts(prev => {
                   const next = new Map(prev);
-                  next.set(data.environmentId, result.count);
+                  next.set(data.environmentId, snapshot.userMods);
+                  return next;
+                });
+                setCoreToolCounts(prev => {
+                  const next = new Map(prev);
+                  next.set(data.environmentId, snapshot.coreTools);
                   return next;
                 });
                 setModUpdatesCounts(prev => {
                   const next = new Map(prev);
-                  next.set(data.environmentId, modUpdatesResult.count);
+                  next.set(data.environmentId, snapshot.updateCount);
                   return next;
                 });
               } catch (err) {
@@ -816,24 +838,23 @@ export function EnvironmentList({
   useEffect(() => {
     const loadCounts = async () => {
       const modCounts = new Map<string, number>();
+      const coreToolCountsMap = new Map<string, number>();
       const modUpdatesCountsMap = new Map<string, number>();
       const pluginCounts = new Map<string, number>();
       const userLibsCounts = new Map<string, number>();
       const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
+      let library = null;
+      try {
+        library = await ApiService.getModLibrary();
+      } catch {
+        library = null;
+      }
       for (const env of environments) {
         if (env.status === 'completed') {
-          try {
-            const result = await ApiService.getModsCount(env.id);
-            modCounts.set(env.id, result.count);
-          } catch {
-            modCounts.set(env.id, 0);
-          }
-          try {
-            const modUpdatesResult = await ApiService.getModUpdatesSummary(env.id);
-            modUpdatesCountsMap.set(env.id, modUpdatesResult.count);
-          } catch {
-            modUpdatesCountsMap.set(env.id, 0);
-          }
+          const modSnapshot = buildEnvironmentModSnapshot(library, env.id);
+          modCounts.set(env.id, modSnapshot.userMods);
+          coreToolCountsMap.set(env.id, modSnapshot.coreTools);
+          modUpdatesCountsMap.set(env.id, modSnapshot.updateCount);
           try {
             const pluginResult = await ApiService.getPluginsCount(env.id);
             pluginCounts.set(env.id, pluginResult.count);
@@ -855,6 +876,7 @@ export function EnvironmentList({
         }
       }
       setModsCounts(modCounts);
+      setCoreToolCounts(coreToolCountsMap);
       setModUpdatesCounts(modUpdatesCountsMap);
       setPluginsCounts(pluginCounts);
       setUserLibsCounts(userLibsCounts);
@@ -914,24 +936,32 @@ export function EnvironmentList({
     if (modsOverlay.envId) {
       const env = environments.find(e => e.id === modsOverlay.envId);
       if (env && env.status === 'completed') {
-        Promise.all([
-          ApiService.getModsCount(env.id),
-          ApiService.getModUpdatesSummary(env.id)
-        ])
-          .then(([result, modUpdatesResult]) => {
+        ApiService.getModLibrary()
+          .then((library) => {
+            const snapshot = buildEnvironmentModSnapshot(library, env.id);
             setModsCounts(prev => {
               const next = new Map(prev);
-              next.set(env.id, result.count);
+              next.set(env.id, snapshot.userMods);
+              return next;
+            });
+            setCoreToolCounts(prev => {
+              const next = new Map(prev);
+              next.set(env.id, snapshot.coreTools);
               return next;
             });
             setModUpdatesCounts(prev => {
               const next = new Map(prev);
-              next.set(env.id, modUpdatesResult.count);
+              next.set(env.id, snapshot.updateCount);
               return next;
             });
           })
           .catch(() => {
             setModsCounts(prev => {
+              const next = new Map(prev);
+              next.set(env.id, 0);
+              return next;
+            });
+            setCoreToolCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, 0);
               return next;
@@ -944,6 +974,15 @@ export function EnvironmentList({
           });
       }
     }
+  };
+
+  const handleOpenModUpdatesOverlay = (envId: string) => {
+    rememberEnvironment(envId);
+    if (onOpenWorkspace) {
+      onOpenWorkspace({ view: 'mods', environmentId: envId, initialTab: 'updates' });
+      return;
+    }
+    setModsOverlay({ isOpen: true, envId });
   };
 
   const handleOpenPluginsOverlay = (envId: string) => {
@@ -1345,6 +1384,7 @@ export function EnvironmentList({
     const status = getDominantStatus(env);
     const launchMethod = preferredLaunchMethod.get(env.id) || 'steam';
     const modCount = modsCounts.get(env.id) ?? 0;
+    const coreToolCount = coreToolCounts.get(env.id) ?? 0;
     const modUpdateCount = modUpdatesCounts.get(env.id) ?? 0;
     const pluginCount = pluginsCounts.get(env.id) ?? 0;
     const userLibsCount = userLibsCounts.get(env.id) ?? 0;
@@ -1354,9 +1394,13 @@ export function EnvironmentList({
       {
         label: 'Mods',
         value: isCompleted
-          ? `${modCount}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
+          ? `${modCount}${coreToolCount > 0 ? ` (+${coreToolCount} ${coreToolCount === 1 ? 'Tool' : 'Tools'})` : ''}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
           : 'Unavailable',
-        tone: modUpdateCount > 0 ? 'warning' : undefined
+        tone: modUpdateCount > 0 ? 'warning' : undefined,
+        onClick: isCompleted && modUpdateCount > 0 ? () => handleOpenModUpdatesOverlay(env.id) : undefined,
+        title: coreToolCount > 0
+          ? `${modCount} user mods, ${coreToolCount} SIMM-managed core tool${coreToolCount === 1 ? '' : 's'}`
+          : undefined,
       },
       { label: 'Plugins', value: isCompleted ? `${pluginCount}` : 'Unavailable' },
       { label: 'UserLibs', value: isCompleted ? `${userLibsCount}` : 'Unavailable' },
@@ -1475,9 +1519,21 @@ export function EnvironmentList({
 
         <div className="environment-card__snapshot">
           {metrics.map((metric) => (
-            <div key={metric.label} className={`environment-metric ${metric.tone ? `environment-metric--${metric.tone}` : ''}`}>
+            <div
+              key={metric.label}
+              className={`environment-metric ${metric.tone ? `environment-metric--${metric.tone}` : ''}`}
+              role={metric.onClick ? 'button' : undefined}
+              tabIndex={metric.onClick ? 0 : undefined}
+              onClick={metric.onClick}
+              onKeyDown={metric.onClick ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  metric.onClick?.();
+                }
+              } : undefined}
+            >
               <span>{metric.label}</span>
-              <strong title={metric.value}>{metric.value}</strong>
+              <strong title={metric.title || metric.value}>{metric.value}</strong>
             </div>
           ))}
           {env.updateAvailable && env.updateGameVersion && (

@@ -81,10 +81,10 @@ impl ModUpdateService {
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
                                 {
-                                    let update_available = current_version
-                                        .as_ref()
-                                        .map(|cv| cv != &latest_version)
-                                        .unwrap_or(true);
+                                    let update_available = Self::versions_differ(
+                                        current_version.as_deref(),
+                                        &latest_version,
+                                    );
 
                                     // Update metadata with check results
                                     metadata.last_update_check = Some(now);
@@ -170,16 +170,34 @@ impl ModUpdateService {
                                 if let Ok(mod_info) =
                                     nexus_mods_service.get_mod(game_id, mod_id).await
                                 {
-                                    // Get latest version from mod info
-                                    if let Some(latest_version) = mod_info
-                                        .get("version")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                    {
-                                        let update_available = current_version
-                                            .as_ref()
-                                            .map(|cv| cv != &latest_version)
-                                            .unwrap_or(true);
+                                    let latest_version = nexus_mods_service
+                                        .get_mod_files(game_id, mod_id)
+                                        .await
+                                        .ok()
+                                        .and_then(|files| {
+                                            Self::select_nexus_file_for_runtime(
+                                                &files,
+                                                Self::runtime_label(&env.runtime),
+                                            )
+                                        })
+                                        .and_then(|file| {
+                                            file.get("version")
+                                                .or_else(|| file.get("mod_version"))
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                        })
+                                        .or_else(|| {
+                                            mod_info
+                                                .get("version")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                        });
+
+                                    if let Some(latest_version) = latest_version {
+                                        let update_available = Self::versions_differ(
+                                            current_version.as_deref(),
+                                            &latest_version,
+                                        );
 
                                         // Update metadata with check results
                                         metadata.last_update_check = Some(now);
@@ -811,9 +829,14 @@ impl ModUpdateService {
                     }));
                 }
 
-                let access_token = nexus_access_token.ok_or_else(|| {
-                    anyhow::anyhow!("Nexus OAuth login required to download updates")
-                })?;
+                let Some(access_token) = nexus_access_token else {
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "error": "Nexus OAuth login required to download updates",
+                        "errorCode": "nexus_auth_required",
+                        "recoveryUrl": "accounts"
+                    }));
+                };
                 let original_file_name = target_file
                     .get("file_name")
                     .or_else(|| target_file.get("name"))
@@ -828,10 +851,12 @@ impl ModUpdateService {
                 );
                 let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
-                let bytes = nexus_mods_service
+                let bytes = match nexus_mods_service
                     .download_mod_file(access_token, "schedule1", mod_id, file_id)
                     .await
-                    .map_err(|error| {
+                {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
                         let message = format!("Failed to download Nexus update: {}", error);
                         let _ = crate::services::tracked_downloads::emit(
                             app,
@@ -841,8 +866,24 @@ impl ModUpdateService {
                                 Some("Download failed".to_string()),
                             ),
                         );
-                        anyhow::anyhow!(message)
-                    })?;
+
+                        let normalized = message.to_ascii_lowercase();
+                        if normalized.contains("premium")
+                            || normalized.contains("site confirmation")
+                            || normalized.contains("requires website confirmation")
+                        {
+                            return Ok(serde_json::json!({
+                                "success": false,
+                                "error": message,
+                                "errorCode": "nexus_manual_confirmation_required",
+                                "requiresManualDownload": true,
+                                "recoveryUrl": format!("https://www.nexusmods.com/schedule1/mods/{}?tab=files", mod_id)
+                            }));
+                        }
+
+                        return Err(anyhow::anyhow!(message));
+                    }
+                };
                 let extension = Path::new(original_file_name)
                     .extension()
                     .and_then(|v| v.to_str())
@@ -1004,7 +1045,8 @@ impl ModUpdateService {
             }
             ModSource::Local | ModSource::Unknown => Ok(serde_json::json!({
                 "success": false,
-                "error": "This mod source does not support automatic updates"
+                "error": "This mod source does not support automatic updates",
+                "errorCode": "unsupported_source"
             })),
         }
     }

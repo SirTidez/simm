@@ -13,6 +13,10 @@ const apiMocks = vi.hoisted(() => ({
   downloadS1APIToLibrary: vi.fn(),
   downloadMLVScanToLibrary: vi.fn(),
   searchThunderstore: vi.fn(),
+  searchNexusMods: vi.fn(),
+  getNexusModsLatestUpdated: vi.fn(),
+  getNexusModsTrending: vi.fn(),
+  getNexusModsLatestAdded: vi.fn(),
   downloadThunderstoreToLibrary: vi.fn(),
   uninstallDownloadedMod: vi.fn(),
   installDownloadedMod: vi.fn(),
@@ -47,6 +51,54 @@ function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
   };
 }
 
+function makeThunderstorePackage(
+  name: string,
+  version: string,
+  runtime: 'IL2CPP' | 'Mono' = 'Mono',
+  owner = 'ifBars',
+) {
+  return {
+    uuid4: `${name}-${runtime}-pkg`,
+    name,
+    owner,
+    package_url: `https://thunderstore.io/c/schedule-i/p/${owner}/${name}/`,
+    date_created: '2025-01-01T00:00:00Z',
+    date_updated: '2025-01-02T00:00:00Z',
+    rating_score: 10,
+    is_pinned: false,
+    is_deprecated: false,
+    full_name: `${owner}-${name}`,
+    versions: [{
+      name,
+      full_name: `${owner}-${name}`,
+      date_created: '2025-01-01T00:00:00Z',
+      date_updated: '2025-01-02T00:00:00Z',
+      uuid4: `${name}-${runtime}-ver`,
+      version_number: version,
+      dependencies: [],
+      download_url: `https://example.com/${name}-${runtime}.zip`,
+      downloads: 250,
+      file_size: 1024,
+      description: `${name} package`,
+      icon: 'https://example.com/icon.png',
+    }],
+  };
+}
+
+function renderLibraryOverlay({
+  libraryTab,
+}: {
+  libraryTab?: 'discover' | 'library' | 'updates';
+} = {}) {
+  return render(
+    <ModLibraryOverlay
+      isOpen={true}
+      onClose={() => {}}
+      navigationState={libraryTab ? { libraryTab } : undefined}
+    />,
+  );
+}
+
 vi.mock('../services/events', () => ({
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
@@ -66,6 +118,10 @@ describe('ModLibraryOverlay', () => {
     apiMocks.downloadS1APIToLibrary.mockReset();
     apiMocks.downloadMLVScanToLibrary.mockReset();
     apiMocks.searchThunderstore.mockReset();
+    apiMocks.searchNexusMods.mockReset();
+    apiMocks.getNexusModsLatestUpdated.mockReset();
+    apiMocks.getNexusModsTrending.mockReset();
+    apiMocks.getNexusModsLatestAdded.mockReset();
     apiMocks.downloadThunderstoreToLibrary.mockReset();
     apiMocks.uninstallDownloadedMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
@@ -78,7 +134,19 @@ describe('ModLibraryOverlay', () => {
     apiMocks.getEnvironments.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
-    apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
+    apiMocks.searchThunderstore.mockImplementation(async (_gameId, query, runtime) => {
+      if (query === 'S1API_Forked') {
+        return { packages: [makeThunderstorePackage('S1API_Forked', '1.1.0', runtime)] };
+      }
+      if (query === 'MLVScan') {
+        return { packages: [makeThunderstorePackage('MLVScan', '1.0.0', runtime)] };
+      }
+      return { packages: [] };
+    });
+    apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
+    apiMocks.getNexusModsLatestUpdated.mockResolvedValue({ mods: [] });
+    apiMocks.getNexusModsTrending.mockResolvedValue({ mods: [] });
+    apiMocks.getNexusModsLatestAdded.mockResolvedValue({ mods: [] });
     apiMocks.downloadThunderstoreToLibrary.mockResolvedValue({ success: true });
     apiMocks.uninstallDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
@@ -125,14 +193,47 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay();
 
     expect(await screen.findByText('S1API')).toBeTruthy();
-    expect((await screen.findAllByText('v1.0.0')).length).toBeGreaterThan(0);
 
     await waitFor(() => {
-      expect(screen.getAllByText('Update available').length).toBeGreaterThan(0);
+      expect(screen.getByRole('button', { name: /S1API/i })).toHaveTextContent('Update');
     });
+  });
+
+  it('shows thunderstore search results without auto-selecting the first result', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+    apiMocks.searchThunderstore.mockImplementation(async (_gameId, query, runtime) => {
+      if (query === 'map') {
+        return {
+          packages: [makeThunderstorePackage('MapTools', '1.2.0', runtime, 'Tester')],
+        };
+      }
+      if (query === 'S1API_Forked') {
+        return { packages: [makeThunderstorePackage('S1API_Forked', '1.1.0', runtime)] };
+      }
+      if (query === 'MLVScan') {
+        return { packages: [makeThunderstorePackage('MLVScan', '1.0.0', runtime)] };
+      }
+      return { packages: [] };
+    });
+
+    renderLibraryOverlay({ libraryTab: 'discover' });
+
+    fireEvent.change(screen.getByPlaceholderText('Search or browse Nexus Mods...'), {
+      target: { value: 'map' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Thunderstore' }));
+    fireEvent.change(screen.getByPlaceholderText('Search or browse Thunderstore mods...'), {
+      target: { value: 'map' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByText('Discover Results')).toBeTruthy();
+    expect(await screen.findByText('MapTools')).toBeTruthy();
+    expect(screen.getByText('1 result(s)')).toBeTruthy();
+    expect(screen.getByText('Select a mod to review details and actions.')).toBeTruthy();
   });
 
   it('shows version, runtime, and update state in downloaded mod rows', async () => {
@@ -156,7 +257,7 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     expect((await screen.findAllByText('Mono Utility')).length).toBeGreaterThan(0);
     expect((await screen.findAllByText('v1.2.3')).length).toBeGreaterThan(0);
@@ -194,7 +295,7 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     expect((await screen.findAllByText('Potentially Malicious')).length).toBeGreaterThan(0);
   });
@@ -254,7 +355,7 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
 
@@ -279,7 +380,7 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     expect(await screen.findByRole('button', { name: 'Install…' })).toBeTruthy();
     expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
@@ -304,7 +405,7 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     expect(await screen.findByRole('button', { name: 'Install…' })).toBeTruthy();
     expect(screen.queryByText('Select a mod to review details and actions.')).toBeNull();
@@ -338,7 +439,7 @@ describe('ModLibraryOverlay', () => {
     });
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     fireEvent.click(await screen.findByRole('button', { name: 'Update and activate' }));
 
@@ -371,12 +472,151 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     fireEvent.click(await screen.findByRole('button', { name: 'Update and activate' }));
 
     expect(await screen.findByText('Mod Update Failed')).toBeTruthy();
     expect(await screen.findByText(/missing Thunderstore or Nexus source metadata/i)).toBeTruthy();
+  });
+
+  it('offers both Mono and IL2CPP environments for same-version Thunderstore runtime siblings', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: 'env-il2cpp',
+        name: 'Main',
+        path: 'C:/envs/main',
+        branch: 'main',
+        runtime: 'IL2CPP',
+        modCount: 0,
+      },
+      {
+        id: 'env-mono',
+        name: 'Alternate',
+        path: 'C:/envs/alternate',
+        branch: 'alternate',
+        runtime: 'Mono',
+        modCount: 0,
+      },
+    ]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: 'scheduletoolbox-il2cpp',
+          displayName: 'ScheduleToolbox',
+          source: 'thunderstore',
+          sourceId: 'Author/ScheduleToolbox-IL2CPP',
+          sourceVersion: '1.2.0-IL2CPP',
+          installedVersion: '1.2.0-IL2CPP',
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'scheduletoolbox-il2cpp' },
+          installedInByRuntime: { IL2CPP: [] },
+          filesByRuntime: { IL2CPP: ['ScheduleToolbox.IL2CPP.dll'] },
+        }),
+        makeEntry({
+          storageId: 'scheduletoolbox-mono',
+          displayName: 'ScheduleToolbox',
+          source: 'thunderstore',
+          sourceId: 'Author/ScheduleToolbox-Mono',
+          sourceVersion: '1.2.0-Mono',
+          installedVersion: '1.2.0-Mono',
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'scheduletoolbox-mono' },
+          installedInByRuntime: { Mono: [] },
+          filesByRuntime: { Mono: ['ScheduleToolbox.Mono.dll'] },
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: 'library' });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install…' }));
+
+    expect(await screen.findByText('2 compatible environments')).toBeTruthy();
+    expect(screen.getByText('Main')).toBeTruthy();
+    expect(screen.getByText('Alternate')).toBeTruthy();
+    expect(screen.getByText('IL2CPP • main')).toBeTruthy();
+    expect(screen.getByText('Mono • alternate')).toBeTruthy();
+  });
+
+  it('treats alternate beta environments as Mono install targets in the library dialog', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: 'env-alt-beta',
+        name: 'Alternate Beta',
+        path: 'C:/envs/alternate-beta',
+        branch: 'alternate-beta',
+        runtime: 'IL2CPP',
+        modCount: 0,
+      },
+    ]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: 'mono-only-storage',
+          displayName: 'Mono Only Mod',
+          source: 'nexusmods',
+          sourceId: '1234',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'mono-only-storage' },
+          installedInByRuntime: { Mono: [] },
+          filesByRuntime: { Mono: ['MonoOnlyMod.dll'] },
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: 'library' });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Install…' }));
+
+    await waitFor(() => {
+      expect(apiMocks.installDownloadedMod).toHaveBeenCalledWith(
+        'mono-only-storage',
+        ['env-alt-beta'],
+      );
+    });
+  });
+
+  it('shows already-installed compatible environments in a read-only install dialog', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: 'env-mono',
+        name: 'Alternate',
+        path: 'C:/envs/alternate',
+        branch: 'alternate',
+        runtime: 'Mono',
+        modCount: 1,
+      },
+    ]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: 'mono-installed-storage',
+          displayName: 'Installed Mono Mod',
+          source: 'nexusmods',
+          sourceId: '5678',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          availableRuntimes: ['Mono'],
+          installedIn: ['env-mono'],
+          storageIdsByRuntime: { Mono: 'mono-installed-storage' },
+          installedInByRuntime: { Mono: ['env-mono'] },
+          filesByRuntime: { Mono: ['InstalledMonoMod.dll'] },
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: 'library' });
+
+    expect(await screen.findByRole('button', { name: 'Install to more…' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Install to more…' }));
+
+    expect(await screen.findByText('This version is already installed in every compatible environment.')).toBeTruthy();
+    expect(screen.getByText('Alternate')).toBeTruthy();
+    expect(screen.getByText('Mono • alternate • already installed')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Already installed' })).toBeDisabled();
   });
 
   it('switches versions from the dropdown menu', async () => {
@@ -418,7 +658,7 @@ describe('ModLibraryOverlay', () => {
       download_url: 'https://example.com/s1api.zip',
     });
 
-    render(<ModLibraryOverlay isOpen={true} onClose={() => {}} />);
+    renderLibraryOverlay({ libraryTab: 'library' });
 
     fireEvent.change(await screen.findByLabelText('Available versions'), {
       target: { value: 'storage-old' },

@@ -770,8 +770,11 @@ export class ApiService {
       query,
     });
 
-    // Transform GraphQL field names to match frontend expectations
-    const transformedMods = mods.map((mod: any) => ({
+    return { mods: this.transformNexusMods(mods) };
+  }
+
+  private static transformNexusMods(mods: any[]): any[] {
+    return mods.map((mod: any) => ({
       mod_id: mod.modId,
       name: mod.name,
       summary: mod.summary,
@@ -779,13 +782,29 @@ export class ApiService {
       thumbnail_url: mod.thumbnailUrl,
       endorsement_count: mod.endorsements,
       mod_downloads: mod.downloads,
+      unique_downloads: mod.downloads,
       version: mod.version,
       author: mod.author || mod.uploader?.name,
       updated_at: mod.updatedAt,
       created_at: mod.createdAt,
+      updated_time: mod.updatedAt,
+      uploaded_time: mod.createdAt,
     }));
+  }
 
-    return { mods: transformedMods };
+  static async getNexusModsLatestUpdated(gameId: string): Promise<{ mods: any[] }> {
+    const mods = await invoke<any[]>('get_nexus_mods_latest_updated', { gameId });
+    return { mods: this.transformNexusMods(mods) };
+  }
+
+  static async getNexusModsTrending(gameId: string): Promise<{ mods: any[] }> {
+    const mods = await invoke<any[]>('get_nexus_mods_trending', { gameId });
+    return { mods: this.transformNexusMods(mods) };
+  }
+
+  static async getNexusModsLatestAdded(gameId: string): Promise<{ mods: any[] }> {
+    const mods = await invoke<any[]>('get_nexus_mods_latest_added', { gameId });
+    return { mods: this.transformNexusMods(mods) };
   }
 
   static async getNexusModsMod(gameId: string, modId: number): Promise<any> {
@@ -841,7 +860,15 @@ export class ApiService {
   static async updateMod(
     environmentId: string,
     modFileName: string
-  ): Promise<{ success: boolean; message?: string; error?: string }> {
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    errorCode?: string;
+    requiresManualDownload?: boolean;
+    recoveryUrl?: string;
+    alreadyUpToDate?: boolean;
+  }> {
     return invoke('update_mod', { environmentId, modFileName });
   }
 
