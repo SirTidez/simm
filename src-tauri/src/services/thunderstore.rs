@@ -217,6 +217,7 @@ impl ThunderStoreService {
         &self,
         package_uuid: &str,
         game_id: Option<&str>,
+        version_uuid: Option<&str>,
     ) -> Result<Vec<u8>> {
         // First get package info to find download URL
         let package = self
@@ -224,14 +225,27 @@ impl ThunderStoreService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Package not found"))?;
 
-        // Get latest version download URL (versions array is directly on package, not under "latest")
-        let download_url = package
+        let versions = package
             .get("versions")
             .and_then(|v| v.as_array())
-            .and_then(|v| v.first())
-            .and_then(|v| v.get("download_url"))
-            .and_then(|u| u.as_str())
             .ok_or_else(|| anyhow::anyhow!("Download URL not found in package versions"))?;
+
+        let selected_version = if let Some(target_version_uuid) = version_uuid {
+            versions.iter().find(|version| {
+                version
+                    .get("uuid4")
+                    .and_then(|value| value.as_str())
+                    == Some(target_version_uuid)
+            })
+        } else {
+            versions.first()
+        }
+        .ok_or_else(|| anyhow::anyhow!("Selected package version was not found"))?;
+
+        let download_url = selected_version
+            .get("download_url")
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Download URL not found in package version"))?;
 
         let response = thunderstore_api::request_url("GET", download_url, None, None)
             .await

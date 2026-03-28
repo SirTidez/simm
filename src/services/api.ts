@@ -780,20 +780,21 @@ export class ApiService {
 
   private static transformNexusMods(mods: any[]): any[] {
     return mods.map((mod: any) => ({
-      mod_id: mod.modId,
+      mod_id: mod.modId ?? mod.mod_id,
       name: mod.name,
       summary: mod.summary,
-      picture_url: mod.pictureUrl,
-      thumbnail_url: mod.thumbnailUrl,
-      endorsement_count: mod.endorsements,
-      mod_downloads: mod.downloads,
-      unique_downloads: mod.downloads,
+      picture_url: mod.pictureUrl ?? mod.picture_url,
+      thumbnail_url: mod.thumbnailUrl ?? mod.thumbnail_url,
+      endorsement_count: mod.endorsements ?? mod.endorsement_count,
+      mod_downloads: mod.downloads ?? mod.mod_downloads,
+      unique_downloads:
+        mod.downloads ?? mod.unique_downloads ?? mod.mod_downloads,
       version: mod.version,
       author: mod.author || mod.uploader?.name,
-      updated_at: mod.updatedAt,
-      created_at: mod.createdAt,
-      updated_time: mod.updatedAt,
-      uploaded_time: mod.createdAt,
+      updated_at: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
+      created_at: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
+      updated_time: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
+      uploaded_time: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
     }));
   }
 
@@ -1255,6 +1256,7 @@ export class ApiService {
     packageUuid: string,
     runtime?: 'IL2CPP' | 'Mono',
     securityOverride?: boolean,
+    versionUuid?: string,
   ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
     const gameId = 'schedule-i';
     const packageInfo = await invoke<any>('get_thunderstore_package', {
@@ -1266,19 +1268,21 @@ export class ApiService {
       throw new Error('Package not found');
     }
 
-    const latestVersion = packageInfo.versions?.[0];
+    const selectedVersion = Array.isArray(packageInfo.versions)
+      ? packageInfo.versions.find((version: any) => version?.uuid4 === versionUuid) || packageInfo.versions[0]
+      : undefined;
     const packageUrl = packageInfo.package_url || '';
     const modName = packageInfo.name || '';
     const owner = packageInfo.owner || '';
-    const versionNumber = latestVersion?.version_number || '';
+    const versionNumber = selectedVersion?.version_number || '';
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
-    const description = latestVersion?.description || packageInfo.latest?.description || '';
-    const iconUrl = latestVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';
+    const description = selectedVersion?.description || packageInfo.latest?.description || '';
+    const iconUrl = selectedVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';
     const downloads = Array.isArray(packageInfo.versions)
       ? packageInfo.versions.reduce((sum: number, version: any) => sum + (version?.downloads || 0), 0)
       : 0;
     const likesOrEndorsements = Number(packageInfo.rating_score || 0);
-    const updatedAt = packageInfo.date_updated || latestVersion?.date_updated || '';
+    const updatedAt = selectedVersion?.date_updated || packageInfo.date_updated || '';
     const tags = Array.isArray(packageInfo.categories) ? packageInfo.categories : [];
 
     const storageCheck = await invoke<any>('find_existing_mod_storage', {
@@ -1292,12 +1296,13 @@ export class ApiService {
 
     const zipPath = await invoke<string>('download_thunderstore_package', {
       packageUuid,
-      gameId
+      gameId,
+      versionUuid: versionUuid ?? null,
     });
 
     return this.storeModArchive(
       zipPath,
-      `${packageUuid}.zip`,
+      `${packageUuid}-${versionNumber || 'latest'}.zip`,
       runtime,
       {
         source: 'thunderstore',

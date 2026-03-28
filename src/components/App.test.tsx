@@ -261,6 +261,33 @@ describe('App', () => {
     expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
   });
 
+  it('marks top-level workspace buttons active when their panel is open', async () => {
+    render(<App />);
+
+    const libraryButton = screen.getByRole('button', { name: 'Mod Library' });
+    const accountsButton = screen.getByRole('button', { name: 'Accounts' });
+    const helpButton = screen.getByRole('button', { name: 'Help' });
+
+    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+    expect(helpButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(libraryButton);
+    expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
+    expect(libraryButton).toHaveAttribute('aria-pressed', 'true');
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(accountsButton);
+    expect(await screen.findByText('Steam Overlay')).toBeTruthy();
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'true');
+    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(helpButton);
+    expect(await screen.findByText('Help Overlay')).toBeTruthy();
+    expect(helpButton).toHaveAttribute('aria-pressed', 'true');
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+  });
+
   it('uses window close for the custom close button', async () => {
     render(<App />);
 

@@ -115,6 +115,10 @@ function AppContent() {
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
   const canGoBack = workspaceStack.length > 1;
+  const isToolbarWorkspaceActive = useCallback(
+    (view: WorkspaceRoute['view']) => activeWorkspace.view === view,
+    [activeWorkspace.view],
+  );
 
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
@@ -874,40 +878,45 @@ function AppContent() {
           <div className="window-toolbar-actions">
             <button
               onClick={() => openLibraryWorkspace()}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('library') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Open Mod Library"
+              aria-pressed={isToolbarWorkspaceActive('library')}
             >
               <i className="fas fa-layer-group"></i>
               Mod Library
             </button>
             <button
               onClick={() => openWorkspace({ view: 'wizard' })}
-              className="btn btn-primary btn-small"
+              className={`btn btn-primary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('wizard') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Download/Import New Game"
+              aria-pressed={isToolbarWorkspaceActive('wizard')}
             >
               <i className="fas fa-plus"></i>
               New Game
             </button>
             <button
               onClick={() => openWorkspace({ view: 'accounts' })}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('accounts') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Manage connected accounts"
+              aria-pressed={isToolbarWorkspaceActive('accounts')}
             >
               <i className="fas fa-user-circle"></i>
               Accounts
             </button>
             <button
               onClick={() => openWorkspace({ view: 'help' })}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('help') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Open help and guides"
+              aria-pressed={isToolbarWorkspaceActive('help')}
             >
               <i className="fas fa-question-circle"></i>
               Help
             </button>
             <button
               onClick={() => openWorkspace({ view: 'settings' })}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('settings') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Open settings"
+              aria-pressed={isToolbarWorkspaceActive('settings')}
             >
               <i className="fas fa-cog"></i>
               Settings

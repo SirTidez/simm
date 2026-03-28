@@ -767,7 +767,7 @@ impl ModUpdateService {
                 let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
                 let bytes = thunderstore_service
-                    .download_package(&package_uuid, Some("schedule-i"))
+                    .download_package(&package_uuid, Some("schedule-i"), None)
                     .await
                     .map_err(|error| {
                         let message = format!("Failed to download Thunderstore update: {}", error);

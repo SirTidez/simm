@@ -50,6 +50,7 @@ pub async fn download_thunderstore_package(
     app: AppHandle,
     package_uuid: String,
     game_id: Option<String>,
+    version_uuid: Option<String>,
 ) -> Result<String, String> {
     let service = get_thunderstore_service(db.inner().clone()).await?;
     let label = service
@@ -74,7 +75,7 @@ pub async fn download_thunderstore_package(
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
 
     let bytes = service
-        .download_package(&package_uuid, game_id.as_deref())
+        .download_package(&package_uuid, game_id.as_deref(), version_uuid.as_deref())
         .await
         .map_err(|e| {
             let _ = crate::services::tracked_downloads::emit(

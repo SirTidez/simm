@@ -14,9 +14,12 @@ const apiMocks = vi.hoisted(() => ({
   downloadMLVScanToLibrary: vi.fn(),
   searchThunderstore: vi.fn(),
   searchNexusMods: vi.fn(),
+  getNexusOAuthStatus: vi.fn(),
+  getNexusModsModFiles: vi.fn(),
   getNexusModsLatestUpdated: vi.fn(),
   getNexusModsTrending: vi.fn(),
   getNexusModsLatestAdded: vi.fn(),
+  downloadNexusModToLibrary: vi.fn(),
   downloadThunderstoreToLibrary: vi.fn(),
   uninstallDownloadedMod: vi.fn(),
   installDownloadedMod: vi.fn(),
@@ -87,14 +90,16 @@ function makeThunderstorePackage(
 
 function renderLibraryOverlay({
   libraryTab,
+  navigationState,
 }: {
   libraryTab?: 'discover' | 'library' | 'updates';
+  navigationState?: Record<string, unknown>;
 } = {}) {
   return render(
     <ModLibraryOverlay
       isOpen={true}
       onClose={() => {}}
-      navigationState={libraryTab ? { libraryTab } : undefined}
+      navigationState={navigationState ?? (libraryTab ? { libraryTab } : undefined)}
     />,
   );
 }
@@ -119,9 +124,12 @@ describe('ModLibraryOverlay', () => {
     apiMocks.downloadMLVScanToLibrary.mockReset();
     apiMocks.searchThunderstore.mockReset();
     apiMocks.searchNexusMods.mockReset();
+    apiMocks.getNexusOAuthStatus.mockReset();
+    apiMocks.getNexusModsModFiles.mockReset();
     apiMocks.getNexusModsLatestUpdated.mockReset();
     apiMocks.getNexusModsTrending.mockReset();
     apiMocks.getNexusModsLatestAdded.mockReset();
+    apiMocks.downloadNexusModToLibrary.mockReset();
     apiMocks.downloadThunderstoreToLibrary.mockReset();
     apiMocks.uninstallDownloadedMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
@@ -144,9 +152,21 @@ describe('ModLibraryOverlay', () => {
       return { packages: [] };
     });
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
+    apiMocks.getNexusOAuthStatus.mockResolvedValue({
+      connected: true,
+      account: {
+        canDirectDownload: true,
+        requiresSiteConfirmation: false,
+      },
+    });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([]);
     apiMocks.getNexusModsLatestUpdated.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsTrending.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsLatestAdded.mockResolvedValue({ mods: [] });
+    apiMocks.downloadNexusModToLibrary.mockResolvedValue({
+      success: true,
+      storageId: 'downloaded-storage',
+    });
     apiMocks.downloadThunderstoreToLibrary.mockResolvedValue({ success: true });
     apiMocks.uninstallDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
@@ -234,6 +254,286 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText('MapTools')).toBeTruthy();
     expect(screen.getByText('1 result(s)')).toBeTruthy();
     expect(screen.getByText('Select a mod to review details and actions.')).toBeTruthy();
+    expect(screen.getByText('Updated Jan 1, 2025')).toBeTruthy();
+  });
+
+  it('shows the Thunderstore updated date when package data uses camelCase fields', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showSearchResults: true,
+        searchResults: [
+          {
+            key: 'tester::maptools',
+            name: 'MapTools',
+            owner: 'Tester',
+            packageUrl: 'https://thunderstore.io/c/schedule-i/p/Tester/MapTools/',
+            packagesByRuntime: {
+              Mono: {
+                ...makeThunderstorePackage('MapTools', '1.2.0', 'Mono', 'Tester'),
+                date_updated: '',
+                date_created: '',
+                dateUpdated: '2025-01-10T12:00:00Z',
+                versions: [
+                  {
+                    ...makeThunderstorePackage('MapTools', '1.2.0', 'Mono', 'Tester').versions[0],
+                    date_updated: '',
+                    date_created: '',
+                    dateUpdated: '2025-01-10T12:00:00Z',
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        activeModView: {
+          id: 'tester::maptools',
+          name: 'MapTools',
+          source: 'thunderstore',
+          author: 'Tester',
+          summary: 'A mapping helper.',
+          kind: 'thunderstore',
+        },
+      },
+    });
+
+    expect(await screen.findByText('Jan 10, 2025')).toBeTruthy();
+    expect(screen.getAllByText('Updated Jan 10, 2025').length).toBeGreaterThan(0);
+  });
+
+  it('downloads the newest runtime-compatible Nexus file instead of the first matching file', async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValueOnce({ downloaded: [] });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 100,
+        name: 'Pack Rat Mono 1.0.0',
+        file_name: 'PackRat-mono-1.0.0.zip',
+        version: '1.0.0',
+        mod_version: '1.0.0',
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+      {
+        file_id: 200,
+        name: 'Pack Rat Mono 1.0.7r2',
+        file_name: 'PackRat-mono-1.0.7r2.zip',
+        version: '1.0.7r2',
+        mod_version: '1.0.7r2',
+        is_primary: false,
+        uploaded_timestamp: 2000,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.7r2',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.7r2',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Download selected version' }),
+    );
+
+    expect(screen.getByText('Updated Jan 1, 2025')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+        1629,
+        200,
+        'Mono',
+      );
+    });
+  });
+
+  it('downloads the selected Thunderstore version from the inspector', async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValueOnce({ downloaded: [] });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showSearchResults: true,
+        searchResults: [
+          {
+            key: 'ifBars/ScheduleToolbox',
+            name: 'ScheduleToolbox',
+            owner: 'ifBars',
+            packageUrl: 'https://thunderstore.io/c/schedule-i/p/ifBars/ScheduleToolbox/',
+            packagesByRuntime: {
+              Mono: {
+                ...makeThunderstorePackage('ScheduleToolbox', '1.2.0', 'Mono'),
+                versions: [
+                  {
+                    name: 'ScheduleToolbox',
+                    full_name: 'ifBars-ScheduleToolbox',
+                    date_created: '2025-01-01T00:00:00Z',
+                    date_updated: '2025-01-10T00:00:00Z',
+                    uuid4: 'mono-1-2-0',
+                    version_number: '1.2.0',
+                    dependencies: [],
+                    download_url: 'https://example.com/toolbox-1.2.0.zip',
+                    downloads: 220,
+                    file_size: 1024,
+                    description: 'Current stable release',
+                    icon: 'https://example.com/toolbox.png',
+                  },
+                  {
+                    name: 'ScheduleToolbox',
+                    full_name: 'ifBars-ScheduleToolbox',
+                    date_created: '2024-12-01T00:00:00Z',
+                    date_updated: '2024-12-08T00:00:00Z',
+                    uuid4: 'mono-1-1-0',
+                    version_number: '1.1.0',
+                    dependencies: [],
+                    download_url: 'https://example.com/toolbox-1.1.0.zip',
+                    downloads: 140,
+                    file_size: 900,
+                    description: 'Older compatible build',
+                    icon: 'https://example.com/toolbox.png',
+                  },
+                ],
+              },
+            },
+          },
+        ],
+        activeModView: {
+          id: 'ifBars/ScheduleToolbox',
+          name: 'ScheduleToolbox',
+          source: 'thunderstore',
+          author: 'ifBars',
+          summary: 'A useful toolbox.',
+          iconUrl: 'https://example.com/toolbox.png',
+          latestVersion: '1.2.0',
+          kind: 'thunderstore',
+        },
+      },
+    });
+
+    fireEvent.click(await screen.findByRole('option', { name: /v1\.1\.0/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download selected version' }));
+
+    await waitFor(() => {
+      expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+        'ScheduleToolbox-Mono-pkg',
+        'Mono',
+        undefined,
+        'mono-1-1-0',
+      );
+    });
+  });
+
+  it('downloads the selected Nexus file from the inspector', async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValueOnce({ downloaded: [] });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 301,
+        name: 'Pack Rat Mono 1.0.0',
+        file_name: 'PackRat-mono-1.0.0.zip',
+        version: '1.0.0',
+        mod_version: '1.0.0',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+      {
+        file_id: 401,
+        name: 'Pack Rat Mono 1.0.7r2',
+        file_name: 'PackRat-mono-1.0.7r2.zip',
+        version: '1.0.7r2',
+        mod_version: '1.0.7r2',
+        category_name: 'MAIN',
+        is_primary: false,
+        uploaded_timestamp: 2000,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.7r2',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.7r2',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    fireEvent.click(await screen.findByRole('option', { name: /v1\.0\.0/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download selected version' }));
+
+    await waitFor(() => {
+      expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+        1629,
+        301,
+        'Mono',
+      );
+    });
   });
 
   it('shows version, runtime, and update state in downloaded mod rows', async () => {

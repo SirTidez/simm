@@ -103,6 +103,36 @@ describe('ApiService', () => {
     );
   });
 
+  it('searchNexusMods preserves legacy snake_case date fields', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        mod_id: 2,
+        name: 'Legacy Mod',
+        summary: 'Summary',
+        picture_url: 'legacy-pic.png',
+        thumbnail_url: 'legacy-thumb.png',
+        endorsement_count: 8,
+        mod_downloads: 21,
+        unique_downloads: 18,
+        version: '2.0.0',
+        author: 'LegacyTester',
+        updated_time: '2025-05-06T12:00:00Z',
+        uploaded_time: '2025-04-01T12:00:00Z',
+      },
+    ]);
+
+    const result = await ApiService.searchNexusMods('3164500', 'legacy');
+    expect(result.mods[0]).toEqual(
+      expect.objectContaining({
+        mod_id: 2,
+        updated_at: '2025-05-06T12:00:00Z',
+        updated_time: '2025-05-06T12:00:00Z',
+        created_at: '2025-04-01T12:00:00Z',
+        uploaded_time: '2025-04-01T12:00:00Z',
+      }),
+    );
+  });
+
   it('uploadMod forwards detectedRuntime metadata', async () => {
     invokeMock.mockResolvedValueOnce({ success: true });
 
