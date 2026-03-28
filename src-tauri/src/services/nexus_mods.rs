@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -206,7 +207,32 @@ impl NexusModsService {
             variants.push(normalized_separators);
         }
 
+        let collapsed = original.replace([' ', '_', '-'], "");
+        if !collapsed.is_empty() && !variants.iter().any(|v| v.eq_ignore_ascii_case(&collapsed)) {
+            variants.push(collapsed);
+        }
+
         variants
+    }
+
+    fn normalize_search_text(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| !matches!(ch, ' ' | '_' | '-'))
+            .flat_map(|ch| ch.to_lowercase())
+            .collect::<String>()
+    }
+
+    fn matches_query_locally(mod_entry: &Value, query: &str) -> bool {
+        let normalized_query = Self::normalize_search_text(query);
+        if normalized_query.is_empty() {
+            return true;
+        }
+
+        ["name", "summary", "author"]
+            .iter()
+            .filter_map(|field| mod_entry.get(*field).and_then(|value| value.as_str()))
+            .any(|value| Self::normalize_search_text(value).contains(&normalized_query))
     }
 
     /// Get list of all games supported by NexusMods
@@ -288,6 +314,9 @@ impl NexusModsService {
         "#;
 
         let search_variants = Self::normalize_search_query_variants(query);
+        let mut merged = Vec::new();
+        let mut seen_ids = HashSet::new();
+
         for variant in search_variants {
             let data = self
                 .graphql_request(
@@ -310,12 +339,22 @@ impl NexusModsService {
                 .cloned()
                 .unwrap_or_default();
 
-            if !mods.is_empty() {
-                return Ok(mods);
+            for mod_entry in mods {
+                let key = mod_entry
+                    .get("modId")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| mod_entry.to_string());
+                if seen_ids.insert(key) {
+                    merged.push(mod_entry);
+                }
             }
         }
 
-        Ok(Vec::new())
+        Ok(merged
+            .into_iter()
+            .filter(|mod_entry| Self::matches_query_locally(mod_entry, query))
+            .collect())
     }
 
     /// Get latest added mods using GraphQL API v2
@@ -688,6 +727,7 @@ impl NexusModsService {
         Ok(downloaded.bytes)
     }
 }
+
 impl Default for NexusModsService {
     fn default() -> Self {
         Self::new()

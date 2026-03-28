@@ -8,6 +8,26 @@ use tokio::sync::Mutex as AsyncMutex;
 static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 
+fn sanitize_temp_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "selected-version".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
     let _ = db;
     let mut service = THUNDERSTORE_SERVICE.lock().await;
@@ -50,6 +70,7 @@ pub async fn download_thunderstore_package(
     app: AppHandle,
     package_uuid: String,
     game_id: Option<String>,
+    version_uuid: Option<String>,
 ) -> Result<String, String> {
     let service = get_thunderstore_service(db.inner().clone()).await?;
     let label = service
@@ -74,7 +95,7 @@ pub async fn download_thunderstore_package(
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
 
     let bytes = service
-        .download_package(&package_uuid, game_id.as_deref())
+        .download_package(&package_uuid, game_id.as_deref(), version_uuid.as_deref())
         .await
         .map_err(|e| {
             let _ = crate::services::tracked_downloads::emit(
@@ -90,7 +111,12 @@ pub async fn download_thunderstore_package(
 
     // Save to temp file
     let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(format!("thunderstore-{}.zip", package_uuid));
+    let version_suffix = version_uuid
+        .as_deref()
+        .map(sanitize_temp_component)
+        .map(|value| format!("-{}", value))
+        .unwrap_or_default();
+    let temp_file = temp_dir.join(format!("thunderstore-{}{}.zip", package_uuid, version_suffix));
     tokio::fs::write(&temp_file, bytes).await.map_err(|e| {
         let message = format!("Failed to save downloaded file: {}", e);
         let _ = crate::services::tracked_downloads::emit(

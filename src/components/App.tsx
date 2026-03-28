@@ -7,24 +7,62 @@ import { EnvironmentList, type WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
 import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
-import { ModLibraryOverlay } from './ModLibraryOverlay';
+import { ModLibraryOverlay, type ModLibraryNavigationState } from './ModLibraryOverlay';
 import { Settings } from './Settings';
 import { SteamAccountOverlay } from './SteamAccountOverlay';
 import { HelpOverlay } from './HelpOverlay';
 import { WelcomeOverlay } from './WelcomeOverlay';
-import { ModsOverlay } from './ModsOverlay';
+import { ModsOverlay, type ModsOverlayNavigationState } from './ModsOverlay';
 import { PluginsOverlay } from './PluginsOverlay';
 import { UserLibsOverlay } from './UserLibsOverlay';
 import { LogsOverlay } from './LogsOverlay';
 import { ConfigurationOverlay } from './ConfigurationOverlay';
+import {
+  SecurityScanReportPage,
+  type SecurityReportWorkspaceRequest,
+} from './SecurityScanReportPage';
+import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
 import { DownloadStatusStoreProvider } from '../stores/downloadStatusStore';
-import { SettingsStoreProvider } from '../stores/settingsStore';
+import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
+import { logger } from '../services/logger';
+import type {
+  AppUpdatePreferences,
+  AppUpdateStatus,
+} from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DownloadsPanel } from './DownloadsPanel';
+
+declare const __APP_VERSION__: string;
+const APP_VERSION = __APP_VERSION__;
+const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const normalizeVersionCore = (value: string) => {
+  const match = value.trim().match(/\d+(?:\.\d+)*/i);
+  return match?.[0] ?? value.trim();
+};
+
+const compareVersionCores = (left: string, right: string) => {
+  const leftParts = normalizeVersionCore(left).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
+  const rightParts = normalizeVersionCore(right).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
+  const maxLength = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftValue = leftParts[index] ?? 0;
+    const rightValue = rightParts[index] ?? 0;
+    if (leftValue > rightValue) {
+      return 1;
+    }
+    if (leftValue < rightValue) {
+      return -1;
+    }
+  }
+
+  return 0;
+};
 
 function AppContent() {
   type PendingNexusRuntimeSelection = {
@@ -36,10 +74,40 @@ function AppContent() {
     fileName?: string;
     version?: string;
   };
+  type LibraryFocusRequest = {
+    storageId: string;
+    modTag: string;
+    requestId: number;
+  };
+  type WorkspaceEntry = {
+    key: string;
+    route: WorkspaceRoute;
+    libraryState?: ModLibraryNavigationState;
+    modsState?: ModsOverlayNavigationState;
+    libraryFocusRequest?: LibraryFocusRequest | null;
+    securityReportState?: SecurityReportWorkspaceRequest;
+  };
+  type AppUpdateState =
+    | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
+    | { status: 'available'; result: AppUpdateStatus };
 
   const appWindow = getCurrentWindow();
   const { environments } = useEnvironmentStore();
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceRoute>({ view: 'home' });
+  const { settings, updateSettings } = useSettingsStore();
+  const workspaceIdRef = useRef(0);
+  const libraryFocusRequestIdRef = useRef(0);
+  const lastLibraryNavigationStateRef = useRef<ModLibraryNavigationState | undefined>(undefined);
+  const createWorkspaceEntry = useCallback((route: WorkspaceRoute, seed?: Partial<WorkspaceEntry>): WorkspaceEntry => ({
+    key: `workspace-${workspaceIdRef.current++}`,
+    route,
+    libraryState: seed?.libraryState,
+    modsState: seed?.modsState,
+    libraryFocusRequest: seed?.libraryFocusRequest ?? null,
+    securityReportState: seed?.securityReportState,
+  }), []);
+  const [workspaceStack, setWorkspaceStack] = useState<WorkspaceEntry[]>(() => [
+    createWorkspaceEntry({ view: 'home' }),
+  ]);
   const [showStartupSplash, setShowStartupSplash] = useState(true);
   const [isMaximized, setIsMaximized] = useState(false);
   const [lastEnvironmentWorkspaceView, setLastEnvironmentWorkspaceView] = useState<'mods' | 'plugins' | 'userLibs' | 'logs' | 'config'>('mods');
@@ -49,41 +117,134 @@ function AppContent() {
   const inFlightNxmCallbackRef = useRef<string | null>(null);
   const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
-  const [backgroundWorkspace, setBackgroundWorkspace] = useState<WorkspaceRoute | null>(null);
-  const [libraryFocusRequest, setLibraryFocusRequest] = useState<{ storageId: string; modTag: string; requestId: number } | null>(null);
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
+  const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
+  const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
+  const hasSettings = settings !== null;
+  const activeEntry = workspaceStack[workspaceStack.length - 1];
+  const activeWorkspace = activeEntry.route;
+  const canGoBack = workspaceStack.length > 1;
+  const isToolbarWorkspaceActive = useCallback(
+    (view: WorkspaceRoute['view']) => activeWorkspace.view === view,
+    [activeWorkspace.view],
+  );
 
-  const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
-    setBackgroundWorkspace(null);
-    setLibraryFocusRequest(null);
-    setActiveWorkspace(workspace);
+  const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
+    if (a.view !== b.view) {
+      return false;
+    }
+    if (a.view === 'securityReport' && b.view === 'securityReport') {
+      return false;
+    }
+    if ('environmentId' in a || 'environmentId' in b) {
+      return 'environmentId' in a
+        && 'environmentId' in b
+        && a.environmentId === b.environmentId
+        && a.view === b.view
+        && ('initialTab' in a ? a.initialTab : undefined) === ('initialTab' in b ? b.initialTab : undefined);
+    }
+    if (a.view === 'library' && b.view === 'library') {
+      return a.initialTab === b.initialTab;
+    }
+    return true;
+  }, []);
+
+  const pushWorkspace = useCallback((route: Exclude<WorkspaceRoute, { view: 'home' }>, seed?: Partial<WorkspaceEntry>) => {
+    setWorkspaceStack((previous) => {
+      const current = previous[previous.length - 1];
+      if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
+        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+          return previous;
+        }
+        return [
+          ...previous.slice(0, -1),
+          {
+            ...current,
+            route,
+            libraryState: seed?.libraryState ?? current.libraryState,
+            modsState: seed?.modsState ?? current.modsState,
+            securityReportState: seed?.securityReportState ?? current.securityReportState,
+          },
+        ];
+      }
+      return [...previous, createWorkspaceEntry(route, seed)];
+    });
+  }, [createWorkspaceEntry, isSameWorkspaceRoute]);
+
+  const popWorkspace = useCallback(() => {
+    setWorkspaceStack((previous) => {
+      if (previous.length <= 1) {
+        return previous;
+      }
+      return previous.slice(0, -1);
+    });
   }, []);
 
   const goHome = useCallback(() => {
-    setBackgroundWorkspace(null);
-    setLibraryFocusRequest(null);
-    setActiveWorkspace({ view: 'home' });
+    setWorkspaceStack((previous) => {
+      const homeEntry = previous.find((entry) => entry.route.view === 'home');
+      return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
+    });
+  }, [createWorkspaceEntry]);
+
+  const updateWorkspaceEntry = useCallback((key: string, updater: (entry: WorkspaceEntry) => WorkspaceEntry) => {
+    setWorkspaceStack((previous) => previous.map((entry) => entry.key === key ? updater(entry) : entry));
   }, []);
 
+  const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
+    pushWorkspace(workspace);
+  }, [pushWorkspace]);
+
+  const openSecurityReportWorkspace = useCallback((reportState: SecurityReportWorkspaceRequest) => {
+    pushWorkspace(
+      { view: 'securityReport' },
+      {
+        securityReportState: reportState,
+      },
+    );
+  }, [pushWorkspace]);
+
+  const openLibraryWorkspace = useCallback((options?: {
+    initialTab?: 'discover' | 'library' | 'updates';
+    navigationState?: Partial<ModLibraryNavigationState>;
+    focusRequest?: LibraryFocusRequest | null;
+  }) => {
+    const lastLibraryEntry = [...workspaceStack].reverse().find((entry) => entry.route.view === 'library');
+    const persistedLibraryState = lastLibraryNavigationStateRef.current;
+    const mergedNavigationState = (
+      lastLibraryEntry?.libraryState
+      || persistedLibraryState
+      || options?.navigationState
+      || options?.initialTab
+    ) ? {
+      ...(lastLibraryEntry?.libraryState ?? persistedLibraryState ?? {}),
+      ...(options?.initialTab ? { libraryTab: options.initialTab } : {}),
+      ...(options?.navigationState ?? {}),
+    } : undefined;
+
+    lastLibraryNavigationStateRef.current = mergedNavigationState;
+
+    pushWorkspace(
+      options?.initialTab ? { view: 'library', initialTab: options.initialTab } : { view: 'library' },
+      {
+        libraryState: mergedNavigationState,
+        libraryFocusRequest: options?.focusRequest ?? null,
+      },
+    );
+  }, [pushWorkspace, workspaceStack]);
+
   const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
-    setBackgroundWorkspace(activeWorkspace);
-    setLibraryFocusRequest((previous) => ({
-      storageId: focus.storageId,
-      modTag: focus.modTag,
-      requestId: (previous?.requestId ?? 0) + 1,
-    }));
-    setActiveWorkspace({ view: 'library' });
-  }, [activeWorkspace]);
-
-  const closeLibrary = useCallback(() => {
-    if (backgroundWorkspace) {
-      setActiveWorkspace(backgroundWorkspace);
-      setBackgroundWorkspace(null);
-      setLibraryFocusRequest(null);
-      return;
-    }
-
-    goHome();
-  }, [backgroundWorkspace, goHome]);
+    const requestId = ++libraryFocusRequestIdRef.current;
+    openLibraryWorkspace({
+      initialTab: 'library',
+      navigationState: { libraryTab: 'library' },
+      focusRequest: {
+        storageId: focus.storageId,
+        modTag: focus.modTag,
+        requestId,
+      },
+    });
+  }, [openLibraryWorkspace]);
 
   const getEnvironmentById = useCallback((environmentId: string) => {
     return environments.find((env) => env.id === environmentId) ?? null;
@@ -102,18 +263,32 @@ function AppContent() {
   }, [activeWorkspace.view]);
 
   const handleWorkspaceEnvironmentSelect = useCallback((environmentId: string) => {
-    setActiveWorkspace((previous) => {
-      if (!('environmentId' in previous)) {
-        return {
-          view: lastEnvironmentWorkspaceView,
-          environmentId,
-        };
+    setWorkspaceStack((previous) => {
+      const next = [...previous];
+      const current = next[next.length - 1];
+      if (!current) {
+        return previous;
       }
 
-      return {
-        ...previous,
-        environmentId
+      if (!('environmentId' in current.route)) {
+        next[next.length - 1] = {
+          ...current,
+          route: {
+            view: lastEnvironmentWorkspaceView,
+            environmentId,
+          },
+        };
+        return next;
+      }
+
+      next[next.length - 1] = {
+        ...current,
+        route: {
+          ...current.route,
+          environmentId,
+        },
       };
+      return next;
     });
   }, [lastEnvironmentWorkspaceView]);
 
@@ -130,14 +305,14 @@ function AppContent() {
       try {
         const wasCreated = await invoke<boolean>('was_simm_directory_just_created');
         if (wasCreated) {
-          setActiveWorkspace({ view: 'welcome' });
+          pushWorkspace({ view: 'welcome' });
         }
       } catch (error) {
         console.error('Failed to check if SIMM directory was created:', error);
       }
     };
     checkWelcome();
-  }, []);
+  }, [pushWorkspace]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -193,6 +368,152 @@ function AppContent() {
     return () => window.clearTimeout(timer);
   }, [appNotice]);
 
+  useEffect(() => {
+    appUpdateSettingsRef.current = settings?.appUpdate ?? null;
+  }, [settings?.appUpdate]);
+
+  const persistAppUpdateSettings = useCallback(async (updates: Partial<AppUpdatePreferences>) => {
+    const mergedSettings = {
+      ...(appUpdateSettingsRef.current ?? {}),
+      ...updates,
+    };
+    appUpdateSettingsRef.current = mergedSettings;
+    await updateSettings({
+      appUpdate: mergedSettings,
+    });
+  }, [updateSettings]);
+
+  const openAppUpdateUrl = useCallback((url?: string | null) => {
+    const rawUrl = url?.trim();
+    if (!rawUrl) {
+      return;
+    }
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        logger.warn('Refusing to open non-http app update URL', rawUrl);
+        return;
+      }
+      window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
+    } catch {
+      logger.warn('Refusing to open invalid app update URL', rawUrl);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasSettings || showStartupSplash) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const runAppUpdateCheck = async () => {
+      try {
+        setAppUpdateState((previous) =>
+          previous.status === 'available' ? previous : { status: 'checking', result: null },
+        );
+
+        const result = await ApiService.getAppUpdateStatus(APP_VERSION);
+        if (cancelled) {
+          return;
+        }
+
+        const currentAppUpdateSettings = appUpdateSettingsRef.current ?? {};
+        const expiredSnooze =
+          !!currentAppUpdateSettings.snoozedUntil
+          && Number.isFinite(Date.parse(currentAppUpdateSettings.snoozedUntil))
+          && Date.parse(currentAppUpdateSettings.snoozedUntil) <= Date.now();
+        const skippedVersionNormalized =
+          currentAppUpdateSettings.skippedVersionNormalized
+            && result.latestVersionNormalized
+            && currentAppUpdateSettings.skippedVersionNormalized !== result.latestVersionNormalized
+            && compareVersionCores(
+              currentAppUpdateSettings.skippedVersionNormalized,
+              result.latestVersionNormalized,
+            ) < 0
+            ? null
+            : currentAppUpdateSettings.skippedVersionNormalized ?? null;
+
+        const nextSettings = {
+          lastCheckedAt: result.checkedAt,
+          lastSeenVersionRaw: result.latestVersionRaw,
+          lastSeenVersionNormalized: result.latestVersionNormalized,
+          lastResolvedUrl: result.targetUrl || result.fallbackFilesUrl,
+          snoozedUntil: expiredSnooze ? null : (currentAppUpdateSettings.snoozedUntil ?? null),
+          skippedVersionNormalized,
+        };
+
+        const previousSerialized = JSON.stringify({
+          lastCheckedAt: currentAppUpdateSettings.lastCheckedAt ?? null,
+          lastSeenVersionRaw: currentAppUpdateSettings.lastSeenVersionRaw ?? null,
+          lastSeenVersionNormalized: currentAppUpdateSettings.lastSeenVersionNormalized ?? null,
+          lastResolvedUrl: currentAppUpdateSettings.lastResolvedUrl ?? null,
+          snoozedUntil: currentAppUpdateSettings.snoozedUntil ?? null,
+          skippedVersionNormalized: currentAppUpdateSettings.skippedVersionNormalized ?? null,
+        });
+        const nextSerialized = JSON.stringify(nextSettings);
+        if (previousSerialized !== nextSerialized) {
+          void persistAppUpdateSettings(nextSettings).catch((error) => {
+            logger.warn('Failed to persist app update settings', error);
+          });
+        }
+
+        setDismissedAppUpdateVersion((previous) =>
+          previous && previous !== result.latestVersionNormalized ? null : previous,
+        );
+        setAppUpdateState(result.updateAvailable
+          ? { status: 'available', result }
+          : { status: 'upToDate', result: null });
+      } catch (error) {
+        logger.warn('Failed to check for SIMM app updates', error);
+        if (!cancelled) {
+          setAppUpdateState((previous) => (
+            previous.status === 'idle' || previous.status === 'checking'
+              ? { status: 'error', result: null }
+              : previous
+          ));
+        }
+      }
+    };
+
+    void runAppUpdateCheck();
+    const intervalId = window.setInterval(() => {
+      void runAppUpdateCheck();
+    }, APP_UPDATE_CHECK_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [hasSettings, persistAppUpdateSettings, showStartupSplash]);
+
+  const handleSkipAppUpdateVersion = useCallback(() => {
+    if (appUpdateState.status !== 'available') {
+      return;
+    }
+    const latestVersionNormalized = appUpdateState.result.latestVersionNormalized;
+    setDismissedAppUpdateVersion(latestVersionNormalized);
+    void persistAppUpdateSettings({
+      skippedVersionNormalized: latestVersionNormalized,
+      snoozedUntil: null,
+    }).catch((error) => {
+      logger.warn('Failed to persist skipped app update version', error);
+    });
+  }, [appUpdateState, persistAppUpdateSettings]);
+
+  const handleSnoozeAppUpdate = useCallback((days: number) => {
+    if (appUpdateState.status !== 'available') {
+      return;
+    }
+    const snoozedUntil = new Date(Date.now() + (days * 24 * 60 * 60 * 1000)).toISOString();
+    setDismissedAppUpdateVersion(appUpdateState.result.latestVersionNormalized);
+    void persistAppUpdateSettings({
+      snoozedUntil,
+    }).catch((error) => {
+      logger.warn('Failed to persist app update snooze state', error);
+    });
+  }, [appUpdateState, persistAppUpdateSettings]);
+
   const handleNexusOAuthCallback = useCallback(async (callbackUrl: string) => {
     if (!callbackUrl.startsWith('simm://oauth/nexus/callback')) {
       return;
@@ -206,7 +527,7 @@ function AppContent() {
     }
     inFlightNexusCallbackRef.current = callbackUrl;
 
-    setActiveWorkspace({ view: 'accounts' });
+    pushWorkspace({ view: 'accounts' });
 
     try {
       const result = await ApiService.completeNexusOAuthCallback(callbackUrl);
@@ -437,18 +758,43 @@ function AppContent() {
     }
   };
 
-  const renderWorkspacePanelFor = useCallback((workspace: WorkspaceRoute, onCloseHandler: () => void) => {
+  const renderWorkspacePanelFor = useCallback((entry: WorkspaceEntry, onCloseHandler: () => void) => {
+    const workspace = entry.route;
     switch (workspace.view) {
       case 'library':
         return (
           <ModLibraryOverlay
             isOpen={true}
             onClose={onCloseHandler}
-            focusStorageId={libraryFocusRequest?.storageId ?? null}
-            focusRequestId={libraryFocusRequest?.requestId}
-            focusModTag={libraryFocusRequest?.modTag ?? null}
+            focusStorageId={entry.libraryFocusRequest?.storageId ?? null}
+            focusRequestId={entry.libraryFocusRequest?.requestId}
+            focusModTag={entry.libraryFocusRequest?.modTag ?? null}
+            navigationState={entry.libraryState ?? (workspace.initialTab ? {
+              libraryTab: workspace.initialTab,
+            } : undefined)}
+            onNavigationStateChange={(navigationState) => {
+              lastLibraryNavigationStateRef.current = navigationState;
+              updateWorkspaceEntry(entry.key, (current) => ({
+                ...current,
+                libraryState: navigationState,
+              }));
+            }}
+            onOpenAccounts={() => pushWorkspace({ view: 'accounts' })}
+            onOpenSecurityReport={openSecurityReportWorkspace}
           />
         );
+      case 'securityReport':
+        return entry.securityReportState ? (
+          <SecurityScanReportPage
+            title={entry.securityReportState.title}
+            report={entry.securityReportState.report}
+            reportOptions={entry.securityReportState.reportOptions}
+            confirmLabel={entry.securityReportState.confirmLabel}
+            onConfirm={entry.securityReportState.onConfirm}
+            onDismiss={entry.securityReportState.onDismiss}
+            onReturn={onCloseHandler}
+          />
+        ) : null;
       case 'wizard':
         return <EnvironmentCreationWizard onClose={onCloseHandler} />;
       case 'accounts':
@@ -480,9 +826,19 @@ function AppContent() {
             isOpen={true}
             onClose={onCloseHandler}
             environmentId={workspace.environmentId}
-            onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
-            onOpenModLibrary={() => openWorkspace({ view: 'library' })}
-            onOpenConfig={() => openWorkspace({ view: 'config', environmentId: workspace.environmentId })}
+            navigationState={entry.modsState ?? (workspace.initialTab ? {
+              modsTab: workspace.initialTab,
+            } : undefined)}
+            onNavigationStateChange={(navigationState) => {
+              updateWorkspaceEntry(entry.key, (current) => ({
+                ...current,
+                modsState: navigationState,
+              }));
+            }}
+            onOpenAccounts={() => pushWorkspace({ view: 'accounts' })}
+            onOpenModLibrary={() => openLibraryWorkspace()}
+            onOpenConfig={() => pushWorkspace({ view: 'config', environmentId: workspace.environmentId })}
+            onOpenSecurityReport={openSecurityReportWorkspace}
             onModUpdatesChecked={(count) => {
               window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
             }}
@@ -527,25 +883,31 @@ function AppContent() {
       default:
         return null;
     }
-  }, [getEnvironmentById, libraryFocusRequest?.modTag, libraryFocusRequest?.requestId, libraryFocusRequest?.storageId, openLibraryFromLogs, openWorkspace]);
+  }, [getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, pushWorkspace, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
-    const activeCloseHandler = activeWorkspace.view === 'library' ? closeLibrary : goHome;
-    const activePanel = renderWorkspacePanelFor(activeWorkspace, activeCloseHandler);
-
-    if (activeWorkspace.view === 'library' && backgroundWorkspace) {
-      return (
-        <>
-          <div className="app-workspace-background">
-            {renderWorkspacePanelFor(backgroundWorkspace, goHome)}
-          </div>
-          {activePanel}
-        </>
-      );
-    }
-
-    return activePanel;
+    return renderWorkspacePanelFor(activeEntry, popWorkspace);
   };
+
+  const appUpdateTargetUrl = appUpdateState.status === 'available'
+    ? (appUpdateState.result.targetUrl || appUpdateState.result.fallbackFilesUrl)
+    : null;
+  const appUpdatePreferences = settings?.appUpdate ?? null;
+  const appUpdateSnoozedUntil = appUpdatePreferences?.snoozedUntil
+    && Number.isFinite(Date.parse(appUpdatePreferences.snoozedUntil))
+    ? Date.parse(appUpdatePreferences.snoozedUntil)
+    : null;
+  const isAppUpdateSnoozed = !!appUpdateTargetUrl
+    && appUpdateSnoozedUntil !== null
+    && appUpdateSnoozedUntil > Date.now();
+  const isAppUpdateSkipped = appUpdateState.status === 'available'
+    && appUpdatePreferences?.skippedVersionNormalized === appUpdateState.result.latestVersionNormalized;
+  const isAppUpdateDismissedForSession = appUpdateState.status === 'available'
+    && dismissedAppUpdateVersion === appUpdateState.result.latestVersionNormalized;
+  const showAppUpdateToast = appUpdateState.status === 'available'
+    && !isAppUpdateSnoozed
+    && !isAppUpdateSkipped
+    && !isAppUpdateDismissedForSession;
 
   return (
     <div className="app app-desktop-shell">
@@ -563,41 +925,46 @@ function AppContent() {
 
           <div className="window-toolbar-actions">
             <button
-              onClick={() => openWorkspace({ view: 'library' })}
-              className="btn btn-secondary btn-small"
+              onClick={() => openLibraryWorkspace()}
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('library') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Open Mod Library"
+              aria-pressed={isToolbarWorkspaceActive('library')}
             >
               <i className="fas fa-layer-group"></i>
               Mod Library
             </button>
             <button
               onClick={() => openWorkspace({ view: 'wizard' })}
-              className="btn btn-primary btn-small"
+              className={`btn btn-primary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('wizard') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Download/Import New Game"
+              aria-pressed={isToolbarWorkspaceActive('wizard')}
             >
               <i className="fas fa-plus"></i>
               New Game
             </button>
             <button
               onClick={() => openWorkspace({ view: 'accounts' })}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('accounts') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Manage connected accounts"
+              aria-pressed={isToolbarWorkspaceActive('accounts')}
             >
               <i className="fas fa-user-circle"></i>
               Accounts
             </button>
             <button
               onClick={() => openWorkspace({ view: 'help' })}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('help') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Open help and guides"
+              aria-pressed={isToolbarWorkspaceActive('help')}
             >
               <i className="fas fa-question-circle"></i>
               Help
             </button>
             <button
               onClick={() => openWorkspace({ view: 'settings' })}
-              className="btn btn-secondary btn-small"
+              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('settings') ? ' app-shell-toolbar-button--active' : ''}`}
               title="Open settings"
+              aria-pressed={isToolbarWorkspaceActive('settings')}
             >
               <i className="fas fa-cog"></i>
               Settings
@@ -646,10 +1013,20 @@ function AppContent() {
                 <aside
                   className="workspace-sidebar"
                 >
-                  <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
-                    <i className="fas fa-arrow-left"></i>
-                    Back to Home
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.65rem' }}>
+                    <button
+                      onClick={popWorkspace}
+                      className="btn btn-secondary app-workspace-home-button"
+                      disabled={!canGoBack}
+                    >
+                      <i className="fas fa-arrow-left"></i>
+                      Back
+                    </button>
+                    <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
+                      <i className="fas fa-house"></i>
+                      Home
+                    </button>
+                  </div>
                   <EnvironmentList
                     compactMode={true}
                     activeWorkspace={activeWorkspace}
@@ -665,8 +1042,28 @@ function AppContent() {
           </div>
         </div>
 
-        <Footer />
+        <Footer
+          onOpenModUpdates={() => openLibraryWorkspace({
+            initialTab: 'updates',
+            navigationState: {
+              libraryTab: 'updates',
+            },
+          })}
+          appUpdateAvailable={appUpdateState.status === 'available'}
+          onOpenAppUpdate={() => openAppUpdateUrl(appUpdateTargetUrl)}
+        />
       </div>
+
+      {showAppUpdateToast && appUpdateState.status === 'available' && (
+        <AppUpdateToast
+          currentVersion={appUpdateState.result.currentVersionRaw}
+          latestVersion={appUpdateState.result.latestVersionRaw}
+          onUpdate={() => openAppUpdateUrl(appUpdateTargetUrl)}
+          onSkip={handleSkipAppUpdateVersion}
+          onSnooze={handleSnoozeAppUpdate}
+          onDismiss={() => setDismissedAppUpdateVersion(appUpdateState.result.latestVersionNormalized)}
+        />
+      )}
 
       {appNotice && (
         <div className="app-notice app-notice--danger" role="alert" aria-live="assertive">

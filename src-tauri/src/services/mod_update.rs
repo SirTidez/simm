@@ -5,6 +5,7 @@ use crate::services::nexus_mods::NexusModsService;
 use crate::services::thunderstore::ThunderStoreService;
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::{AppHandle, Runtime};
@@ -81,10 +82,10 @@ impl ModUpdateService {
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
                                 {
-                                    let update_available = current_version
-                                        .as_ref()
-                                        .map(|cv| cv != &latest_version)
-                                        .unwrap_or(true);
+                                    let update_available = Self::versions_differ(
+                                        current_version.as_deref(),
+                                        &latest_version,
+                                    );
 
                                     // Update metadata with check results
                                     metadata.last_update_check = Some(now);
@@ -170,16 +171,35 @@ impl ModUpdateService {
                                 if let Ok(mod_info) =
                                     nexus_mods_service.get_mod(game_id, mod_id).await
                                 {
-                                    // Get latest version from mod info
-                                    if let Some(latest_version) = mod_info
-                                        .get("version")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                    {
-                                        let update_available = current_version
-                                            .as_ref()
-                                            .map(|cv| cv != &latest_version)
-                                            .unwrap_or(true);
+                                    let latest_version = nexus_mods_service
+                                        .get_mod_files(game_id, mod_id)
+                                        .await
+                                        .ok()
+                                        .and_then(|files| {
+                                            Self::select_best_nexus_file_for_update(
+                                                &files,
+                                                Self::runtime_label(&env.runtime),
+                                                current_version.as_deref(),
+                                            )
+                                        })
+                                        .and_then(|file| {
+                                            file.get("version")
+                                                .or_else(|| file.get("mod_version"))
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                        })
+                                        .or_else(|| {
+                                            mod_info
+                                                .get("version")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                        });
+
+                                    if let Some(latest_version) = latest_version {
+                                        let update_available = Self::versions_differ(
+                                            current_version.as_deref(),
+                                            &latest_version,
+                                        );
 
                                         // Update metadata with check results
                                         metadata.last_update_check = Some(now);
@@ -552,48 +572,134 @@ impl ModUpdateService {
         Ok((package_uuid, package))
     }
 
-    fn select_nexus_file_for_runtime(files: &[Value], runtime_label: &str) -> Option<Value> {
+    fn extract_numeric_version_parts(value: &str) -> Vec<u32> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+
+        let core = value
+            .trim_start_matches(['v', 'V'])
+            .split(['-', '+'])
+            .next()
+            .unwrap_or_default();
+
+        for ch in core.chars() {
+            if ch.is_ascii_digit() {
+                current.push(ch);
+            } else if !current.is_empty() {
+                parts.push(current.parse::<u32>().unwrap_or(0));
+                current.clear();
+            }
+        }
+
+        if !current.is_empty() {
+            parts.push(current.parse::<u32>().unwrap_or(0));
+        }
+
+        parts
+    }
+
+    fn is_prerelease_marker(value: &str) -> bool {
+        let lower = value.to_ascii_lowercase();
+        [
+            "alpha",
+            "beta",
+            "preview",
+            "pre",
+            "rc",
+            "nightly",
+            "experimental",
+            "dev",
+            "test",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    }
+
+    fn compare_versions(current: &str, latest: &str) -> Ordering {
+        let current_parts = Self::extract_numeric_version_parts(current);
+        let latest_parts = Self::extract_numeric_version_parts(latest);
+        let max_len = current_parts.len().max(latest_parts.len());
+
+        for index in 0..max_len {
+            let current_value = current_parts.get(index).copied().unwrap_or(0);
+            let latest_value = latest_parts.get(index).copied().unwrap_or(0);
+            match current_value.cmp(&latest_value) {
+                Ordering::Equal => continue,
+                ordering => return ordering,
+            }
+        }
+
+        match (
+            Self::is_prerelease_marker(current),
+            Self::is_prerelease_marker(latest),
+        ) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => current
+                .trim_start_matches(['v', 'V'])
+                .cmp(latest.trim_start_matches(['v', 'V'])),
+        }
+    }
+
+    fn file_version_string(file: &Value) -> String {
+        file.get("version")
+            .or_else(|| file.get("mod_version"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn is_runtime_compatible_nexus_file(file: &Value, runtime_label: &str) -> bool {
         let runtime_lower = runtime_label.to_lowercase();
+        let file_name = file
+            .get("file_name")
+            .or_else(|| file.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if runtime_lower == "il2cpp" {
+            file_name.contains("il2cpp") || file_name.contains("main") || file_name.contains("beta")
+        } else {
+            file_name.contains("mono") || file_name.contains("alternate")
+        }
+    }
+
+    fn select_best_nexus_file_for_update(
+        files: &[Value],
+        runtime_label: &str,
+        _current_version: Option<&str>,
+    ) -> Option<Value> {
         let compatible: Vec<Value> = files
             .iter()
-            .filter(|f| {
-                let file_name = f
-                    .get("file_name")
-                    .or_else(|| f.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if runtime_lower == "il2cpp" {
-                    file_name.contains("il2cpp")
-                        || file_name.contains("main")
-                        || file_name.contains("beta")
-                } else {
-                    file_name.contains("mono") || file_name.contains("alternate")
-                }
-            })
+            .filter(|f| Self::is_runtime_compatible_nexus_file(f, runtime_label))
             .cloned()
             .collect();
 
-        if !compatible.is_empty() {
-            if let Some(primary) = compatible.iter().find(|f| {
-                f.get("is_primary")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            }) {
-                return Some(primary.clone());
-            }
-            return compatible.first().cloned();
-        }
+        let pool: Vec<Value> = if compatible.is_empty() {
+            files.to_vec()
+        } else {
+            compatible
+        };
 
-        files
-            .iter()
-            .find(|f| {
-                f.get("is_primary")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .or_else(|| files.first().cloned())
+        pool.into_iter().max_by(|left, right| {
+            let left_version = Self::file_version_string(left);
+            let right_version = Self::file_version_string(right);
+            match Self::compare_versions(&left_version, &right_version) {
+                Ordering::Equal => {
+                    let left_primary = left
+                        .get("is_primary")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let right_primary = right
+                        .get("is_primary")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    left_primary.cmp(&right_primary)
+                }
+                ordering => ordering,
+            }
+        })
     }
 
     pub async fn update_mod<R: Runtime>(
@@ -675,7 +781,7 @@ impl ModUpdateService {
                 let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
                 let bytes = thunderstore_service
-                    .download_package(&package_uuid, Some("schedule-i"))
+                    .download_package(&package_uuid, Some("schedule-i"), None)
                     .await
                     .map_err(|error| {
                         let message = format!("Failed to download Thunderstore update: {}", error);
@@ -786,8 +892,12 @@ impl ModUpdateService {
                     .get_mod_files("schedule1", mod_id)
                     .await
                     .context("Failed to fetch Nexus mod files")?;
-                let target_file = Self::select_nexus_file_for_runtime(&files, runtime_label)
-                    .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
+                let target_file = Self::select_best_nexus_file_for_update(
+                    &files,
+                    runtime_label,
+                    metadata.source_version.as_deref(),
+                )
+                .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
 
                 let file_id = target_file
                     .get("file_id")
@@ -811,9 +921,14 @@ impl ModUpdateService {
                     }));
                 }
 
-                let access_token = nexus_access_token.ok_or_else(|| {
-                    anyhow::anyhow!("Nexus OAuth login required to download updates")
-                })?;
+                let Some(access_token) = nexus_access_token else {
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "error": "Nexus OAuth login required to download updates",
+                        "errorCode": "nexus_auth_required",
+                        "recoveryUrl": "accounts"
+                    }));
+                };
                 let original_file_name = target_file
                     .get("file_name")
                     .or_else(|| target_file.get("name"))
@@ -828,10 +943,12 @@ impl ModUpdateService {
                 );
                 let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
-                let bytes = nexus_mods_service
+                let bytes = match nexus_mods_service
                     .download_mod_file(access_token, "schedule1", mod_id, file_id)
                     .await
-                    .map_err(|error| {
+                {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
                         let message = format!("Failed to download Nexus update: {}", error);
                         let _ = crate::services::tracked_downloads::emit(
                             app,
@@ -841,8 +958,24 @@ impl ModUpdateService {
                                 Some("Download failed".to_string()),
                             ),
                         );
-                        anyhow::anyhow!(message)
-                    })?;
+
+                        let normalized = message.to_ascii_lowercase();
+                        if normalized.contains("premium")
+                            || normalized.contains("site confirmation")
+                            || normalized.contains("requires website confirmation")
+                        {
+                            return Ok(serde_json::json!({
+                                "success": false,
+                                "error": message,
+                                "errorCode": "nexus_manual_confirmation_required",
+                                "requiresManualDownload": true,
+                                "recoveryUrl": format!("https://www.nexusmods.com/schedule1/mods/{}?tab=files", mod_id)
+                            }));
+                        }
+
+                        return Err(anyhow::anyhow!(message));
+                    }
+                };
                 let extension = Path::new(original_file_name)
                     .extension()
                     .and_then(|v| v.to_str())
@@ -1004,18 +1137,15 @@ impl ModUpdateService {
             }
             ModSource::Local | ModSource::Unknown => Ok(serde_json::json!({
                 "success": false,
-                "error": "This mod source does not support automatic updates"
+                "error": "This mod source does not support automatic updates",
+                "errorCode": "unsupported_source"
             })),
         }
     }
 
     fn versions_differ(current: Option<&str>, latest: &str) -> bool {
-        let normalized_latest = latest.trim_start_matches('v').trim_start_matches('V');
         match current {
-            Some(value) => {
-                let normalized_current = value.trim_start_matches('v').trim_start_matches('V');
-                normalized_current != normalized_latest
-            }
+            Some(value) => Self::compare_versions(value, latest) == Ordering::Less,
             None => true,
         }
     }
@@ -1145,6 +1275,73 @@ mod tests {
         assert!(!ModUpdateService::versions_differ(Some("1.2.3"), "V1.2.3"));
         assert!(ModUpdateService::versions_differ(Some("1.2.3"), "1.2.4"));
         assert!(ModUpdateService::versions_differ(None, "1.0.0"));
+    }
+
+    #[test]
+    fn versions_differ_does_not_flag_newer_beta_as_outdated_against_older_stable() {
+        assert!(!ModUpdateService::versions_differ(
+            Some("1.1.0-beta"),
+            "1.0.2",
+        ));
+    }
+
+    #[test]
+    fn versions_differ_treats_same_core_stable_as_newer_than_numbered_prerelease() {
+        assert!(ModUpdateService::versions_differ(
+            Some("1.1.0-beta.1"),
+            "1.1.0",
+        ));
+    }
+
+    #[test]
+    fn select_best_nexus_file_for_update_offers_prerelease_when_newer_than_stable() {
+        let files = vec![
+            serde_json::json!({
+                "file_id": 1,
+                "file_name": "Pack Rat Main.zip",
+                "version": "1.0.6-4.4.3",
+                "is_primary": true
+            }),
+            serde_json::json!({
+                "file_id": 2,
+                "file_name": "Pack Rat Beta.zip",
+                "version": "1.0.7r2",
+                "is_primary": false
+            }),
+        ];
+
+        let selected =
+            ModUpdateService::select_best_nexus_file_for_update(&files, "IL2CPP", Some("1.0.0"))
+                .expect("selected nexus file");
+
+        assert_eq!(selected.get("file_id").and_then(|v| v.as_u64()), Some(2));
+    }
+
+    #[test]
+    fn select_best_nexus_file_for_update_keeps_beta_track_for_beta_installs() {
+        let files = vec![
+            serde_json::json!({
+                "file_id": 10,
+                "file_name": "Example Main.zip",
+                "version": "1.0.2",
+                "is_primary": true
+            }),
+            serde_json::json!({
+                "file_id": 11,
+                "file_name": "Example Beta.zip",
+                "version": "1.1.0-beta",
+                "is_primary": false
+            }),
+        ];
+
+        let selected = ModUpdateService::select_best_nexus_file_for_update(
+            &files,
+            "IL2CPP",
+            Some("1.1.0-beta"),
+        )
+        .expect("selected nexus file");
+
+        assert_eq!(selected.get("file_id").and_then(|v| v.as_u64()), Some(11));
     }
 
     #[test]

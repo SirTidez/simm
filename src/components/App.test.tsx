@@ -12,6 +12,12 @@ const deepLinkMocks = vi.hoisted(() => ({
 const environmentStoreMocks = vi.hoisted(() => ({
   useEnvironmentStore: vi.fn(),
 }));
+const settingsStoreMocks = vi.hoisted(() => ({
+  useSettingsStore: vi.fn(),
+}));
+const modLibraryOverlayMocks = vi.hoisted(() => ({
+  lastNavigationState: null as any,
+}));
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: invokeMock,
@@ -49,6 +55,7 @@ vi.mock('../stores/downloadStatusStore', () => ({
 
 vi.mock('../stores/settingsStore', () => ({
   SettingsStoreProvider: ({ children }: { children: ReactNode }) => children,
+  useSettingsStore: settingsStoreMocks.useSettingsStore,
 }));
 
 vi.mock('../utils/logger', () => ({
@@ -75,13 +82,64 @@ vi.mock('./EnvironmentCreationWizard', () => ({
 }));
 
 vi.mock('./ModLibraryOverlay', () => ({
-  ModLibraryOverlay: ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) =>
+  ModLibraryOverlay: ({
+    isOpen,
+    onClose,
+    navigationState,
+    onNavigationStateChange,
+    onOpenSecurityReport,
+  }: {
+    isOpen: boolean;
+    onClose: () => void;
+    navigationState?: any;
+    onNavigationStateChange?: (state: any) => void;
+    onOpenSecurityReport?: (state: any) => void;
+  }) =>
     isOpen ? (
       <div>
         <span>Mod Library Overlay</span>
+        <span>Active Library Tab: {navigationState?.libraryTab ?? 'discover'}</span>
+        <button onClick={() => onNavigationStateChange?.({ libraryTab: 'library', searchQuery: 'pack rat' })}>
+          Save Library State
+        </button>
+        <button
+          onClick={() =>
+            onOpenSecurityReport?.({
+              title: 'Security Findings - Pack Rat',
+              report: {
+                summary: {
+                  state: 'verified',
+                  verified: true,
+                  totalFindings: 0,
+                  threatFamilyCount: 0,
+                },
+                policy: {
+                  enabled: true,
+                  requiresConfirmation: false,
+                  blocked: false,
+                  promptOnHighFindings: false,
+                  blockCriticalFindings: false,
+                },
+                files: [],
+              },
+            })
+          }
+        >
+          Open Security Report
+        </button>
         <button onClick={onClose}>Close Mod Library</button>
       </div>
     ) : null,
+}));
+
+vi.mock('./SecurityScanReportPage', () => ({
+  SecurityScanReportPage: ({ title, onReturn }: { title: string; onReturn: () => void }) => (
+    <div>
+      <span>Security Report Page</span>
+      <span>{title}</span>
+      <button onClick={onReturn}>Return From Security Report</button>
+    </div>
+  ),
 }));
 
 vi.mock('./SteamAccountOverlay', () => ({
@@ -146,7 +204,11 @@ vi.mock('./Settings', () => ({
 }));
 
 vi.mock('./Footer', () => ({
-  Footer: () => <div>Footer</div>,
+  Footer: ({ onOpenModUpdates }: { onOpenModUpdates?: () => void }) => (
+    <div>
+      <button onClick={onOpenModUpdates}>Open Mod Updates</button>
+    </div>
+  ),
 }));
 
 vi.mock('./DownloadsPanel', () => ({
@@ -155,6 +217,7 @@ vi.mock('./DownloadsPanel', () => ({
 
 describe('App', () => {
   beforeEach(() => {
+    modLibraryOverlayMocks.lastNavigationState = null;
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
     deepLinkMocks.getCurrent.mockReset();
@@ -177,6 +240,11 @@ describe('App', () => {
     environmentStoreMocks.useEnvironmentStore.mockReset();
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({
       environments: [],
+    });
+    settingsStoreMocks.useSettingsStore.mockReset();
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: { appUpdate: null },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
     });
   });
 
@@ -217,6 +285,79 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('reuses the last mod library navigation state when reopening from the toolbar', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Active Library Tab: discover')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Library State' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
+
+    await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
+  });
+
+  it('retargets the current mod library workspace when a same-route navigation carries new state', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Active Library Tab: discover')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Library State' }));
+    expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Mod Updates' }));
+    expect(await screen.findByText('Active Library Tab: updates')).toBeTruthy();
+  });
+
+  it('renders the security report workspace page when Mod Library opens a report', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Security Report' }));
+
+    expect(await screen.findByText('Security Report Page')).toBeTruthy();
+    expect(screen.getByText('Security Findings - Pack Rat')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Return From Security Report' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Mod Library Overlay')).toBeTruthy();
+    });
+  });
+
+  it('marks top-level workspace buttons active when their panel is open', async () => {
+    render(<App />);
+
+    const libraryButton = screen.getByRole('button', { name: 'Mod Library' });
+    const accountsButton = screen.getByRole('button', { name: 'Accounts' });
+    const helpButton = screen.getByRole('button', { name: 'Help' });
+
+    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+    expect(helpButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(libraryButton);
+    expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
+    expect(libraryButton).toHaveAttribute('aria-pressed', 'true');
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(accountsButton);
+    expect(await screen.findByText('Steam Overlay')).toBeTruthy();
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'true');
+    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(helpButton);
+    expect(await screen.findByText('Help Overlay')).toBeTruthy();
+    expect(helpButton).toHaveAttribute('aria-pressed', 'true');
+    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('uses window close for the custom close button', async () => {

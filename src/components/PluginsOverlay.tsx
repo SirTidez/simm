@@ -42,7 +42,7 @@ function getPluginSourceLabel(source?: PluginInfo['source']): string {
   }
 }
 
-export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChanged }: Props) {
+export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Props) {
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -320,10 +320,6 @@ export function PluginsOverlay({ isOpen, onClose, environmentId, onPluginsChange
       <div className="mods-overlay workspace-collection-shell">
         <div className="modal-header">
           <h2>Plugins</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-            Back
-          </button>
         </div>
 
         <div className="workspace-collection">

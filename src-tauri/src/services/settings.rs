@@ -155,6 +155,7 @@ impl SettingsService {
             mod_icon_cache_limit_mb: Some(500),
             database_backup_count: Some(10),
             log_retention_days: Some(7),
+            app_update: None,
         };
 
         Ok(default_settings)

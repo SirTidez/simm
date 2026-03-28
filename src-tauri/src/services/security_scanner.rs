@@ -1303,6 +1303,7 @@ mod tests {
             mod_icon_cache_limit_mb: None,
             database_backup_count: None,
             log_retention_days: None,
+            app_update: None,
         }
     }
 

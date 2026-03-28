@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { ApiService } from '../services/api';
-import type { AppConfig, BranchConfig } from '../types';
+import type { AppConfig, BranchConfig, SecurityScannerStatus } from '../types';
 
 interface Props {
   onClose: () => void;
@@ -73,6 +73,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
   const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
+  const [securityScannerStatus, setSecurityScannerStatus] = useState<SecurityScannerStatus | null>(null);
+  const [loadingSecurityScannerStatus, setLoadingSecurityScannerStatus] = useState(false);
+  const [installingSecurityScanner, setInstallingSecurityScanner] = useState(false);
+  const [securityScannerError, setSecurityScannerError] = useState<string | null>(null);
   const previousDerivedNameRef = useRef('');
 
   const hasSteamEnvironment = environments.some(
@@ -115,6 +119,20 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         setDepotDownloaderDetectionError(
           err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
         );
+      }
+
+      try {
+        setLoadingSecurityScannerStatus(true);
+        const scannerStatus = await ApiService.getSecurityScannerStatus();
+        setSecurityScannerStatus(scannerStatus);
+        setSecurityScannerError(null);
+      } catch (err) {
+        setSecurityScannerStatus(null);
+        setSecurityScannerError(
+          err instanceof Error ? err.message : 'Unable to detect the MLVScan security scanner right now.'
+        );
+      } finally {
+        setLoadingSecurityScannerStatus(false);
       }
     };
 
@@ -268,6 +286,37 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     window.open('https://github.com/SteamRE/DepotDownloader#installation', '_blank', 'noopener,noreferrer');
   };
 
+  const refreshSecurityScannerStatus = async () => {
+    setLoadingSecurityScannerStatus(true);
+    setSecurityScannerError(null);
+    try {
+      const scannerStatus = await ApiService.getSecurityScannerStatus();
+      setSecurityScannerStatus(scannerStatus);
+    } catch (err) {
+      setSecurityScannerStatus(null);
+      setSecurityScannerError(
+        err instanceof Error ? err.message : 'Unable to detect the MLVScan security scanner right now.'
+      );
+    } finally {
+      setLoadingSecurityScannerStatus(false);
+    }
+  };
+
+  const handleInstallSecurityScanner = async () => {
+    setInstallingSecurityScanner(true);
+    setSecurityScannerError(null);
+    try {
+      const scannerStatus = await ApiService.installSecurityScanner();
+      setSecurityScannerStatus(scannerStatus);
+    } catch (err) {
+      setSecurityScannerError(
+        err instanceof Error ? err.message : 'Failed to install the MLVScan security scanner automatically.'
+      );
+    } finally {
+      setInstallingSecurityScanner(false);
+    }
+  };
+
   const handleBranchSelect = (branch: BranchConfig) => {
     if (depotDownloaderInstalled !== true) return;
 
@@ -362,6 +411,16 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             ? 'Ready'
             : 'Missing'
     },
+    {
+      label: 'MLVScan',
+      value: securityScannerError
+        ? 'Check failed'
+        : loadingSecurityScannerStatus
+          ? 'Checking'
+          : securityScannerStatus?.installed
+            ? 'Ready'
+            : 'Missing'
+    },
     { label: 'Default path', value: settings?.defaultDownloadDir ? 'Configured' : 'Unset' },
   ];
 
@@ -381,7 +440,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     >
       <div className="modal-header">
         <h2>Create Environment</h2>
-        <button className="modal-close" onClick={onClose} aria-label="Close create environment panel">×</button>
       </div>
 
       {error && <div className="settings-error-banner">{error}</div>}
@@ -626,12 +684,63 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
             )}
 
+            {((securityScannerStatus?.installed !== true) || securityScannerError) && (
+              <div className="wizard-prerequisite-card">
+                <div className="wizard-prerequisite-card__copy">
+                  <span className="settings-eyebrow">Requirement</span>
+                  <h4>{securityScannerError ? 'Unable to verify MLVScan status' : 'MLVScan is installed during setup'}</h4>
+                  <p>
+                    {securityScannerError
+                      ? 'SIMM could not confirm whether the MLVScan security scanner is available. Retry the check or install it here before continuing.'
+                      : 'MLVScan is now managed from the setup wizard instead of Settings. Install it here so protected downloads are ready before you start using the app.'}
+                  </p>
+                  {securityScannerError && <div className="settings-error-banner">{securityScannerError}</div>}
+                  {securityScannerStatus?.lastError && <div className="settings-error-banner">{securityScannerStatus.lastError}</div>}
+                </div>
+                <div className="wizard-inline-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      if (securityScannerError) {
+                        void refreshSecurityScannerStatus();
+                        return;
+                      }
+                      void handleInstallSecurityScanner();
+                    }}
+                    disabled={installingSecurityScanner || loadingSecurityScannerStatus}
+                  >
+                    <i className={installingSecurityScanner || loadingSecurityScannerStatus ? 'fas fa-spinner fa-spin' : 'fas fa-shield-halved'}></i>
+                    {securityScannerError
+                      ? 'Retry Detection'
+                      : loadingSecurityScannerStatus
+                        ? 'Checking…'
+                        : installingSecurityScanner
+                          ? 'Installing…'
+                          : securityScannerStatus?.installed
+                            ? 'Repair / Update'
+                            : 'Install MLVScan'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void refreshSecurityScannerStatus()}
+                    disabled={installingSecurityScanner || loadingSecurityScannerStatus}
+                  >
+                    <i className={loadingSecurityScannerStatus ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'}></i>
+                    Refresh Status
+                  </button>
+                </div>
+              </div>
+            )}
+
             {appConfig ? (
               <div className="wizard-branch-grid" role="list">
                 {appConfig.branches.map((branch) => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
                   const depotRequired = depotDownloaderInstalled !== true || !!depotDownloaderDetectionError;
-                  const disabled = authRequired || depotRequired;
+                  const scannerRequired = securityScannerStatus?.installed !== true || !!securityScannerError;
+                  const disabled = authRequired || depotRequired || scannerRequired;
 
                   return (
                     <div key={branch.name} role="listitem">
@@ -649,6 +758,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                               ? depotDownloaderDetectionError
                                 ? 'SIMM could not verify DepotDownloader for this branch'
                                 : 'DepotDownloader is required to download this branch'
+                              : scannerRequired
+                                ? securityScannerError
+                                  ? 'SIMM could not verify the MLVScan security scanner for this setup'
+                                  : 'Install MLVScan from the setup prerequisites before selecting a branch'
                               : undefined
                         }
                       >
@@ -667,7 +780,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           </div>
                         </div>
                         <div className="wizard-branch-card__footer">
-                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before starting this download.' : 'Install DepotDownloader to unlock downloads.') : 'Continue to environment configuration.'}</span>
+                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before starting this download.' : 'Install DepotDownloader to unlock downloads.') : scannerRequired ? (securityScannerError ? 'Fix MLVScan detection before starting this download.' : 'Install MLVScan in the setup wizard to unlock branch downloads.') : 'Continue to environment configuration.'}</span>
                         </div>
                       </button>
                     </div>

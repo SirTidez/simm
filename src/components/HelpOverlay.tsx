@@ -142,7 +142,6 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
     <section className="modal-content help-overlay workspace-panel" aria-label="Help panel">
       <div className="modal-header">
         <h2>Help Center</h2>
-        <button className="modal-close" onClick={onClose} aria-label="Close help panel">×</button>
       </div>
 
       <div className="help-pane">

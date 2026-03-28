@@ -34,6 +34,27 @@ describe('ApiService', () => {
     });
   });
 
+  it('getAppUpdateStatus forwards the current app version to the backend', async () => {
+    invokeMock.mockResolvedValueOnce({
+      currentVersionRaw: '0.7.8',
+      currentVersionNormalized: '0.7.8',
+      latestVersionRaw: '0.7.9-beta',
+      latestVersionNormalized: '0.7.9',
+      updateAvailable: true,
+      targetUrl: 'https://www.nexusmods.com/schedule1/mods/999?tab=files&file_id=42',
+      fallbackFilesUrl: 'https://www.nexusmods.com/schedule1/mods/999?tab=files',
+      checkedAt: '2026-03-27T12:00:00Z',
+    });
+
+    const result = await ApiService.getAppUpdateStatus('0.7.8');
+
+    expect(invokeMock).toHaveBeenCalledWith('get_app_update_status', {
+      currentVersion: '0.7.8',
+    });
+    expect(result.updateAvailable).toBe(true);
+    expect(result.latestVersionNormalized).toBe('0.7.9');
+  });
+
   it('deleteEnvironment wraps boolean response', async () => {
     invokeMock.mockResolvedValueOnce(true);
     const result = await ApiService.deleteEnvironment('env-1');
@@ -79,6 +100,36 @@ describe('ApiService', () => {
         updated_at: '2024-01-01',
         created_at: '2023-01-01',
       })
+    );
+  });
+
+  it('searchNexusMods preserves legacy snake_case date fields', async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        mod_id: 2,
+        name: 'Legacy Mod',
+        summary: 'Summary',
+        picture_url: 'legacy-pic.png',
+        thumbnail_url: 'legacy-thumb.png',
+        endorsement_count: 8,
+        mod_downloads: 21,
+        unique_downloads: 18,
+        version: '2.0.0',
+        author: 'LegacyTester',
+        updated_time: '2025-05-06T12:00:00Z',
+        uploaded_time: '2025-04-01T12:00:00Z',
+      },
+    ]);
+
+    const result = await ApiService.searchNexusMods('3164500', 'legacy');
+    expect(result.mods[0]).toEqual(
+      expect.objectContaining({
+        mod_id: 2,
+        updated_at: '2025-05-06T12:00:00Z',
+        updated_time: '2025-05-06T12:00:00Z',
+        created_at: '2025-04-01T12:00:00Z',
+        uploaded_time: '2025-04-01T12:00:00Z',
+      }),
     );
   });
 
@@ -164,6 +215,26 @@ describe('ApiService', () => {
         source: 'thunderstore',
       },
     ]);
+  });
+
+  it('downloadThunderstoreToLibrary rejects an invalid selected version UUID instead of falling back', async () => {
+    invokeMock.mockResolvedValueOnce({
+      package_url: 'https://thunderstore.io/c/schedule-i/p/ifBars/Example/',
+      name: 'Example',
+      owner: 'ifBars',
+      versions: [
+        {
+          uuid4: 'known-version',
+          version_number: '1.0.0',
+          downloads: 10,
+          date_updated: '2026-03-28T00:00:00Z',
+        },
+      ],
+    });
+
+    await expect(
+      ApiService.downloadThunderstoreToLibrary('package-1', 'Mono', undefined, 'missing-version'),
+    ).rejects.toThrow('Thunderstore version missing-version was not found for package package-1');
   });
 
   it('config editor commands use the new document-oriented API', async () => {

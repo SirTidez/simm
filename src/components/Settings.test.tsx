@@ -242,4 +242,17 @@ describe("Settings", () => {
       );
     });
   });
+
+  it("offers a fallback MLVScan install action when the scanner is missing", async () => {
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    const fallbackButton = await screen.findByRole("button", {
+      name: /fallback install/i,
+    });
+    fireEvent.click(fallbackButton);
+
+    await waitFor(() => {
+      expect(apiMocks.installSecurityScanner).toHaveBeenCalledTimes(1);
+    });
+  });
 });

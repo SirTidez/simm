@@ -2010,7 +2010,7 @@ pub async fn install_nexus_mods_mod(
             return Ok(json!({
                 "success": false,
                 "requiresManualDownload": true,
-                "modUrl": format!("https://www.nexusmods.com/{}/mods/{}", game_id, mod_id),
+                "modUrl": build_nexus_files_page_url(&game_id, mod_id, file_id),
                 "error": "This Nexus account must confirm downloads on Nexus Mods website.",
             }))
         }

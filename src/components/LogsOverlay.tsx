@@ -198,7 +198,7 @@ function formatVisibleCount(count: number): string {
   return `${count} ${count === 1 ? 'Line' : 'Lines'}`;
 }
 
-export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpenModLibraryView }: Props) {
+export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibraryView }: Props) {
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
   const [selectedLogPath, setSelectedLogPath] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
@@ -743,10 +743,6 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
             Review live and archived environment logs for {environment.name}.
           </p>
         </div>
-        <button className="btn btn-secondary btn-small" onClick={onClose}>
-          <i className="fas fa-arrow-left"></i>
-          Back
-        </button>
       </div>
 
       <div

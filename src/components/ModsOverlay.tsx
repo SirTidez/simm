@@ -1,7 +1,11 @@
-import React, { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
-import { SecurityScanReportOverlay } from './SecurityScanReportOverlay';
+import {
+  SecurityScanReportOverlay,
+  type SecurityScanReportOption,
+} from './SecurityScanReportOverlay';
+import { type SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
@@ -30,7 +34,7 @@ interface ModInfo {
   securityScan?: SecurityScanSummary;
 }
 
-interface ModViewState {
+export interface ModViewState {
   id: string;
   storageId?: string;
   name: string;
@@ -60,9 +64,12 @@ interface Props {
   onOpenAccounts?: () => void;
   onOpenModLibrary?: () => void;
   onOpenConfig?: () => void;
+  onOpenSecurityReport?: (request: SecurityReportWorkspaceRequest) => void;
+  navigationState?: ModsOverlayNavigationState;
+  onNavigationStateChange?: (state: ModsOverlayNavigationState) => void;
 }
 
-type ModsTab = 'installed' | 'updates';
+export type ModsTab = 'installed' | 'updates';
 
 interface ConfirmDialog {
   title: string;
@@ -73,11 +80,26 @@ interface ConfirmDialog {
   readyAt?: number;
 }
 
+export interface ModsOverlayNavigationState {
+  modsTab?: ModsTab;
+  searchSource?: 'thunderstore' | 'nexusmods';
+  searchQuery?: string;
+  searchResults?: ThunderstorePackage[];
+  showSearchResults?: boolean;
+  nexusModsSearchQuery?: string;
+  nexusModsSearchResults?: NexusMod[];
+  showNexusModsResults?: boolean;
+  showSearchInOverlay?: boolean;
+  modListFilter?: 'all' | 'updates' | 'enabled' | 'disabled';
+  installedSearchTerm?: string;
+  activeModView?: ModViewState | null;
+}
+
 const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
   return !!value && typeof value === 'object' && 'summary' in (value as Record<string, unknown>) && Array.isArray((value as { files?: unknown[] }).files);
 };
 
-interface ThunderstorePackage {
+export interface ThunderstorePackage {
   uuid4: string;
   name: string;
   owner: string;
@@ -255,8 +277,30 @@ function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] 
   return merged;
 }
 
-export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onModUpdatesChecked, onOpenAccounts, onOpenModLibrary, onOpenConfig }: Props) {
+export function ModsOverlay({
+  isOpen,
+  environmentId,
+  onModsChanged,
+  onModUpdatesChecked,
+  onOpenAccounts,
+  onOpenModLibrary,
+  onOpenConfig,
+  onOpenSecurityReport,
+  navigationState,
+  onNavigationStateChange,
+}: Props) {
   type ModListFilter = 'all' | 'updates' | 'enabled' | 'disabled';
+  const defaultSearchSource = useMemo<'thunderstore' | 'nexusmods'>(() => {
+    if (navigationState?.searchSource) {
+      return navigationState.searchSource;
+    }
+    try {
+      const stored = localStorage.getItem('simm:last-mods-search-source');
+      return stored === 'thunderstore' ? 'thunderstore' : 'nexusmods';
+    } catch {
+      return 'nexusmods';
+    }
+  }, [navigationState?.searchSource]);
 
   const [mods, setMods] = useState<ModInfo[]>([]);
   const [downloadedMods, setDownloadedMods] = useState<ModLibraryEntry[]>([]);
@@ -271,29 +315,25 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<{ filePath: string; fileName: string; sourceInfo: any } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [installingDownloaded, setInstallingDownloaded] = useState<string | null>(null);
-  const [activeSecurityReport, setActiveSecurityReport] = useState<{
-    title: string;
-    report: SecurityScanReport;
-    confirmLabel?: string;
-    onConfirm?: (() => Promise<void>) | null;
-  } | null>(null);
+  const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Search state
   const [environment, setEnvironment] = useState<Environment | null>(null);
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [searchResults, setSearchResults] = useState<ThunderstorePackage[]>([]);
+  const [searchQuery, setSearchQuery] = useState<string>(() => navigationState?.searchQuery ?? '');
+  const [searchResults, setSearchResults] = useState<ThunderstorePackage[]>(() => navigationState?.searchResults ?? []);
   const [searching, setSearching] = useState(false);
   const [installingPackage, setInstallingPackage] = useState<string | null>(null);
-  const [showSearchResults, setShowSearchResults] = useState(false);
-  const [searchSource, setSearchSource] = useState<'thunderstore' | 'nexusmods'>('thunderstore');
+  const [showSearchResults, setShowSearchResults] = useState(() => navigationState?.showSearchResults ?? false);
+  const [searchSource, setSearchSource] = useState<'thunderstore' | 'nexusmods'>(defaultSearchSource);
 
   // NexusMods search state
-  const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState<string>('');
-  const [nexusModsSearchResults, setNexusModsSearchResults] = useState<NexusMod[]>([]);
+  const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState<string>(() => navigationState?.nexusModsSearchQuery ?? '');
+  const [nexusModsSearchResults, setNexusModsSearchResults] = useState<NexusMod[]>(() => navigationState?.nexusModsSearchResults ?? []);
   const [searchingNexusMods, setSearchingNexusMods] = useState(false);
   const [installingNexusMod, setInstallingNexusMod] = useState<{ modId: number; fileId: number } | null>(null);
-  const [showNexusModsResults, setShowNexusModsResults] = useState(false);
+  const [showNexusModsResults, setShowNexusModsResults] = useState(() => navigationState?.showNexusModsResults ?? false);
   const [nexusModsFiles, setNexusModsFiles] = useState<Map<number, NexusModFile[]>>(new Map());
   const [showNexusKeyRequiredModal, setShowNexusKeyRequiredModal] = useState(false);
   const [hasNexusDownloadAccess, setHasNexusDownloadAccess] = useState<boolean>(false);
@@ -304,11 +344,11 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const [checkingModUpdates, setCheckingModUpdates] = useState(false);
   const [updatingMod, setUpdatingMod] = useState<string | null>(null);
   const [updatingAllMods, setUpdatingAllMods] = useState(false);
-  const [showSearchInOverlay, setShowSearchInOverlay] = useState(false);
-  const [modListFilter, setModListFilter] = useState<ModListFilter>('all');
-  const [modsTab, setModsTab] = useState<ModsTab>('installed');
-  const [installedSearchTerm, setInstalledSearchTerm] = useState('');
-  const [activeModView, setActiveModView] = useState<ModViewState | null>(null);
+  const [showSearchInOverlay, setShowSearchInOverlay] = useState(() => navigationState?.showSearchInOverlay ?? false);
+  const [modListFilter, setModListFilter] = useState<ModListFilter>(() => navigationState?.modListFilter ?? 'all');
+  const [modsTab, setModsTab] = useState<ModsTab>(() => navigationState?.modsTab ?? 'installed');
+  const [installedSearchTerm, setInstalledSearchTerm] = useState(() => navigationState?.installedSearchTerm ?? '');
+  const [activeModView, setActiveModView] = useState<ModViewState | null>(() => navigationState?.activeModView ?? null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
   const suppressWatcherReloadUntilRef = useRef(0);
   const modsReloadTimerRef = useRef<number | null>(null);
@@ -317,8 +357,64 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
   const modsScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
   const activeModViewSecurityBadge = getSecurityBadgeConfig(activeModView?.securityScan);
+  const openExternalSourceUrl = useCallback((url?: string) => {
+    const safeUrl = safeExternalUrl(url);
+    if (!safeUrl) {
+      return;
+    }
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+  }, []);
+  const getUpdateDisabledReason = useCallback((mod: ModInfo, updateAvailable?: boolean) => {
+    if (!(mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github')) {
+      return 'Automatic updates are only available for Thunderstore, Nexus Mods, and GitHub sources.';
+    }
+    if (!updateAvailable) {
+      return 'No update is currently available for this mod.';
+    }
+    return null;
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('simm:last-mods-search-source', searchSource);
+    } catch {
+      // Ignore localStorage failures.
+    }
+  }, [searchSource]);
+
+  useEffect(() => {
+    onNavigationStateChange?.({
+      modsTab,
+      searchSource,
+      searchQuery,
+      searchResults,
+      showSearchResults,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      showNexusModsResults,
+      showSearchInOverlay,
+      modListFilter,
+      installedSearchTerm,
+      activeModView,
+    });
+  }, [
+    activeModView,
+    installedSearchTerm,
+    modListFilter,
+    modsTab,
+    nexusModsSearchQuery,
+    nexusModsSearchResults,
+    onNavigationStateChange,
+    searchQuery,
+    searchResults,
+    searchSource,
+    showNexusModsResults,
+    showSearchInOverlay,
+    showSearchResults,
+  ]);
 
   const libraryVersionCountByName = useMemo(() => {
     const counts = new Map<string, number>();
@@ -364,11 +460,41 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
   };
 
+  const showToast = useCallback((message: string, duration = 6500) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, duration);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+        toastTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
+    if (onOpenSecurityReport) {
+      onOpenSecurityReport(request);
+      return;
+    }
+
+    setActiveSecurityReport(request);
+  }, [onOpenSecurityReport]);
+
   const closeSecurityReport = () => {
     if (securityActionBusy) {
       return;
     }
 
+    activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
   };
 
@@ -398,12 +524,12 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     }
 
     if (result.securityScanBlocked) {
-      setActiveSecurityReport({ title, report: result.securityScan, onConfirm: null });
+      openSecurityReport({ title, report: result.securityScan, onConfirm: null });
       return true;
     }
 
     if (result.securityScanConfirmationRequired) {
-      setActiveSecurityReport({
+      openSecurityReport({
         title,
         report: result.securityScan,
         confirmLabel: 'Continue Install',
@@ -415,13 +541,72 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     return false;
   };
 
+  const buildStoredSecurityReportOption = useCallback(
+    (entry: ModLibraryEntry | null, storageId: string, report: SecurityScanReport): SecurityScanReportOption => {
+      const versionLabel = normalizeVersionToken(entry?.sourceVersion || entry?.installedVersion)
+        ? `v${normalizeVersionToken(entry?.sourceVersion || entry?.installedVersion)}`
+        : 'Stored scan';
+      const explicitRuntimes = Object.entries(entry?.storageIdsByRuntime || {})
+        .filter(([, id]) => id === storageId)
+        .map(([runtime]) => runtime);
+      const fallbackRuntime =
+        entry?.storageId === storageId && (entry.availableRuntimes?.length || 0) === 1
+          ? entry.availableRuntimes
+          : [];
+      const runtimeLabel = [...explicitRuntimes, ...fallbackRuntime].join('/') || 'Runtime?';
+      const fileCount = report.files.length;
+      const description = fileCount === 0
+        ? 'Stored security report'
+        : fileCount === 1
+          ? report.files[0].fileName
+          : `${fileCount} scanned files`;
+
+      return {
+        key: storageId,
+        label: `${versionLabel} • ${runtimeLabel}`,
+        description,
+        report,
+      };
+    },
+    [],
+  );
+
   const openStoredSecurityReport = async (storageId: string, title: string) => {
     try {
-      const report = await ApiService.getModSecurityScanReport(storageId);
-      if (report) {
-        setActiveSecurityReport({
+      const matchingEntry = downloadedMods.find(
+        (entry) =>
+          entry.storageId === storageId ||
+          Object.values(entry.storageIdsByRuntime || {}).includes(storageId),
+      ) || null;
+      const storageIds = Array.from(
+        new Set([
+          storageId,
+          matchingEntry?.storageId,
+          ...Object.values(matchingEntry?.storageIdsByRuntime || {}),
+        ].filter((value): value is string => Boolean(value))),
+      );
+      const reports = await Promise.all(
+        storageIds.map(async (id) => ({
+          storageId: id,
+          report: await ApiService.getModSecurityScanReport(id),
+        })),
+      );
+      const reportOptions = reports
+        .filter(
+          (
+            candidate,
+          ): candidate is { storageId: string; report: SecurityScanReport } =>
+            Boolean(candidate.report),
+        )
+        .map(({ storageId: optionStorageId, report: optionReport }) =>
+          buildStoredSecurityReportOption(matchingEntry, optionStorageId, optionReport),
+        );
+
+      if (reportOptions.length > 0) {
+        openSecurityReport({
           title,
-          report,
+          report: reportOptions[0].report,
+          reportOptions,
           onConfirm: null,
         });
       } else {
@@ -579,32 +764,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       window.clearTimeout(modsReloadTimerRef.current);
       modsReloadTimerRef.current = null;
     }
-
-    // Reset state when closing
-    setMods([]);
-    setError(null);
-    setModsDirectory('');
-    setEnvironment(null);
-    setSearchQuery('');
-    setSearchResults([]);
-    setShowSearchResults(false);
-    setSearchSource('thunderstore');
-    setNexusModsSearchQuery('');
-    setNexusModsSearchResults([]);
-    setShowNexusModsResults(false);
-    setNexusModsFiles(new Map());
-    setModUpdates(new Map());
-    setUpdatingAllMods(false);
-    setShowSearchInOverlay(false);
-    setModListFilter('all');
-    setModsTab('installed');
-    setInstalledSearchTerm('');
-    setConfirmDialog(null);
-    setPendingRuntimeSelection(null);
-    setPendingUpload(null);
-    setDownloadedMods([]);
-    setActiveModView(null);
-    setContextMenu(null);
   }, [isOpen, environmentId]);
 
   useEffect(() => {
@@ -797,6 +956,26 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
     try {
       const result = await ApiService.updateMod(environmentId, mod.fileName);
       if (!result.success) {
+        if (result.errorCode === 'nexus_auth_required' && onOpenAccounts) {
+          setConfirmDialog({
+            title: 'Nexus Login Required',
+            message: result.error || 'Log into Nexus in Accounts before updating this mod.',
+            confirmText: 'Open Accounts',
+            cancelText: 'Dismiss',
+            onConfirm: () => onOpenAccounts(),
+          });
+          return;
+        }
+        if (result.requiresManualDownload && result.recoveryUrl) {
+          setConfirmDialog({
+            title: 'Manual Download Required',
+            message: result.error || 'Open the mod page to complete this update manually.',
+            confirmText: 'Open Source Page',
+            cancelText: onOpenAccounts ? 'Accounts' : 'Dismiss',
+            onConfirm: () => openExternalSourceUrl(result.recoveryUrl),
+          });
+          return;
+        }
         throw new Error(result.error || result.message || 'Failed to update mod');
       }
 
@@ -858,9 +1037,9 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
 
   const requestDeleteMod = (mod: ModInfo) => {
     const dialog: ConfirmDialog = {
-      title: 'Delete Mod',
-      message: `Are you sure you want to delete "${mod.name}"?`,
-      confirmText: 'Delete',
+      title: 'Uninstall from Environment',
+      message: `Remove "${mod.name}" from this environment? The downloaded library copy is kept separately.`,
+      confirmText: 'Uninstall',
       cancelText: 'Cancel',
       onConfirm: () => handleDeleteMod(mod),
       readyAt: Date.now() + 200,
@@ -1587,7 +1766,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
           runtime: environment.runtime,
         });
         startNexusManualTimeout();
-        setError('Confirm the Mod Manager download on Nexus. SIMM will continue when the nxm link returns.');
+        showToast('Opened the Nexus Mods Files tab in your browser. Confirm the download there; SIMM will continue when the nxm link returns.');
         keepPendingInstall = true;
         return;
       }
@@ -1598,7 +1777,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       if (!result.success) {
         if (result.requiresManualDownload && result.modUrl) {
           window.open(result.modUrl, '_blank', 'noopener,noreferrer');
-          setError('This Nexus account requires website confirmation. Opened the mod page in your browser.');
+          showToast('Opened the Nexus Mods Files tab in your browser. Confirm the download there, then return to SIMM.');
           return;
         }
 
@@ -1937,11 +2116,35 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || 'Security Findings'}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
         confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}
         busy={securityActionBusy}
       />
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            right: '1rem',
+            bottom: '1rem',
+            zIndex: 2200,
+            maxWidth: '28rem',
+            padding: '0.8rem 0.95rem',
+            borderRadius: '0.8rem',
+            background: 'rgba(19, 29, 42, 0.96)',
+            border: '1px solid rgba(116, 168, 255, 0.42)',
+            color: '#e7f0fb',
+            boxShadow: '0 18px 40px rgba(0, 0, 0, 0.32)',
+            fontSize: '0.92rem',
+            lineHeight: 1.45,
+          }}
+        >
+          {toastMessage}
+        </div>
+      )}
       {pendingRuntimeSelection && (
         <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
           <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
@@ -2049,10 +2252,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   Add Mod
                 </>
               )}
-            </button>
-            <button className="btn btn-secondary btn-small" onClick={onClose}>
-              <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-              Back
             </button>
           </div>
         </div>
@@ -3110,6 +3309,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || 'Security Findings'}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
         confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}
@@ -3138,10 +3338,6 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
       <div className="mods-overlay mods-overlay--environment workspace-collection-shell">
         <div className="modal-header">
           <h2>Mods</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-            Back
-          </button>
         </div>
 
         <div className="workspace-collection">
@@ -3238,7 +3434,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   {filteredMods.map((mod) => {
                     const updateInfo = modUpdates.get(mod.fileName);
                     const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
-                    const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
+                    const updateDisabledReason = getUpdateDisabledReason(mod, updateInfo?.updateAvailable);
                     const securityBadge = getSecurityBadgeConfig(mod.securityScan);
                     return (
                       <div
@@ -3260,7 +3456,7 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             key: 'update',
                             label: 'Update',
                             icon: 'fas fa-arrow-up',
-                            disabled: !canAutoUpdate || !updateInfo?.updateAvailable,
+                            disabled: !!updateDisabledReason,
                             onSelect: () => void handleUpdateMod(mod),
                           },
                           {
@@ -3278,8 +3474,15 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                             onSelect: () => onOpenModLibrary?.(),
                           },
                           {
+                            key: 'source',
+                            label: 'Open Source Page',
+                            icon: 'fas fa-arrow-up-right-from-square',
+                            disabled: !safeExternalUrl(mod.sourceUrl),
+                            onSelect: () => openExternalSourceUrl(mod.sourceUrl),
+                          },
+                          {
                             key: 'delete',
-                            label: 'Uninstall',
+                            label: 'Uninstall from Environment',
                             icon: 'fas fa-trash',
                             danger: true,
                             onSelect: () => requestDeleteMod(mod),
@@ -3375,14 +3578,26 @@ export function ModsOverlay({ isOpen, onClose, environmentId, onModsChanged, onM
                   <button
                     className="btn btn-secondary"
                     onClick={() => void handleUpdateMod(selectedInstalledMod)}
-                    disabled={!modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable}
+                    disabled={!!getUpdateDisabledReason(
+                      selectedInstalledMod,
+                      modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                    )}
+                    title={getUpdateDisabledReason(
+                      selectedInstalledMod,
+                      modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                    ) || undefined}
                   >
                     Update
                   </button>
+                  {activeModViewSourceUrl && (
+                    <button className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
+                      Open Source Page
+                    </button>
+                  )}
                   <button className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</button>
                   <button className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</button>
                   <button className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</button>
-                  <button className="btn btn-danger" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall</button>
+                  <button className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</button>
                 </div>
               </div>
             )}

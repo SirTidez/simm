@@ -149,6 +149,17 @@ pub struct BranchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppUpdateSettings {
+    pub last_checked_at: Option<String>,
+    pub last_seen_version_raw: Option<String>,
+    pub last_seen_version_normalized: Option<String>,
+    pub last_resolved_url: Option<String>,
+    pub snoozed_until: Option<String>,
+    pub skipped_version_normalized: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub default_download_dir: String,
     pub depot_downloader_path: Option<String>,
@@ -177,6 +188,7 @@ pub struct Settings {
     pub mod_icon_cache_limit_mb: Option<u32>,
     pub database_backup_count: Option<u32>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
+    pub app_update: Option<AppUpdateSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +483,8 @@ pub struct ModLibraryEntry {
     pub storage_id: String,
     pub display_name: String,
     pub files: Vec<String>,
+    #[serde(rename = "attachedUserLibs")]
+    pub attached_userlibs: Vec<String>,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
     pub source_version: Option<String>,
@@ -595,6 +609,7 @@ mod tests {
             storage_id: "s-1".to_string(),
             display_name: "Example".to_string(),
             files: vec!["Example.dll".to_string()],
+            attached_userlibs: vec!["Config/Example.json".to_string()],
             source: Some(ModSource::Github),
             source_id: Some("owner/repo".to_string()),
             source_version: Some("v1.0.0".to_string()),
@@ -624,8 +639,10 @@ mod tests {
         let json = serde_json::to_value(entry).expect("serialize");
         assert!(json.get("storageId").is_some());
         assert!(json.get("displayName").is_some());
+        assert!(json.get("attachedUserLibs").is_some());
         assert!(json.get("sourceId").is_some());
         assert!(json.get("availableRuntimes").is_some());
+        assert!(json.get("attachedUserlibs").is_none());
         assert!(json.get("storage_ids_by_runtime").is_none());
     }
 

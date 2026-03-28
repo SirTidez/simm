@@ -15,13 +15,26 @@ import {
 } from "./modCardHelpers";
 import { onModMetadataRefreshStatus } from "../services/events";
 import { useSettingsStore } from "../stores/settingsStore";
-import { SecurityScanReportOverlay } from "./SecurityScanReportOverlay";
+import {
+  SecurityScanReportOverlay,
+  type SecurityScanReportOption,
+} from "./SecurityScanReportOverlay";
+import { type SecurityReportWorkspaceRequest } from "./SecurityScanReportPage";
 import {
   AnchoredContextMenu,
   type AnchoredContextMenuItem,
 } from "./AnchoredContextMenu";
-import { InstallTargetsDialog } from "./InstallTargetsDialog";
+import { InstallTargetsDialog, getNormalizedRuntime } from "./InstallTargetsDialog";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
+import {
+  areVersionsEquivalent,
+  buildDownloadedGroups,
+  compareVersionTokensDesc,
+  normalizeThunderstoreName,
+  normalizeVersionToken,
+  parseThunderstoreSourceId,
+  type DownloadedModGroup,
+} from "../services/modLibrarySummary";
 import type {
   Environment,
   ModLibraryEntry,
@@ -64,7 +77,7 @@ interface ThunderstorePackage {
 
 type ThunderstoreRuntime = "IL2CPP" | "Mono";
 
-interface ThunderstorePackageGroup {
+export interface ThunderstorePackageGroup {
   key: string;
   name: string;
   owner: string;
@@ -72,30 +85,50 @@ interface ThunderstorePackageGroup {
   packagesByRuntime: Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>;
 }
 
-interface DownloadedModGroup {
+type ThunderstorePackageVersion = ThunderstorePackage["versions"][number];
+
+interface ThunderstoreVersionOption {
   key: string;
-  displayName: string;
-  managed: boolean;
-  entries: ModLibraryEntry[];
-  storageIds: string[];
-  installedIn: string[];
-  installedInByRuntime: Partial<Record<"IL2CPP" | "Mono", string[]>>;
-  availableRuntimes: Array<"IL2CPP" | "Mono">;
-  author?: string;
-  sourceVersion?: string;
-  updateAvailable?: boolean;
-  remoteVersion?: string;
+  versionNumber: string;
+  runtimes: ThunderstoreRuntime[];
+  packagesByRuntime: Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>;
+  versionsByRuntime: Partial<Record<ThunderstoreRuntime, ThunderstorePackageVersion>>;
+  updatedAt?: string;
+  downloads?: number;
+  description?: string;
 }
 
-type DownloadedFilter =
+type DateLike = string | number | Date | undefined | null;
+type NexusModDateAliases = {
+  updatedAt?: string;
+  createdAt?: string;
+  updated_at?: string;
+  created_at?: string;
+};
+
+const FEATURED_THUNDERSTORE_PACKAGES = {
+  s1api: {
+    sourceId: "ifBars/S1API_Forked",
+    displayName: "S1API",
+    packageUrl: "https://thunderstore.io/c/schedule-i/p/ifBars/S1API_Forked/",
+  },
+  mlvscan: {
+    sourceId: "ifBars/MLVScan",
+    displayName: "MLVScan",
+    packageUrl: "https://thunderstore.io/c/schedule-i/p/ifBars/MLVScan/",
+  },
+} as const;
+
+export type DownloadedFilter =
   | "all"
   | "updates"
   | "managed"
   | "external"
   | "installed";
-type LibraryTab = "discover" | "library" | "updates";
+export type LibraryTab = "discover" | "library" | "updates";
+type DiscoverSort = "relevance" | "updated" | "popularity" | "newest";
 
-interface LibraryModViewState {
+export interface LibraryModViewState {
   id: string;
   storageId?: string;
   name: string;
@@ -123,57 +156,9 @@ interface InstallDialogState {
   entry: ModLibraryEntry | null;
   compatibleEnvironments: Environment[];
   excludedEnvironments: Environment[];
+  lockedEnvironmentIds: string[];
+  mode: "select" | "installed";
 }
-
-const runtimeSuffixPatterns = [
-  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
-  /\s*[_-]\s*(mono|il2cpp)\s*$/i,
-  /\s+(mono|il2cpp)\s*$/i,
-];
-
-const normalizeThunderstoreName = (name: string): string => {
-  let normalized = name;
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const pattern of runtimeSuffixPatterns) {
-      const next = normalized.replace(pattern, "").trim();
-      if (next !== normalized) {
-        normalized = next;
-        changed = true;
-      }
-    }
-  }
-  return normalized;
-};
-
-const parseThunderstoreSourceId = (
-  sourceId?: string,
-): { owner: string; name: string } => {
-  if (!sourceId) {
-    return { owner: "", name: "" };
-  }
-  const [owner, ...rest] = sourceId.split("/");
-  return { owner: owner || "", name: rest.join("/") };
-};
-
-const normalizeVersionToken = (value?: string): string => {
-  let normalized = (value || "").trim();
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const pattern of runtimeSuffixPatterns) {
-      const next = normalized.replace(pattern, "").trim();
-      if (next !== normalized) {
-        normalized = next;
-        changed = true;
-      }
-    }
-  }
-
-  return normalized.replace(/^v/i, "").toLowerCase();
-};
 
 const formatVersionTag = (value?: string): string => {
   const normalized = normalizeVersionToken(value);
@@ -190,37 +175,67 @@ const formatCompactNumber = (value?: number): string => {
   }).format(value);
 };
 
-const formatInspectorDate = (value?: string): string => {
+const getEffectiveEnvironmentRuntime = (
+  environment: Pick<Environment, "branch" | "runtime">,
+): "IL2CPP" | "Mono" => {
+  const normalizedBranch = (environment.branch || "")
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
+
+  if (
+    normalizedBranch === "alternate" ||
+    normalizedBranch === "alternate-beta" ||
+    normalizedBranch === "alternatebeta"
+  ) {
+    return "Mono";
+  }
+
+  if (normalizedBranch === "main" || normalizedBranch === "beta") {
+    return "IL2CPP";
+  }
+
+  return environment.runtime === "Mono" ? "Mono" : "IL2CPP";
+};
+
+const normalizeDateLike = (value: DateLike): number => {
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return 0;
+    }
+    if (/^\d+$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric)) {
+        return numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+      }
+    }
+    const parsed = new Date(trimmed).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+};
+
+const formatInspectorDate = (value?: DateLike): string => {
   if (!value) {
     return "unknown";
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const timestamp = normalizeDateLike(value);
+  if (!timestamp) {
     return "unknown";
   }
+  const date = new Date(timestamp);
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
   }).format(date);
-};
-
-const compareVersionTokensDesc = (a?: string, b?: string): number => {
-  const aParts = normalizeVersionToken(a)
-    .split(".")
-    .map((v) => parseInt(v, 10) || 0);
-  const bParts = normalizeVersionToken(b)
-    .split(".")
-    .map((v) => parseInt(v, 10) || 0);
-  const len = Math.max(aParts.length, bParts.length);
-  for (let i = 0; i < len; i++) {
-    const av = aParts[i] || 0;
-    const bv = bParts[i] || 0;
-    if (av !== bv) {
-      return bv - av;
-    }
-  }
-  return 0;
 };
 
 const compareVersions = (a: string, b: string): number => {
@@ -240,13 +255,369 @@ const compareVersions = (a: string, b: string): number => {
   return 0;
 };
 
-const areVersionsEquivalent = (a?: string, b?: string): boolean => {
-  const normalizedA = normalizeVersionToken(a);
-  const normalizedB = normalizeVersionToken(b);
-  if (!normalizedA || !normalizedB) {
-    return false;
+const normalizeDateString = (value: DateLike): string | undefined => {
+  const timestamp = normalizeDateLike(value);
+  return timestamp ? new Date(timestamp).toISOString() : undefined;
+};
+
+const parseTimestamp = (value?: DateLike): number => normalizeDateLike(value);
+
+const getThunderstorePackageUpdatedAt = (
+  pkg?: ThunderstorePackage | null,
+): DateLike => {
+  if (!pkg) {
+    return undefined;
   }
-  return compareVersionTokensDesc(normalizedA, normalizedB) === 0;
+
+  const latestVersion = pkg.versions?.[0] as
+    | (ThunderstorePackageVersion & { dateUpdated?: string; dateCreated?: string })
+    | undefined;
+  const packageWithAliases = pkg as ThunderstorePackage & {
+    dateUpdated?: string;
+    dateCreated?: string;
+  };
+
+  return (
+    pkg.date_updated ||
+    packageWithAliases.dateUpdated ||
+    latestVersion?.date_updated ||
+    latestVersion?.dateUpdated ||
+    pkg.date_created ||
+    packageWithAliases.dateCreated ||
+    latestVersion?.date_created ||
+    latestVersion?.dateCreated
+  );
+};
+
+const getNexusModUpdatedAt = (mod?: (NexusMod & NexusModDateAliases) | null): DateLike => {
+  if (!mod) {
+    return undefined;
+  }
+
+  const modWithAliases = mod as NexusMod & NexusModDateAliases;
+
+  return (
+    modWithAliases.updated_time ||
+    modWithAliases.uploaded_time ||
+    modWithAliases.updated_at ||
+    modWithAliases.created_at ||
+    modWithAliases.updatedAt ||
+    modWithAliases.createdAt
+  );
+};
+
+const getNexusFileUpdatedAt = (
+  file?:
+    | NexusModFile
+    | (NexusModFile & {
+        uploaded_time?: string;
+        updated_time?: string;
+        uploadedAt?: string;
+        updatedAt?: string;
+        uploaded_at?: string;
+        updated_at?: string;
+      })
+    | null,
+): DateLike => {
+  if (!file) {
+    return undefined;
+  }
+
+  if (file.uploaded_timestamp) {
+    return new Date(file.uploaded_timestamp * 1000).toISOString();
+  }
+
+  return (
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).updated_time ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).uploaded_time ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).updated_at ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).uploaded_at ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).updatedAt ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).uploadedAt
+  );
+};
+
+const normalizeSearchText = (value?: string): string => {
+  return (value || "").toLowerCase().replace(/[\s_-]+/g, "");
+};
+
+const inferNexusFileRuntime = (
+  file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
+): "IL2CPP" | "Mono" | "Unknown" => {
+  const fileName = `${file.file_name || ""} ${file.name || ""} ${file.category_name || ""}`.toLowerCase();
+  if (fileName.includes("il2cpp")) {
+    return "IL2CPP";
+  }
+  if (fileName.includes("mono")) {
+    return "Mono";
+  }
+  return "Unknown";
+};
+
+const isNexusFomodInstaller = (
+  file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
+): boolean => {
+  const haystack =
+    `${file.file_name || ""} ${file.name || ""} ${file.category_name || ""}`.toLowerCase();
+  return (
+    haystack.includes("vortex installer") ||
+    haystack.includes("fomod") ||
+    (haystack.includes("installer") && !haystack.includes("melonloader"))
+  );
+};
+
+const getNexusFileDisplayKind = (
+  file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
+): "FOMOD Installer" | "IL2CPP" | "Mono" | "Unknown" => {
+  if (isNexusFomodInstaller(file)) {
+    return "FOMOD Installer";
+  }
+  return inferNexusFileRuntime(file);
+};
+
+const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
+  return [...files].sort((left, right) => {
+    const versionDelta = compareVersionTokensDesc(
+      left.version || left.mod_version || "",
+      right.version || right.mod_version || "",
+    );
+    if (versionDelta !== 0) {
+      return versionDelta;
+    }
+
+    const uploadedDelta =
+      Number(right.uploaded_timestamp || 0) - Number(left.uploaded_timestamp || 0);
+    if (uploadedDelta !== 0) {
+      return uploadedDelta;
+    }
+
+    const rightDate = parseTimestamp(getNexusFileUpdatedAt(right));
+    const leftDate = parseTimestamp(getNexusFileUpdatedAt(left));
+    const fallbackDateDelta = rightDate - leftDate;
+    if (fallbackDateDelta !== 0) {
+      return fallbackDateDelta;
+    }
+
+    const leftInstaller = isNexusFomodInstaller(left);
+    const rightInstaller = isNexusFomodInstaller(right);
+    if (leftInstaller !== rightInstaller) {
+      return leftInstaller ? 1 : -1;
+    }
+
+    if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
+      return left.is_primary ? -1 : 1;
+    }
+
+    return (left.file_name || left.name || "").localeCompare(
+      right.file_name || right.name || "",
+    );
+  });
+};
+
+const buildThunderstoreVersionOptions = (
+  pkg: ThunderstorePackageGroup | null,
+): ThunderstoreVersionOption[] => {
+  if (!pkg) {
+    return [];
+  }
+
+  const grouped = new Map<string, ThunderstoreVersionOption>();
+  (["IL2CPP", "Mono"] as const).forEach((runtime) => {
+    const runtimePackage = pkg.packagesByRuntime[runtime];
+    const versions = runtimePackage?.versions || [];
+
+    versions.forEach((version) => {
+      const resolvedUpdatedAt =
+        version.date_updated ||
+        (version as ThunderstorePackageVersion & { dateUpdated?: string; dateCreated?: string })
+          .dateUpdated ||
+        version.date_created ||
+        (version as ThunderstorePackageVersion & { dateUpdated?: string; dateCreated?: string })
+          .dateCreated ||
+        getThunderstorePackageUpdatedAt(runtimePackage) ||
+        runtimePackage?.date_created ||
+        (runtimePackage as ThunderstorePackage & { dateCreated?: string })?.dateCreated;
+      const normalizedResolvedUpdatedAt = normalizeDateString(resolvedUpdatedAt);
+      const key = version.version_number || version.uuid4;
+      const existing: ThunderstoreVersionOption = grouped.get(key) || {
+        key,
+        versionNumber: version.version_number || "unknown",
+        runtimes: [],
+        packagesByRuntime: {} as Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>,
+        versionsByRuntime: {} as Partial<
+          Record<ThunderstoreRuntime, ThunderstorePackageVersion>
+        >,
+        updatedAt: normalizedResolvedUpdatedAt,
+        downloads: 0,
+        description: version.description,
+      };
+
+      if (!existing.runtimes.includes(runtime)) {
+        existing.runtimes.push(runtime);
+      }
+      existing.packagesByRuntime[runtime] = runtimePackage;
+      existing.versionsByRuntime[runtime] = version;
+      if (!existing.description && version.description) {
+        existing.description = version.description;
+      }
+      existing.updatedAt =
+        parseTimestamp(normalizedResolvedUpdatedAt) > parseTimestamp(existing.updatedAt)
+          ? normalizedResolvedUpdatedAt
+          : existing.updatedAt;
+      existing.downloads = (existing.downloads || 0) + Number(version.downloads || 0);
+      grouped.set(key, existing);
+    });
+  });
+
+  return Array.from(grouped.values()).sort((left, right) => {
+    const versionDelta = compareVersionTokensDesc(
+      left.versionNumber,
+      right.versionNumber,
+    );
+    if (versionDelta !== 0) {
+      return versionDelta;
+    }
+    return parseTimestamp(right.updatedAt) - parseTimestamp(left.updatedAt);
+  });
+};
+
+const matchesNexusQueryLocally = (mod: NexusMod, query: string): boolean => {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  const haystacks = [
+    mod.name,
+    mod.summary,
+    mod.author,
+  ];
+
+  return haystacks.some((value) => normalizeSearchText(value).includes(normalizedQuery));
+};
+
+const sortThunderstoreGroups = (
+  groups: ThunderstorePackageGroup[],
+  sort: DiscoverSort,
+): ThunderstorePackageGroup[] => {
+  return [...groups].sort((a, b) => {
+    const aVersions = Object.values(a.packagesByRuntime).filter(Boolean);
+    const bVersions = Object.values(b.packagesByRuntime).filter(Boolean);
+    const aUpdated = Math.max(...aVersions.map((pkg) => parseTimestamp(getThunderstorePackageUpdatedAt(pkg))));
+    const bUpdated = Math.max(...bVersions.map((pkg) => parseTimestamp(getThunderstorePackageUpdatedAt(pkg))));
+    const aCreated = Math.max(...aVersions.map((pkg) => parseTimestamp(pkg?.date_created || (pkg as ThunderstorePackage & { dateCreated?: string })?.dateCreated || pkg?.versions?.[0]?.date_created || (pkg?.versions?.[0] as ThunderstorePackageVersion & { dateCreated?: string })?.dateCreated)));
+    const bCreated = Math.max(...bVersions.map((pkg) => parseTimestamp(pkg?.date_created || (pkg as ThunderstorePackage & { dateCreated?: string })?.dateCreated || pkg?.versions?.[0]?.date_created || (pkg?.versions?.[0] as ThunderstorePackageVersion & { dateCreated?: string })?.dateCreated)));
+    const aDownloads = aVersions.reduce((sum, pkg) => sum + (pkg?.versions?.[0]?.downloads || 0), 0);
+    const bDownloads = bVersions.reduce((sum, pkg) => sum + (pkg?.versions?.[0]?.downloads || 0), 0);
+
+    if (sort === "popularity" && aDownloads !== bDownloads) {
+      return bDownloads - aDownloads;
+    }
+    if (sort === "newest" && aCreated !== bCreated) {
+      return bCreated - aCreated;
+    }
+    if (sort === "updated" && aUpdated !== bUpdated) {
+      return bUpdated - aUpdated;
+    }
+    return a.name.localeCompare(b.name);
+  });
+};
+
+const sortNexusMods = (mods: NexusMod[], sort: DiscoverSort): NexusMod[] => {
+  return [...mods].sort((a, b) => {
+    const aUpdated = parseTimestamp(getNexusModUpdatedAt(a));
+    const bUpdated = parseTimestamp(getNexusModUpdatedAt(b));
+    const aCreated = parseTimestamp(
+      a.uploaded_time ||
+        (a as NexusMod & { created_at?: string; createdAt?: string }).created_at ||
+        (a as NexusMod & { created_at?: string; createdAt?: string }).createdAt,
+    );
+    const bCreated = parseTimestamp(
+      b.uploaded_time ||
+        (b as NexusMod & { created_at?: string; createdAt?: string }).created_at ||
+        (b as NexusMod & { created_at?: string; createdAt?: string }).createdAt,
+    );
+    const aDownloads = a.mod_downloads || a.unique_downloads || 0;
+    const bDownloads = b.mod_downloads || b.unique_downloads || 0;
+
+    if (sort === "popularity" && aDownloads !== bDownloads) {
+      return bDownloads - aDownloads;
+    }
+    if (sort === "newest" && aCreated !== bCreated) {
+      return bCreated - aCreated;
+    }
+    if (sort === "updated" && aUpdated !== bUpdated) {
+      return bUpdated - aUpdated;
+    }
+    return a.name.localeCompare(b.name);
+  });
+};
+
+const getFeaturedThunderstoreRepresentative = (
+  group: ThunderstorePackageGroup | null,
+): ThunderstorePackage | null => {
+  if (!group) {
+    return null;
+  }
+
+  const candidates = Object.values(group.packagesByRuntime).filter(
+    Boolean,
+  ) as ThunderstorePackage[];
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return [...candidates].sort((a, b) => {
+    const aVersion = a.versions?.[0]?.version_number || "";
+    const bVersion = b.versions?.[0]?.version_number || "";
+    const versionCompare = compareVersions(bVersion, aVersion);
+    if (versionCompare !== 0) {
+      return versionCompare;
+    }
+    return parseTimestamp(getThunderstorePackageUpdatedAt(b)) - parseTimestamp(getThunderstorePackageUpdatedAt(a));
+  })[0];
 };
 
 const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
@@ -311,142 +682,6 @@ const getSourceBadgeStyle = (
   }
 };
 
-const buildDownloadedGroups = (
-  downloaded: ModLibraryEntry[],
-): DownloadedModGroup[] => {
-  const groups = new Map<
-    string,
-    {
-      key: string;
-      displayName: string;
-      entries: ModLibraryEntry[];
-      storageIds: string[];
-      installedIn: Set<string>;
-      installedInByRuntime: {
-        IL2CPP: Set<string>;
-        Mono: Set<string>;
-      };
-      availableRuntimes: Set<"IL2CPP" | "Mono">;
-      managedStates: Set<boolean>;
-      authors: Set<string>;
-      sourceVersions: Set<string>;
-      updateAvailable: boolean;
-      remoteVersions: Set<string>;
-    }
-  >();
-
-  downloaded.forEach((entry) => {
-    let key = entry.storageId;
-    let displayName = entry.displayName;
-    const normalizedDisplayName = normalizeThunderstoreName(
-      entry.displayName,
-    ).toLowerCase();
-
-    if (entry.source === "thunderstore") {
-      const { name } = parseThunderstoreSourceId(entry.sourceId);
-      const baseName = normalizeThunderstoreName(name || entry.displayName);
-      key = `thunderstore::${normalizeThunderstoreName(baseName).toLowerCase()}`;
-      displayName = baseName || entry.displayName;
-    } else if (
-      (entry.source === "nexusmods" || entry.source === "github") &&
-      entry.sourceId
-    ) {
-      key = `${entry.source}::${entry.sourceId.toLowerCase()}`;
-    } else if (
-      (entry.source === "nexusmods" || entry.source === "github") &&
-      !entry.sourceId
-    ) {
-      key = `${entry.source}::${normalizedDisplayName}`;
-    } else if (entry.managed) {
-      key = `managed::${normalizedDisplayName}`;
-    }
-
-    const group = groups.get(key) || {
-      key,
-      displayName,
-      entries: [],
-      storageIds: [],
-      installedIn: new Set<string>(),
-      installedInByRuntime: {
-        IL2CPP: new Set<string>(),
-        Mono: new Set<string>(),
-      },
-      availableRuntimes: new Set<"IL2CPP" | "Mono">(),
-      managedStates: new Set<boolean>(),
-      authors: new Set<string>(),
-      sourceVersions: new Set<string>(),
-      updateAvailable: false,
-      remoteVersions: new Set<string>(),
-    };
-
-    group.entries.push(entry);
-    group.storageIds.push(entry.storageId);
-    entry.installedIn.forEach((envId) => group.installedIn.add(envId));
-    (entry.installedInByRuntime?.IL2CPP || []).forEach((envId) =>
-      group.installedInByRuntime.IL2CPP.add(envId),
-    );
-    (entry.installedInByRuntime?.Mono || []).forEach((envId) =>
-      group.installedInByRuntime.Mono.add(envId),
-    );
-    entry.availableRuntimes.forEach((runtime) =>
-      group.availableRuntimes.add(runtime),
-    );
-    group.managedStates.add(entry.managed);
-    if (entry.author) group.authors.add(entry.author);
-    if (entry.sourceVersion) group.sourceVersions.add(entry.sourceVersion);
-    if (entry.updateAvailable) group.updateAvailable = true;
-    if (entry.remoteVersion) group.remoteVersions.add(entry.remoteVersion);
-
-    groups.set(key, group);
-  });
-
-  return Array.from(groups.values())
-    .map((group) => {
-      const remoteVersions = Array.from(group.remoteVersions).sort((a, b) =>
-        compareVersionTokensDesc(a, b),
-      );
-      const remoteVersion = remoteVersions[0];
-      const hasRemoteVersion = normalizeVersionToken(remoteVersion).length > 0;
-      const hasRemoteDownloaded =
-        hasRemoteVersion &&
-        group.entries.some((entry) => {
-          return areVersionsEquivalent(
-            entry.sourceVersion || entry.installedVersion,
-            remoteVersion,
-          );
-        });
-      const hasFlaggedUpdate = group.updateAvailable;
-      const updateAvailable = hasRemoteVersion
-        ? !hasRemoteDownloaded
-        : hasFlaggedUpdate;
-
-      return {
-        key: group.key,
-        displayName: group.displayName,
-        managed:
-          group.managedStates.size === 1 && group.managedStates.has(true),
-        entries: group.entries,
-        storageIds: group.storageIds,
-        installedIn: Array.from(group.installedIn),
-        installedInByRuntime: {
-          IL2CPP: Array.from(group.installedInByRuntime.IL2CPP),
-          Mono: Array.from(group.installedInByRuntime.Mono),
-        },
-        availableRuntimes: Array.from(group.availableRuntimes),
-        author:
-          group.authors.size === 1 ? Array.from(group.authors)[0] : undefined,
-        sourceVersion:
-          group.sourceVersions.size === 1
-            ? Array.from(group.sourceVersions)[0]
-            : undefined,
-        updateAvailable,
-        remoteVersion,
-      };
-    })
-    .sort((a, b) =>
-      a.displayName.toLowerCase().localeCompare(b.displayName.toLowerCase()),
-    );
-};
 
 interface Props {
   isOpen: boolean;
@@ -454,6 +689,26 @@ interface Props {
   focusStorageId?: string | null;
   focusRequestId?: number;
   focusModTag?: string | null;
+  onOpenAccounts?: () => void;
+  onOpenSecurityReport?: (request: SecurityReportWorkspaceRequest) => void;
+  navigationState?: ModLibraryNavigationState;
+  onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
+}
+
+export interface ModLibraryNavigationState {
+  libraryTab?: LibraryTab;
+  searchSource?: "thunderstore" | "nexusmods";
+  discoverSort?: DiscoverSort;
+  searchQuery?: string;
+  searchResults?: ThunderstorePackageGroup[];
+  showSearchResults?: boolean;
+  showDiscovery?: boolean;
+  nexusModsSearchQuery?: string;
+  nexusModsSearchResults?: NexusMod[];
+  showNexusModsResults?: boolean;
+  downloadedFilter?: DownloadedFilter;
+  downloadedSearch?: string;
+  activeModView?: LibraryModViewState | null;
 }
 
 interface RuntimePromptState {
@@ -468,8 +723,23 @@ export function ModLibraryOverlay({
   focusStorageId,
   focusRequestId,
   focusModTag,
+  onOpenAccounts,
+  onOpenSecurityReport,
+  navigationState,
+  onNavigationStateChange,
 }: Props) {
   const { settings } = useSettingsStore();
+  const defaultSearchSource = useMemo<"thunderstore" | "nexusmods">(() => {
+    if (navigationState?.searchSource) {
+      return navigationState.searchSource;
+    }
+    try {
+      const stored = localStorage.getItem("simm:last-library-search-source");
+      return stored === "thunderstore" ? "thunderstore" : "nexusmods";
+    } catch {
+      return "nexusmods";
+    }
+  }, [navigationState?.searchSource]);
   const [library, setLibrary] = useState<ModLibraryResult | null>(null);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [selectedModIds, setSelectedModIds] = useState<Set<string>>(new Set());
@@ -479,31 +749,48 @@ export function ModLibraryOverlay({
     title: string;
     message: string;
     onConfirm: () => void;
+    confirmText?: string;
+    cancelText?: string;
   }>({
     isOpen: false,
     title: "",
     message: "",
     onConfirm: () => {},
   });
-  const [libraryTab, setLibraryTab] = useState<LibraryTab>("discover");
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>(
+    () => navigationState?.libraryTab ?? "discover",
+  );
 
   const [searchSource, setSearchSource] = useState<
     "thunderstore" | "nexusmods"
-  >("thunderstore");
-  const [searchQuery, setSearchQuery] = useState("");
+  >(defaultSearchSource);
+  const [discoverSort, setDiscoverSort] = useState<DiscoverSort>(
+    () => navigationState?.discoverSort ?? "updated",
+  );
+  const [searchQuery, setSearchQuery] = useState(
+    () => navigationState?.searchQuery ?? "",
+  );
   const [searchResults, setSearchResults] = useState<
     ThunderstorePackageGroup[]
-  >([]);
+  >(() => navigationState?.searchResults ?? []);
   const [searching, setSearching] = useState(false);
-  const [showSearchResults, setShowSearchResults] = useState(false);
-  const [showDiscovery, setShowDiscovery] = useState(true);
+  const [showSearchResults, setShowSearchResults] = useState(
+    () => navigationState?.showSearchResults ?? false,
+  );
+  const [showDiscovery, setShowDiscovery] = useState(
+    () => navigationState?.showDiscovery ?? true,
+  );
 
-  const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState("");
+  const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState(
+    () => navigationState?.nexusModsSearchQuery ?? "",
+  );
   const [nexusModsSearchResults, setNexusModsSearchResults] = useState<
     NexusMod[]
-  >([]);
+  >(() => navigationState?.nexusModsSearchResults ?? []);
   const [searchingNexusMods, setSearchingNexusMods] = useState(false);
-  const [showNexusModsResults, setShowNexusModsResults] = useState(false);
+  const [showNexusModsResults, setShowNexusModsResults] = useState(
+    () => navigationState?.showNexusModsResults ?? false,
+  );
   const [nexusModsFiles, setNexusModsFiles] = useState<
     Map<number, NexusModFile[]>
   >(new Map());
@@ -521,27 +808,32 @@ export function ModLibraryOverlay({
   const [selectedStorageByGroup, setSelectedStorageByGroup] = useState<
     Record<string, string>
   >({});
+  const [selectedThunderstoreVersionByPackage, setSelectedThunderstoreVersionByPackage] =
+    useState<Record<string, string>>({});
+  const [selectedNexusFileByModId, setSelectedNexusFileByModId] = useState<
+    Record<number, number>
+  >({});
   const [runtimePrompt, setRuntimePrompt] = useState<RuntimePromptState | null>(
     null,
   );
   const [downloadedFilter, setDownloadedFilter] =
-    useState<DownloadedFilter>("all");
-  const [downloadedSearch, setDownloadedSearch] = useState("");
+    useState<DownloadedFilter>(() => navigationState?.downloadedFilter ?? "all");
+  const [downloadedSearch, setDownloadedSearch] = useState(
+    () => navigationState?.downloadedSearch ?? "",
+  );
   const [activeModView, setActiveModView] =
-    useState<LibraryModViewState | null>(null);
-  const [activeSecurityReport, setActiveSecurityReport] = useState<{
-    title: string;
-    report: SecurityScanReport;
-    confirmLabel?: string;
-    onConfirm?: (() => Promise<void>) | null;
-  } | null>(null);
+    useState<LibraryModViewState | null>(() => navigationState?.activeModView ?? null);
+  const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [installDialog, setInstallDialog] = useState<InstallDialogState>({
     isOpen: false,
     title: "",
     entry: null,
     compatibleEnvironments: [],
     excludedEnvironments: [],
+    lockedEnvironmentIds: [],
+    mode: "select",
   });
   const [selectedInstallEnvironmentIds, setSelectedInstallEnvironmentIds] =
     useState<Set<string>>(new Set());
@@ -562,59 +854,80 @@ export function ModLibraryOverlay({
   const libraryScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
-  const pendingSecurityGateResolutionRef = useRef<
-    ((accepted: boolean) => void) | null
-  >(null);
+  const pendingSecurityGateResolutionRef = useRef<(() => void) | null>(null);
   const pendingNexusManualActionRef = useRef<null | {
     onSuccess: () => Promise<void>;
     onErrorTitle?: string;
   }>(null);
   const lastHandledFocusRequestIdRef = useRef<number | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
+  const previousDiscoverSortRef = useRef(discoverSort);
 
-  const [s1apiLatestRelease, setS1apiLatestRelease] = useState<{
-    tag_name: string;
-    name: string;
-    published_at: string;
-    prerelease: boolean;
-    download_url: string | null;
-  } | null>(null);
-  const [mlvscanLatestRelease, setMlvscanLatestRelease] = useState<{
-    tag_name: string;
-    name: string;
-    published_at: string;
-    prerelease: boolean;
-    download_url: string | null;
-  } | null>(null);
-  const [s1apiReleases, setS1apiReleases] = useState<
-    Array<{
-      tag_name: string;
-      name: string;
-      published_at: string;
-      prerelease: boolean;
-      download_url: string | null;
-      body?: string;
-    }>
-  >([]);
-  const [mlvscanReleases, setMlvscanReleases] = useState<
-    Array<{
-      tag_name: string;
-      name: string;
-      published_at: string;
-      prerelease: boolean;
-      download_url: string | null;
-      body?: string;
-    }>
-  >([]);
-  const [loadingS1APIReleases, setLoadingS1APIReleases] = useState(false);
-  const [loadingMlvscanReleases, setLoadingMlvscanReleases] = useState(false);
-  const [showS1APIVersionSelector, setShowS1APIVersionSelector] =
-    useState(false);
-  const [showMlvscanVersionSelector, setShowMlvscanVersionSelector] =
-    useState(false);
-  const [selectedS1APIVersion, setSelectedS1APIVersion] = useState("");
-  const [selectedMlvscanVersion, setSelectedMlvscanVersion] = useState("");
-  const [downloadingS1API, setDownloadingS1API] = useState(false);
-  const [downloadingMlvscan, setDownloadingMlvscan] = useState(false);
+  useEffect(() => {
+    try {
+      localStorage.setItem("simm:last-library-search-source", searchSource);
+    } catch {
+      // Ignore localStorage failures in embedded/webview contexts.
+    }
+  }, [searchSource]);
+
+  useEffect(() => {
+    onNavigationStateChange?.({
+      libraryTab,
+      searchSource,
+      discoverSort,
+      searchQuery,
+      searchResults,
+      showSearchResults,
+      showDiscovery,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      showNexusModsResults,
+      downloadedFilter,
+      downloadedSearch,
+      activeModView,
+    });
+  }, [
+    activeModView,
+    downloadedFilter,
+    discoverSort,
+    downloadedSearch,
+    libraryTab,
+    nexusModsSearchQuery,
+    nexusModsSearchResults,
+    onNavigationStateChange,
+    searchQuery,
+    searchResults,
+    searchSource,
+    showDiscovery,
+    showNexusModsResults,
+    showSearchResults,
+  ]);
+
+  const showToast = useCallback((message: string, duration = 6500) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, duration);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+        toastTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const [s1apiFeaturedPackage, setS1apiFeaturedPackage] =
+    useState<ThunderstorePackageGroup | null>(null);
+  const [mlvscanFeaturedPackage, setMlvscanFeaturedPackage] =
+    useState<ThunderstorePackageGroup | null>(null);
 
   const downloadedGroups = useMemo(
     () => buildDownloadedGroups(library?.downloaded ?? []),
@@ -677,6 +990,7 @@ export function ModLibraryOverlay({
       .filter(Boolean);
     return (
       sourceIds.includes("ifbars/s1api") ||
+      sourceIds.includes("ifbars/s1api_forked") ||
       normalizeThunderstoreName(group.displayName).toLowerCase() === "s1api"
     );
   });
@@ -694,7 +1008,10 @@ export function ModLibraryOverlay({
   const s1apiInLibrary = !!s1apiGroup;
   const mlvscanInLibrary = !!mlvscanGroup;
   const s1apiInstalledVersion = getLatestDownloadedVersionForGroup(s1apiGroup);
-  const s1apiLatestVersion = s1apiLatestRelease?.tag_name;
+  const s1apiFeaturedRepresentative =
+    getFeaturedThunderstoreRepresentative(s1apiFeaturedPackage);
+  const s1apiLatestVersion =
+    s1apiFeaturedRepresentative?.versions?.[0]?.version_number;
   const s1apiNeedsUpdate =
     s1apiInLibrary &&
     s1apiInstalledVersion &&
@@ -703,7 +1020,10 @@ export function ModLibraryOverlay({
 
   const mlvscanInstalledVersion =
     getLatestDownloadedVersionForGroup(mlvscanGroup);
-  const mlvscanLatestVersion = mlvscanLatestRelease?.tag_name;
+  const mlvscanFeaturedRepresentative =
+    getFeaturedThunderstoreRepresentative(mlvscanFeaturedPackage);
+  const mlvscanLatestVersion =
+    mlvscanFeaturedRepresentative?.versions?.[0]?.version_number;
   const mlvscanNeedsUpdate =
     mlvscanInLibrary &&
     mlvscanInstalledVersion &&
@@ -720,7 +1040,9 @@ export function ModLibraryOverlay({
       ).toLowerCase();
 
       const isS1apiGroup =
-        sourceIds.includes("ifbars/s1api") || normalizedName === "s1api";
+        sourceIds.includes("ifbars/s1api") ||
+        sourceIds.includes("ifbars/s1api_forked") ||
+        normalizedName === "s1api";
       if (isS1apiGroup && !!s1apiInstalledVersion && !!s1apiLatestVersion) {
         return !!s1apiNeedsUpdate;
       }
@@ -759,21 +1081,6 @@ export function ModLibraryOverlay({
     const managed = downloadedGroups.filter((group) => group.managed).length;
     return { total, updates, installed, managed };
   }, [downloadedGroups, isGroupUpdateAvailable]);
-
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-
-    if (downloadedGroups.length > 0) {
-      setLibraryTab((current) =>
-        current === "discover" ? "library" : current,
-      );
-      return;
-    }
-
-    setLibraryTab("discover");
-  }, [downloadedGroups.length, isOpen]);
 
   const filteredDownloadedGroups = useMemo(() => {
     const query = downloadedSearch.trim().toLowerCase();
@@ -890,33 +1197,50 @@ export function ModLibraryOverlay({
       title: "",
       message: "",
       onConfirm: () => {},
+      confirmText: undefined,
+      cancelText: undefined,
     });
   }, []);
 
   const showLibraryNotice = useCallback(
-    (title: string, message: string) => {
+    (
+      title: string,
+      message: string,
+      action?: { label: string; onAction: () => void; cancelText?: string },
+    ) => {
       setConfirmOverlay({
         isOpen: true,
         title,
         message,
         onConfirm: () => {
+          action?.onAction();
           closeConfirmOverlay();
         },
+        confirmText: action?.label,
+        cancelText: action ? action.cancelText ?? "Dismiss" : undefined,
       });
     },
     [closeConfirmOverlay],
   );
+
+  const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
+    if (onOpenSecurityReport) {
+      onOpenSecurityReport(request);
+      return;
+    }
+
+    setActiveSecurityReport(request);
+  }, [onOpenSecurityReport]);
 
   const closeSecurityReport = useCallback(() => {
     if (securityActionBusy) {
       return;
     }
 
-    const resolvePending = pendingSecurityGateResolutionRef.current;
     pendingSecurityGateResolutionRef.current = null;
-    resolvePending?.(false);
+    activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
-  }, [securityActionBusy]);
+  }, [activeSecurityReport, securityActionBusy]);
 
   const handleSecurityReportConfirm = useCallback(async () => {
     if (!activeSecurityReport?.onConfirm) {
@@ -940,9 +1264,85 @@ export function ModLibraryOverlay({
     }
   }, [activeSecurityReport, showLibraryNotice]);
 
+  const buildSecurityReportOptionLabel = useCallback(
+    (entry: ModLibraryEntry) => {
+      const versionLabel = formatVersionTag(
+        entry.sourceVersion || entry.installedVersion,
+      );
+      const runtimeLabel =
+        entry.availableRuntimes?.length > 0
+          ? entry.availableRuntimes.join("/")
+          : "Runtime?";
+      return `${versionLabel} • ${runtimeLabel}`;
+    },
+    [],
+  );
+
+  const buildSecurityReportOptionDescription = useCallback((entry: ModLibraryEntry) => {
+    const fileCount = entry.files.length;
+    const fileSummary =
+      fileCount <= 2
+        ? entry.files.join(", ")
+        : `${fileCount} scanned files`;
+    return fileSummary || "Stored security report";
+  }, []);
+
+  const loadStoredSecurityReportOptions = useCallback(
+    async (entries: ModLibraryEntry[]): Promise<SecurityScanReportOption[]> => {
+      const uniqueEntries = entries.filter(
+        (entry, index, array) =>
+          array.findIndex((candidate) => candidate.storageId === entry.storageId) ===
+          index,
+      );
+
+      const reports = await Promise.all(
+        uniqueEntries.map(async (entry) => ({
+          entry,
+          report: await ApiService.getModSecurityScanReport(entry.storageId),
+        })),
+      );
+
+      return reports
+        .filter(
+          (
+            candidate,
+          ): candidate is { entry: ModLibraryEntry; report: SecurityScanReport } =>
+            Boolean(candidate.report),
+        )
+        .map(({ entry, report }) => ({
+          key: entry.storageId,
+          label: buildSecurityReportOptionLabel(entry),
+          description: buildSecurityReportOptionDescription(entry),
+          report,
+        }));
+    },
+    [buildSecurityReportOptionDescription, buildSecurityReportOptionLabel],
+  );
+
   const openStoredSecurityReport = useCallback(
     async (storageId: string, title: string) => {
       try {
+        const containingGroup = downloadedGroups.find((group) =>
+          group.entries.some(
+            (entry) =>
+              entry.storageId === storageId ||
+              Object.values(entry.storageIdsByRuntime || {}).includes(storageId),
+          ),
+        );
+        const reportOptions = await loadStoredSecurityReportOptions(
+          containingGroup?.entries || [],
+        );
+
+        if (reportOptions.length > 0) {
+          openSecurityReport({
+            title,
+            report: reportOptions[0].report,
+            reportOptions,
+            onConfirm: null,
+          });
+          return;
+        }
+
         const report = await ApiService.getModSecurityScanReport(storageId);
         if (!report) {
           showLibraryNotice(
@@ -952,7 +1352,7 @@ export function ModLibraryOverlay({
           return;
         }
 
-        setActiveSecurityReport({ title, report, onConfirm: null });
+        openSecurityReport({ title, report, onConfirm: null });
       } catch (err) {
         console.error("Failed to load security report:", err);
         showLibraryNotice(
@@ -963,7 +1363,7 @@ export function ModLibraryOverlay({
         );
       }
     },
-    [showLibraryNotice],
+    [downloadedGroups, loadStoredSecurityReportOptions, openSecurityReport, showLibraryNotice],
   );
 
   const handleSecurityGateResult = useCallback(
@@ -985,7 +1385,7 @@ export function ModLibraryOverlay({
       const securityReport = result.securityScan;
 
       if (result.securityScanBlocked) {
-        setActiveSecurityReport({
+        openSecurityReport({
           title,
           report: securityReport,
           onConfirm: null,
@@ -994,19 +1394,25 @@ export function ModLibraryOverlay({
       }
 
       if (result.securityScanConfirmationRequired) {
-        pendingSecurityGateResolutionRef.current?.(false);
+        pendingSecurityGateResolutionRef.current?.();
         return new Promise<boolean>((resolve) => {
-          pendingSecurityGateResolutionRef.current = resolve;
-          setActiveSecurityReport({
+          const finishResolution = () => {
+            if (pendingSecurityGateResolutionRef.current === finishResolution) {
+              pendingSecurityGateResolutionRef.current = null;
+            }
+            resolve(false);
+          };
+
+          pendingSecurityGateResolutionRef.current = finishResolution;
+          openSecurityReport({
             title,
             report: securityReport,
             confirmLabel: "Continue Download",
             onConfirm: async () => {
               await onConfirm();
-              const resolvePending = pendingSecurityGateResolutionRef.current;
-              pendingSecurityGateResolutionRef.current = null;
-              resolvePending?.(false);
+              finishResolution();
             },
+            onDismiss: finishResolution,
           });
         });
       }
@@ -1054,7 +1460,7 @@ export function ModLibraryOverlay({
     async (
       modId: number,
       fileId: number,
-      runtime: "IL2CPP" | "Mono",
+      runtime: "IL2CPP" | "Mono" | undefined,
       onSuccess: () => Promise<void>,
       onErrorTitle?: string,
     ) => {
@@ -1068,12 +1474,15 @@ export function ModLibraryOverlay({
           runtime,
         });
         startNexusManualTimeout();
+        showToast(
+          "Opened the Nexus Mods Files tab in your browser. Confirm the download there; SIMM will add it to your library when the nxm link returns.",
+        );
       } catch (error) {
         pendingNexusManualActionRef.current = null;
         throw error;
       }
     },
-    [startNexusManualTimeout],
+    [showToast, startNexusManualTimeout],
   );
 
   /** Notify ModsOverlay (and other views) that the library was updated - e.g. after download */
@@ -1175,23 +1584,6 @@ export function ModLibraryOverlay({
   }, [isOpen, refreshEnvironments, refreshLibrary]);
 
   useEffect(() => {
-    if (!isOpen) return;
-    const loadLatestReleases = async () => {
-      try {
-        const [s1apiLatest, mlvscanLatest] = await Promise.all([
-          ApiService.getS1APILatestRelease(""),
-          ApiService.getMLVScanLatestRelease(""),
-        ]);
-        setS1apiLatestRelease(s1apiLatest);
-        setMlvscanLatestRelease(mlvscanLatest);
-      } catch (err) {
-        console.warn("Failed to load S1API/MLVScan latest releases:", err);
-      }
-    };
-    loadLatestReleases();
-  }, [isOpen]);
-
-  useEffect(() => {
     if (!showNexusModsResults || nexusModsSearchResults.length === 0) return;
     const toLoad = nexusModsSearchResults.filter(
       (modItem) =>
@@ -1258,13 +1650,16 @@ export function ModLibraryOverlay({
   };
 
   const runThunderstoreSearch = useCallback(async (query: string) => {
-    if (!query.trim()) return;
+    const trimmedQuery = query.trim();
     setSearching(true);
     setShowSearchResults(false);
+    setShowNexusModsResults(false);
+    setNexusModsSearchResults([]);
+    setActiveModView(null);
     try {
       const [il2cppResult, monoResult] = await Promise.all([
-        ApiService.searchThunderstore("schedule-i", query.trim(), "IL2CPP"),
-        ApiService.searchThunderstore("schedule-i", query.trim(), "Mono"),
+        ApiService.searchThunderstore("schedule-i", trimmedQuery, "IL2CPP"),
+        ApiService.searchThunderstore("schedule-i", trimmedQuery, "Mono"),
       ]);
 
       const merged = new Map<string, ThunderstorePackageGroup>();
@@ -1304,7 +1699,11 @@ export function ModLibraryOverlay({
         addRuntime(pkg, "Mono"),
       );
 
-      setSearchResults(Array.from(merged.values()));
+      const sortedResults = sortThunderstoreGroups(
+        Array.from(merged.values()),
+        trimmedQuery ? discoverSort : discoverSort === "relevance" ? "updated" : discoverSort,
+      );
+      setSearchResults(sortedResults);
       setShowSearchResults(true);
     } catch (err) {
       console.error("Error searching Thunderstore:", err);
@@ -1312,18 +1711,47 @@ export function ModLibraryOverlay({
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [discoverSort]);
 
   const runNexusSearch = useCallback(async (query: string) => {
-    if (!query.trim()) return;
+    const trimmedQuery = query.trim();
     setSearchingNexusMods(true);
     setShowNexusModsResults(false);
+    setShowSearchResults(false);
+    setSearchResults([]);
+    setActiveModView(null);
     try {
-      const result = await ApiService.searchNexusMods(
-        "schedule1",
-        query.trim(),
+      let mods: NexusMod[] = [];
+      if (!trimmedQuery) {
+        const result = discoverSort === "popularity"
+          ? await ApiService.getNexusModsTrending("schedule1")
+          : discoverSort === "newest"
+            ? await ApiService.getNexusModsLatestAdded("schedule1")
+            : await ApiService.getNexusModsLatestUpdated("schedule1");
+        mods = result.mods || [];
+      } else {
+        const [searchResult, supplementalBrowse] = await Promise.all([
+          ApiService.searchNexusMods("schedule1", trimmedQuery),
+          ApiService.getNexusModsLatestUpdated("schedule1"),
+        ]);
+        const merged = new Map<string, NexusMod>();
+        for (const mod of searchResult.mods || []) {
+          merged.set(String(mod.mod_id), mod);
+        }
+        for (const mod of supplementalBrowse.mods || []) {
+          if (matchesNexusQueryLocally(mod, trimmedQuery)) {
+            merged.set(String(mod.mod_id), merged.get(String(mod.mod_id)) || mod);
+          }
+        }
+        mods = Array.from(merged.values()).filter((mod) => matchesNexusQueryLocally(mod, trimmedQuery));
+      }
+
+      setNexusModsSearchResults(
+        sortNexusMods(
+          mods,
+          trimmedQuery ? discoverSort : discoverSort === "relevance" ? "updated" : discoverSort,
+        ),
       );
-      setNexusModsSearchResults(result.mods || []);
       setShowNexusModsResults(true);
     } catch (err) {
       console.error("Error searching NexusMods:", err);
@@ -1331,11 +1759,41 @@ export function ModLibraryOverlay({
     } finally {
       setSearchingNexusMods(false);
     }
-  }, []);
+  }, [discoverSort]);
 
   const handleSearch = () => runThunderstoreSearch(searchQuery);
 
   const handleSearchNexusMods = () => runNexusSearch(nexusModsSearchQuery);
+
+  useEffect(() => {
+    if (previousDiscoverSortRef.current === discoverSort) {
+      return;
+    }
+    previousDiscoverSortRef.current = discoverSort;
+
+    if (!isOpen || libraryTab !== "discover") {
+      return;
+    }
+
+    if (showSearchResults) {
+      void runThunderstoreSearch(searchQuery);
+      return;
+    }
+
+    if (showNexusModsResults) {
+      void runNexusSearch(nexusModsSearchQuery);
+    }
+  }, [
+    discoverSort,
+    isOpen,
+    libraryTab,
+    nexusModsSearchQuery,
+    runNexusSearch,
+    runThunderstoreSearch,
+    searchQuery,
+    showNexusModsResults,
+    showSearchResults,
+  ]);
 
   const getEntryVersionLabel = useCallback((entry: ModLibraryEntry): string => {
     return entry.sourceVersion || entry.installedVersion || "unknown";
@@ -1345,6 +1803,7 @@ export function ModLibraryOverlay({
     async (
       packageUuid: string,
       runtime?: "IL2CPP" | "Mono",
+      versionUuid?: string,
       title = "Security Findings",
     ): Promise<Awaited<
       ReturnType<typeof ApiService.downloadThunderstoreToLibrary>
@@ -1352,6 +1811,8 @@ export function ModLibraryOverlay({
       const result = await ApiService.downloadThunderstoreToLibrary(
         packageUuid,
         runtime,
+        undefined,
+        versionUuid,
       );
       if (!result.success) {
         const handled = await handleSecurityGateResult(
@@ -1362,6 +1823,7 @@ export function ModLibraryOverlay({
               packageUuid,
               runtime,
               true,
+              versionUuid,
             );
             if (!retry.success) {
               throw new Error(
@@ -1573,8 +2035,74 @@ export function ModLibraryOverlay({
       );
       return ownerMatch || null;
     },
-    [],
+    [openSecurityReport],
   );
+
+  const resolveFeaturedThunderstorePackage = useCallback(
+    async (
+      sourceId: string,
+      fallbackDisplayName: string,
+      fallbackPackageUrl: string,
+    ): Promise<ThunderstorePackageGroup | null> => {
+      const parsed = parseThunderstoreSourceId(sourceId);
+      const [il2cpp, mono] = await Promise.all([
+        findThunderstorePackageForRuntime(sourceId, "IL2CPP"),
+        findThunderstorePackageForRuntime(sourceId, "Mono"),
+      ]);
+
+      if (!il2cpp && !mono) {
+        return null;
+      }
+
+      const representative = il2cpp || mono;
+      return {
+        key: `${(parsed.owner || representative?.owner || fallbackDisplayName).toLowerCase()}::${normalizeThunderstoreName(parsed.name || representative?.name || fallbackDisplayName).toLowerCase()}`,
+        name:
+          normalizeThunderstoreName(
+            representative?.name || parsed.name || fallbackDisplayName,
+          ) || fallbackDisplayName,
+        owner: representative?.owner || parsed.owner || "",
+        packageUrl:
+          representative?.package_url || fallbackPackageUrl,
+        packagesByRuntime: {
+          ...(il2cpp ? { IL2CPP: il2cpp } : {}),
+          ...(mono ? { Mono: mono } : {}),
+        },
+      };
+    },
+    [findThunderstorePackageForRuntime],
+  );
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const loadFeaturedPackages = async () => {
+      try {
+        const [s1apiPackage, mlvscanPackage] = await Promise.all([
+          resolveFeaturedThunderstorePackage(
+            FEATURED_THUNDERSTORE_PACKAGES.s1api.sourceId,
+            FEATURED_THUNDERSTORE_PACKAGES.s1api.displayName,
+            FEATURED_THUNDERSTORE_PACKAGES.s1api.packageUrl,
+          ),
+          resolveFeaturedThunderstorePackage(
+            FEATURED_THUNDERSTORE_PACKAGES.mlvscan.sourceId,
+            FEATURED_THUNDERSTORE_PACKAGES.mlvscan.displayName,
+            FEATURED_THUNDERSTORE_PACKAGES.mlvscan.packageUrl,
+          ),
+        ]);
+        setS1apiFeaturedPackage(s1apiPackage);
+        setMlvscanFeaturedPackage(mlvscanPackage);
+      } catch (err) {
+        console.warn("Failed to load featured Thunderstore packages:", err);
+        setS1apiFeaturedPackage(null);
+        setMlvscanFeaturedPackage(null);
+      }
+    };
+
+    void loadFeaturedPackages();
+  }, [isOpen, resolveFeaturedThunderstorePackage]);
 
   const pickNexusFileForVersionAndRuntime = useCallback(
     (
@@ -1978,25 +2506,6 @@ export function ModLibraryOverlay({
     [getSortedGroupEntries, selectedStorageByGroup],
   );
 
-  const findDownloadedEntryByStorageIds = useCallback(
-    (group: DownloadedModGroup, storageIds: string[]) => {
-      if (storageIds.length === 0) {
-        return null;
-      }
-
-      return (
-        group.entries.find(
-          (entry) =>
-            storageIds.includes(entry.storageId) ||
-            Object.values(entry.storageIdsByRuntime || {}).some((id) =>
-              id ? storageIds.includes(id) : false,
-            ),
-        ) || null
-      );
-    },
-    [],
-  );
-
   const entrySupportsRuntime = useCallback(
     (entry: ModLibraryEntry, runtime: "IL2CPP" | "Mono") => {
       if (entry.storageIdsByRuntime?.[runtime]) {
@@ -2037,6 +2546,94 @@ export function ModLibraryOverlay({
     [downloadedGroups, getEntryStorageIds],
   );
 
+  const getInstallableEntry = useCallback(
+    (entry: ModLibraryEntry): ModLibraryEntry => {
+      const containingGroup = getContainingDownloadedGroup(entry);
+      if (!containingGroup) {
+        return entry;
+      }
+
+      const entryVersion = getEntryVersionLabel(entry);
+      const matchingEntries = containingGroup.entries.filter((candidate) =>
+        areVersionsEquivalent(getEntryVersionLabel(candidate), entryVersion),
+      );
+
+      if (matchingEntries.length <= 1) {
+        return entry;
+      }
+
+      const availableRuntimes = Array.from(
+        new Set(
+          matchingEntries.flatMap((candidate) => candidate.availableRuntimes || []),
+        ),
+      );
+      const storageIdsByRuntime: Record<string, string> = {
+        ...(entry.storageIdsByRuntime || {}),
+      };
+      const installedInByRuntime: Record<string, string[]> = {
+        ...(entry.installedInByRuntime || {}),
+      };
+      const filesByRuntime: Record<string, string[]> = {
+        ...(entry.filesByRuntime || {}),
+      };
+      const installedIn = new Set(entry.installedIn || []);
+      const attachedUserLibs = new Set(entry.attachedUserLibs || []);
+
+      for (const candidate of matchingEntries) {
+        const candidateRuntimes = candidate.availableRuntimes || [];
+        const candidateStorageIds = candidate.storageIdsByRuntime || {};
+
+        for (const [runtime, storageId] of Object.entries(candidateStorageIds)) {
+          if (storageId) {
+            storageIdsByRuntime[runtime] = storageId;
+          }
+        }
+
+        if (candidateRuntimes.length === 1 && candidate.storageId) {
+          const runtime = candidateRuntimes[0];
+          if (runtime && !storageIdsByRuntime[runtime]) {
+            storageIdsByRuntime[runtime] = candidate.storageId;
+          }
+        }
+
+        for (const [runtime, envIds] of Object.entries(
+          candidate.installedInByRuntime || {},
+        )) {
+          installedInByRuntime[runtime] = Array.from(
+            new Set([...(installedInByRuntime[runtime] || []), ...envIds]),
+          );
+        }
+
+        for (const [runtime, files] of Object.entries(
+          candidate.filesByRuntime || {},
+        )) {
+          filesByRuntime[runtime] = Array.from(
+            new Set([...(filesByRuntime[runtime] || []), ...files]),
+          );
+        }
+
+        for (const envId of candidate.installedIn || []) {
+          installedIn.add(envId);
+        }
+
+        for (const userLib of candidate.attachedUserLibs || []) {
+          attachedUserLibs.add(userLib);
+        }
+      }
+
+      return {
+        ...entry,
+        installedIn: Array.from(installedIn),
+        attachedUserLibs: Array.from(attachedUserLibs),
+        availableRuntimes,
+        storageIdsByRuntime,
+        installedInByRuntime,
+        filesByRuntime,
+      };
+    },
+    [getContainingDownloadedGroup, getEntryVersionLabel],
+  );
+
   const hasSiblingVersionInstalledInEnvironment = useCallback(
     (entry: ModLibraryEntry, environment: Environment) => {
       const containingGroup = getContainingDownloadedGroup(entry);
@@ -2044,6 +2641,7 @@ export function ModLibraryOverlay({
         return false;
       }
 
+      const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
       const targetStorageIds = new Set(getEntryStorageIds(entry));
       return containingGroup.entries.some((candidate) => {
         const candidateStorageIds = getEntryStorageIds(candidate);
@@ -2055,7 +2653,7 @@ export function ModLibraryOverlay({
           return false;
         }
         const siblingInstalledIds =
-          candidate.installedInByRuntime?.[environment.runtime] ||
+          candidate.installedInByRuntime?.[environmentRuntime] ||
           candidate.installedIn ||
           [];
         return siblingInstalledIds.includes(environment.id);
@@ -2071,6 +2669,8 @@ export function ModLibraryOverlay({
       entry: null,
       compatibleEnvironments: [],
       excludedEnvironments: [],
+      lockedEnvironmentIds: [],
+      mode: "select",
     });
     setSelectedInstallEnvironmentIds(new Set());
   }, []);
@@ -2083,15 +2683,16 @@ export function ModLibraryOverlay({
       const runtimeGroups = new Map<"IL2CPP" | "Mono", string[]>();
 
       for (const environment of selectedTargets) {
-        if (!entrySupportsRuntime(entry, environment.runtime)) {
+        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
+        if (!entrySupportsRuntime(entry, environmentRuntime)) {
           continue;
         }
         if (hasSiblingVersionInstalledInEnvironment(entry, environment)) {
           continue;
         }
-        const existing = runtimeGroups.get(environment.runtime) || [];
+        const existing = runtimeGroups.get(environmentRuntime) || [];
         existing.push(environment.id);
-        runtimeGroups.set(environment.runtime, existing);
+        runtimeGroups.set(environmentRuntime, existing);
       }
 
       for (const [runtime, targetIds] of runtimeGroups.entries()) {
@@ -2112,27 +2713,65 @@ export function ModLibraryOverlay({
 
   const promptInstallTargets = useCallback(
     async (entry: ModLibraryEntry, title: string, installMoreOnly: boolean) => {
-      const compatible = environments.filter((environment) => {
-        if (!entrySupportsRuntime(entry, environment.runtime)) {
+      const installEntry = getInstallableEntry(entry);
+      const installedCompatible = environments.filter((environment) => {
+        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
+        if (!entrySupportsRuntime(installEntry, environmentRuntime)) {
           return false;
         }
-        if (hasSiblingVersionInstalledInEnvironment(entry, environment)) {
+        if (hasSiblingVersionInstalledInEnvironment(installEntry, environment)) {
+          return false;
+        }
+        const installedIds =
+          installEntry.installedInByRuntime?.[environmentRuntime] ||
+          installEntry.installedIn ||
+          [];
+        return installedIds.includes(environment.id);
+      });
+
+      const compatible = environments.filter((environment) => {
+        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
+        if (!entrySupportsRuntime(installEntry, environmentRuntime)) {
+          return false;
+        }
+        if (hasSiblingVersionInstalledInEnvironment(installEntry, environment)) {
           return false;
         }
         if (!installMoreOnly) {
           return true;
         }
         const installedIds =
-          entry.installedInByRuntime?.[environment.runtime] ||
-          entry.installedIn ||
+          installEntry.installedInByRuntime?.[environmentRuntime] ||
+          installEntry.installedIn ||
           [];
         return !installedIds.includes(environment.id);
       });
       const excluded = environments.filter(
-        (environment) => !entrySupportsRuntime(entry, environment.runtime),
+        (environment) =>
+          !entrySupportsRuntime(
+            installEntry,
+            getEffectiveEnvironmentRuntime(environment),
+          ),
       );
 
       if (compatible.length === 0) {
+        if (installMoreOnly && installedCompatible.length > 0) {
+          const lockedEnvironmentIds = installedCompatible.map(
+            (environment) => environment.id,
+          );
+          setSelectedInstallEnvironmentIds(new Set(lockedEnvironmentIds));
+          setInstallDialog({
+            isOpen: true,
+            title,
+            entry: installEntry,
+            compatibleEnvironments: installedCompatible,
+            excludedEnvironments: excluded,
+            lockedEnvironmentIds,
+            mode: "installed",
+          });
+          return;
+        }
+
         showLibraryNotice(
           "No Compatible Environments",
           "This mod version is not compatible with any currently configured environments.",
@@ -2143,7 +2782,7 @@ export function ModLibraryOverlay({
       if (compatible.length === 1) {
         setInstallingTargets(true);
         try {
-          await installEntryToEnvironmentIds(entry, [compatible[0].id]);
+          await installEntryToEnvironmentIds(installEntry, [compatible[0].id]);
           await refreshLibrary();
           notifyLibraryUpdated();
           notifyModUpdateStateChanged();
@@ -2164,15 +2803,18 @@ export function ModLibraryOverlay({
       setInstallDialog({
         isOpen: true,
         title,
-        entry,
+        entry: installEntry,
         compatibleEnvironments: compatible,
         excludedEnvironments: excluded,
+        lockedEnvironmentIds: [],
+        mode: "select",
       });
     },
     [
       downloadedGroups,
       entrySupportsRuntime,
       environments,
+      getInstallableEntry,
       hasSiblingVersionInstalledInEnvironment,
       installEntryToEnvironmentIds,
       notifyLibraryUpdated,
@@ -2245,139 +2887,28 @@ export function ModLibraryOverlay({
     [getActiveEntryForGroup, getSortedGroupEntries, handleSelectVersion],
   );
 
-  const loadS1APIReleases = async () => {
-    setLoadingS1APIReleases(true);
-    try {
-      const releases = await ApiService.getS1APIReleases("");
-      setS1apiReleases(releases);
-      if (releases.length > 0) {
-        setSelectedS1APIVersion(releases[0].tag_name);
-      }
-    } catch (err) {
-      console.error("Failed to load S1API releases:", err);
-    } finally {
-      setLoadingS1APIReleases(false);
-    }
-  };
-
-  const loadMlvscanReleases = async () => {
-    setLoadingMlvscanReleases(true);
-    try {
-      const releases = await ApiService.getMLVScanReleases("");
-      setMlvscanReleases(releases);
-      if (releases.length > 0) {
-        setSelectedMlvscanVersion(releases[0].tag_name);
-      }
-    } catch (err) {
-      console.error("Failed to load MLVScan releases:", err);
-    } finally {
-      setLoadingMlvscanReleases(false);
-    }
-  };
-
   const handleDownloadS1APIClick = () => {
-    loadS1APIReleases();
-    setShowS1APIVersionSelector(true);
+    if (!s1apiFeaturedPackage) {
+      showLibraryNotice(
+        "S1API Unavailable",
+        "The S1API Thunderstore listing could not be resolved. Try refreshing and retry the download.",
+      );
+      return;
+    }
+
+    void handleDownloadThunderstore(s1apiFeaturedPackage);
   };
 
   const handleDownloadMlvscanClick = () => {
-    loadMlvscanReleases();
-    setShowMlvscanVersionSelector(true);
-  };
-
-  const handleS1APIVersionSelected = async () => {
-    if (!selectedS1APIVersion) {
+    if (!mlvscanFeaturedPackage) {
+      showLibraryNotice(
+        "MLVScan Unavailable",
+        "The MLVScan Thunderstore listing could not be resolved. Try refreshing and retry the download.",
+      );
       return;
     }
-    setShowS1APIVersionSelector(false);
-    setDownloadingS1API(true);
-    try {
-      const result =
-        await ApiService.downloadS1APIToLibrary(selectedS1APIVersion);
-      if (!result.success) {
-        const handled = await handleSecurityGateResult(
-          "Security Findings - S1API",
-          result,
-          async () => {
-            const retry = await ApiService.downloadS1APIToLibrary(
-              selectedS1APIVersion,
-              true,
-            );
-            if (!retry.success) {
-              throw new Error(
-                retry.error ||
-                  "Failed to continue the S1API download after confirming the MLVScan findings.",
-              );
-            }
-            await refreshLibrary();
-          },
-        );
-        if (!handled) {
-          return;
-        }
 
-        throw new Error(result.error || "Failed to download S1API.");
-      }
-
-      await refreshLibrary();
-    } catch (err) {
-      console.error("Failed to download S1API:", err);
-      showLibraryNotice(
-        "S1API Download Failed",
-        err instanceof Error ? err.message : "Failed to download S1API.",
-      );
-    } finally {
-      setDownloadingS1API(false);
-      setSelectedS1APIVersion("");
-    }
-  };
-
-  const handleMlvscanVersionSelected = async () => {
-    if (!selectedMlvscanVersion) {
-      return;
-    }
-    setShowMlvscanVersionSelector(false);
-    setDownloadingMlvscan(true);
-    try {
-      const result = await ApiService.downloadMLVScanToLibrary(
-        selectedMlvscanVersion,
-      );
-      if (!result.success) {
-        const handled = await handleSecurityGateResult(
-          "Security Findings - MLVScan",
-          result,
-          async () => {
-            const retry = await ApiService.downloadMLVScanToLibrary(
-              selectedMlvscanVersion,
-              true,
-            );
-            if (!retry.success) {
-              throw new Error(
-                retry.error ||
-                  "Failed to continue the MLVScan download after confirming the MLVScan findings.",
-              );
-            }
-            await refreshLibrary();
-          },
-        );
-        if (!handled) {
-          return;
-        }
-
-        throw new Error(result.error || "Failed to download MLVScan.");
-      }
-
-      await refreshLibrary();
-    } catch (err) {
-      console.error("Failed to download MLVScan:", err);
-      showLibraryNotice(
-        "MLVScan Download Failed",
-        err instanceof Error ? err.message : "Failed to download MLVScan.",
-      );
-    } finally {
-      setDownloadingMlvscan(false);
-      setSelectedMlvscanVersion("");
-    }
+    void handleDownloadThunderstore(mlvscanFeaturedPackage);
   };
 
   const handleDeleteDownloadedGroup = async (group: DownloadedModGroup) => {
@@ -2454,9 +2985,16 @@ export function ModLibraryOverlay({
     });
   };
 
-  const handleDownloadThunderstore = async (pkg: ThunderstorePackageGroup) => {
-    const hasIl2cpp = Boolean(pkg.packagesByRuntime.IL2CPP);
-    const hasMono = Boolean(pkg.packagesByRuntime.Mono);
+  const handleDownloadThunderstore = async (
+    pkg: ThunderstorePackageGroup,
+    selectedVersionOption?: ThunderstoreVersionOption | null,
+  ) => {
+    const resolvedVersionOption =
+      selectedVersionOption ||
+      buildThunderstoreVersionOptions(pkg)[0] ||
+      null;
+    const hasIl2cpp = Boolean(resolvedVersionOption?.versionsByRuntime.IL2CPP);
+    const hasMono = Boolean(resolvedVersionOption?.versionsByRuntime.Mono);
     const runDownload = async (runtime: "IL2CPP" | "Mono" | "Both") => {
       setDownloading(pkg.key);
       try {
@@ -2466,10 +3004,12 @@ export function ModLibraryOverlay({
           alreadyStored?: boolean;
         }> = [];
         if (runtime === "Both") {
-          if (pkg.packagesByRuntime.IL2CPP) {
+          const il2cppVersion = resolvedVersionOption?.versionsByRuntime.IL2CPP;
+          if (pkg.packagesByRuntime.IL2CPP && il2cppVersion) {
             const result = await downloadThunderstoreWithSecurity(
               pkg.packagesByRuntime.IL2CPP.uuid4,
               "IL2CPP",
+              il2cppVersion.uuid4,
               `Security Findings - ${pkg.name}`,
             );
             if (!result) {
@@ -2477,10 +3017,12 @@ export function ModLibraryOverlay({
             }
             results.push(result);
           }
-          if (pkg.packagesByRuntime.Mono) {
+          const monoVersion = resolvedVersionOption?.versionsByRuntime.Mono;
+          if (pkg.packagesByRuntime.Mono && monoVersion) {
             const result = await downloadThunderstoreWithSecurity(
               pkg.packagesByRuntime.Mono.uuid4,
               "Mono",
+              monoVersion.uuid4,
               `Security Findings - ${pkg.name}`,
             );
             if (!result) {
@@ -2488,10 +3030,11 @@ export function ModLibraryOverlay({
             }
             results.push(result);
           }
-        } else if (pkg.packagesByRuntime[runtime]) {
+        } else if (pkg.packagesByRuntime[runtime] && resolvedVersionOption?.versionsByRuntime[runtime]) {
           const result = await downloadThunderstoreWithSecurity(
             pkg.packagesByRuntime[runtime]!.uuid4,
             runtime,
+            resolvedVersionOption.versionsByRuntime[runtime]!.uuid4,
             `Security Findings - ${pkg.name}`,
           );
           if (!result) {
@@ -2508,32 +3051,17 @@ export function ModLibraryOverlay({
         ) {
           showLibraryNotice(
             "Already Downloaded",
-            `The latest version of ${pkg.name} is already in your mod library.`,
+            `${pkg.name} ${formatVersionTag(
+              resolvedVersionOption?.versionNumber,
+            )} is already in your mod library.`,
           );
         } else {
-          const refreshedGroup = findDownloadedGroupForThunderstorePackage(
-            pkg,
-            nextLibrary,
+          showLibraryNotice(
+            "Download Complete",
+            `${pkg.name} ${formatVersionTag(
+              resolvedVersionOption?.versionNumber,
+            )} was added to your mod library. Continue browsing or open the Library tab to install it.`,
           );
-          const downloadedStorageIds = results.flatMap((result) =>
-            result.storageId ? [result.storageId] : [],
-          );
-          const selectedEntry = refreshedGroup
-            ? findDownloadedEntryByStorageIds(
-                refreshedGroup,
-                downloadedStorageIds,
-              ) ||
-              getActiveEntryForGroup(refreshedGroup) ||
-              refreshedGroup.entries[0]
-            : null;
-          if (selectedEntry) {
-            openDownloadedModView(refreshedGroup!, selectedEntry.storageId);
-            await promptInstallTargets(
-              selectedEntry,
-              `Install ${selectedEntry.displayName}`,
-              false,
-            );
-          }
         }
       } catch (err) {
         console.error("Failed to download Thunderstore mod:", err);
@@ -2551,7 +3079,9 @@ export function ModLibraryOverlay({
     if (!hasIl2cpp && !hasMono) {
       setRuntimePrompt({
         title: "Select Runtime",
-        message: `Select the runtime for ${pkg.name}.`,
+        message: `Select the runtime for ${pkg.name} ${formatVersionTag(
+          resolvedVersionOption?.versionNumber,
+        )}.`,
         onSelect: runDownload,
       });
       return;
@@ -2577,7 +3107,7 @@ export function ModLibraryOverlay({
     });
 
     if (runtimeFiles.length > 0) {
-      return runtimeFiles.find((f: any) => f.is_primary) || runtimeFiles[0];
+      return sortNexusFilesNewestFirst(runtimeFiles)[0];
     }
 
     const compatibleFiles = files.filter((f: any) => {
@@ -2585,14 +3115,15 @@ export function ModLibraryOverlay({
       return !fileName.includes(otherRuntime);
     });
 
-    return (
-      compatibleFiles.find((f: any) => f.is_primary) ||
-      compatibleFiles[0] ||
-      files[0]
-    );
+    return sortNexusFilesNewestFirst(
+      compatibleFiles.length > 0 ? compatibleFiles : files,
+    )[0];
   };
 
-  const handleDownloadNexusMod = async (modId: number) => {
+  const handleDownloadNexusMod = async (
+    modId: number,
+    selectedFile?: NexusModFile | null,
+  ) => {
     const files = nexusModsFiles.get(modId) || [];
     if (files.length === 0) {
       await handleLoadNexusModFiles(modId);
@@ -2604,12 +3135,21 @@ export function ModLibraryOverlay({
     );
     const hasIl2cpp = fileNames.some((name) => name.includes("il2cpp"));
     const hasMono = fileNames.some((name) => name.includes("mono"));
+    const fomodInstallerFile =
+      sortNexusFilesNewestFirst(files.filter((file) => isNexusFomodInstaller(file)))[0] ||
+      null;
 
     const access = await getEffectiveNexusDownloadAccess();
     if (!access.connected) {
       showLibraryNotice(
         "Nexus Login Required",
         "Log into Nexus in Accounts before downloading Nexus mods.",
+        onOpenAccounts
+          ? {
+              label: "Open Accounts",
+              onAction: onOpenAccounts,
+            }
+          : undefined,
       );
       return;
     }
@@ -2624,6 +3164,21 @@ export function ModLibraryOverlay({
           alreadyStored?: boolean;
         }> = [];
         if (!access.canDirectDownload && access.requiresSiteConfirmation) {
+          if (selectedFile?.file_id) {
+            const inferredRuntime = inferNexusFileRuntime(selectedFile);
+            await beginManualNexusLibraryDownload(
+              modId,
+              selectedFile.file_id,
+              inferredRuntime === "Unknown" ? undefined : inferredRuntime,
+              async () => {
+                await refreshLibrary();
+                notifyLibraryUpdated();
+              },
+            );
+            keepPendingDownload = true;
+            return;
+          }
+
           if (runtime === "Both") {
             throw new Error(
               "Manual Nexus download flow requires a single runtime selection.",
@@ -2648,7 +3203,19 @@ export function ModLibraryOverlay({
           return;
         }
 
-        if (runtime === "Both") {
+        if (selectedFile?.file_id) {
+          const inferredRuntime = inferNexusFileRuntime(selectedFile);
+          const result = await downloadNexusWithSecurity(
+            modId,
+            selectedFile.file_id,
+            inferredRuntime === "Unknown" ? undefined : inferredRuntime,
+            "Security Findings - Nexus Download",
+          );
+          if (!result) {
+            return;
+          }
+          results.push(result);
+        } else if (runtime === "Both") {
           const il2cppFile = selectNexusFileForRuntime(files, "IL2CPP");
           const monoFile = selectNexusFileForRuntime(files, "Mono");
           if (il2cppFile?.file_id) {
@@ -2696,24 +3263,18 @@ export function ModLibraryOverlay({
           modId,
           nextLibrary,
         );
-        const selectedEntry = refreshedGroup
-          ? findDownloadedEntryByStorageIds(
-              refreshedGroup,
-              results.flatMap((result) =>
-                result.storageId ? [result.storageId] : [],
-              ),
-            ) ||
-            getActiveEntryForGroup(refreshedGroup) ||
-            refreshedGroup.entries[0]
-          : null;
-        if (selectedEntry) {
-          openDownloadedModView(refreshedGroup!, selectedEntry.storageId);
-          await promptInstallTargets(
-            selectedEntry,
-            `Install ${selectedEntry.displayName}`,
-            false,
-          );
-        }
+        const downloadedLabel =
+          selectedFile?.version ||
+          selectedFile?.mod_version ||
+          refreshedGroup?.remoteVersion ||
+          refreshedGroup?.sourceVersion ||
+          refreshedGroup?.entries[0]?.sourceVersion;
+        showLibraryNotice(
+          "Download Complete",
+          `${refreshedGroup?.displayName || "This mod"}${
+            downloadedLabel ? ` ${formatVersionTag(downloadedLabel)}` : ""
+          } was added to your mod library. Continue browsing or open the Library tab to install it.`,
+        );
       } catch (err) {
         console.error("Failed to download Nexus mod:", err);
         showLibraryNotice(
@@ -2726,6 +3287,78 @@ export function ModLibraryOverlay({
         }
       }
     };
+
+    const runFomodInstallerDownload = async (file: NexusModFile) => {
+      setDownloading(`nexus-${modId}`);
+      let keepPendingDownload = false;
+      try {
+        if (!access.canDirectDownload && access.requiresSiteConfirmation) {
+          await beginManualNexusLibraryDownload(
+            modId,
+            file.file_id,
+            undefined,
+            async () => {
+              await refreshLibrary();
+              notifyLibraryUpdated();
+            },
+          );
+          keepPendingDownload = true;
+          return;
+        }
+
+        const result = await downloadNexusWithSecurity(
+          modId,
+          file.file_id,
+          undefined,
+          "Security Findings - Nexus Download",
+        );
+        if (!result) {
+          return;
+        }
+
+        const nextLibrary = await ApiService.getModLibrary();
+        setLibrary(nextLibrary);
+        notifyLibraryUpdated();
+        const refreshedGroup = findDownloadedGroupForNexusMod(
+          modId,
+          nextLibrary,
+        );
+        showLibraryNotice(
+          "Download Complete",
+          `${refreshedGroup?.displayName || "This mod"}${
+            file.version || file.mod_version
+              ? ` ${formatVersionTag(file.version || file.mod_version)}`
+              : ""
+          } was added to your mod library. SIMM will resolve the FOMOD installer contents from the archive when you install it.`,
+        );
+      } catch (err) {
+        console.error("Failed to download Nexus FOMOD installer:", err);
+        showLibraryNotice(
+          "Nexus Download Failed",
+          err instanceof Error ? err.message : "Failed to download Nexus mod.",
+        );
+      } finally {
+        if (!keepPendingDownload) {
+          setDownloading(null);
+        }
+      }
+    };
+
+    if (selectedFile?.file_id) {
+      if (isNexusFomodInstaller(selectedFile)) {
+        void runFomodInstallerDownload(selectedFile);
+        return;
+      }
+
+      const runtime = inferNexusFileRuntime(selectedFile);
+      void runDownload(runtime === "Unknown" ? "Mono" : runtime);
+      return;
+    }
+
+    if (!hasIl2cpp && !hasMono && fomodInstallerFile?.file_id) {
+      void runFomodInstallerDownload(fomodInstallerFile);
+      return;
+    }
 
     if (!hasIl2cpp && !hasMono) {
       setRuntimePrompt({
@@ -2876,7 +3509,7 @@ export function ModLibraryOverlay({
         sourceUrl: pkg.packageUrl,
         downloads,
         likesOrEndorsements: representative?.rating_score || 0,
-        updatedAt: representative?.date_updated,
+        updatedAt: normalizeDateString(getThunderstorePackageUpdatedAt(representative)),
         tags: representative?.categories || [],
         installedVersion: version?.version_number,
         kind: "thunderstore",
@@ -2897,7 +3530,7 @@ export function ModLibraryOverlay({
         sourceUrl: `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`,
         downloads: mod.mod_downloads,
         likesOrEndorsements: mod.endorsement_count,
-        updatedAt: mod.updated_time,
+        updatedAt: normalizeDateString(getNexusModUpdatedAt(mod)),
         installedVersion: mod.version,
         kind: "nexusmods",
       });
@@ -3039,6 +3672,30 @@ export function ModLibraryOverlay({
     return searchResults.find((pkg) => pkg.key === activeModView.id) || null;
   }, [activeModView, searchResults]);
 
+  const selectedThunderstoreVersionOptions = useMemo(
+    () => buildThunderstoreVersionOptions(selectedThunderstorePackage),
+    [selectedThunderstorePackage],
+  );
+
+  const selectedThunderstoreVersion = useMemo(() => {
+    if (!selectedThunderstorePackage) {
+      return null;
+    }
+    const selectedKey =
+      selectedThunderstoreVersionByPackage[selectedThunderstorePackage.key];
+    return (
+      selectedThunderstoreVersionOptions.find(
+        (version) => version.key === selectedKey,
+      ) ||
+      selectedThunderstoreVersionOptions[0] ||
+      null
+    );
+  }, [
+    selectedThunderstorePackage,
+    selectedThunderstoreVersionByPackage,
+    selectedThunderstoreVersionOptions,
+  ]);
+
   const selectedNexusResult = useMemo(() => {
     if (activeModView?.kind !== "nexusmods") {
       return null;
@@ -3049,6 +3706,27 @@ export function ModLibraryOverlay({
       ) || null
     );
   }, [activeModView, nexusModsSearchResults]);
+
+  const selectedNexusFiles = useMemo(() => {
+    if (!selectedNexusResult) {
+      return [];
+    }
+    return sortNexusFilesNewestFirst(
+      nexusModsFiles.get(selectedNexusResult.mod_id) || [],
+    );
+  }, [nexusModsFiles, selectedNexusResult]);
+
+  const selectedNexusFile = useMemo(() => {
+    if (!selectedNexusResult) {
+      return null;
+    }
+    const selectedFileId = selectedNexusFileByModId[selectedNexusResult.mod_id];
+    return (
+      selectedNexusFiles.find((file) => file.file_id === selectedFileId) ||
+      selectedNexusFiles[0] ||
+      null
+    );
+  }, [selectedNexusFileByModId, selectedNexusFiles, selectedNexusResult]);
 
   const downloadedGroupForSelectedThunderstore = useMemo(() => {
     if (!selectedThunderstorePackage) {
@@ -3089,37 +3767,51 @@ export function ModLibraryOverlay({
   }, [downloadedGroupForSelectedNexus, getActiveEntryForGroup]);
 
   useEffect(() => {
-    if (!isOpen || openedFromLogs.active) {
+    if (!selectedThunderstorePackage || selectedThunderstoreVersionOptions.length === 0) {
       return;
     }
 
-    if (libraryTab === "discover") {
-      if (activeModView?.kind === "downloaded") {
-        return;
+    setSelectedThunderstoreVersionByPackage((prev) => {
+      if (
+        prev[selectedThunderstorePackage.key] &&
+        selectedThunderstoreVersionOptions.some(
+          (option) => option.key === prev[selectedThunderstorePackage.key],
+        )
+      ) {
+        return prev;
       }
 
-      if (showSearchResults && searchResults.length > 0) {
-        const stillValid =
-          activeModView?.kind === "thunderstore" &&
-          searchResults.some((pkg) => pkg.key === activeModView.id);
-        if (!stillValid) {
-          openThunderstoreModView(searchResults[0]);
-        }
-        return;
+      return {
+        ...prev,
+        [selectedThunderstorePackage.key]: selectedThunderstoreVersionOptions[0].key,
+      };
+    });
+  }, [selectedThunderstorePackage, selectedThunderstoreVersionOptions]);
+
+  useEffect(() => {
+    if (!selectedNexusResult || selectedNexusFiles.length === 0) {
+      return;
+    }
+
+    setSelectedNexusFileByModId((prev) => {
+      if (
+        prev[selectedNexusResult.mod_id] &&
+        selectedNexusFiles.some(
+          (file) => file.file_id === prev[selectedNexusResult.mod_id],
+        )
+      ) {
+        return prev;
       }
 
-      if (showNexusModsResults && nexusModsSearchResults.length > 0) {
-        const stillValid =
-          activeModView?.kind === "nexusmods" &&
-          nexusModsSearchResults.some(
-            (mod) => String(mod.mod_id) === activeModView.id,
-          );
-        if (!stillValid) {
-          openNexusModView(nexusModsSearchResults[0]);
-        }
-        return;
-      }
+      return {
+        ...prev,
+        [selectedNexusResult.mod_id]: selectedNexusFiles[0].file_id,
+      };
+    });
+  }, [selectedNexusFiles, selectedNexusResult]);
 
+  useEffect(() => {
+    if (!isOpen || openedFromLogs.active || libraryTab === "discover") {
       return;
     }
 
@@ -3138,14 +3830,8 @@ export function ModLibraryOverlay({
     displayedDownloadedGroups,
     isOpen,
     libraryTab,
-    nexusModsSearchResults,
     openDownloadedModView,
-    openNexusModView,
-    openThunderstoreModView,
     openedFromLogs.active,
-    searchResults,
-    showNexusModsResults,
-    showSearchResults,
   ]);
 
   const openContextMenu = useCallback(
@@ -3256,12 +3942,15 @@ export function ModLibraryOverlay({
         onConfirm={confirmOverlay.onConfirm}
         title={confirmOverlay.title}
         message={confirmOverlay.message}
+        confirmText={confirmOverlay.confirmText}
+        cancelText={confirmOverlay.cancelText}
         isNested
       />
       <SecurityScanReportOverlay
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || "Security Findings"}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={
           activeSecurityReport?.onConfirm
@@ -3273,6 +3962,29 @@ export function ModLibraryOverlay({
         confirmLabel={activeSecurityReport?.confirmLabel || "Continue Download"}
         busy={securityActionBusy}
       />
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            right: "1rem",
+            bottom: "1rem",
+            zIndex: 2200,
+            maxWidth: "28rem",
+            padding: "0.8rem 0.95rem",
+            borderRadius: "0.8rem",
+            background: "rgba(19, 29, 42, 0.96)",
+            border: "1px solid rgba(116, 168, 255, 0.42)",
+            color: "#e7f0fb",
+            boxShadow: "0 18px 40px rgba(0, 0, 0, 0.32)",
+            fontSize: "0.92rem",
+            lineHeight: 1.45,
+          }}
+        >
+          {toastMessage}
+        </div>
+      )}
       {runtimePrompt && (
         <div
           className="modal-overlay modal-overlay-nested"
@@ -3350,13 +4062,6 @@ export function ModLibraryOverlay({
       >
         <div className="modal-header">
           <h2>Mod Library</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i
-              className="fas fa-arrow-left"
-              style={{ marginRight: "0.45rem" }}
-            ></i>
-            Back
-          </button>
         </div>
 
         <div className="mods-content" ref={libraryScrollContainerRef}>
@@ -3681,10 +4386,10 @@ export function ModLibraryOverlay({
                       >
                         <span>
                           <i
-                            className="fab fa-github"
-                            style={{ marginRight: "0.35rem", color: "#6e5494" }}
+                            className="fas fa-box-open"
+                            style={{ marginRight: "0.35rem", color: "#4a90e2" }}
                           ></i>
-                          GitHub Release
+                          Thunderstore Package
                         </span>
                         {s1apiInstalledVersion && (
                           <span>
@@ -3695,7 +4400,7 @@ export function ModLibraryOverlay({
                             Installed: {formatVersionTag(s1apiInstalledVersion)}
                           </span>
                         )}
-                        {s1apiLatestRelease && (
+                        {s1apiLatestVersion && (
                           <span
                             style={s1apiNeedsUpdate ? { color: "#ffaa00" } : {}}
                           >
@@ -3704,7 +4409,7 @@ export function ModLibraryOverlay({
                               style={{ marginRight: "0.35rem" }}
                             ></i>
                             Latest:{" "}
-                            {formatVersionTag(s1apiLatestRelease.tag_name)}
+                            {formatVersionTag(s1apiLatestVersion)}
                           </span>
                         )}
                       </div>
@@ -3720,14 +4425,18 @@ export function ModLibraryOverlay({
                       <button
                         className={`btn btn-small ${s1apiNeedsUpdate ? "btn-warning" : "btn-primary"}`}
                         onClick={handleDownloadS1APIClick}
-                        disabled={downloadingS1API}
+                        disabled={
+                          !!s1apiFeaturedPackage &&
+                          downloading === s1apiFeaturedPackage.key
+                        }
                         title={
                           s1apiNeedsUpdate
                             ? "Update S1API to the latest version"
-                            : "Download S1API to the library"
+                            : "Download S1API from Thunderstore to the library"
                         }
                       >
-                        {downloadingS1API ? (
+                        {!!s1apiFeaturedPackage &&
+                        downloading === s1apiFeaturedPackage.key ? (
                           <i className="fas fa-spinner fa-spin"></i>
                         ) : (
                           <>
@@ -3741,14 +4450,14 @@ export function ModLibraryOverlay({
                         )}
                       </button>
                       <a
-                        href="https://github.com/ifBars/S1API"
+                        href={FEATURED_THUNDERSTORE_PACKAGES.s1api.packageUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="btn btn-secondary btn-small"
                         style={{ textDecoration: "none", textAlign: "center" }}
-                        title="View on GitHub"
+                        title="View on Thunderstore"
                       >
-                        <i className="fab fa-github"></i>
+                        <i className="fas fa-external-link-alt"></i>
                         <span style={{ marginLeft: "0.5rem" }}>View</span>
                       </a>
                     </div>
@@ -3843,10 +4552,10 @@ export function ModLibraryOverlay({
                       >
                         <span>
                           <i
-                            className="fab fa-github"
-                            style={{ marginRight: "0.35rem", color: "#6e5494" }}
+                            className="fas fa-box-open"
+                            style={{ marginRight: "0.35rem", color: "#4a90e2" }}
                           ></i>
-                          GitHub Release
+                          Thunderstore Package
                         </span>
                         {mlvscanInstalledVersion && (
                           <span>
@@ -3858,7 +4567,7 @@ export function ModLibraryOverlay({
                             {formatVersionTag(mlvscanInstalledVersion)}
                           </span>
                         )}
-                        {mlvscanLatestRelease && (
+                        {mlvscanLatestVersion && (
                           <span
                             style={
                               mlvscanNeedsUpdate ? { color: "#ffaa00" } : {}
@@ -3869,7 +4578,7 @@ export function ModLibraryOverlay({
                               style={{ marginRight: "0.35rem" }}
                             ></i>
                             Latest:{" "}
-                            {formatVersionTag(mlvscanLatestRelease.tag_name)}
+                            {formatVersionTag(mlvscanLatestVersion)}
                           </span>
                         )}
                       </div>
@@ -3885,14 +4594,18 @@ export function ModLibraryOverlay({
                       <button
                         className={`btn btn-small ${mlvscanNeedsUpdate ? "btn-warning" : "btn-primary"}`}
                         onClick={handleDownloadMlvscanClick}
-                        disabled={downloadingMlvscan}
+                        disabled={
+                          !!mlvscanFeaturedPackage &&
+                          downloading === mlvscanFeaturedPackage.key
+                        }
                         title={
                           mlvscanNeedsUpdate
                             ? "Update MLVScan to the latest version"
-                            : "Download MLVScan to the library"
+                            : "Download MLVScan from Thunderstore to the library"
                         }
                       >
-                        {downloadingMlvscan ? (
+                        {!!mlvscanFeaturedPackage &&
+                        downloading === mlvscanFeaturedPackage.key ? (
                           <i className="fas fa-spinner fa-spin"></i>
                         ) : (
                           <>
@@ -3906,14 +4619,14 @@ export function ModLibraryOverlay({
                         )}
                       </button>
                       <a
-                        href="https://github.com/ifBars/MLVScan"
+                        href={FEATURED_THUNDERSTORE_PACKAGES.mlvscan.packageUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="btn btn-secondary btn-small"
                         style={{ textDecoration: "none", textAlign: "center" }}
-                        title="View on GitHub"
+                        title="View on Thunderstore"
                       >
-                        <i className="fab fa-github"></i>
+                        <i className="fas fa-external-link-alt"></i>
                         <span style={{ marginLeft: "0.5rem" }}>View</span>
                       </a>
                     </div>
@@ -5263,301 +5976,6 @@ export function ModLibraryOverlay({
         )}
       </div>
 
-      {showS1APIVersionSelector && (
-        <div
-          className="modal-overlay modal-overlay-nested"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setShowS1APIVersionSelector(false);
-              setSelectedS1APIVersion("");
-            }
-          }}
-        >
-          <div
-            className="modal-content modal-content-nested"
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              maxWidth: "600px",
-              maxHeight: "80vh",
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <div className="modal-header">
-              <h2>Select S1API Version</h2>
-              <button
-                className="modal-close"
-                onClick={() => {
-                  setShowS1APIVersionSelector(false);
-                  setSelectedS1APIVersion("");
-                }}
-              >
-                ×
-              </button>
-            </div>
-
-            <div
-              style={{
-                padding: "1.25rem",
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.75rem",
-                overflow: "hidden",
-              }}
-            >
-              <p
-                style={{
-                  margin: 0,
-                  color: "#ccc",
-                  fontSize: "0.9rem",
-                  lineHeight: "1.5",
-                }}
-              >
-                S1API is game version specific. Select the version that matches
-                your game version.
-              </p>
-
-              {loadingS1APIReleases ? (
-                <div
-                  style={{
-                    padding: "2rem",
-                    textAlign: "center",
-                    color: "#888",
-                  }}
-                >
-                  <i
-                    className="fas fa-spinner fa-spin"
-                    style={{ fontSize: "2rem", marginBottom: "1rem" }}
-                  ></i>
-                  <p>Loading releases...</p>
-                </div>
-              ) : s1apiReleases.length === 0 ? (
-                <div
-                  style={{
-                    padding: "2rem",
-                    textAlign: "center",
-                    color: "#888",
-                  }}
-                >
-                  <p>No releases found</p>
-                </div>
-              ) : (
-                <>
-                  <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                    <div style={{ display: "grid", gap: "0.5rem" }}>
-                      {s1apiReleases.map((release) => (
-                        <label
-                          key={release.tag_name}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.75rem",
-                            padding: "0.75rem",
-                            borderRadius: "6px",
-                            backgroundColor:
-                              selectedS1APIVersion === release.tag_name
-                                ? "#2a2a2a"
-                                : "#1f1f1f",
-                            border:
-                              selectedS1APIVersion === release.tag_name
-                                ? "1px solid #4a90e2"
-                                : "1px solid #3a3a3a",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <input
-                            type="radio"
-                            name="s1api-version"
-                            checked={selectedS1APIVersion === release.tag_name}
-                            onChange={() =>
-                              setSelectedS1APIVersion(release.tag_name)
-                            }
-                          />
-                          <div>
-                            <div style={{ fontWeight: 600 }}>
-                              {release.tag_name}
-                            </div>
-                            <div style={{ fontSize: "0.8rem", color: "#888" }}>
-                              {release.published_at}
-                            </div>
-                          </div>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "flex-end",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => {
-                        setShowS1APIVersionSelector(false);
-                        setSelectedS1APIVersion("");
-                      }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="btn btn-primary"
-                      disabled={!selectedS1APIVersion || downloadingS1API}
-                      onClick={handleS1APIVersionSelected}
-                    >
-                      {downloadingS1API ? "Downloading..." : "Download"}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showMlvscanVersionSelector && (
-        <div
-          className="modal-overlay modal-overlay-nested"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) {
-              setShowMlvscanVersionSelector(false);
-              setSelectedMlvscanVersion("");
-            }
-          }}
-        >
-          <div
-            className="modal-content modal-content-nested"
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              maxWidth: "600px",
-              maxHeight: "80vh",
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <div className="modal-header">
-              <h2>Select MLVScan Version</h2>
-              <button
-                className="modal-close"
-                onClick={() => {
-                  setShowMlvscanVersionSelector(false);
-                  setSelectedMlvscanVersion("");
-                }}
-              >
-                ×
-              </button>
-            </div>
-
-            <div
-              style={{
-                padding: "1.25rem",
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.75rem",
-                overflow: "hidden",
-              }}
-            >
-              {loadingMlvscanReleases ? (
-                <div
-                  style={{
-                    padding: "2rem",
-                    textAlign: "center",
-                    color: "#888",
-                  }}
-                >
-                  <i
-                    className="fas fa-spinner fa-spin"
-                    style={{ fontSize: "2rem", marginBottom: "1rem" }}
-                  ></i>
-                  <p>Loading releases...</p>
-                </div>
-              ) : mlvscanReleases.length === 0 ? (
-                <div
-                  style={{
-                    padding: "2rem",
-                    textAlign: "center",
-                    color: "#888",
-                  }}
-                >
-                  <p>No releases found</p>
-                </div>
-              ) : (
-                <>
-                  <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                    <div style={{ display: "grid", gap: "0.5rem" }}>
-                      {mlvscanReleases.map((release) => (
-                        <label
-                          key={release.tag_name}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.75rem",
-                            padding: "0.75rem",
-                            borderRadius: "6px",
-                            backgroundColor:
-                              selectedMlvscanVersion === release.tag_name
-                                ? "#2a2a2a"
-                                : "#1f1f1f",
-                            border:
-                              selectedMlvscanVersion === release.tag_name
-                                ? "1px solid #4a90e2"
-                                : "1px solid #3a3a3a",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <input
-                            type="radio"
-                            name="mlvscan-version"
-                            checked={
-                              selectedMlvscanVersion === release.tag_name
-                            }
-                            onChange={() =>
-                              setSelectedMlvscanVersion(release.tag_name)
-                            }
-                          />
-                          <div>
-                            <div style={{ fontWeight: 600 }}>
-                              {release.tag_name}
-                            </div>
-                            <div style={{ fontSize: "0.8rem", color: "#888" }}>
-                              {release.published_at}
-                            </div>
-                          </div>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "flex-end",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => {
-                        setShowMlvscanVersionSelector(false);
-                        setSelectedMlvscanVersion("");
-                      }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="btn btn-primary"
-                      disabled={!selectedMlvscanVersion || downloadingMlvscan}
-                      onClick={handleMlvscanVersionSelected}
-                    >
-                      {downloadingMlvscan ? "Downloading..." : "Download"}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 
@@ -5578,6 +5996,8 @@ export function ModLibraryOverlay({
         onConfirm={confirmOverlay.onConfirm}
         title={confirmOverlay.title}
         message={confirmOverlay.message}
+        confirmText={confirmOverlay.confirmText}
+        cancelText={confirmOverlay.cancelText}
         isNested
       />
       <InstallTargetsDialog
@@ -5586,6 +6006,8 @@ export function ModLibraryOverlay({
         entry={installDialog.entry}
         compatibleEnvironments={installDialog.compatibleEnvironments}
         excludedEnvironments={installDialog.excludedEnvironments}
+        lockedEnvironmentIds={installDialog.lockedEnvironmentIds}
+        mode={installDialog.mode}
         selectedEnvironmentIds={selectedInstallEnvironmentIds}
         onToggleEnvironment={(environmentId) => {
           setSelectedInstallEnvironmentIds((previous) => {
@@ -5608,7 +6030,11 @@ export function ModLibraryOverlay({
           setSelectedInstallEnvironmentIds(
             new Set(
               installDialog.compatibleEnvironments
-                .filter((environment) => environment.runtime === runtime)
+                .filter(
+                  (environment) =>
+                    !installDialog.lockedEnvironmentIds.includes(environment.id)
+                    && getNormalizedRuntime(environment) === runtime,
+                )
                 .map((environment) => environment.id),
             ),
           )
@@ -5622,6 +6048,7 @@ export function ModLibraryOverlay({
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || "Security Findings"}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={
           activeSecurityReport?.onConfirm
@@ -5702,13 +6129,6 @@ export function ModLibraryOverlay({
       <div className="mods-overlay mods-overlay--library workspace-collection-shell">
         <div className="modal-header">
           <h2>Mod Library</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i
-              className="fas fa-arrow-left"
-              style={{ marginRight: "0.45rem" }}
-            ></i>
-            Back
-          </button>
         </div>
 
         <div className="workspace-collection">
@@ -5793,6 +6213,7 @@ export function ModLibraryOverlay({
                           setSearchSource("thunderstore");
                           setShowSearchResults(false);
                           setShowNexusModsResults(false);
+                          setActiveModView(null);
                         }}
                       >
                         Thunderstore
@@ -5804,6 +6225,7 @@ export function ModLibraryOverlay({
                           setSearchSource("nexusmods");
                           setShowSearchResults(false);
                           setShowNexusModsResults(false);
+                          setActiveModView(null);
                         }}
                       >
                         Nexus Mods
@@ -5814,8 +6236,8 @@ export function ModLibraryOverlay({
                         type="text"
                         placeholder={
                           searchSource === "thunderstore"
-                            ? "Search Thunderstore mods..."
-                            : "Search NexusMods mods..."
+                            ? "Search or browse Thunderstore mods..."
+                            : "Search or browse Nexus Mods..."
                         }
                         value={
                           searchSource === "thunderstore"
@@ -5845,14 +6267,32 @@ export function ModLibraryOverlay({
                         disabled={
                           (searchSource === "thunderstore"
                             ? searching
-                            : searchingNexusMods) ||
-                          !(searchSource === "thunderstore"
-                            ? searchQuery.trim()
-                            : nexusModsSearchQuery.trim())
+                            : searchingNexusMods)
                         }
                       >
-                        Search
+                        {(searchSource === "thunderstore"
+                          ? searchQuery.trim()
+                          : nexusModsSearchQuery.trim())
+                          ? "Search"
+                          : "Browse"}
                       </button>
+                    </div>
+                    <div className="workspace-collection__toolbar-group">
+                      <label className="workspace-collection__toolbar-select">
+                        <span className="workspace-collection__toolbar-select-wrap">
+                          <select
+                            aria-label="Sort discover results"
+                            value={discoverSort}
+                            onChange={(event) => setDiscoverSort(event.target.value as DiscoverSort)}
+                          >
+                            <option value="relevance">Relevance</option>
+                            <option value="updated">Last updated</option>
+                            <option value="popularity">Popularity</option>
+                            <option value="newest">Newest</option>
+                          </select>
+                          <i className="fas fa-chevron-down" aria-hidden="true"></i>
+                        </span>
+                      </label>
                     </div>
                     <button
                       className="btn btn-secondary btn-small"
@@ -5918,7 +6358,7 @@ export function ModLibraryOverlay({
                         <div>
                           <strong>S1API</strong>
                           <p>
-                            Core GitHub release for shared APIs and
+                            Core Thunderstore package for shared APIs and
                             interoperability.
                           </p>
                         </div>
@@ -5931,7 +6371,7 @@ export function ModLibraryOverlay({
                       >
                         <div>
                           <strong>MLVScan</strong>
-                          <p>Library scanning and validation tooling.</p>
+                          <p>Thunderstore-hosted library scanning and validation tooling.</p>
                         </div>
                         <span>{mlvscanActionLabel}</span>
                       </button>
@@ -5962,6 +6402,9 @@ export function ModLibraryOverlay({
                             pkg.packagesByRuntime.IL2CPP ||
                             pkg.packagesByRuntime.Mono;
                           const latestVersion = representative?.versions?.[0];
+                          const updatedLabel = formatInspectorDate(
+                            getThunderstorePackageUpdatedAt(representative),
+                          );
                           const downloadedGroup =
                             findDownloadedGroupForThunderstorePackage(pkg);
                           const isSelected =
@@ -5997,6 +6440,11 @@ export function ModLibraryOverlay({
                                   <span className="workspace-pill workspace-pill--source">
                                     Thunderstore
                                   </span>
+                                  {updatedLabel !== "unknown" && (
+                                    <span className="workspace-pill">
+                                      Updated {updatedLabel}
+                                    </span>
+                                  )}
                                   {downloadedGroup && (
                                     <span className="workspace-pill workspace-pill--success">
                                       Downloaded
@@ -6020,6 +6468,9 @@ export function ModLibraryOverlay({
 
                       {showNexusModsResults &&
                         nexusModsSearchResults.map((mod) => {
+                          const updatedLabel = formatInspectorDate(
+                            getNexusModUpdatedAt(mod),
+                          );
                           const downloadedGroup =
                             findDownloadedGroupForNexusMod(mod.mod_id);
                           const isSelected =
@@ -6053,6 +6504,11 @@ export function ModLibraryOverlay({
                                   <span className="workspace-pill workspace-pill--source">
                                     Nexus Mods
                                   </span>
+                                  {updatedLabel !== "unknown" && (
+                                    <span className="workspace-pill">
+                                      Updated {updatedLabel}
+                                    </span>
+                                  )}
                                   {downloadedGroup && (
                                     <span className="workspace-pill workspace-pill--success">
                                       Downloaded
@@ -6072,6 +6528,17 @@ export function ModLibraryOverlay({
                             </div>
                           );
                         })}
+                      {showSearchResults && searchResults.length === 0 && (
+                        <div className="workspace-collection__empty">
+                          No Thunderstore mods matched this search.
+                        </div>
+                      )}
+                      {showNexusModsResults &&
+                        nexusModsSearchResults.length === 0 && (
+                          <div className="workspace-collection__empty">
+                            No Nexus Mods matched this search.
+                          </div>
+                        )}
                     </div>
                   </section>
                 )}
@@ -6446,8 +6913,9 @@ export function ModLibraryOverlay({
                           <span>Updated</span>
                           <strong>
                             {formatInspectorDate(
-                              representativePackage?.date_updated ||
-                                latestVersion?.date_updated,
+                              getThunderstorePackageUpdatedAt(
+                                representativePackage,
+                              ),
                             )}
                           </strong>
                         </div>
@@ -6518,22 +6986,21 @@ export function ModLibraryOverlay({
                   );
                 })()}
                 <div className="workspace-inspector-card__actions">
-                  {!downloadedGroupForSelectedThunderstore && (
-                    <button
-                      className="btn btn-primary"
-                      onClick={() =>
-                        void handleDownloadThunderstore(
-                          selectedThunderstorePackage,
-                        )
-                      }
-                    >
-                      Download
-                    </button>
-                  )}
+                  <button
+                    className="btn btn-primary"
+                    onClick={() =>
+                      void handleDownloadThunderstore(
+                        selectedThunderstorePackage,
+                        selectedThunderstoreVersion,
+                      )
+                    }
+                  >
+                    Download selected version
+                  </button>
                   {downloadedGroupForSelectedThunderstore &&
                     selectedThunderstoreDownloadedEntry && (
                       <button
-                        className="btn btn-primary"
+                        className="btn btn-secondary"
                         onClick={() =>
                           void promptInstallTargets(
                             selectedThunderstoreDownloadedEntry,
@@ -6545,8 +7012,8 @@ export function ModLibraryOverlay({
                       >
                         {downloadedGroupForSelectedThunderstore.installedIn
                           .length > 0
-                          ? "Install to more…"
-                          : "Install…"}
+                          ? "Install library version…"
+                          : "Install library version"}
                       </button>
                     )}
                   {safeExternalUrl(selectedThunderstorePackage.packageUrl) && (
@@ -6562,6 +7029,79 @@ export function ModLibraryOverlay({
                     </a>
                   )}
                 </div>
+                <section
+                  className="workspace-inspector-card__subsection"
+                  aria-labelledby="thunderstore-inspector-versions"
+                >
+                  <div className="workspace-inspector-card__subsection-header">
+                    <div>
+                      <h4 id="thunderstore-inspector-versions">
+                        Available versions
+                      </h4>
+                      <p>
+                        Pick the package version you want to add to the library.
+                      </p>
+                    </div>
+                    <span className="workspace-inspector-card__subsection-count">
+                      {selectedThunderstoreVersionOptions.length} available
+                    </span>
+                  </div>
+                  <div
+                    className="workspace-version-list"
+                    role="listbox"
+                    aria-label="Thunderstore available versions"
+                  >
+                    {selectedThunderstoreVersionOptions.map((versionOption) => {
+                      const isActive =
+                        selectedThunderstoreVersion?.key === versionOption.key;
+                      return (
+                        <button
+                          key={versionOption.key}
+                          type="button"
+                          role="option"
+                          aria-selected={isActive}
+                          className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
+                          onClick={() =>
+                            setSelectedThunderstoreVersionByPackage((prev) => ({
+                              ...prev,
+                              [selectedThunderstorePackage.key]:
+                                versionOption.key,
+                            }))
+                          }
+                        >
+                          <div className="workspace-version-row__header">
+                            <div className="workspace-version-row__title">
+                              {formatVersionTag(versionOption.versionNumber)}
+                            </div>
+                            <div className="workspace-version-row__badges">
+                              {versionOption.runtimes.map((runtime) => (
+                                <span
+                                  key={`${versionOption.key}-${runtime}`}
+                                  className="workspace-pill"
+                                >
+                                  {runtime}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="workspace-version-row__meta">
+                            <span>
+                              Updated {formatInspectorDate(versionOption.updatedAt)}
+                            </span>
+                            <span>
+                              {formatCompactNumber(versionOption.downloads)} downloads
+                            </span>
+                          </div>
+                          {versionOption.description && (
+                            <p className="workspace-version-row__summary">
+                              {versionOption.description}
+                            </p>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
               </div>
             )}
 
@@ -6617,8 +7157,7 @@ export function ModLibraryOverlay({
                     <span>Updated</span>
                     <strong>
                       {formatInspectorDate(
-                        selectedNexusResult.updated_time ||
-                          selectedNexusResult.uploaded_time,
+                        getNexusModUpdatedAt(selectedNexusResult),
                       )}
                     </strong>
                   </div>
@@ -6655,20 +7194,22 @@ export function ModLibraryOverlay({
                   </div>
                 </div>
                 <div className="workspace-inspector-card__actions">
-                  {!downloadedGroupForSelectedNexus && (
-                    <button
-                      className="btn btn-primary"
-                      onClick={() =>
-                        void handleDownloadNexusMod(selectedNexusResult.mod_id)
-                      }
-                    >
-                      Download
-                    </button>
-                  )}
+                  <button
+                    className="btn btn-primary"
+                    onClick={() =>
+                      void handleDownloadNexusMod(
+                        selectedNexusResult.mod_id,
+                        selectedNexusFile,
+                      )
+                    }
+                    disabled={selectedNexusFiles.length === 0}
+                  >
+                    Download selected version
+                  </button>
                   {downloadedGroupForSelectedNexus &&
                     selectedNexusDownloadedEntry && (
                       <button
-                        className="btn btn-primary"
+                        className="btn btn-secondary"
                         onClick={() =>
                           void promptInstallTargets(
                             selectedNexusDownloadedEntry,
@@ -6679,8 +7220,8 @@ export function ModLibraryOverlay({
                         }
                       >
                         {downloadedGroupForSelectedNexus.installedIn.length > 0
-                          ? "Install to more…"
-                          : "Install…"}
+                          ? "Install library version…"
+                          : "Install library version"}
                       </button>
                     )}
                   <a
@@ -6692,6 +7233,93 @@ export function ModLibraryOverlay({
                     Open source page
                   </a>
                 </div>
+                <section
+                  className="workspace-inspector-card__subsection"
+                  aria-labelledby="nexus-inspector-versions"
+                >
+                  <div className="workspace-inspector-card__subsection-header">
+                    <div>
+                      <h4 id="nexus-inspector-versions">
+                        Available versions
+                      </h4>
+                      <p>
+                        Pick the file you want to add to the library before downloading.
+                      </p>
+                    </div>
+                    <span className="workspace-inspector-card__subsection-count">
+                      {selectedNexusFiles.length} available
+                    </span>
+                  </div>
+                  {selectedNexusFiles.length > 0 ? (
+                    <div
+                      className="workspace-version-list"
+                      role="listbox"
+                      aria-label="Nexus available versions"
+                    >
+                      {selectedNexusFiles.map((file) => {
+                        const displayKind = getNexusFileDisplayKind(file);
+                        const versionLabel =
+                          file.version || file.mod_version || "unknown";
+                        const isActive =
+                          selectedNexusFile?.file_id === file.file_id;
+                        return (
+                          <button
+                            key={file.file_id}
+                            type="button"
+                            role="option"
+                            aria-selected={isActive}
+                            className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
+                            onClick={() =>
+                              setSelectedNexusFileByModId((prev) => ({
+                                ...prev,
+                                [selectedNexusResult.mod_id]: file.file_id,
+                              }))
+                            }
+                          >
+                            <div className="workspace-version-row__header">
+                              <div className="workspace-version-row__title">
+                                {formatVersionTag(versionLabel)}
+                              </div>
+                              <div className="workspace-version-row__badges">
+                                <span className="workspace-pill">
+                                  {displayKind}
+                                </span>
+                                {file.is_primary && (
+                                  <span className="workspace-pill workspace-pill--success">
+                                    Primary
+                                  </span>
+                                )}
+                                {file.category_name && (
+                                  <span className="workspace-pill workspace-pill--source">
+                                    {file.category_name}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="workspace-version-row__meta">
+                              <span>
+                                Uploaded {formatInspectorDate(
+                                  getNexusFileUpdatedAt(file) ||
+                                    getNexusModUpdatedAt(selectedNexusResult),
+                                )}
+                              </span>
+                              <span>{file.file_name || file.name}</span>
+                            </div>
+                            {file.name && file.file_name !== file.name && (
+                              <p className="workspace-version-row__summary">
+                                {file.name}
+                              </p>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="workspace-inspector-card__empty">
+                      No downloadable files were returned for this Nexus mod yet.
+                    </div>
+                  )}
+                </section>
               </div>
             )}
           </aside>

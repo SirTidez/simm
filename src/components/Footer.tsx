@@ -4,6 +4,7 @@ import { logger } from '../services/logger';
 import { ApiService } from '../services/api';
 import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/events';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
+import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 
 interface ModUpdatesEntry {
   count: number;
@@ -14,7 +15,13 @@ interface ModUpdatesEntry {
 declare const __APP_VERSION__: string;
 const APP_VERSION = __APP_VERSION__;
 
-export function Footer() {
+interface FooterProps {
+  onOpenModUpdates?: () => void;
+  appUpdateAvailable?: boolean;
+  onOpenAppUpdate?: () => void;
+}
+
+export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenAppUpdate }: FooterProps) {
   const { environments, checkAllUpdates } = useEnvironmentStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
@@ -37,16 +44,29 @@ export function Footer() {
   // Load mod updates summary for completed environments
   const loadModUpdatesSummary = React.useCallback(async () => {
     try {
-      const summary = await ApiService.getAllModUpdatesSummary();
+      const library = await ApiService.getModLibrary();
       const map = new Map<string, ModUpdatesEntry>();
-      for (const entry of summary) {
-        map.set(entry.environmentId, { count: entry.count, updates: entry.updates });
+      for (const env of environments) {
+        if (env.status !== 'completed') {
+          continue;
+        }
+        const snapshot = buildEnvironmentModSnapshot(library, env.id);
+        map.set(env.id, {
+          count: snapshot.updateCount,
+          updates: snapshot.updates.map((update) => ({
+            modFileName: update.groupKey,
+            modName: update.modName,
+            currentVersion: update.currentVersion,
+            latestVersion: update.latestVersion,
+            source: update.source,
+          })),
+        });
       }
       setModUpdatesByEnv(map);
     } catch (err) {
       console.warn('Failed to load mod updates summary:', err);
     }
-  }, []);
+  }, [environments]);
 
   useEffect(() => {
     const completedCount = environments.filter(env => env.status === 'completed').length;
@@ -58,15 +78,11 @@ export function Footer() {
   // Subscribe to mod_updates_checked (from backend) to refresh when mod checks complete
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    onModUpdatesChecked((data) => {
-      setModUpdatesByEnv(prev => {
-        const next = new Map(prev);
-        next.set(data.environmentId, { count: data.count, updates: data.updates });
-        return next;
-      });
+    onModUpdatesChecked(() => {
+      void loadModUpdatesSummary();
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
-  }, []);
+  }, [loadModUpdatesSummary]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -224,13 +240,25 @@ export function Footer() {
                 &bull; Mods up to date
               </span>
             ) : totalModsNeedingUpdate === 1 ? (
-              <span className="statusbar-stat statusbar-stat-warn">
+              <button
+                type="button"
+                className="statusbar-stat statusbar-stat-warn"
+                onClick={onOpenModUpdates}
+                disabled={!onOpenModUpdates}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: onOpenModUpdates ? 'pointer' : 'default' }}
+              >
                 &bull; 1 Mod needs updating
-              </span>
+              </button>
             ) : (
-              <span className="statusbar-stat statusbar-stat-warn">
+              <button
+                type="button"
+                className="statusbar-stat statusbar-stat-warn"
+                onClick={onOpenModUpdates}
+                disabled={!onOpenModUpdates}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: onOpenModUpdates ? 'pointer' : 'default' }}
+              >
                 &bull; {totalModsNeedingUpdate} Mods need updating
-              </span>
+              </button>
             )}
           </>
         )}
@@ -272,6 +300,16 @@ export function Footer() {
         )}
       </div>
       <div className="statusbar-right">
+        {appUpdateAvailable && (
+          <button
+            type="button"
+            className="statusbar-app-update"
+            onClick={onOpenAppUpdate}
+            disabled={!onOpenAppUpdate}
+          >
+            SIMM Update Available
+          </button>
+        )}
         <span className="statusbar-version">v{APP_VERSION}</span>
       </div>
     </footer>

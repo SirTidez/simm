@@ -13,6 +13,7 @@ const settingsStoreMocks = vi.hoisted(() => ({
 
 const apiMocks = vi.hoisted(() => ({
   getAllModUpdatesSummary: vi.fn(),
+  getModLibrary: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -75,12 +76,18 @@ describe('Footer', () => {
     envStoreMocks.useEnvironmentStore.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
     apiMocks.getAllModUpdatesSummary.mockReset();
+    apiMocks.getModLibrary.mockReset();
     eventMocks.onModUpdatesChecked.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
 
     eventMocks.onModUpdatesChecked.mockResolvedValue(() => {});
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
     apiMocks.getAllModUpdatesSummary.mockResolvedValue([]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      entries: [],
+      groups: [],
+      totalCount: 0,
+    });
   });
 
   afterEach(() => {
@@ -89,14 +96,42 @@ describe('Footer', () => {
 
   it('shows global mod updates count when updates exist', async () => {
     mockStores([completedEnv]);
-    apiMocks.getAllModUpdatesSummary.mockResolvedValueOnce([
-      {
-        environmentId: 'env-1',
-        environmentName: 'Env One',
-        count: 2,
-        updates: [],
-      },
-    ]);
+    apiMocks.getModLibrary.mockResolvedValueOnce({
+      downloaded: [
+        {
+          storageId: 'mod-a',
+          displayName: 'Mod A',
+          files: ['ModA.dll'],
+          source: 'thunderstore',
+          sourceId: 'author/mod-a',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          remoteVersion: '1.1.0',
+          managed: false,
+          installedIn: ['env-1'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: {},
+          installedInByRuntime: { IL2CPP: ['env-1'] },
+          filesByRuntime: {},
+        },
+        {
+          storageId: 'mod-b',
+          displayName: 'Mod B',
+          files: ['ModB.dll'],
+          source: 'nexusmods',
+          sourceId: 'mod-b',
+          sourceVersion: '2.0.0',
+          installedVersion: '2.0.0',
+          remoteVersion: '2.1.0',
+          managed: false,
+          installedIn: ['env-1'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: {},
+          installedInByRuntime: { IL2CPP: ['env-1'] },
+          filesByRuntime: {},
+        },
+      ],
+    });
 
     render(<Footer />);
 
@@ -105,14 +140,9 @@ describe('Footer', () => {
 
   it('shows all mods up to date when completed environments have no mod updates', async () => {
     mockStores([completedEnv]);
-    apiMocks.getAllModUpdatesSummary.mockResolvedValueOnce([
-      {
-        environmentId: 'env-1',
-        environmentName: 'Env One',
-        count: 0,
-        updates: [],
-      },
-    ]);
+    apiMocks.getModLibrary.mockResolvedValueOnce({
+      downloaded: [],
+    });
 
     render(<Footer />);
 
@@ -136,5 +166,17 @@ describe('Footer', () => {
       expect(screen.queryByText(/Mods up to date/i)).toBeNull();
       expect(screen.queryByText(/mod(s)? need updating/i)).toBeNull();
     });
+  });
+
+  it('renders an app update badge when the shell reports an update', async () => {
+    const onOpenAppUpdate = vi.fn();
+    mockStores([completedEnv]);
+
+    render(<Footer appUpdateAvailable={true} onOpenAppUpdate={onOpenAppUpdate} />);
+
+    const badge = await screen.findByRole('button', { name: /SIMM Update Available/i });
+    expect(badge).toBeTruthy();
+    badge.click();
+    expect(onOpenAppUpdate).toHaveBeenCalled();
   });
 });

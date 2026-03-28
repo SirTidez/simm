@@ -113,10 +113,6 @@ function getPreferredConfigFilePath(catalog: ConfigFileSummary[], currentSelecti
   );
 }
 
-function hasDirtyDraft(drafts: Record<string, FileDraft>) {
-  return Object.values(drafts).some((draft) => draft.dirty);
-}
-
 function buildOperations(originalSections: ConfigSection[], draftSections: EditableSection[]): ConfigEditOperation[] {
   const operations: ConfigEditOperation[] = [];
   const originalSectionMap = new Map(originalSections.map((section) => [section.name, section]));
@@ -220,7 +216,7 @@ function validateStructuredDraft(sections: EditableSection[]) {
   return null;
 }
 
-export function ConfigurationOverlay({ isOpen, onClose, environmentId, environment }: Props) {
+export function ConfigurationOverlay({ isOpen, environmentId, environment }: Props) {
   const [catalog, setCatalog] = useState<ConfigFileSummary[]>([]);
   const [documentCache, setDocumentCache] = useState<Record<string, ConfigDocument>>({});
   const [drafts, setDrafts] = useState<Record<string, FileDraft>>({});
@@ -533,19 +529,6 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     applyFileSelection(file, preferredMode);
   };
 
-  const handleCloseRequest = () => {
-    if (hasDirtyDraft(drafts)) {
-      requestConfirm(
-        'Discard Unsaved Changes?',
-        'Closing the configuration editor will discard any unsaved drafts for this session.',
-        onClose
-      );
-      return;
-    }
-
-    onClose();
-  };
-
   const handleReload = async () => {
     if (!selectedFilePath) return;
     const requestedFilePath = selectedFilePath;
@@ -759,12 +742,6 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
           <p className="config-editor__subtitle">
             Manage loader, mod, and auxiliary configuration files for {environment.name}.
           </p>
-        </div>
-        <div className="config-editor__header-actions">
-          <button className="btn btn-secondary btn-small" onClick={handleCloseRequest}>
-            <i className="fas fa-arrow-left"></i>
-            Back
-          </button>
         </div>
       </div>
 

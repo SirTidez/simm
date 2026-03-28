@@ -31,7 +31,7 @@ function formatFileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChanged }: Props) {
+export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Props) {
   const [userLibs, setUserLibs] = useState<UserLibInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,10 +190,6 @@ export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChan
     <div className="mods-overlay workspace-collection-shell">
       <div className="modal-header">
         <h2>User Libraries</h2>
-        <button className="btn btn-secondary btn-small" onClick={onClose}>
-          <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-          Back
-        </button>
       </div>
 
       <div className="workspace-collection">
