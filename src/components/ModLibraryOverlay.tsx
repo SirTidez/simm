@@ -15,7 +15,10 @@ import {
 } from "./modCardHelpers";
 import { onModMetadataRefreshStatus } from "../services/events";
 import { useSettingsStore } from "../stores/settingsStore";
-import { SecurityScanReportOverlay } from "./SecurityScanReportOverlay";
+import {
+  SecurityScanReportOverlay,
+  type SecurityScanReportOption,
+} from "./SecurityScanReportOverlay";
 import {
   AnchoredContextMenu,
   type AnchoredContextMenuItem,
@@ -504,6 +507,7 @@ export function ModLibraryOverlay({
   const [activeSecurityReport, setActiveSecurityReport] = useState<{
     title: string;
     report: SecurityScanReport;
+    reportOptions?: SecurityScanReportOption[];
     confirmLabel?: string;
     onConfirm?: (() => Promise<void>) | null;
   } | null>(null);
@@ -941,9 +945,85 @@ export function ModLibraryOverlay({
     }
   }, [activeSecurityReport, showLibraryNotice]);
 
+  const buildSecurityReportOptionLabel = useCallback(
+    (entry: ModLibraryEntry) => {
+      const versionLabel = formatVersionTag(
+        entry.sourceVersion || entry.installedVersion,
+      );
+      const runtimeLabel =
+        entry.availableRuntimes?.length > 0
+          ? entry.availableRuntimes.join("/")
+          : "Runtime?";
+      return `${versionLabel} • ${runtimeLabel}`;
+    },
+    [],
+  );
+
+  const buildSecurityReportOptionDescription = useCallback((entry: ModLibraryEntry) => {
+    const fileCount = entry.files.length;
+    const fileSummary =
+      fileCount <= 2
+        ? entry.files.join(", ")
+        : `${fileCount} scanned files`;
+    return fileSummary || "Stored security report";
+  }, []);
+
+  const loadStoredSecurityReportOptions = useCallback(
+    async (entries: ModLibraryEntry[]): Promise<SecurityScanReportOption[]> => {
+      const uniqueEntries = entries.filter(
+        (entry, index, array) =>
+          array.findIndex((candidate) => candidate.storageId === entry.storageId) ===
+          index,
+      );
+
+      const reports = await Promise.all(
+        uniqueEntries.map(async (entry) => ({
+          entry,
+          report: await ApiService.getModSecurityScanReport(entry.storageId),
+        })),
+      );
+
+      return reports
+        .filter(
+          (
+            candidate,
+          ): candidate is { entry: ModLibraryEntry; report: SecurityScanReport } =>
+            Boolean(candidate.report),
+        )
+        .map(({ entry, report }) => ({
+          key: entry.storageId,
+          label: buildSecurityReportOptionLabel(entry),
+          description: buildSecurityReportOptionDescription(entry),
+          report,
+        }));
+    },
+    [buildSecurityReportOptionDescription, buildSecurityReportOptionLabel],
+  );
+
   const openStoredSecurityReport = useCallback(
     async (storageId: string, title: string) => {
       try {
+        const containingGroup = downloadedGroups.find((group) =>
+          group.entries.some(
+            (entry) =>
+              entry.storageId === storageId ||
+              Object.values(entry.storageIdsByRuntime || {}).includes(storageId),
+          ),
+        );
+        const reportOptions = await loadStoredSecurityReportOptions(
+          containingGroup?.entries || [],
+        );
+
+        if (reportOptions.length > 0) {
+          setActiveSecurityReport({
+            title,
+            report: reportOptions[0].report,
+            reportOptions,
+            onConfirm: null,
+          });
+          return;
+        }
+
         const report = await ApiService.getModSecurityScanReport(storageId);
         if (!report) {
           showLibraryNotice(
@@ -964,7 +1044,7 @@ export function ModLibraryOverlay({
         );
       }
     },
-    [showLibraryNotice],
+    [downloadedGroups, loadStoredSecurityReportOptions, showLibraryNotice],
   );
 
   const handleSecurityGateResult = useCallback(
@@ -3336,6 +3416,7 @@ export function ModLibraryOverlay({
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || "Security Findings"}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={
           activeSecurityReport?.onConfirm
@@ -5436,6 +5517,7 @@ export function ModLibraryOverlay({
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || "Security Findings"}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={
           activeSecurityReport?.onConfirm

@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
-import { SecurityScanReportOverlay } from './SecurityScanReportOverlay';
+import {
+  SecurityScanReportOverlay,
+  type SecurityScanReportOption,
+} from './SecurityScanReportOverlay';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
@@ -313,6 +316,7 @@ export function ModsOverlay({
   const [activeSecurityReport, setActiveSecurityReport] = useState<{
     title: string;
     report: SecurityScanReport;
+    reportOptions?: SecurityScanReportOption[];
     confirmLabel?: string;
     onConfirm?: (() => Promise<void>) | null;
   } | null>(null);
@@ -531,13 +535,72 @@ export function ModsOverlay({
     return false;
   };
 
+  const buildStoredSecurityReportOption = useCallback(
+    (entry: ModLibraryEntry | null, storageId: string, report: SecurityScanReport): SecurityScanReportOption => {
+      const versionLabel = normalizeVersionToken(entry?.sourceVersion || entry?.installedVersion)
+        ? `v${normalizeVersionToken(entry?.sourceVersion || entry?.installedVersion)}`
+        : 'Stored scan';
+      const explicitRuntimes = Object.entries(entry?.storageIdsByRuntime || {})
+        .filter(([, id]) => id === storageId)
+        .map(([runtime]) => runtime);
+      const fallbackRuntime =
+        entry?.storageId === storageId && (entry.availableRuntimes?.length || 0) === 1
+          ? entry.availableRuntimes
+          : [];
+      const runtimeLabel = [...explicitRuntimes, ...fallbackRuntime].join('/') || 'Runtime?';
+      const fileCount = report.files.length;
+      const description = fileCount === 0
+        ? 'Stored security report'
+        : fileCount === 1
+          ? report.files[0].fileName
+          : `${fileCount} scanned files`;
+
+      return {
+        key: storageId,
+        label: `${versionLabel} • ${runtimeLabel}`,
+        description,
+        report,
+      };
+    },
+    [],
+  );
+
   const openStoredSecurityReport = async (storageId: string, title: string) => {
     try {
-      const report = await ApiService.getModSecurityScanReport(storageId);
-      if (report) {
+      const matchingEntry = downloadedMods.find(
+        (entry) =>
+          entry.storageId === storageId ||
+          Object.values(entry.storageIdsByRuntime || {}).includes(storageId),
+      ) || null;
+      const storageIds = Array.from(
+        new Set([
+          storageId,
+          matchingEntry?.storageId,
+          ...Object.values(matchingEntry?.storageIdsByRuntime || {}),
+        ].filter((value): value is string => Boolean(value))),
+      );
+      const reports = await Promise.all(
+        storageIds.map(async (id) => ({
+          storageId: id,
+          report: await ApiService.getModSecurityScanReport(id),
+        })),
+      );
+      const reportOptions = reports
+        .filter(
+          (
+            candidate,
+          ): candidate is { storageId: string; report: SecurityScanReport } =>
+            Boolean(candidate.report),
+        )
+        .map(({ storageId: optionStorageId, report: optionReport }) =>
+          buildStoredSecurityReportOption(matchingEntry, optionStorageId, optionReport),
+        );
+
+      if (reportOptions.length > 0) {
         setActiveSecurityReport({
           title,
-          report,
+          report: reportOptions[0].report,
+          reportOptions,
           onConfirm: null,
         });
       } else {
@@ -2047,6 +2110,7 @@ export function ModsOverlay({
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || 'Security Findings'}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
         confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}
@@ -3243,6 +3307,7 @@ export function ModsOverlay({
         isOpen={!!activeSecurityReport}
         title={activeSecurityReport?.title || 'Security Findings'}
         report={activeSecurityReport?.report || null}
+        reportOptions={activeSecurityReport?.reportOptions}
         onClose={closeSecurityReport}
         onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
         confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}

@@ -12,10 +12,18 @@ interface SecurityScanReportOverlayProps {
   isOpen: boolean;
   title: string;
   report: SecurityScanReport | null;
+  reportOptions?: SecurityScanReportOption[];
   onClose: () => void;
   onConfirm?: () => void;
   confirmLabel?: string;
   busy?: boolean;
+}
+
+export interface SecurityScanReportOption {
+  key: string;
+  label: string;
+  description?: string;
+  report: SecurityScanReport;
 }
 
 const severityOrder: Record<Severity, number> = {
@@ -142,22 +150,45 @@ export function SecurityScanReportOverlay({
   isOpen,
   title,
   report,
+  reportOptions,
   onClose,
   onConfirm,
   confirmLabel = 'Continue Anyway',
   busy = false,
 }: SecurityScanReportOverlayProps) {
+  const normalizedReportOptions = useMemo<SecurityScanReportOption[]>(() => {
+    if (Array.isArray(reportOptions) && reportOptions.length > 0) {
+      return reportOptions;
+    }
+    if (!report) {
+      return [];
+    }
+    return [
+      {
+        key: 'default',
+        label: 'Scan report',
+        report,
+      },
+    ];
+  }, [report, reportOptions]);
+  const [activeReportIndex, setActiveReportIndex] = useState(0);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [activeSeverity, setActiveSeverity] = useState<Severity | 'All'>('All');
   const [selectedFindingKey, setSelectedFindingKey] = useState<string | null>(null);
 
   useEffect(() => {
+    setActiveReportIndex(0);
+  }, [report, reportOptions]);
+
+  useEffect(() => {
     setActiveFileIndex(0);
     setActiveSeverity('All');
     setSelectedFindingKey(null);
-  }, [report]);
+  }, [activeReportIndex, report, reportOptions]);
 
-  const files = report?.files || [];
+  const activeReportOption = normalizedReportOptions[activeReportIndex] || normalizedReportOptions[0] || null;
+  const activeReport = activeReportOption?.report || report || null;
+  const files = activeReport?.files || [];
   const activeFile = files[activeFileIndex] || files[0] || null;
   const activeResult = activeFile?.result || null;
   const findings = activeResult?.findings || [];
@@ -194,14 +225,14 @@ export function SecurityScanReportOverlay({
     }
   }, [filteredFindings, selectedFinding]);
 
-  if (!isOpen || !report) {
+  if (!isOpen || !activeReport) {
     return null;
   }
 
-  const summaryStyle = getSummaryStyle(report.summary, report.policy.blocked);
+  const summaryStyle = getSummaryStyle(activeReport.summary, activeReport.policy.blocked);
   const threatFamilyLabel = getThreatFamilyLabel(families);
   const topFindings = findings.slice(0, 3);
-  const summaryDisposition = report.summary.disposition;
+  const summaryDisposition = activeReport.summary.disposition;
   const activeDisposition = activeResult?.disposition || summaryDisposition;
   const summaryDispositionBadge = getSecurityDispositionBadgeConfig(summaryDisposition);
   const activeDispositionBadge = getSecurityDispositionBadgeConfig(activeDisposition);
@@ -291,21 +322,91 @@ export function SecurityScanReportOverlay({
             </div>
           )}
 
+          {normalizedReportOptions.length > 1 && (
+            <section
+              className="mod-card"
+              style={{
+                padding: '1rem',
+                display: 'grid',
+                gap: '0.75rem',
+              }}
+            >
+              <div>
+                <h3 style={{ margin: 0, color: '#edf5ff' }}>Stored reports</h3>
+                <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>
+                  Choose which downloaded archive report you want to inspect, then drill into its scanned files.
+                </p>
+              </div>
+              <div style={{ display: 'grid', gap: '0.55rem' }}>
+                {normalizedReportOptions.map((option, index) => {
+                  const optionStyle = getSummaryStyle(option.report.summary, option.report.policy.blocked);
+                  const isActive = index === activeReportIndex;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setActiveReportIndex(index)}
+                      style={{
+                        width: '100%',
+                        textAlign: 'left',
+                        borderRadius: '12px',
+                        border: isActive ? `1px solid ${optionStyle.border}` : '1px solid #2f3d53',
+                        background: isActive ? optionStyle.glow : 'rgba(18, 24, 36, 0.82)',
+                        color: '#d7e4f6',
+                        padding: '0.85rem 1rem',
+                        cursor: 'pointer',
+                        display: 'grid',
+                        gap: '0.35rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <strong style={{ color: '#eef5ff' }}>{option.label}</strong>
+                        <span
+                          style={{
+                            fontSize: '0.72rem',
+                            letterSpacing: '0.03em',
+                            textTransform: 'uppercase',
+                            color: optionStyle.tone,
+                            background: optionStyle.glow,
+                            border: `1px solid ${optionStyle.border}`,
+                            borderRadius: '999px',
+                            padding: '0.16rem 0.55rem',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                          }}
+                        >
+                          <i className={`fas ${optionStyle.icon}`}></i>
+                          {optionStyle.label}
+                        </span>
+                      </div>
+                      {option.description && (
+                        <span style={{ color: '#8fa7c5', fontSize: '0.82rem', lineHeight: 1.45 }}>
+                          {option.description}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(320px, 0.95fr)' }}>
             <section className="mod-card" style={{ padding: '1rem', border: `1px solid ${summaryStyle.border}`, background: `linear-gradient(180deg, ${summaryStyle.glow} 0%, rgba(17, 23, 34, 0.86) 100%)` }}>
               <div style={{ display: 'grid', gap: '0.55rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1.35rem', color: '#edf5ff' }}>{summaryStyle.label}</h3>
-                <p style={{ margin: 0, color: '#b9c9de', lineHeight: 1.55 }}>{report.summary.statusMessage || 'MLVScan completed this scan.'}</p>
+                <p style={{ margin: 0, color: '#b9c9de', lineHeight: 1.55 }}>{activeReport.summary.statusMessage || 'MLVScan completed this scan.'}</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem' }}>
                   <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
-                    {report.summary.totalFindings} finding{report.summary.totalFindings === 1 ? '' : 's'}
+                    {activeReport.summary.totalFindings} finding{activeReport.summary.totalFindings === 1 ? '' : 's'}
                   </span>
                   <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
-                    {report.summary.threatFamilyCount} threat match{report.summary.threatFamilyCount === 1 ? '' : 'es'}
+                    {activeReport.summary.threatFamilyCount} threat match{activeReport.summary.threatFamilyCount === 1 ? '' : 'es'}
                   </span>
-                  {report.summary.highestSeverity && (
-                    <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', fontSize: '0.74rem', ...severityBadgeStyles[report.summary.highestSeverity] }}>
-                      Highest: {report.summary.highestSeverity}
+                  {activeReport.summary.highestSeverity && (
+                    <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', fontSize: '0.74rem', ...severityBadgeStyles[activeReport.summary.highestSeverity] }}>
+                      Highest: {activeReport.summary.highestSeverity}
                     </span>
                   )}
                   {summaryDispositionBadge && (
@@ -364,7 +465,7 @@ export function SecurityScanReportOverlay({
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
                   <span style={{ color: '#8ea7c6' }}>Scanned</span>
-                  <strong style={{ color: '#edf5ff', textAlign: 'right' }}>{formatTimestamp(report.summary.scannedAt)}</strong>
+                  <strong style={{ color: '#edf5ff', textAlign: 'right' }}>{formatTimestamp(activeReport.summary.scannedAt)}</strong>
                 </div>
                 {activeDispositionBadge && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>

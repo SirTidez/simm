@@ -362,6 +362,147 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText('Security Findings - Questionable Mod')).toBeTruthy();
   });
 
+  it('loads security reports for sibling runtime downloads in the same mod group', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Dual Runtime Mod',
+          storageId: 'dual-mono',
+          source: 'nexusmods',
+          sourceId: '1234',
+          sourceVersion: '1.0.0',
+          files: ['DualRuntime.Mono.dll'],
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'dual-mono' },
+          installedInByRuntime: { Mono: [] },
+          filesByRuntime: { Mono: ['DualRuntime.Mono.dll'] },
+          securityScan: {
+            state: 'review',
+            verified: false,
+            highestSeverity: 'Medium',
+            totalFindings: 1,
+            threatFamilyCount: 0,
+          },
+        }),
+        makeEntry({
+          displayName: 'Dual Runtime Mod',
+          storageId: 'dual-il2cpp',
+          source: 'nexusmods',
+          sourceId: '1234',
+          sourceVersion: '1.0.0',
+          files: ['DualRuntime.IL2CPP.dll'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'dual-il2cpp' },
+          installedInByRuntime: { IL2CPP: [] },
+          filesByRuntime: { IL2CPP: ['DualRuntime.IL2CPP.dll'] },
+          securityScan: {
+            state: 'verified',
+            verified: true,
+            highestSeverity: undefined,
+            totalFindings: 0,
+            threatFamilyCount: 0,
+          },
+        }),
+      ],
+    });
+    apiMocks.getModSecurityScanReport.mockImplementation(async (storageId: string) => {
+      if (storageId === 'dual-mono') {
+        return {
+          summary: {
+            state: 'review',
+            verified: false,
+            highestSeverity: 'Medium',
+            totalFindings: 1,
+            threatFamilyCount: 0,
+          },
+          policy: {
+            enabled: true,
+            requiresConfirmation: false,
+            blocked: false,
+            promptOnHighFindings: false,
+            blockCriticalFindings: false,
+          },
+          files: [
+            {
+              fileName: 'DualRuntime.Mono.dll',
+              displayPath: 'Mods/DualRuntime.Mono.dll',
+              totalFindings: 1,
+              threatFamilyCount: 0,
+              result: {
+                findings: [
+                  {
+                    id: 'mono-finding',
+                    severity: 'Medium',
+                    description: 'Mono heuristic hit',
+                  },
+                ],
+                input: {
+                  sizeBytes: 1024,
+                },
+              },
+            },
+          ],
+        };
+      }
+
+      if (storageId === 'dual-il2cpp') {
+        return {
+          summary: {
+            state: 'verified',
+            verified: true,
+            highestSeverity: undefined,
+            totalFindings: 0,
+            threatFamilyCount: 0,
+          },
+          policy: {
+            enabled: true,
+            requiresConfirmation: false,
+            blocked: false,
+            promptOnHighFindings: false,
+            blockCriticalFindings: false,
+          },
+          files: [
+            {
+              fileName: 'DualRuntime.IL2CPP.dll',
+              displayPath: 'Mods/DualRuntime.IL2CPP.dll',
+              totalFindings: 0,
+              threatFamilyCount: 0,
+              result: {
+                findings: [],
+                input: {
+                  sizeBytes: 2048,
+                },
+              },
+            },
+          ],
+        };
+      }
+
+      return null;
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    renderLibraryOverlay({ libraryTab: 'library' });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+
+    expect(await screen.findByText('Stored reports')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /v1\.0\.0 • Mono/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /v1\.0\.0 • IL2CPP/i })).toBeTruthy();
+    expect(apiMocks.getModSecurityScanReport).toHaveBeenCalledWith('dual-mono');
+    expect(apiMocks.getModSecurityScanReport).toHaveBeenCalledWith('dual-il2cpp');
+
+    fireEvent.click(screen.getByRole('button', { name: /v1\.0\.0 • IL2CPP/i }));
+
+    expect((await screen.findAllByText('DualRuntime.IL2CPP.dll')).length).toBeGreaterThan(0);
+  });
+
   it('shows downloaded mod details in the preselected inspector state', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
