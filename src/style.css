@@ -6931,7 +6931,8 @@ body {
 }
 
 .workspace-collection__content {
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 0.85rem;
   display: grid;
   gap: 0.9rem;
@@ -7044,9 +7045,12 @@ body {
   font-size: 0.94rem;
   font-weight: 600;
   color: var(--workspace-title-color);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.25;
 }
 
 .workspace-collection__row-meta {
@@ -7126,18 +7130,29 @@ body {
   align-items: start;
 }
 
+.workspace-inspector-card__header > div:last-child {
+  min-width: 0;
+}
+
 .workspace-inspector-card__header--file {
   grid-template-columns: 72px minmax(0, 1fr);
 }
 
 .workspace-inspector-card__header h3 {
   margin: 0;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.2;
 }
 
 .workspace-inspector-card__subtle {
   margin-top: 0.25rem;
   color: var(--workspace-copy-color);
   font-size: 0.82rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .workspace-inspector-card__summary {
