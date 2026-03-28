@@ -1,0 +1,2118 @@
+﻿2026-03-28T20:08:09.7240393Z Current runner version: '2.333.0'
+2026-03-28T20:08:09.7276876Z ##[group]Runner Image Provisioner
+2026-03-28T20:08:09.7278075Z Hosted Compute Agent
+2026-03-28T20:08:09.7279095Z Version: 20260213.493
+2026-03-28T20:08:09.7280119Z Commit: 5c115507f6dd24b8de37d8bbe0bb4509d0cc0fa3
+2026-03-28T20:08:09.7281343Z Build Date: 2026-02-13T00:28:41Z
+2026-03-28T20:08:09.7282659Z Worker ID: {a496f807-809c-4bb4-947e-0672340b365c}
+2026-03-28T20:08:09.7284004Z Azure Region: eastus2
+2026-03-28T20:08:09.7284882Z ##[endgroup]
+2026-03-28T20:08:09.7286983Z ##[group]Operating System
+2026-03-28T20:08:09.7288159Z Ubuntu
+2026-03-28T20:08:09.7288930Z 24.04.4
+2026-03-28T20:08:09.7289663Z LTS
+2026-03-28T20:08:09.7290510Z ##[endgroup]
+2026-03-28T20:08:09.7291469Z ##[group]Runner Image
+2026-03-28T20:08:09.7292613Z Image: ubuntu-24.04
+2026-03-28T20:08:09.7293712Z Version: 20260323.65.1
+2026-03-28T20:08:09.7295639Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260323.65/images/ubuntu/Ubuntu2404-Readme.md
+2026-03-28T20:08:09.7298326Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260323.65
+2026-03-28T20:08:09.7299895Z ##[endgroup]
+2026-03-28T20:08:09.7302031Z ##[group]GITHUB_TOKEN Permissions
+2026-03-28T20:08:09.7305135Z Contents: read
+2026-03-28T20:08:09.7306087Z Metadata: read
+2026-03-28T20:08:09.7307051Z Packages: read
+2026-03-28T20:08:09.7307893Z ##[endgroup]
+2026-03-28T20:08:09.7310703Z Secret source: Actions
+2026-03-28T20:08:09.7313327Z Prepare workflow directory
+2026-03-28T20:08:09.7776692Z Prepare all required actions
+2026-03-28T20:08:09.7831159Z Getting action download info
+2026-03-28T20:08:10.0741588Z Download action repository 'actions/checkout@v4' (SHA:34e114876b0b11c390a56381ad16ebd13914f8d5)
+2026-03-28T20:08:10.4195208Z Download action repository 'actions/setup-node@v4' (SHA:49933ea5288caeca8642d1e84afbd3f7d6820020)
+2026-03-28T20:08:10.6056116Z Complete job name: frontend
+2026-03-28T20:08:10.6785867Z ##[group]Run actions/checkout@v4
+2026-03-28T20:08:10.6786816Z with:
+2026-03-28T20:08:10.6787262Z   repository: SirTidez/simm
+2026-03-28T20:08:10.6787921Z   token: ***
+2026-03-28T20:08:10.6788341Z   ssh-strict: true
+2026-03-28T20:08:10.6788765Z   ssh-user: git
+2026-03-28T20:08:10.6789178Z   persist-credentials: true
+2026-03-28T20:08:10.6789655Z   clean: true
+2026-03-28T20:08:10.6790084Z   sparse-checkout-cone-mode: true
+2026-03-28T20:08:10.6790598Z   fetch-depth: 1
+2026-03-28T20:08:10.6791008Z   fetch-tags: false
+2026-03-28T20:08:10.6791443Z   show-progress: true
+2026-03-28T20:08:10.6791882Z   lfs: false
+2026-03-28T20:08:10.6792481Z   submodules: false
+2026-03-28T20:08:10.6792934Z   set-safe-directory: true
+2026-03-28T20:08:10.6793682Z ##[endgroup]
+2026-03-28T20:08:10.7929032Z Syncing repository: SirTidez/simm
+2026-03-28T20:08:10.7930767Z ##[group]Getting Git version info
+2026-03-28T20:08:10.7931455Z Working directory is '/home/runner/work/simm/simm'
+2026-03-28T20:08:10.7932784Z [command]/usr/bin/git version
+2026-03-28T20:08:10.7984350Z git version 2.53.0
+2026-03-28T20:08:10.8010019Z ##[endgroup]
+2026-03-28T20:08:10.8023608Z Temporarily overriding HOME='/home/runner/work/_temp/7cccb187-9f27-46e0-80f6-84608277ad31' before making global git config changes
+2026-03-28T20:08:10.8028385Z Adding repository directory to the temporary git global config as a safe directory
+2026-03-28T20:08:10.8029638Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/simm/simm
+2026-03-28T20:08:10.8058528Z Deleting the contents of '/home/runner/work/simm/simm'
+2026-03-28T20:08:10.8062049Z ##[group]Initializing the repository
+2026-03-28T20:08:10.8066069Z [command]/usr/bin/git init /home/runner/work/simm/simm
+2026-03-28T20:08:10.8164803Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-03-28T20:08:10.8166838Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-03-28T20:08:10.8168716Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-03-28T20:08:10.8170213Z hint: call:
+2026-03-28T20:08:10.8171309Z hint:
+2026-03-28T20:08:10.8172571Z hint: 	git config --global init.defaultBranch <name>
+2026-03-28T20:08:10.8173819Z hint:
+2026-03-28T20:08:10.8174936Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-03-28T20:08:10.8176893Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-03-28T20:08:10.8178410Z hint:
+2026-03-28T20:08:10.8179186Z hint: 	git branch -m <name>
+2026-03-28T20:08:10.8180112Z hint:
+2026-03-28T20:08:10.8181596Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-03-28T20:08:10.8183842Z Initialized empty Git repository in /home/runner/work/simm/simm/.git/
+2026-03-28T20:08:10.8186928Z [command]/usr/bin/git remote add origin https://github.com/SirTidez/simm
+2026-03-28T20:08:10.8208349Z ##[endgroup]
+2026-03-28T20:08:10.8209773Z ##[group]Disabling automatic garbage collection
+2026-03-28T20:08:10.8211864Z [command]/usr/bin/git config --local gc.auto 0
+2026-03-28T20:08:10.8243013Z ##[endgroup]
+2026-03-28T20:08:10.8244431Z ##[group]Setting up auth
+2026-03-28T20:08:10.8249280Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-03-28T20:08:10.8278018Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-03-28T20:08:10.8568651Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-03-28T20:08:10.8597040Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-03-28T20:08:10.8805473Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-03-28T20:08:10.8841526Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-03-28T20:08:10.9054058Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-03-28T20:08:10.9085826Z ##[endgroup]
+2026-03-28T20:08:10.9086735Z ##[group]Fetching the repository
+2026-03-28T20:08:10.9094780Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +4e6124cbb36781db7ad47cbc3bf60f67f0adba32:refs/remotes/pull/14/merge
+2026-03-28T20:08:11.4517223Z From https://github.com/SirTidez/simm
+2026-03-28T20:08:11.4518599Z  * [new ref]         4e6124cbb36781db7ad47cbc3bf60f67f0adba32 -> pull/14/merge
+2026-03-28T20:08:11.4544998Z ##[endgroup]
+2026-03-28T20:08:11.4546827Z ##[group]Determining the checkout info
+2026-03-28T20:08:11.4548823Z ##[endgroup]
+2026-03-28T20:08:11.4553202Z [command]/usr/bin/git sparse-checkout disable
+2026-03-28T20:08:11.4599423Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-03-28T20:08:11.4624895Z ##[group]Checking out the ref
+2026-03-28T20:08:11.4628860Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/14/merge
+2026-03-28T20:08:11.5366339Z Note: switching to 'refs/remotes/pull/14/merge'.
+2026-03-28T20:08:11.5367650Z 
+2026-03-28T20:08:11.5368613Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-03-28T20:08:11.5371165Z changes and commit them, and you can discard any commits you make in this
+2026-03-28T20:08:11.5373937Z state without impacting any branches by switching back to a branch.
+2026-03-28T20:08:11.5375432Z 
+2026-03-28T20:08:11.5376426Z If you want to create a new branch to retain commits you create, you may
+2026-03-28T20:08:11.5378082Z do so (now or later) by using -c with the switch command. Example:
+2026-03-28T20:08:11.5378968Z 
+2026-03-28T20:08:11.5379314Z   git switch -c <new-branch-name>
+2026-03-28T20:08:11.5379906Z 
+2026-03-28T20:08:11.5380231Z Or undo this operation with:
+2026-03-28T20:08:11.5381005Z 
+2026-03-28T20:08:11.5381486Z   git switch -
+2026-03-28T20:08:11.5382147Z 
+2026-03-28T20:08:11.5383518Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-03-28T20:08:11.5384665Z 
+2026-03-28T20:08:11.5385968Z HEAD is now at 4e6124c Merge cd5e32a50f4556d17e3438c71eba32887dce3e0c into 02ff50be9cb4188727714fbb44f08eba8e9c0abd
+2026-03-28T20:08:11.5390061Z ##[endgroup]
+2026-03-28T20:08:11.5419247Z [command]/usr/bin/git log -1 --format=%H
+2026-03-28T20:08:11.5439905Z 4e6124cbb36781db7ad47cbc3bf60f67f0adba32
+2026-03-28T20:08:11.5774627Z ##[group]Run actions/setup-node@v4
+2026-03-28T20:08:11.5775833Z with:
+2026-03-28T20:08:11.5776644Z   node-version: 22
+2026-03-28T20:08:11.5777550Z   always-auth: false
+2026-03-28T20:08:11.5778480Z   check-latest: false
+2026-03-28T20:08:11.5779662Z   token: ***
+2026-03-28T20:08:11.5780478Z ##[endgroup]
+2026-03-28T20:08:11.7531105Z Found in cache @ /opt/hostedtoolcache/node/22.22.1/x64
+2026-03-28T20:08:11.7537763Z ##[group]Environment details
+2026-03-28T20:08:15.5946665Z node: v22.22.1
+2026-03-28T20:08:15.5947787Z npm: 10.9.4
+2026-03-28T20:08:15.5948171Z yarn: 1.22.22
+2026-03-28T20:08:15.5949243Z ##[endgroup]
+2026-03-28T20:08:15.6076649Z ##[group]Run npm config set fetch-retries 5
+2026-03-28T20:08:15.6077045Z [36;1mnpm config set fetch-retries 5[0m
+2026-03-28T20:08:15.6077377Z [36;1mnpm config set fetch-retry-maxtimeout 120000[0m
+2026-03-28T20:08:15.6077744Z [36;1mnpm install --no-audit --prefer-offline[0m
+2026-03-28T20:08:15.6128061Z shell: /usr/bin/bash -e {0}
+2026-03-28T20:08:15.6128330Z ##[endgroup]
+2026-03-28T20:08:29.2857558Z npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
+2026-03-28T20:08:30.2150362Z npm warn deprecated glob@10.5.0: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
+2026-03-28T20:08:32.3281026Z 
+2026-03-28T20:08:32.3281782Z added 230 packages in 16s
+2026-03-28T20:08:32.3288233Z 
+2026-03-28T20:08:32.3288696Z 46 packages are looking for funding
+2026-03-28T20:08:32.3289233Z   run `npm fund` for details
+2026-03-28T20:08:32.3887802Z ##[group]Run npx tsc --noEmit
+2026-03-28T20:08:32.3888130Z [36;1mnpx tsc --noEmit[0m
+2026-03-28T20:08:32.3914973Z shell: /usr/bin/bash -e {0}
+2026-03-28T20:08:32.3915561Z ##[endgroup]
+2026-03-28T20:08:40.1604318Z ##[group]Run npm run test
+2026-03-28T20:08:40.1604605Z [36;1mnpm run test[0m
+2026-03-28T20:08:40.1630585Z shell: /usr/bin/bash -e {0}
+2026-03-28T20:08:40.1630827Z ##[endgroup]
+2026-03-28T20:08:40.2555371Z 
+2026-03-28T20:08:40.2556058Z > simmrust@0.7.8 test
+2026-03-28T20:08:40.2556376Z > vitest run
+2026-03-28T20:08:40.2556513Z 
+2026-03-28T20:08:40.5541757Z 
+2026-03-28T20:08:40.5543894Z [1m[46m RUN [49m[22m [36mv3.2.4 [39m[90m/home/runner/work/simm/simm[39m
+2026-03-28T20:08:40.5544522Z 
+2026-03-28T20:08:43.0020444Z  [32m✓[39m src/components/LogsOverlay.test.tsx [2m([22m[2m7 tests[22m[2m)[22m[33m 878[2mms[22m[39m
+2026-03-28T20:08:43.1741365Z  [32m✓[39m src/components/ModsOverlay.test.tsx [2m([22m[2m8 tests[22m[2m)[22m[33m 898[2mms[22m[39m
+2026-03-28T20:08:44.4765619Z [90mstderr[2m | src/components/ModLibraryOverlay.test.tsx[2m > [22m[2mModLibraryOverlay[2m > [22m[2mshows an error when a Thunderstore library update cannot resolve a package
+2026-03-28T20:08:44.4769841Z [22m[39mFailed to update and activate mod version: Error: Could not resolve the latest Thunderstore package for Mono runtime.
+2026-03-28T20:08:44.4773178Z     at [90m/home/runner/work/simm/simm/[39msrc/components/ModLibraryOverlay.tsx:2244:21
+2026-03-28T20:08:44.4774489Z 
+2026-03-28T20:08:44.5323877Z [90mstdout[2m | src/components/EnvironmentList.test.tsx[2m > [22m[2mEnvironmentList[2m > [22m[2mtriggers manual update check from card action
+2026-03-28T20:08:44.5331756Z [22m[39m[EnvironmentList] Running initial update check on app launch for 1 environment(s)
+2026-03-28T20:08:44.5334844Z [EnvironmentList] Automatic update check starting for 1 environment(s)
+2026-03-28T20:08:44.5339082Z [EnvironmentList] Automatic update checks are disabled in settings
+2026-03-28T20:08:44.5383721Z [EnvironmentList] Update check completed successfully
+2026-03-28T20:08:44.5385744Z 
+2026-03-28T20:08:44.5801495Z [90mstdout[2m | src/components/EnvironmentList.test.tsx[2m > [22m[2mEnvironmentList[2m > [22m[2mrefreshes mod counts when mods_changed event fires for a completed environment
+2026-03-28T20:08:44.5805732Z [22m[39m[EnvironmentList] Running initial update check on app launch for 1 environment(s)
+2026-03-28T20:08:44.5833817Z [EnvironmentList] Skipping automatic update check - last check was 0 minutes ago. Next check in 60 minute(s)
+2026-03-28T20:08:44.5839299Z [EnvironmentList] Automatic update checks are disabled in settings
+2026-03-28T20:08:44.5839840Z 
+2026-03-28T20:08:44.6695121Z [90mstdout[2m | src/components/App.test.tsx[2m > [22m[2mApp[2m > [22m[2mhides startup splash when initial detection completes
+2026-03-28T20:08:44.6696573Z [22m[39m[Discord] Setting up static presence...
+2026-03-28T20:08:44.6696969Z 
+2026-03-28T20:08:44.9495842Z  [31m❯[39m src/components/ModLibraryOverlay.test.tsx [2m([22m[2m22 tests[22m[2m | [22m[31m2 failed[39m[2m)[22m[33m 2651[2mms[22m[39m
+2026-03-28T20:08:44.9498048Z    [32m✓[39m ModLibraryOverlay[2m > [22mshows S1API update state in featured downloads when installed version is behind[32m 215[2mms[22m[39m
+2026-03-28T20:08:44.9500380Z [31m   [31m×[31m ModLibraryOverlay[2m > [22mshows thunderstore search results without auto-selecting the first result[39m[32m 164[2mms[22m[39m
+2026-03-28T20:08:44.9503815Z [31m     → Unable to find an element with the text: Updated Jan 1, 2025. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+2026-03-28T20:08:44.9505433Z 
+2026-03-28T20:08:44.9505772Z Ignored nodes: comments, script, style
+2026-03-28T20:08:44.9506408Z [36m<body>[31m
+2026-03-28T20:08:44.9506855Z   [36m<div>[31m
+2026-03-28T20:08:44.9507249Z     [36m<div[31m
+2026-03-28T20:08:44.9508185Z       [33mclass[31m=[32m"mods-overlay mods-overlay--library workspace-collection-shell"[31m
+2026-03-28T20:08:44.9509138Z     [36m>[31m
+2026-03-28T20:08:44.9509505Z       [36m<div[31m
+2026-03-28T20:08:44.9510601Z         [33mclass[31m=[32m"modal-header"[31m
+2026-03-28T20:08:44.9511202Z       [36m>[31m
+2026-03-28T20:08:44.9511590Z         [36m<h2>[31m
+2026-03-28T20:08:44.9512034Z           [0mMod Library[0m
+2026-03-28T20:08:44.9512787Z         [36m</h2>[31m
+2026-03-28T20:08:44.9513217Z       [36m</div>[31m
+2026-03-28T20:08:44.9513612Z       [36m<div[31m
+2026-03-28T20:08:44.9514190Z         [33mclass[31m=[32m"workspace-collection"[31m
+2026-03-28T20:08:44.9514752Z       [36m>[31m
+2026-03-28T20:08:44.9515139Z         [36m<div[31m
+2026-03-28T20:08:44.9515797Z           [33mclass[31m=[32m"workspace-collection__main"[31m
+2026-03-28T20:08:44.9516453Z         [36m>[31m
+2026-03-28T20:08:44.9516860Z           [36m<div[31m
+2026-03-28T20:08:44.9517566Z             [33mclass[31m=[32m"workspace-collection__header"[31m
+2026-03-28T20:08:44.9518217Z           [36m>[31m
+2026-03-28T20:08:44.9518641Z             [36m<div[31m
+2026-03-28T20:08:44.9519346Z               [33mclass[31m=[32m"workspace-collection__nav"[31m
+2026-03-28T20:08:44.9519952Z             [36m>[31m
+2026-03-28T20:08:44.9520358Z               [36m<div[31m
+2026-03-28T20:08:44.9521481Z                 [33mclass[31m=[32m"workspace-collection__rail-group workspace-collection__rail-group--inline"[31m
+2026-03-28T20:08:44.9522934Z               [36m>[31m
+2026-03-28T20:08:44.9523423Z                 [36m<button[31m
+2026-03-28T20:08:44.9524609Z                   [33mclass[31m=[32m"workspace-collection__rail-button workspace-collection__rail-button--active"[31m
+2026-03-28T20:08:44.9525734Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9526273Z                 [36m>[31m
+2026-03-28T20:08:44.9527122Z                   [36m<i[31m
+2026-03-28T20:08:44.9527800Z                     [33mclass[31m=[32m"fas fa-compass"[31m
+2026-03-28T20:08:44.9528465Z                   [36m/>[31m
+2026-03-28T20:08:44.9528991Z                   [36m<span>[31m
+2026-03-28T20:08:44.9529580Z                     [0mDiscover[0m
+2026-03-28T20:08:44.9530147Z                   [36m</span>[31m
+2026-03-28T20:08:44.9530688Z                 [36m</button>[31m
+2026-03-28T20:08:44.9531226Z                 [36m<button[31m
+2026-03-28T20:08:44.9532030Z                   [33mclass[31m=[32m"workspace-collection__rail-button "[31m
+2026-03-28T20:08:44.9533142Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9533668Z                 [36m>[31m
+2026-03-28T20:08:44.9534136Z                   [36m<i[31m
+2026-03-28T20:08:44.9534758Z                     [33mclass[31m=[32m"fas fa-book-open"[31m
+2026-03-28T20:08:44.9535351Z                   [36m/>[31m
+2026-03-28T20:08:44.9535827Z                   [36m<span>[31m
+2026-03-28T20:08:44.9536319Z                     [0mLibrary[0m
+2026-03-28T20:08:44.9536837Z                   [36m</span>[31m
+2026-03-28T20:08:44.9537357Z                 [36m</button>[31m
+2026-03-28T20:08:44.9537888Z                 [36m<button[31m
+2026-03-28T20:08:44.9538689Z                   [33mclass[31m=[32m"workspace-collection__rail-button "[31m
+2026-03-28T20:08:44.9539586Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9540173Z                 [36m>[31m
+2026-03-28T20:08:44.9540689Z                   [36m<i[31m
+2026-03-28T20:08:44.9541361Z                     [33mclass[31m=[32m"fas fa-arrow-up"[31m
+2026-03-28T20:08:44.9541985Z                   [36m/>[31m
+2026-03-28T20:08:44.9542784Z                   [36m<span>[31m
+2026-03-28T20:08:44.9543323Z                     [0mUpdates[0m
+2026-03-28T20:08:44.9543872Z                   [36m</span>[31m
+2026-03-28T20:08:44.9544426Z                 [36m</button>[31m
+2026-03-28T20:08:44.9545050Z               [36m</div>[31m
+2026-03-28T20:08:44.9545557Z               [36m<div[31m
+2026-03-28T20:08:44.9546269Z                 [33mclass[31m=[32m"workspace-collection__summary"[31m
+2026-03-28T20:08:44.9546929Z               [36m>[31m
+2026-03-28T20:08:44.9548194Z                 [36m<div[31m
+2026-03-28T20:08:44.9549279Z                   [33mclass[31m=[32m"workspace-collection__summary-chip"[31m
+2026-03-28T20:08:44.9550034Z                 [36m>[31m
+2026-03-28T20:08:44.9550540Z                   [36m<span>[31m
+2026-03-28T20:08:44.9551119Z                     [0mDownloaded[0m
+2026-03-28T20:08:44.9551707Z                   [36m</span>[31m
+2026-03-28T20:08:44.9552516Z                   [36m<strong>[31m
+2026-03-28T20:08:44.9553059Z                     [0m0[0m
+2026-03-28T20:08:44.9553563Z                   [36m</strong>[31m
+2026-03-28T20:08:44.9554110Z                 [36m</div>[31m
+2026-03-28T20:08:44.9554610Z                 [36m<div[31m
+2026-03-28T20:08:44.9555418Z                   [33mclass[31m=[32m"workspace-collection__summary-chip"[31m
+2026-03-28T20:08:44.9556122Z                 [36m>[31m
+2026-03-28T20:08:44.9556617Z                   [36m<span>[31m
+2026-03-28T20:08:44.9557153Z                     [0mUpdates[0m
+2026-03-28T20:08:44.9557728Z                   [36m</span>[31m
+2026-03-28T20:08:44.9558285Z                   [36m<strong>[31m
+2026-03-28T20:08:44.9558778Z                     [0m0[0m
+2026-03-28T20:08:44.9559303Z                   [36m</strong>[31m
+2026-03-28T20:08:44.9559818Z                 [36m</div>[31m
+2026-03-28T20:08:44.9560318Z                 [36m<div[31m
+2026-03-28T20:08:44.9561085Z                   [33mclass[31m=[32m"workspace-collection__summary-chip"[31m
+2026-03-28T20:08:44.9561770Z                 [36m>[31m
+2026-03-28T20:08:44.9562527Z                   [36m<span>[31m
+2026-03-28T20:08:44.9563108Z                     [0mInstalled[0m
+2026-03-28T20:08:44.9563660Z                   [36m</span>[31m
+2026-03-28T20:08:44.9564553Z                   [36m<strong>[31m
+2026-03-28T20:08:44.9565067Z                     [0m0[0m
+2026-03-28T20:08:44.9565614Z                   [36m</strong>[31m
+2026-03-28T20:08:44.9566182Z                 [36m</div>[31m
+2026-03-28T20:08:44.9566700Z               [36m</div>[31m
+2026-03-28T20:08:44.9567182Z             [36m</div>[31m
+2026-03-28T20:08:44.9567633Z             [36m<div[31m
+2026-03-28T20:08:44.9568365Z               [33mclass[31m=[32m"workspace-collection__toolbar"[31m
+2026-03-28T20:08:44.9569039Z             [36m>[31m
+2026-03-28T20:08:44.9569466Z               [36m<div[31m
+2026-03-28T20:08:44.9570240Z                 [33mclass[31m=[32m"workspace-collection__toolbar-group"[31m
+2026-03-28T20:08:44.9570929Z               [36m>[31m
+2026-03-28T20:08:44.9571423Z                 [36m<button[31m
+2026-03-28T20:08:44.9572145Z                   [33mclass[31m=[32m"btn btn-small btn-primary"[31m
+2026-03-28T20:08:44.9573186Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9573732Z                 [36m>[31m
+2026-03-28T20:08:44.9574245Z                   [0mThunderstore[0m
+2026-03-28T20:08:44.9574842Z                 [36m</button>[31m
+2026-03-28T20:08:44.9575405Z                 [36m<button[31m
+2026-03-28T20:08:44.9576150Z                   [33mclass[31m=[32m"btn btn-small btn-secondary"[31m
+2026-03-28T20:08:44.9576930Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9577499Z                 [36m>[31m
+2026-03-28T20:08:44.9578029Z                   [0mNexus Mods[0m
+2026-03-28T20:08:44.9578592Z                 [36m</button>[31m
+2026-03-28T20:08:44.9579145Z               [36m</div>[31m
+2026-03-28T20:08:44.9579631Z               [36m<div[31m
+2026-03-28T20:08:44.9580453Z                 [33mclass[31m=[32m"workspace-collection__toolbar-search"[31m
+2026-03-28T20:08:44.9581168Z               [36m>[31m
+2026-03-28T20:08:44.9581660Z                 [36m<input[31m
+2026-03-28T20:08:44.9582864Z                   [33mplaceholder[31m=[32m"Search or browse Thunderstore mods..."[31m
+2026-03-28T20:08:44.9583803Z                   [33mtype[31m=[32m"text"[31m
+2026-03-28T20:08:44.9584510Z                   [33mvalue[31m=[32m"map"[31m
+2026-03-28T20:08:44.9585142Z                 [36m/>[31m
+2026-03-28T20:08:44.9585926Z                 [36m<button[31m
+2026-03-28T20:08:44.9586746Z                   [33mclass[31m=[32m"btn btn-primary btn-small"[31m
+2026-03-28T20:08:44.9587548Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9588096Z                 [36m>[31m
+2026-03-28T20:08:44.9588578Z                   [0mSearch[0m
+2026-03-28T20:08:44.9589105Z                 [36m</button>[31m
+2026-03-28T20:08:44.9589615Z               [36m</div>[31m
+2026-03-28T20:08:44.9590067Z               [36m<div[31m
+2026-03-28T20:08:44.9590833Z                 [33mclass[31m=[32m"workspace-collection__toolbar-group"[31m
+2026-03-28T20:08:44.9591573Z               [36m>[31m
+2026-03-28T20:08:44.9592174Z                 [36m<label[31m
+2026-03-28T20:08:44.9593294Z                   [33mclass[31m=[32m"workspace-collection__toolbar-select"[31m
+2026-03-28T20:08:44.9594036Z                 [36m>[31m
+2026-03-28T20:08:44.9594541Z                   [36m<span[31m
+2026-03-28T20:08:44.9595411Z                     [33mclass[31m=[32m"workspace-collection__toolbar-select-wrap"[31m
+2026-03-28T20:08:44.9596151Z                   [36m>[31m
+2026-03-28T20:08:44.9596688Z                     [36m<select[31m
+2026-03-28T20:08:44.9597472Z                       [33maria-label[31m=[32m"Sort discover results"[31m
+2026-03-28T20:08:44.9598199Z                     [36m>[31m
+2026-03-28T20:08:44.9598752Z                       [36m<option[31m
+2026-03-28T20:08:44.9599460Z                         [33mvalue[31m=[32m"relevance"[31m
+2026-03-28T20:08:44.9600119Z                       [36m>[31m
+2026-03-28T20:08:44.9600715Z                         [0mRelevance[0m
+2026-03-28T20:08:44.9601712Z                       [36m</option>[31m
+2026-03-28T20:08:44.9602594Z                       [36m<option[31m
+2026-03-28T20:08:44.9603319Z                         [33mvalue[31m=[32m"updated"[31m
+2026-03-28T20:08:44.9603979Z                       [36m>[31m
+2026-03-28T20:08:44.9604565Z                         [0mLast updated[0m
+2026-03-28T20:08:44.9605183Z                       [36m</option>[31m
+2026-03-28T20:08:44.9605760Z                       [36m<option[31m
+2026-03-28T20:08:44.9606420Z                         [33mvalue[31m=[32m"popularity"[31m
+2026-03-28T20:08:44.9607068Z                       [36m>[31m
+2026-03-28T20:08:44.9607625Z                         [0mPopularity[0m
+2026-03-28T20:08:44.9608197Z                       [36m</option>[31m
+2026-03-28T20:08:44.9608826Z                       [36m<option[31m
+2026-03-28T20:08:44.9609491Z                         [33mvalue[31m=[32m"newest"[31m
+2026-03-28T20:08:44.9610081Z                       [36m>[31m
+2026-03-28T20:08:44.9610631Z                         [0mNewest[0m
+2026-03-28T20:08:44.9611216Z                       [36m</option>[31m
+2026-03-28T20:08:44.9611794Z                     [36m</select>[31m
+2026-03-28T20:08:44.9612935Z                     [36m<i[31m
+2026-03-28T20:08:44.9613669Z                       [33maria-hidden[31m=[32m"true"[31m
+2026-03-28T20:08:44.9614494Z                       [33mclass[31m=[32m"fas fa-chevron-down"[31m
+2026-03-28T20:08:44.9615182Z                     [36m/>[31m
+2026-03-28T20:08:44.9615713Z                   [36m</span>[31m
+2026-03-28T20:08:44.9616261Z                 [36m</label>[31m
+2026-03-28T20:08:44.9616810Z               [36m</div>[31m
+2026-03-28T20:08:44.9617310Z               [36m<button[31m
+2026-03-28T20:08:44.9618034Z                 [33mclass[31m=[32m"btn btn-secondary btn-small"[31m
+2026-03-28T20:08:44.9618696Z               [36m>[31m
+2026-03-28T20:08:44.9619151Z                 [36m<i[31m
+2026-03-28T20:08:44.9619808Z                   [33mclass[31m=[32m"fas fa-sync-alt"[31m
+2026-03-28T20:08:44.9620437Z                 [36m/>[31m
+2026-03-28T20:08:44.9620950Z                 [36m<span>[31m
+2026-03-28T20:08:44.9621492Z                   [0mRefresh[0m
+2026-03-28T20:08:44.9622018Z                 [36m</span>[31m
+2026-03-28T20:08:44.9622837Z               [36m</button>[31m
+2026-03-28T20:08:44.9623565Z             [36m</div>[31m
+2026-03-28T20:08:44.9624015Z           [36m</div>[31m
+2026-03-28T20:08:44.9624440Z           [36m<div[31m
+2026-03-28T20:08:44.9625105Z             [33mclass[31m=[32m"workspace-collection__content"[31m
+2026-03-28T20:08:44.9625717Z           [36m>[31m
+2026-03-28T20:08:44.9626149Z             [36m<section[31m
+2026-03-28T20:08:44.9626867Z               [33mclass[31m=[32m"workspace-collection__section"[31m
+2026-03-28T20:08:44.9627503Z             [36m>[31m
+2026-03-28T20:08:44.9627936Z               [36m<div[31m
+2026-03-28T20:08:44.9628674Z                 [33mclass[31m=[32m"workspace-collection__section-header"[31m
+2026-03-28T20:08:44.9629348Z               [36m>[31m
+2026-03-28T20:08:44.9629807Z                 [36m<h3>[31m
+2026-03-28T20:08:44.9630323Z                   [0mDiscover Results[0m
+2026-03-28T20:08:44.9630860Z                 [36m</h3>[31m
+2026-03-28T20:08:44.9631338Z                 [36m<span>[31m
+2026-03-28T20:08:44.9631802Z                   [0m1[0m
+2026-03-28T20:08:44.9632232Z                   [0m [0m
+2026-03-28T20:08:44.9632986Z                   [0mresult(s)[0m
+2026-03-28T20:08:44.9633509Z                 [36m</span>[31m
+2026-03-28T20:08:44.9634016Z               [36m</div>[31m
+2026-03-28T20:08:44.9634459Z               [36m<div[31m
+2026-03-28T20:08:44.9635256Z                 [33mclass[31m=[32m"workspace-collection__list"[31m
+2026-03-28T20:08:44.9635934Z               [36m>[31m
+2026-03-28T20:08:44.9636435Z                 [36m<div[31m
+2026-03-28T20:08:44.9637179Z                   [33mclass[31m=[32m"workspace-collection__row "[31m
+2026-03-28T20:08:44.9638305Z                   [33mrole[31m=[32m"button"[31m
+2026-03-28T20:08:44.9638988Z                   [33mtabindex[31m=[32m"0"[31m
+2026-03-28T20:08:44.9639524Z                 [36m>[31m
+2026-03-28T20:08:44.9640028Z                   [36m<div[31m
+2026-03-28T20:08:44.9640729Z                     [33mclass[31m=[32m"mod-card-icon-inline"[31m
+2026-03-28T20:08:44.9641353Z                   [36m>[31m
+2026-03-28T20:08:44.9641832Z                     [36m<img[31m
+2026-03-28T20:08:44.9642717Z                       [33malt[31m=[32m"MapTools icon"[31m
+2026-03-28T20:08:44.9643513Z                       [33mclass[31m=[32m"mod-card-icon-image"[31m
+2026-03-28T20:08:44.9644175Z                       [33msrc[31m=[32m"https://example.com/icon.png"[31m
+2026-03-28T20:08:44.9644571Z                     [36m/>[31m
+2026-03-28T20:08:44.9644858Z                   [36m</div>[31m
+2026-03-28T20:08:44.9645136Z                   [36m<div[31m
+2026-03-28T20:08:44.9645545Z                     [33mclass[31m=[32m"workspace-collection__row-body"[31m
+2026-03-28T20:08:44.9645916Z                   [36m>[31m
+2026-03-28T20:08:44.9646177Z                     [36m<div[31m
+2026-03-28T20:08:44.9646586Z                       [33mclass[31m=[32m"workspace-collection__row-title"[31m
+2026-03-28T20:08:44.9646974Z                     [36m>[31m
+2026-03-28T20:08:44.9647252Z                       [0mMapTools[0m
+2026-03-28T20:08:44.9647546Z                     [36m</div>[31m
+2026-03-28T20:08:44.9647817Z                     [36m<div[31m
+2026-03-28T20:08:44.9648216Z                       [33mclass[31m=[32m"workspace-collection__row-meta"[31m
+2026-03-28T20:08:44.9648587Z                     [36m>[31m
+2026-03-28T20:08:44.9648850Z                       [36m<span>[31m
+2026-03-28T20:08:44.9649134Z                         [0mTester[0m
+2026-03-28T20:08:44.9649422Z                       [36m</span>[31m
+2026-03-28T20:08:44.9649706Z                       [36m<span[31m
+2026-03-28T20:08:44.9650169Z                         [33mclass[31m=[32m"workspace-pill workspace-pill--source"[31m
+2026-03-28T20:08:44.9650583Z                       [36m>[31m
+2026-03-28T20:08:44.9650873Z                         [0mThunderstore[0m
+2026-03-28T20:08:44.9651178Z                       [36m</span>[31m
+2026-03-28T20:08:44.9651647Z                       [36m<span[31m
+2026-03-28T20:08:44.9652027Z                         [33mclass[31m=[32m"workspace-pill"[31m
+2026-03-28T20:08:44.9652665Z                       [36m>[31m
+2026-03-28T20:08:44.9652967Z                         [0mUpdated [0m
+2026-03-28T20:08:44.9653321Z                         [0mJan 2, 2025[0m
+2026-03-28T20:08:44.9653626Z                       [36m</span>[31m
+2026-03-28T20:08:44.9653909Z                     [36m</div>[31m
+2026-03-28T20:08:44.9654190Z                     [36m<p[31m
+2026-03-28T20:08:44.9654607Z                       [33mclass[31m=[32m"workspace-collection__row-summary"[31m
+2026-03-28T20:08:44.9654992Z                     [36m>[31m
+2026-03-28T20:08:44.9655308Z                       [0mMapTools package[0m
+2026-03-28T20:08:44.9655605Z                     [36m</p>[31m
+2026-03-28T20:08:44.9655877Z                   [36m</div>[31m
+2026-03-28T20:08:44.9656141Z                 [36m</div>[31m
+2026-03-28T20:08:44.9656396Z               [36m</div>[31m
+2026-03-28T20:08:44.9656666Z             [36m</section>[31m
+2026-03-28T20:08:44.9656906Z           [36m</div>[31m
+2026-03-28T20:08:44.9657133Z         [36m</div>[31m
+2026-03-28T20:08:44.9657353Z         [36m<aside[31m
+2026-03-28T20:08:44.9657713Z           [33mclass[31m=[32m"workspace-collection__inspector"[31m
+2026-03-28T20:08:44.9658047Z         [36m>[31m
+2026-03-28T20:08:44.9658254Z           [36m<div[31m
+2026-03-28T20:08:44.9658638Z             [33mclass[31m=[32m"workspace-collection__inspector-empty"[31m
+2026-03-28T20:08:44.9658995Z           [36m>[31m
+2026-03-28T20:08:44.9659324Z             [0mSelect a mod to review details and actions.[0m
+2026-03-28T20:08:44.9659808Z           [36m</div>[31m
+2026-03-28T20:08:44.9660036Z         [36m</aside>[31m
+2026-03-28T20:08:44.9660250Z       [36m</div>[31m
+2026-03-28T20:08:44.9660461Z     [36m</div>[31m
+2026-03-28T20:08:44.9660669Z   [36m</div>[31m
+2026-03-28T20:08:44.9660886Z [36m</body>[31m[39m
+2026-03-28T20:08:44.9661640Z    [32m✓[39m ModLibraryOverlay[2m > [22mshows the Thunderstore updated date when package data uses camelCase fields[32m 81[2mms[22m[39m
+2026-03-28T20:08:44.9664508Z [31m   [31m×[31m ModLibraryOverlay[2m > [22mdownloads the newest runtime-compatible Nexus file instead of the first matching file[39m[32m 102[2mms[22m[39m
+2026-03-28T20:08:44.9667764Z [31m     → Unable to find an element with the text: Updated Jan 1, 2025. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+2026-03-28T20:08:44.9669275Z 
+2026-03-28T20:08:44.9669559Z Ignored nodes: comments, script, style
+2026-03-28T20:08:44.9670111Z [36m<body>[31m
+2026-03-28T20:08:44.9670471Z   [36m<div>[31m
+2026-03-28T20:08:44.9670833Z     [36m<div[31m
+2026-03-28T20:08:44.9671744Z       [33mclass[31m=[32m"mods-overlay mods-overlay--library workspace-collection-shell"[31m
+2026-03-28T20:08:44.9672889Z     [36m>[31m
+2026-03-28T20:08:44.9673309Z       [36m<div[31m
+2026-03-28T20:08:44.9673866Z         [33mclass[31m=[32m"modal-header"[31m
+2026-03-28T20:08:44.9674420Z       [36m>[31m
+2026-03-28T20:08:44.9674813Z         [36m<h2>[31m
+2026-03-28T20:08:44.9675240Z           [0mMod Library[0m
+2026-03-28T20:08:44.9675688Z         [36m</h2>[31m
+2026-03-28T20:08:44.9676094Z       [36m</div>[31m
+2026-03-28T20:08:44.9676490Z       [36m<div[31m
+2026-03-28T20:08:44.9677088Z         [33mclass[31m=[32m"workspace-collection"[31m
+2026-03-28T20:08:44.9677653Z       [36m>[31m
+2026-03-28T20:08:44.9678037Z         [36m<div[31m
+2026-03-28T20:08:44.9678682Z           [33mclass[31m=[32m"workspace-collection__main"[31m
+2026-03-28T20:08:44.9679290Z         [36m>[31m
+2026-03-28T20:08:44.9679660Z           [36m<div[31m
+2026-03-28T20:08:44.9680303Z             [33mclass[31m=[32m"workspace-collection__header"[31m
+2026-03-28T20:08:44.9680905Z           [36m>[31m
+2026-03-28T20:08:44.9681280Z             [36m<div[31m
+2026-03-28T20:08:44.9682120Z               [33mclass[31m=[32m"workspace-collection__nav"[31m
+2026-03-28T20:08:44.9705817Z             [36m>[31m
+2026-03-28T20:08:44.9706251Z               [36m<div[31m
+2026-03-28T20:08:44.9707362Z                 [33mclass[31m=[32m"workspace-collection__rail-group workspace-collection__rail-group--inline"[31m
+2026-03-28T20:08:44.9708301Z               [36m>[31m
+2026-03-28T20:08:44.9708838Z                 [36m<button[31m
+2026-03-28T20:08:44.9710006Z                   [33mclass[31m=[32m"workspace-collection__rail-button workspace-collection__rail-button--active"[31m
+2026-03-28T20:08:44.9711156Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9711732Z                 [36m>[31m
+2026-03-28T20:08:44.9712236Z                   [36m<i[31m
+2026-03-28T20:08:44.9713193Z                     [33mclass[31m=[32m"fas fa-compass"[31m
+2026-03-28T20:08:44.9713839Z                   [36m/>[31m
+2026-03-28T20:08:44.9714382Z                   [36m<span>[31m
+2026-03-28T20:08:44.9714950Z                     [0mDiscover[0m
+2026-03-28T20:08:44.9715483Z                   [36m</span>[31m
+2026-03-28T20:08:44.9716020Z                 [36m</button>[31m
+2026-03-28T20:08:44.9716566Z                 [36m<button[31m
+2026-03-28T20:08:44.9717392Z                   [33mclass[31m=[32m"workspace-collection__rail-button "[31m
+2026-03-28T20:08:44.9718229Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9718759Z                 [36m>[31m
+2026-03-28T20:08:44.9719241Z                   [36m<i[31m
+2026-03-28T20:08:44.9719937Z                     [33mclass[31m=[32m"fas fa-book-open"[31m
+2026-03-28T20:08:44.9720862Z                   [36m/>[31m
+2026-03-28T20:08:44.9721364Z                   [36m<span>[31m
+2026-03-28T20:08:44.9721880Z                     [0mLibrary[0m
+2026-03-28T20:08:44.9722655Z                   [36m</span>[31m
+2026-03-28T20:08:44.9723188Z                 [36m</button>[31m
+2026-03-28T20:08:44.9723728Z                 [36m<button[31m
+2026-03-28T20:08:44.9724517Z                   [33mclass[31m=[32m"workspace-collection__rail-button "[31m
+2026-03-28T20:08:44.9725331Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9725847Z                 [36m>[31m
+2026-03-28T20:08:44.9726314Z                   [36m<i[31m
+2026-03-28T20:08:44.9726968Z                     [33mclass[31m=[32m"fas fa-arrow-up"[31m
+2026-03-28T20:08:44.9727620Z                   [36m/>[31m
+2026-03-28T20:08:44.9728130Z                   [36m<span>[31m
+2026-03-28T20:08:44.9728664Z                     [0mUpdates[0m
+2026-03-28T20:08:44.9729207Z                   [36m</span>[31m
+2026-03-28T20:08:44.9729755Z                 [36m</button>[31m
+2026-03-28T20:08:44.9730248Z               [36m</div>[31m
+2026-03-28T20:08:44.9730688Z               [36m<div[31m
+2026-03-28T20:08:44.9731398Z                 [33mclass[31m=[32m"workspace-collection__summary"[31m
+2026-03-28T20:08:44.9732052Z               [36m>[31m
+2026-03-28T20:08:44.9732965Z                 [36m<div[31m
+2026-03-28T20:08:44.9733762Z                   [33mclass[31m=[32m"workspace-collection__summary-chip"[31m
+2026-03-28T20:08:44.9734456Z                 [36m>[31m
+2026-03-28T20:08:44.9734946Z                   [36m<span>[31m
+2026-03-28T20:08:44.9735493Z                     [0mDownloaded[0m
+2026-03-28T20:08:44.9736051Z                   [36m</span>[31m
+2026-03-28T20:08:44.9736581Z                   [36m<strong>[31m
+2026-03-28T20:08:44.9737064Z                     [0m0[0m
+2026-03-28T20:08:44.9737563Z                   [36m</strong>[31m
+2026-03-28T20:08:44.9738085Z                 [36m</div>[31m
+2026-03-28T20:08:44.9738601Z                 [36m<div[31m
+2026-03-28T20:08:44.9739355Z                   [33mclass[31m=[32m"workspace-collection__summary-chip"[31m
+2026-03-28T20:08:44.9740021Z                 [36m>[31m
+2026-03-28T20:08:44.9740497Z                   [36m<span>[31m
+2026-03-28T20:08:44.9741009Z                     [0mUpdates[0m
+2026-03-28T20:08:44.9741873Z                   [36m</span>[31m
+2026-03-28T20:08:44.9742648Z                   [36m<strong>[31m
+2026-03-28T20:08:44.9743114Z                     [0m0[0m
+2026-03-28T20:08:44.9743581Z                   [36m</strong>[31m
+2026-03-28T20:08:44.9744072Z                 [36m</div>[31m
+2026-03-28T20:08:44.9744542Z                 [36m<div[31m
+2026-03-28T20:08:44.9745338Z                   [33mclass[31m=[32m"workspace-collection__summary-chip"[31m
+2026-03-28T20:08:44.9745998Z                 [36m>[31m
+2026-03-28T20:08:44.9746456Z                   [36m<span>[31m
+2026-03-28T20:08:44.9746968Z                     [0mInstalled[0m
+2026-03-28T20:08:44.9747556Z                   [36m</span>[31m
+2026-03-28T20:08:44.9748055Z                   [36m<strong>[31m
+2026-03-28T20:08:44.9748512Z                     [0m0[0m
+2026-03-28T20:08:44.9748991Z                   [36m</strong>[31m
+2026-03-28T20:08:44.9749488Z                 [36m</div>[31m
+2026-03-28T20:08:44.9749976Z               [36m</div>[31m
+2026-03-28T20:08:44.9750398Z             [36m</div>[31m
+2026-03-28T20:08:44.9750868Z             [36m<div[31m
+2026-03-28T20:08:44.9751556Z               [33mclass[31m=[32m"workspace-collection__toolbar"[31m
+2026-03-28T20:08:44.9752216Z             [36m>[31m
+2026-03-28T20:08:44.9752942Z               [36m<div[31m
+2026-03-28T20:08:44.9753742Z                 [33mclass[31m=[32m"workspace-collection__toolbar-group"[31m
+2026-03-28T20:08:44.9754456Z               [36m>[31m
+2026-03-28T20:08:44.9754945Z                 [36m<button[31m
+2026-03-28T20:08:44.9755666Z                   [33mclass[31m=[32m"btn btn-small btn-primary"[31m
+2026-03-28T20:08:44.9756975Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9757560Z                 [36m>[31m
+2026-03-28T20:08:44.9758097Z                   [0mThunderstore[0m
+2026-03-28T20:08:44.9758656Z                 [36m</button>[31m
+2026-03-28T20:08:44.9759174Z                 [36m<button[31m
+2026-03-28T20:08:44.9759928Z                   [33mclass[31m=[32m"btn btn-small btn-secondary"[31m
+2026-03-28T20:08:44.9760721Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9761252Z                 [36m>[31m
+2026-03-28T20:08:44.9761757Z                   [0mNexus Mods[0m
+2026-03-28T20:08:44.9764192Z                 [36m</button>[31m
+2026-03-28T20:08:44.9764804Z               [36m</div>[31m
+2026-03-28T20:08:44.9765254Z               [36m<div[31m
+2026-03-28T20:08:44.9766004Z                 [33mclass[31m=[32m"workspace-collection__toolbar-search"[31m
+2026-03-28T20:08:44.9766678Z               [36m>[31m
+2026-03-28T20:08:44.9767147Z                 [36m<input[31m
+2026-03-28T20:08:44.9767957Z                   [33mplaceholder[31m=[32m"Search or browse Thunderstore mods..."[31m
+2026-03-28T20:08:44.9768794Z                   [33mtype[31m=[32m"text"[31m
+2026-03-28T20:08:44.9769410Z                   [33mvalue[31m=[32m""[31m
+2026-03-28T20:08:44.9769913Z                 [36m/>[31m
+2026-03-28T20:08:44.9770387Z                 [36m<button[31m
+2026-03-28T20:08:44.9771078Z                   [33mclass[31m=[32m"btn btn-primary btn-small"[31m
+2026-03-28T20:08:44.9771794Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9772605Z                 [36m>[31m
+2026-03-28T20:08:44.9773088Z                   [0mBrowse[0m
+2026-03-28T20:08:44.9773651Z                 [36m</button>[31m
+2026-03-28T20:08:44.9774148Z               [36m</div>[31m
+2026-03-28T20:08:44.9774566Z               [36m<div[31m
+2026-03-28T20:08:44.9775305Z                 [33mclass[31m=[32m"workspace-collection__toolbar-group"[31m
+2026-03-28T20:08:44.9775977Z               [36m>[31m
+2026-03-28T20:08:44.9776418Z                 [36m<label[31m
+2026-03-28T20:08:44.9777183Z                   [33mclass[31m=[32m"workspace-collection__toolbar-select"[31m
+2026-03-28T20:08:44.9777854Z                 [36m>[31m
+2026-03-28T20:08:44.9778320Z                   [36m<span[31m
+2026-03-28T20:08:44.9779779Z                     [33mclass[31m=[32m"workspace-collection__toolbar-select-wrap"[31m
+2026-03-28T20:08:44.9780534Z                   [36m>[31m
+2026-03-28T20:08:44.9781010Z                     [36m<select[31m
+2026-03-28T20:08:44.9781715Z                       [33maria-label[31m=[32m"Sort discover results"[31m
+2026-03-28T20:08:44.9782614Z                     [36m>[31m
+2026-03-28T20:08:44.9783113Z                       [36m<option[31m
+2026-03-28T20:08:44.9783723Z                         [33mvalue[31m=[32m"relevance"[31m
+2026-03-28T20:08:44.9784267Z                       [36m>[31m
+2026-03-28T20:08:44.9784745Z                         [0mRelevance[0m
+2026-03-28T20:08:44.9785287Z                       [36m</option>[31m
+2026-03-28T20:08:44.9785796Z                       [36m<option[31m
+2026-03-28T20:08:44.9786389Z                         [33mvalue[31m=[32m"updated"[31m
+2026-03-28T20:08:44.9786930Z                       [36m>[31m
+2026-03-28T20:08:44.9787445Z                         [0mLast updated[0m
+2026-03-28T20:08:44.9787985Z                       [36m</option>[31m
+2026-03-28T20:08:44.9788506Z                       [36m<option[31m
+2026-03-28T20:08:44.9789125Z                         [33mvalue[31m=[32m"popularity"[31m
+2026-03-28T20:08:44.9789678Z                       [36m>[31m
+2026-03-28T20:08:44.9790171Z                         [0mPopularity[0m
+2026-03-28T20:08:44.9790702Z                       [36m</option>[31m
+2026-03-28T20:08:44.9791206Z                       [36m<option[31m
+2026-03-28T20:08:44.9791792Z                         [33mvalue[31m=[32m"newest"[31m
+2026-03-28T20:08:44.9792522Z                       [36m>[31m
+2026-03-28T20:08:44.9793295Z                         [0mNewest[0m
+2026-03-28T20:08:44.9793869Z                       [36m</option>[31m
+2026-03-28T20:08:44.9794461Z                     [36m</select>[31m
+2026-03-28T20:08:44.9795003Z                     [36m<i[31m
+2026-03-28T20:08:44.9795658Z                       [33maria-hidden[31m=[32m"true"[31m
+2026-03-28T20:08:44.9796451Z                       [33mclass[31m=[32m"fas fa-chevron-down"[31m
+2026-03-28T20:08:44.9797132Z                     [36m/>[31m
+2026-03-28T20:08:44.9797671Z                   [36m</span>[31m
+2026-03-28T20:08:44.9798210Z                 [36m</label>[31m
+2026-03-28T20:08:44.9798754Z               [36m</div>[31m
+2026-03-28T20:08:44.9799267Z               [36m<button[31m
+2026-03-28T20:08:44.9799968Z                 [33mclass[31m=[32m"btn btn-secondary btn-small"[31m
+2026-03-28T20:08:44.9800608Z               [36m>[31m
+2026-03-28T20:08:44.9801105Z                 [36m<i[31m
+2026-03-28T20:08:44.9801771Z                   [33mclass[31m=[32m"fas fa-sync-alt"[31m
+2026-03-28T20:08:44.9802617Z                 [36m/>[31m
+2026-03-28T20:08:44.9803119Z                 [36m<span>[31m
+2026-03-28T20:08:44.9803646Z                   [0mRefresh[0m
+2026-03-28T20:08:44.9804157Z                 [36m</span>[31m
+2026-03-28T20:08:44.9804677Z               [36m</button>[31m
+2026-03-28T20:08:44.9805156Z             [36m</div>[31m
+2026-03-28T20:08:44.9805589Z           [36m</div>[31m
+2026-03-28T20:08:44.9806034Z           [36m<div[31m
+2026-03-28T20:08:44.9806733Z             [33mclass[31m=[32m"workspace-collection__content"[31m
+2026-03-28T20:08:44.9807375Z           [36m>[31m
+2026-03-28T20:08:44.9807833Z             [36m<section[31m
+2026-03-28T20:08:44.9808652Z               [33mclass[31m=[32m"workspace-collection__section"[31m
+2026-03-28T20:08:44.9809262Z             [36m>[31m
+2026-03-28T20:08:44.9809671Z               [36m<div[31m
+2026-03-28T20:08:44.9810463Z                 [33mclass[31m=[32m"workspace-collection__section-header"[31m
+2026-03-28T20:08:44.9811205Z               [36m>[31m
+2026-03-28T20:08:44.9811674Z                 [36m<h3>[31m
+2026-03-28T20:08:44.9812205Z                   [0mNexus Results[0m
+2026-03-28T20:08:44.9813034Z                 [36m</h3>[31m
+2026-03-28T20:08:44.9813811Z                 [36m<span>[31m
+2026-03-28T20:08:44.9814323Z                   [0m1[0m
+2026-03-28T20:08:44.9814765Z                   [0m [0m
+2026-03-28T20:08:44.9815259Z                   [0mresult(s)[0m
+2026-03-28T20:08:44.9815790Z                 [36m</span>[31m
+2026-03-28T20:08:44.9816290Z               [36m</div>[31m
+2026-03-28T20:08:44.9816739Z               [36m<div[31m
+2026-03-28T20:08:44.9817454Z                 [33mclass[31m=[32m"workspace-collection__list"[31m
+2026-03-28T20:08:44.9818105Z               [36m>[31m
+2026-03-28T20:08:44.9818581Z                 [36m<div[31m
+2026-03-28T20:08:44.9819595Z                   [33mclass[31m=[32m"workspace-collection__row workspace-collection__row--selected"[31m
+2026-03-28T20:08:44.9820649Z                   [33mrole[31m=[32m"button"[31m
+2026-03-28T20:08:44.9821330Z                   [33mtabindex[31m=[32m"0"[31m
+2026-03-28T20:08:44.9821901Z                 [36m>[31m
+2026-03-28T20:08:44.9822656Z                   [36m<div[31m
+2026-03-28T20:08:44.9823362Z                     [33mclass[31m=[32m"mod-card-icon-inline"[31m
+2026-03-28T20:08:44.9823984Z                   [36m>[31m
+2026-03-28T20:08:44.9824506Z                     [36m<img[31m
+2026-03-28T20:08:44.9825166Z                       [33malt[31m=[32m"Pack Rat icon"[31m
+2026-03-28T20:08:44.9825968Z                       [33mclass[31m=[32m"mod-card-icon-image"[31m
+2026-03-28T20:08:44.9826902Z                       [33msrc[31m=[32m"https://example.com/packrat.png"[31m
+2026-03-28T20:08:44.9827637Z                     [36m/>[31m
+2026-03-28T20:08:44.9828174Z                   [36m</div>[31m
+2026-03-28T20:08:44.9828698Z                   [36m<div[31m
+2026-03-28T20:08:44.9829759Z                     [33mclass[31m=[32m"workspace-collection__row-body"[31m
+2026-03-28T20:08:44.9830435Z                   [36m>[31m
+2026-03-28T20:08:44.9830956Z                     [36m<div[31m
+2026-03-28T20:08:44.9831770Z                       [33mclass[31m=[32m"workspace-collection__row-title"[31m
+2026-03-28T20:08:44.9832782Z                     [36m>[31m
+2026-03-28T20:08:44.9833324Z                       [0mPack Rat[0m
+2026-03-28T20:08:44.9833877Z                     [36m</div>[31m
+2026-03-28T20:08:44.9834397Z                     [36m<div[31m
+2026-03-28T20:08:44.9835182Z                       [33mclass[31m=[32m"workspace-collection__row-meta"[31m
+2026-03-28T20:08:44.9835925Z                     [36m>[31m
+2026-03-28T20:08:44.9836447Z                       [36m<span>[31m
+2026-03-28T20:08:44.9837040Z                         [0mExampleAuthor[0m
+2026-03-28T20:08:44.9837630Z                       [36m</span>[31m
+2026-03-28T20:08:44.9838217Z                       [36m<span[31m
+2026-03-28T20:08:44.9839102Z                         [33mclass[31m=[32m"workspace-pill workspace-pill--source"[31m
+2026-03-28T20:08:44.9839902Z                       [36m>[31m
+2026-03-28T20:08:44.9840475Z                         [0mNexus Mods[0m
+2026-03-28T20:08:44.9875632Z                       [36m</span>[31m
+2026-03-28T20:08:44.9876370Z                       [36m<span[31m
+2026-03-28T20:08:44.9877114Z                         [33mclass[31m=[32m"workspace-pill"[31m
+2026-03-28T20:08:44.9877800Z                       [36m>[31m
+2026-03-28T20:08:44.9878357Z                         [0mUpdated [0m
+2026-03-28T20:08:44.9878964Z                         [0mJan 2, 2025[0m
+2026-03-28T20:08:44.9879544Z                       [36m</span>[31m
+2026-03-28T20:08:44.9880101Z                     [36m</div>[31m
+2026-03-28T20:08:44.9880636Z                     [36m<p[31m
+2026-03-28T20:08:44.9881454Z                       [33mclass[31m=[32m"workspace-collection__row-summary"[31m
+2026-03-28T20:08:44.9882554Z                     [36m>[31m
+2026-03-28T20:08:44.9883170Z                       [0mCarry more stuff.[0m
+2026-03-28T20:08:44.9883773Z                     [36m</p>[31m
+2026-03-28T20:08:44.9884306Z                   [36m</div>[31m
+2026-03-28T20:08:44.9884828Z                 [36m</div>[31m
+2026-03-28T20:08:44.9885607Z               [36m</div>[31m
+2026-03-28T20:08:44.9886169Z             [36m</section>[31m
+2026-03-28T20:08:44.9886623Z           [36m</div>[31m
+2026-03-28T20:08:44.9887045Z         [36m</div>[31m
+2026-03-28T20:08:44.9887466Z         [36m<aside[31m
+2026-03-28T20:08:44.9888176Z           [33mclass[31m=[32m"workspace-collection__inspector"[31m
+2026-03-28T20:08:44.9888839Z         [36m>[31m
+2026-03-28T20:08:44.9889232Z           [36m<div[31m
+2026-03-28T20:08:44.9889886Z             [33mclass[31m=[32m"workspace-inspector-card"[31m
+2026-03-28T20:08:44.9890509Z           [36m>[31m
+2026-03-28T20:08:44.9890926Z             [36m<div[31m
+2026-03-28T20:08:44.9891673Z               [33mclass[31m=[32m"workspace-inspector-card__header"[31m
+2026-03-28T20:08:44.9892644Z             [36m>[31m
+2026-03-28T20:08:44.9893074Z               [36m<div[31m
+2026-03-28T20:08:44.9893702Z                 [33mclass[31m=[32m"mod-card-icon-rail"[31m
+2026-03-28T20:08:44.9894303Z               [36m>[31m
+2026-03-28T20:08:44.9894778Z                 [36m<img[31m
+2026-03-28T20:08:44.9895413Z                   [33malt[31m=[32m"Pack Rat icon"[31m
+2026-03-28T20:08:44.9896182Z                   [33mclass[31m=[32m"mod-card-icon-image"[31m
+2026-03-28T20:08:44.9897064Z                   [33msrc[31m=[32m"https://example.com/packrat.png"[31m
+2026-03-28T20:08:44.9897728Z                 [36m/>[31m
+2026-03-28T20:08:44.9898222Z               [36m</div>[31m
+2026-03-28T20:08:44.9898665Z               [36m<div>[31m
+2026-03-28T20:08:44.9899167Z                 [36m<h3>[31m
+2026-03-28T20:08:44.9899668Z                   [0mPack Rat[0m
+2026-03-28T20:08:44.9900505Z                 [36m</h3>[31m
+2026-03-28T20:08:44.9901022Z                 [36m<div[31m
+2026-03-28T20:08:44.9901790Z                   [33mclass[31m=[32m"workspace-inspector-card__subtle"[31m
+2026-03-28T20:08:44.9902773Z                 [36m>[31m
+2026-03-28T20:08:44.9903339Z                   [0mNexus Mods • [0m
+2026-03-28T20:08:44.9903939Z                   [0mExampleAuthor[0m
+2026-03-28T20:08:44.9904496Z                 [36m</div>[31m
+2026-03-28T20:08:44.9904988Z               [36m</div>[31m
+2026-03-28T20:08:44.9905428Z             [36m</div>[31m
+2026-03-28T20:08:44.9905864Z             [36m<p[31m
+2026-03-28T20:08:44.9906584Z               [33mclass[31m=[32m"workspace-inspector-card__summary"[31m
+2026-03-28T20:08:44.9907257Z             [36m>[31m
+2026-03-28T20:08:44.9907746Z               [0mCarry more stuff.[0m
+2026-03-28T20:08:44.9908239Z             [36m</p>[31m
+2026-03-28T20:08:44.9908732Z             [36m<div[31m
+2026-03-28T20:08:44.9909458Z               [33mclass[31m=[32m"workspace-inspector-card__metrics"[31m
+2026-03-28T20:08:44.9910122Z             [36m>[31m
+2026-03-28T20:08:44.9910541Z               [36m<div>[31m
+2026-03-28T20:08:44.9911027Z                 [36m<span>[31m
+2026-03-28T20:08:44.9911532Z                   [0mLatest[0m
+2026-03-28T20:08:44.9912054Z                 [36m</span>[31m
+2026-03-28T20:08:44.9912835Z                 [36m<strong>[31m
+2026-03-28T20:08:44.9913368Z                   [0mv1.0.7r2[0m
+2026-03-28T20:08:44.9914004Z                 [36m</strong>[31m
+2026-03-28T20:08:44.9914529Z               [36m</div>[31m
+2026-03-28T20:08:44.9914993Z               [36m<div>[31m
+2026-03-28T20:08:44.9915460Z                 [36m<span>[31m
+2026-03-28T20:08:44.9915977Z                   [0mEndorsements[0m
+2026-03-28T20:08:44.9916507Z                 [36m</span>[31m
+2026-03-28T20:08:44.9916978Z                 [36m<strong>[31m
+2026-03-28T20:08:44.9917441Z                   [0m42[0m
+2026-03-28T20:08:44.9917934Z                 [36m</strong>[31m
+2026-03-28T20:08:44.9918461Z               [36m</div>[31m
+2026-03-28T20:08:44.9918928Z               [36m<div>[31m
+2026-03-28T20:08:44.9919399Z                 [36m<span>[31m
+2026-03-28T20:08:44.9919911Z                   [0mDownloads[0m
+2026-03-28T20:08:44.9920668Z                 [36m</span>[31m
+2026-03-28T20:08:44.9921213Z                 [36m<strong>[31m
+2026-03-28T20:08:44.9921681Z                   [0m250[0m
+2026-03-28T20:08:44.9922162Z                 [36m</strong>[31m
+2026-03-28T20:08:44.9922970Z               [36m</div>[31m
+2026-03-28T20:08:44.9923408Z               [36m<div>[31m
+2026-03-28T20:08:44.9923873Z                 [36m<span>[31m
+2026-03-28T20:08:44.9924381Z                   [0mUpdated[0m
+2026-03-28T20:08:44.9924885Z                 [36m</span>[31m
+2026-03-28T20:08:44.9925404Z                 [36m<strong>[31m
+2026-03-28T20:08:44.9925946Z                   [0mJan 2, 2025[0m
+2026-03-28T20:08:44.9926492Z                 [36m</strong>[31m
+2026-03-28T20:08:44.9927029Z               [36m</div>[31m
+2026-03-28T20:08:44.9927471Z             [36m</div>[31m
+2026-03-28T20:08:44.9927881Z             [36m<div[31m
+2026-03-28T20:08:44.9928595Z               [33mclass[31m=[32m"workspace-inspector-card__field"[31m
+2026-03-28T20:08:44.9929281Z             [36m>[31m
+2026-03-28T20:08:44.9929755Z               [36m<label>[31m
+2026-03-28T20:08:44.9930238Z                 [0mStatus[0m
+2026-03-28T20:08:44.9930714Z               [36m</label>[31m
+2026-03-28T20:08:44.9931188Z               [36m<div[31m
+2026-03-28T20:08:44.9931943Z                 [33mclass[31m=[32m"workspace-inspector-card__tags"[31m
+2026-03-28T20:08:44.9932979Z               [36m>[31m
+2026-03-28T20:08:44.9933482Z                 [36m<span[31m
+2026-03-28T20:08:44.9934339Z                   [33mclass[31m=[32m"workspace-pill workspace-pill--source"[31m
+2026-03-28T20:08:44.9935100Z                 [36m>[31m
+2026-03-28T20:08:44.9935624Z                   [0mNexus Mods[0m
+2026-03-28T20:08:44.9936434Z                 [36m</span>[31m
+2026-03-28T20:08:44.9936944Z                 [36m<span[31m
+2026-03-28T20:08:44.9937563Z                   [33mclass[31m=[32m"workspace-pill"[31m
+2026-03-28T20:08:44.9938108Z                 [36m>[31m
+2026-03-28T20:08:44.9938598Z                   [0mpublished[0m
+2026-03-28T20:08:44.9939111Z                 [36m</span>[31m
+2026-03-28T20:08:44.9939718Z               [36m</div>[31m
+2026-03-28T20:08:44.9940159Z             [36m</div>[31m
+2026-03-28T20:08:44.9940574Z             [36m<div[31m
+2026-03-28T20:08:44.9941267Z               [33mclass[31m=[32m"workspace-inspector-card__actions"[31m
+2026-03-28T20:08:44.9941921Z             [36m>[31m
+2026-03-28T20:08:44.9942614Z               [36m<button[31m
+2026-03-28T20:08:44.9943221Z                 [33mclass[31m=[32m"btn btn-primary"[31m
+2026-03-28T20:08:44.9943782Z               [36m>[31m
+2026-03-28T20:08:44.9944321Z                 [0mDownload selected version[0m
+2026-03-28T20:08:44.9944908Z               [36m</button>[31m
+2026-03-28T20:08:44.9945357Z               [36m<a[31m
+2026-03-28T20:08:44.9945982Z                 [33mclass[31m=[32m"btn btn-secondary"[31m
+2026-03-28T20:08:44.9946967Z                 [33mhref[31m=[32m"https://www.nexusmods.com/schedule1/mods/1629"[31m
+2026-03-28T20:08:44.9947914Z                 [33mrel[31m=[32m"noopener noreferrer"[31m
+2026-03-28T20:08:44.9948630Z                 [33mtarget[31m=[32m"_blank"[31m
+2026-03-28T20:08:44.9949172Z               [36m>[31m
+2026-03-28T20:08:44.9949695Z                 [0mOpen source page[0m
+2026-03-28T20:08:44.9950229Z               [36m</a>[31m
+2026-03-28T20:08:44.9950676Z             [36m</div>[31m
+2026-03-28T20:08:44.9951158Z             [36m<section[31m
+2026-03-28T20:08:44.9951918Z               [33maria-labelledby[31m=[32m"nexus-inspector-versions"[31m
+2026-03-28T20:08:44.9953185Z               [33mclass[31m=[32m"workspace-inspector-card__subsection"[31m
+2026-03-28T20:08:44.9953909Z             [36m>[31m
+2026-03-28T20:08:44.9954333Z               [36m<div[31m
+2026-03-28T20:08:44.9955117Z                 [33mclass[31m=[32m"workspace-inspector-card__subsection-header"[31m
+2026-03-28T20:08:44.9955815Z               [36m>[31m
+2026-03-28T20:08:44.9956261Z                 [36m<div>[31m
+2026-03-28T20:08:44.9956960Z                   [36m<h4[31m
+2026-03-28T20:08:44.9957681Z                     [33mid[31m=[32m"nexus-inspector-versions"[31m
+2026-03-28T20:08:44.9958258Z                   [36m>[31m
+2026-03-28T20:08:44.9958803Z                     [0mAvailable versions[0m
+2026-03-28T20:08:44.9959378Z                   [36m</h4>[31m
+2026-03-28T20:08:44.9959855Z                   [36m<p>[31m
+2026-03-28T20:08:44.9960627Z                     [0mPick the file you want to add to the library before downloading.[0m
+2026-03-28T20:08:44.9961423Z                   [36m</p>[31m
+2026-03-28T20:08:44.9961939Z                 [36m</div>[31m
+2026-03-28T20:08:44.9962787Z                 [36m<span[31m
+2026-03-28T20:08:44.9963614Z                   [33mclass[31m=[32m"workspace-inspector-card__subsection-count"[31m
+2026-03-28T20:08:44.9964376Z                 [36m>[31m
+2026-03-28T20:08:44.9964830Z                   [0m2[0m
+2026-03-28T20:08:44.9965316Z                   [0m available[0m
+2026-03-28T20:08:44.9965869Z                 [36m</span>[31m
+2026-03-28T20:08:44.9966360Z               [36m</div>[31m
+2026-03-28T20:08:44.9966780Z               [36m<div[31m
+2026-03-28T20:08:44.9967479Z                 [33maria-label[31m=[32m"Nexus available versions"[31m
+2026-03-28T20:08:44.9968322Z                 [33mclass[31m=[32m"workspace-version-list"[31m
+2026-03-28T20:08:44.9969020Z                 [33mrole[31m=[32m"listbox"[31m
+2026-03-28T20:08:44.9969551Z               [36m>[31m
+2026-03-28T20:08:44.9970027Z                 [36m<button[31m
+2026-03-28T20:08:44.9970666Z                   [33maria-selected[31m=[32m"true"[31m
+2026-03-28T20:08:44.9971989Z                   [33mclass[31m=[32m"workspace-version-row workspace-version-row--active"[31m
+2026-03-28T20:08:44.9973234Z                   [33mrole[31m=[32m"option"[31m
+2026-03-28T20:08:44.9973890Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:44.9974425Z                 [36m>[31m
+2026-03-28T20:08:44.9974907Z                   [36m<div[31m
+2026-03-28T20:08:44.9975650Z                     [33mclass[31m=[32m"workspace-version-row__header"[31m
+2026-03-28T20:08:44.9976324Z                   [36m>[31m
+2026-03-28T20:08:44.9976835Z                     [36m<div[31m
+2026-03-28T20:08:44.9977608Z                       [33mclass[31m=[32m"workspace-version-row__title"[31m
+2026-03-28T20:08:44.9978341Z                     [36m>[31m
+2026-03-28T20:08:44.9978885Z                       [0mv1.0.7r2[0m
+2026-03-28T20:08:44.9979488Z                     [36m</div>[31m
+2026-03-28T20:08:44.9980038Z                     [36m<div[31m
+2026-03-28T20:08:44.9980858Z                       [33mclass[31m=[32m"workspace-version-row__badges"[31m
+2026-03-28T20:08:44.9981627Z                     [36m>[31m
+2026-03-28T20:08:44.9982164Z                       [36m<span[31m
+2026-03-28T20:08:44.9983166Z                         [33mclass[31m=[32m"workspace-pill"[31m
+2026-03-28T20:08:44.9983873Z                       [36m>[31m
+2026-03-28T20:08:44.9984417Z                         [0mMono[0m
+2026-03-28T20:08:44.9985001Z                       [36m</span>[31m
+2026-03-28T20:08:44.9985585Z                     [36m</div>[31m
+2026-03-28T20:08:44.9986150Z                   [36m</div>[31m
+2026-03-28T20:08:44.9986706Z                   [36m<div[31m
+2026-03-28T20:08:44.9987483Z                     [33mclass[31m=[32m"workspace-version-row__meta"[31m
+2026-03-28T20:08:44.9988192Z                   [36m>[31m
+2026-03-28T20:08:44.9988735Z                     [36m<span>[31m
+2026-03-28T20:08:44.9989320Z                       [0mUploaded [0m
+2026-03-28T20:08:44.9989947Z                       [0mJan 1, 1970[0m
+2026-03-28T20:08:44.9990547Z                     [36m</span>[31m
+2026-03-28T20:08:44.9991129Z                     [36m<span>[31m
+2026-03-28T20:08:44.9991802Z                       [0mPackRat-mono-1.0.7r2.zip[0m
+2026-03-28T20:08:44.9992714Z                     [36m</span>[31m
+2026-03-28T20:08:44.9993535Z                   [36m</div>[31m
+2026-03-28T20:08:44.9994137Z                   [36m<p[31m
+2026-03-28T20:08:44.9994929Z                     [33mclass[31m=[32m"workspace-version-row__summary"[31m
+2026-03-28T20:08:44.9995661Z                   [36m>[31m
+2026-03-28T20:08:44.9996350Z                     [0mPack Rat Mono 1.0.7r2[0m
+2026-03-28T20:08:44.9996963Z                   [36m</p>[31m
+2026-03-28T20:08:44.9997503Z                 [36m</button>[31m
+2026-03-28T20:08:44.9998064Z                 [36m<button[31m
+2026-03-28T20:08:44.9998708Z                   [33maria-selected[31m=[32m"false"[31m
+2026-03-28T20:08:44.9999547Z                   [33mclass[31m=[32m"workspace-version-row"[31m
+2026-03-28T20:08:45.0000423Z                   [33mrole[31m=[32m"option"[31m
+2026-03-28T20:08:45.0001135Z                   [33mtype[31m=[32m"button"[31m
+2026-03-28T20:08:45.0001735Z                 [36m>[31m
+2026-03-28T20:08:45.0002489Z                   [36m<div[31m
+2026-03-28T20:08:45.0003324Z                     [33mclass[31m=[32m"workspace-version-row__header"[31m
+2026-03-28T20:08:45.0004059Z                   [36m>[31m
+2026-03-28T20:08:45.0004590Z                     [36m<div[31m
+2026-03-28T20:08:45.0005389Z                       [33mclass[31m=[32m"workspace-version-row__title"[31m
+2026-03-28T20:08:45.0006156Z                     [36m>[31m
+2026-03-28T20:08:45.0006697Z                       [0mv1.0.0[0m
+2026-03-28T20:08:45.0007277Z                     [36m</div>[31m
+2026-03-28T20:08:45.0007839Z                     [36m<div[31m
+2026-03-28T20:08:45.0008714Z                       [33mclass[31m=[32m"workspace-version-row__badges"[31m
+2026-03-28T20:08:45.0009762Z                     [36m>[31m
+2026-03-28T20:08:45.0010360Z                       [36m<span[31m
+2026-03-28T20:08:45.0011068Z                         [33mclass[31m=[32m"workspace-pill"[31m
+2026-03-28T20:08:45.0011673Z                       [36m>[31m
+2026-03-28T20:08:45.0012171Z                         [0mMono[0m
+2026-03-28T20:08:45.0012980Z                       [36m</span>[31m
+2026-03-28T20:08:45.0013519Z                       [36m<span[31m
+2026-03-28T20:08:45.0014368Z                         [33mclass[31m=[32m"workspace-pill workspace-pill--success"[31m
+2026-03-28T20:08:45.0015155Z                       [36m>[31m
+2026-03-28T20:08:45.0015664Z                         [0mPrimary[0m
+2026-03-28T20:08:45.0016201Z                       [36m</span>[31m
+2026-03-28T20:08:45.0016721Z                     [36m</div>[31m
+2026-03-28T20:08:45.0017234Z                   [36m</div>[31m
+2026-03-28T20:08:45.0017739Z                   [36m<div[31m
+2026-03-28T20:08:45.0018440Z                     [33mclass[31m=[32m"workspace-version-row__meta"[31m
+2026-03-28T20:08:45.0019026Z                   [36m>[31m
+2026-03-28T20:08:45.0019519Z                     [36m<span>[31m
+2026-03-28T20:08:45.0020097Z                       [0mUploaded [0m
+2026-03-28T20:08:45.0020665Z                       [0mJan 1, 1970[0m
+2026-03-28T20:08:45.0021213Z                     [36m</span>[31m
+2026-03-28T20:08:45.0021732Z                     [36m<span>[31m
+2026-03-28T20:08:45.0022644Z                       [0mPackRat-mono-1.0.0.zip[0m
+2026-03-28T20:08:45.0023273Z                     [36m</span>[31m
+2026-03-28T20:08:45.0023788Z                   [36m</div>[31m
+2026-03-28T20:08:45.0024293Z                   [36m<p[31m
+2026-03-28T20:08:45.0025012Z                     [33mclass[31m=[32m"workspace-version-row__summary"[31m
+2026-03-28T20:08:45.0025690Z                   [36m>[31m
+2026-03-28T20:08:45.0026242Z                     [0mPack Rat Mono 1.0.0[0m
+2026-03-28T20:08:45.0026836Z                   [36m</p>[31m
+2026-03-28T20:08:45.0027369Z                 [36m</button>[31m
+2026-03-28T20:08:45.0027888Z               [36m</div>[31m
+2026-03-28T20:08:45.0028352Z             [36m</section>[31m
+2026-03-28T20:08:45.0028810Z           [36m</div>[31m
+2026-03-28T20:08:45.0029245Z         [36m</aside>[31m
+2026-03-28T20:08:45.0029942Z       [36m</div>[31m
+2026-03-28T20:08:45.0030472Z     [36m</div>[31m
+2026-03-28T20:08:45.0030843Z   [36m</div>[31m
+2026-03-28T20:08:45.0031238Z [36m</body>[31m[39m
+2026-03-28T20:08:45.0032785Z    [32m✓[39m ModLibraryOverlay[2m > [22mdownloads the selected Thunderstore version from the inspector[32m 140[2mms[22m[39m
+2026-03-28T20:08:45.0034619Z    [32m✓[39m ModLibraryOverlay[2m > [22mdownloads the selected Nexus file from the inspector[32m 114[2mms[22m[39m
+2026-03-28T20:08:45.0036621Z    [32m✓[39m ModLibraryOverlay[2m > [22mfalls back to the Nexus mod updated date when file rows do not expose upload timestamps[32m 38[2mms[22m[39m
+2026-03-28T20:08:45.0038846Z    [32m✓[39m ModLibraryOverlay[2m > [22mde-prioritizes FOMOD installers in the Nexus inspector when direct runtime files exist[32m 84[2mms[22m[39m
+2026-03-28T20:08:45.0040994Z    [32m✓[39m ModLibraryOverlay[2m > [22mdownloads a selected Nexus FOMOD installer without forcing a runtime[32m 93[2mms[22m[39m
+2026-03-28T20:08:45.0043220Z    [32m✓[39m ModLibraryOverlay[2m > [22mshows version, runtime, and update state in downloaded mod rows[32m 38[2mms[22m[39m
+2026-03-28T20:08:45.0045084Z    [32m✓[39m ModLibraryOverlay[2m > [22mrenders MLVScan disposition badges for downloaded mods[32m 29[2mms[22m[39m
+2026-03-28T20:08:45.0046875Z    [32m✓[39m ModLibraryOverlay[2m > [22mopens the security report overlay for downloaded mods[32m 224[2mms[22m[39m
+2026-03-28T20:08:45.0048823Z    [32m✓[39m ModLibraryOverlay[2m > [22mforwards downloaded security reports to the workspace page when requested[32m 175[2mms[22m[39m
+2026-03-28T20:08:45.0051306Z    [33m[2m✓[22m[39m ModLibraryOverlay[2m > [22mloads security reports for sibling runtime downloads in the same mod group [33m 325[2mms[22m[39m
+2026-03-28T20:08:45.0053661Z    [32m✓[39m ModLibraryOverlay[2m > [22mshows downloaded mod details in the preselected inspector state[32m 102[2mms[22m[39m
+2026-03-28T20:08:45.0055656Z    [32m✓[39m ModLibraryOverlay[2m > [22mdoes not render unsafe source links for downloaded inspector details[32m 89[2mms[22m[39m
+2026-03-28T20:08:45.0057747Z    [32m✓[39m ModLibraryOverlay[2m > [22mshows an error when a Thunderstore library update cannot resolve a package[32m 186[2mms[22m[39m
+2026-03-28T20:08:45.0059851Z    [32m✓[39m ModLibraryOverlay[2m > [22mdisables update actions when a downloaded mod has no newer remote version[32m 111[2mms[22m[39m
+2026-03-28T20:08:45.0062043Z    [32m✓[39m ModLibraryOverlay[2m > [22moffers both Mono and IL2CPP environments for same-version Thunderstore runtime siblings[32m 88[2mms[22m[39m
+2026-03-28T20:08:45.0074383Z    [32m✓[39m ModLibraryOverlay[2m > [22mtreats alternate beta environments as Mono install targets in the library dialog[32m 94[2mms[22m[39m
+2026-03-28T20:08:45.0076683Z    [32m✓[39m ModLibraryOverlay[2m > [22mshows already-installed compatible environments in a read-only install dialog[32m 104[2mms[22m[39m
+2026-03-28T20:08:45.0078623Z    [32m✓[39m ModLibraryOverlay[2m > [22mswitches versions from the dropdown menu[32m 52[2mms[22m[39m
+2026-03-28T20:08:45.0606802Z  [32m✓[39m src/components/App.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[33m 585[2mms[22m[39m
+2026-03-28T20:08:45.1645102Z [90mstdout[2m | src/components/EnvironmentList.test.tsx[2m > [22m[2mEnvironmentList[2m > [22m[2mcleans up all event listeners on unmount
+2026-03-28T20:08:45.1646832Z [22m[39m[EnvironmentList] Running initial update check on app launch for 1 environment(s)
+2026-03-28T20:08:45.1648257Z [EnvironmentList] Skipping automatic update check - last check was 0 minutes ago. Next check in 60 minute(s)
+2026-03-28T20:08:45.1649496Z [EnvironmentList] Automatic update checks are disabled in settings
+2026-03-28T20:08:45.1649974Z 
+2026-03-28T20:08:45.2359593Z [90mstdout[2m | src/components/EnvironmentList.test.tsx[2m > [22m[2mEnvironmentList[2m > [22m[2mroutes start download failures through the shared message dialog
+2026-03-28T20:08:45.2363295Z [22m[39m[EnvironmentList] No completed environments to check for updates
+2026-03-28T20:08:45.2365643Z [EnvironmentList] Automatic update checks are disabled in settings
+2026-03-28T20:08:45.2367615Z 
+2026-03-28T20:08:45.2916614Z [90mstdout[2m | src/components/EnvironmentList.test.tsx[2m > [22m[2mEnvironmentList[2m > [22m[2mrenders compact workspace rows as an active tab stack and preserves environment selection behavior
+2026-03-28T20:08:45.2931138Z [22m[39m[EnvironmentList] Running initial update check on app launch for 2 environment(s)
+2026-03-28T20:08:45.2932878Z [EnvironmentList] Skipping automatic update check - last check was 0 minutes ago. Next check in 60 minute(s)
+2026-03-28T20:08:45.2934148Z [EnvironmentList] Automatic update checks are disabled in settings
+2026-03-28T20:08:45.2934663Z 
+2026-03-28T20:08:45.2954748Z  [32m✓[39m src/components/EnvironmentList.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[33m 963[2mms[22m[39m
+2026-03-28T20:08:45.2959007Z    [33m[2m✓[22m[39m EnvironmentList[2m > [22mrefreshes mod counts when mods_changed event fires for a completed environment [33m 577[2mms[22m[39m
+2026-03-28T20:08:45.8245721Z  [32m✓[39m src/services/api.test.ts [2m([22m[2m18 tests[22m[2m)[22m[32m 12[2mms[22m[39m
+2026-03-28T20:08:46.1924848Z [90mstdout[2m | src/stores/environmentStore.test.tsx[2m > [22m[2mEnvironmentStore[2m > [22m[2mcheckAllUpdates updates environments in place
+2026-03-28T20:08:46.1927963Z [22m[39mEnvironmentStore: checkAllUpdates called
+2026-03-28T20:08:46.1929888Z 
+2026-03-28T20:08:46.1935608Z [90mstdout[2m | src/stores/environmentStore.test.tsx[2m > [22m[2mEnvironmentStore[2m > [22m[2mcheckAllUpdates updates environments in place
+2026-03-28T20:08:46.1940932Z [22m[39mEnvironmentStore: API call completed, got 1 result(s) {
+2026-03-28T20:08:46.1941647Z   results: [
+2026-03-28T20:08:46.1941951Z     {
+2026-03-28T20:08:46.1942852Z       environmentId: [32m'env-1'[39m,
+2026-03-28T20:08:46.1943508Z       updateAvailable: [33mtrue[39m,
+2026-03-28T20:08:46.1944134Z       remoteManifestId: [32m'456'[39m,
+2026-03-28T20:08:46.1944695Z       branch: [32m'main'[39m,
+2026-03-28T20:08:46.1945215Z       appId: [32m'3164500'[39m,
+2026-03-28T20:08:46.1945761Z       checkedAt: [32m'now'[39m
+2026-03-28T20:08:46.1946158Z     }
+2026-03-28T20:08:46.1946429Z   ]
+2026-03-28T20:08:46.1946697Z }
+2026-03-28T20:08:46.1947173Z EnvironmentStore: Environments updated in place
+2026-03-28T20:08:46.1947579Z 
+2026-03-28T20:08:46.2133633Z  [32m✓[39m src/stores/environmentStore.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[32m 110[2mms[22m[39m
+2026-03-28T20:08:47.0150747Z  [32m✓[39m src/components/ConfigurationOverlay.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[33m 623[2mms[22m[39m
+2026-03-28T20:08:47.0153110Z    [33m[2m✓[22m[39m ConfigurationOverlay[2m > [22mrenders discovered config files and falls back to raw mode for parse-limited files [33m 460[2mms[22m[39m
+2026-03-28T20:08:47.4185709Z  [32m✓[39m src/stores/settingsStore.test.tsx [2m([22m[2m6 tests[22m[2m)[22m[32m 143[2mms[22m[39m
+2026-03-28T20:08:47.5977343Z  [32m✓[39m src/components/Settings.test.tsx [2m([22m[2m13 tests[22m[2m)[22m[33m 682[2mms[22m[39m
+2026-03-28T20:08:48.4981659Z  [32m✓[39m src/services/events.test.ts [2m([22m[2m17 tests[22m[2m)[22m[32m 16[2mms[22m[39m
+2026-03-28T20:08:48.5084829Z  [32m✓[39m src/stores/downloadStatusStore.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[32m 69[2mms[22m[39m
+2026-03-28T20:08:48.7324541Z  [32m✓[39m src/components/EnvironmentCreationWizard.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[33m 514[2mms[22m[39m
+2026-03-28T20:08:48.7348535Z    [33m[2m✓[22m[39m EnvironmentCreationWizard[2m > [22muses the selected folder as the exact install target instead of appending the branch name [33m 324[2mms[22m[39m
+2026-03-28T20:08:49.8409375Z  [32m✓[39m src/components/DownloadsPanel.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[32m 93[2mms[22m[39m
+2026-03-28T20:08:49.8427150Z  [32m✓[39m src/components/Footer.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[32m 167[2mms[22m[39m
+2026-03-28T20:08:49.9517063Z  [32m✓[39m src/components/PluginsOverlay.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[33m 388[2mms[22m[39m
+2026-03-28T20:08:51.0965186Z  [32m✓[39m src/components/AuthenticationModal.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[32m 185[2mms[22m[39m
+2026-03-28T20:08:51.1013078Z  [32m✓[39m src/components/UserLibsOverlay.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[32m 269[2mms[22m[39m
+2026-03-28T20:08:51.1961573Z  [32m✓[39m src/components/ConfirmOverlay.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[32m 161[2mms[22m[39m
+2026-03-28T20:08:52.2704132Z  [32m✓[39m src/components/MessageOverlay.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[32m 143[2mms[22m[39m
+2026-03-28T20:08:52.3253715Z  [32m✓[39m src/components/InstallTargetsDialog.test.tsx [2m([22m[2m1 test[22m[2m)[22m[32m 144[2mms[22m[39m
+2026-03-28T20:08:52.3403687Z  [32m✓[39m src/components/WelcomeOverlay.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[32m 204[2mms[22m[39m
+2026-03-28T20:08:53.2750726Z  [32m✓[39m src/services/modLibrarySummary.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+2026-03-28T20:08:53.4985548Z  [32m✓[39m src/components/SteamAccountOverlay.test.tsx [2m([22m[2m1 test[22m[2m)[22m[32m 181[2mms[22m[39m
+2026-03-28T20:08:53.5869484Z  [32m✓[39m src/components/HelpOverlay.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[32m 223[2mms[22m[39m
+2026-03-28T20:08:54.4066727Z  [32m✓[39m src/components/SecurityScanReportPage.test.tsx [2m([22m[2m1 test[22m[2m)[22m[32m 177[2mms[22m[39m
+2026-03-28T20:08:54.5314344Z  [32m✓[39m src/services/api.command-contract.test.js [2m([22m[2m1 test[22m[2m)[22m[32m 5[2mms[22m[39m
+2026-03-28T20:08:54.6668800Z  [32m✓[39m src/components/AppUpdateToast.test.tsx [2m([22m[2m1 test[22m[2m)[22m[32m 147[2mms[22m[39m
+2026-03-28T20:08:54.6872910Z 
+2026-03-28T20:08:54.6874901Z [31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 2 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+2026-03-28T20:08:54.6875393Z 
+2026-03-28T20:08:54.6876971Z [41m[1m FAIL [22m[49m src/components/ModLibraryOverlay.test.tsx[2m > [22mModLibraryOverlay[2m > [22mshows thunderstore search results without auto-selecting the first result
+2026-03-28T20:08:54.6897715Z [31m[1mTestingLibraryElementError[22m[39m: Unable to find an element with the text: Updated Jan 1, 2025. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+2026-03-28T20:08:54.6899541Z 
+2026-03-28T20:08:54.6899851Z Ignored nodes: comments, script, style
+2026-03-28T20:08:54.6900365Z [36m<body>[39m
+2026-03-28T20:08:54.6900714Z   [36m<div>[39m
+2026-03-28T20:08:54.6901050Z     [36m<div[39m
+2026-03-28T20:08:54.6902013Z       [33mclass[39m=[32m"mods-overlay mods-overlay--library workspace-collection-shell"[39m
+2026-03-28T20:08:54.6903092Z     [36m>[39m
+2026-03-28T20:08:54.6903474Z       [36m<div[39m
+2026-03-28T20:08:54.6903986Z         [33mclass[39m=[32m"modal-header"[39m
+2026-03-28T20:08:54.6904462Z       [36m>[39m
+2026-03-28T20:08:54.6904817Z         [36m<h2>[39m
+2026-03-28T20:08:54.6905206Z           [0mMod Library[0m
+2026-03-28T20:08:54.6905613Z         [36m</h2>[39m
+2026-03-28T20:08:54.6905994Z       [36m</div>[39m
+2026-03-28T20:08:54.6906353Z       [36m<div[39m
+2026-03-28T20:08:54.6906940Z         [33mclass[39m=[32m"workspace-collection"[39m
+2026-03-28T20:08:54.6907457Z       [36m>[39m
+2026-03-28T20:08:54.6907786Z         [36m<div[39m
+2026-03-28T20:08:54.6908374Z           [33mclass[39m=[32m"workspace-collection__main"[39m
+2026-03-28T20:08:54.6908937Z         [36m>[39m
+2026-03-28T20:08:54.6909287Z           [36m<div[39m
+2026-03-28T20:08:54.6909921Z             [33mclass[39m=[32m"workspace-collection__header"[39m
+2026-03-28T20:08:54.6910484Z           [36m>[39m
+2026-03-28T20:08:54.6911113Z             [36m<div[39m
+2026-03-28T20:08:54.6911755Z               [33mclass[39m=[32m"workspace-collection__nav"[39m
+2026-03-28T20:08:54.6912594Z             [36m>[39m
+2026-03-28T20:08:54.6912991Z               [36m<div[39m
+2026-03-28T20:08:54.6914022Z                 [33mclass[39m=[32m"workspace-collection__rail-group workspace-collection__rail-group--inline"[39m
+2026-03-28T20:08:54.6914937Z               [36m>[39m
+2026-03-28T20:08:54.6915380Z                 [36m<button[39m
+2026-03-28T20:08:54.6916455Z                   [33mclass[39m=[32m"workspace-collection__rail-button workspace-collection__rail-button--active"[39m
+2026-03-28T20:08:54.6917483Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.6917967Z                 [36m>[39m
+2026-03-28T20:08:54.6918384Z                   [36m<i[39m
+2026-03-28T20:08:54.6918960Z                     [33mclass[39m=[32m"fas fa-compass"[39m
+2026-03-28T20:08:54.6919515Z                   [36m/>[39m
+2026-03-28T20:08:54.6919962Z                   [36m<span>[39m
+2026-03-28T20:08:54.6920498Z                     [0mDiscover[0m
+2026-03-28T20:08:54.6920991Z                   [36m</span>[39m
+2026-03-28T20:08:54.6921516Z                 [36m</button>[39m
+2026-03-28T20:08:54.6922041Z                 [36m<button[39m
+2026-03-28T20:08:54.6923054Z                   [33mclass[39m=[32m"workspace-collection__rail-button "[39m
+2026-03-28T20:08:54.6923820Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.6924345Z                 [36m>[39m
+2026-03-28T20:08:54.6924783Z                   [36m<i[39m
+2026-03-28T20:08:54.6925387Z                     [33mclass[39m=[32m"fas fa-book-open"[39m
+2026-03-28T20:08:54.6926212Z                   [36m/>[39m
+2026-03-28T20:08:54.6926694Z                   [36m<span>[39m
+2026-03-28T20:08:54.6927185Z                     [0mLibrary[0m
+2026-03-28T20:08:54.6927667Z                   [36m</span>[39m
+2026-03-28T20:08:54.6928157Z                 [36m</button>[39m
+2026-03-28T20:08:54.6928652Z                 [36m<button[39m
+2026-03-28T20:08:54.6929388Z                   [33mclass[39m=[32m"workspace-collection__rail-button "[39m
+2026-03-28T20:08:54.6930151Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.6930646Z                 [36m>[39m
+2026-03-28T20:08:54.6931076Z                   [36m<i[39m
+2026-03-28T20:08:54.6931666Z                     [33mclass[39m=[32m"fas fa-arrow-up"[39m
+2026-03-28T20:08:54.6932487Z                   [36m/>[39m
+2026-03-28T20:08:54.6932982Z                   [36m<span>[39m
+2026-03-28T20:08:54.6933483Z                     [0mUpdates[0m
+2026-03-28T20:08:54.6933975Z                   [36m</span>[39m
+2026-03-28T20:08:54.6934460Z                 [36m</button>[39m
+2026-03-28T20:08:54.6934938Z               [36m</div>[39m
+2026-03-28T20:08:54.6935343Z               [36m<div[39m
+2026-03-28T20:08:54.6936018Z                 [33mclass[39m=[32m"workspace-collection__summary"[39m
+2026-03-28T20:08:54.6936614Z               [36m>[39m
+2026-03-28T20:08:54.6937041Z                 [36m<div[39m
+2026-03-28T20:08:54.6937773Z                   [33mclass[39m=[32m"workspace-collection__summary-chip"[39m
+2026-03-28T20:08:54.6938419Z                 [36m>[39m
+2026-03-28T20:08:54.6938876Z                   [36m<span>[39m
+2026-03-28T20:08:54.6939378Z                     [0mDownloaded[0m
+2026-03-28T20:08:54.6939887Z                   [36m</span>[39m
+2026-03-28T20:08:54.6940379Z                   [36m<strong>[39m
+2026-03-28T20:08:54.6940823Z                     [0m0[0m
+2026-03-28T20:08:54.6941307Z                   [36m</strong>[39m
+2026-03-28T20:08:54.6941811Z                 [36m</div>[39m
+2026-03-28T20:08:54.6942479Z                 [36m<div[39m
+2026-03-28T20:08:54.6943240Z                   [33mclass[39m=[32m"workspace-collection__summary-chip"[39m
+2026-03-28T20:08:54.6943885Z                 [36m>[39m
+2026-03-28T20:08:54.6944325Z                   [36m<span>[39m
+2026-03-28T20:08:54.6944989Z                     [0mUpdates[0m
+2026-03-28T20:08:54.6945491Z                   [36m</span>[39m
+2026-03-28T20:08:54.6945988Z                   [36m<strong>[39m
+2026-03-28T20:08:54.6946432Z                     [0m0[0m
+2026-03-28T20:08:54.6946896Z                   [36m</strong>[39m
+2026-03-28T20:08:54.6947387Z                 [36m</div>[39m
+2026-03-28T20:08:54.6947844Z                 [36m<div[39m
+2026-03-28T20:08:54.6948552Z                   [33mclass[39m=[32m"workspace-collection__summary-chip"[39m
+2026-03-28T20:08:54.6949179Z                 [36m>[39m
+2026-03-28T20:08:54.6949620Z                   [36m<span>[39m
+2026-03-28T20:08:54.6950123Z                     [0mInstalled[0m
+2026-03-28T20:08:54.6950622Z                   [36m</span>[39m
+2026-03-28T20:08:54.6951106Z                   [36m<strong>[39m
+2026-03-28T20:08:54.6951548Z                     [0m0[0m
+2026-03-28T20:08:54.6952022Z                   [36m</strong>[39m
+2026-03-28T20:08:54.6952744Z                 [36m</div>[39m
+2026-03-28T20:08:54.6953239Z               [36m</div>[39m
+2026-03-28T20:08:54.6953654Z             [36m</div>[39m
+2026-03-28T20:08:54.6954057Z             [36m<div[39m
+2026-03-28T20:08:54.6954720Z               [33mclass[39m=[32m"workspace-collection__toolbar"[39m
+2026-03-28T20:08:54.6955304Z             [36m>[39m
+2026-03-28T20:08:54.6955686Z               [36m<div[39m
+2026-03-28T20:08:54.6956405Z                 [33mclass[39m=[32m"workspace-collection__toolbar-group"[39m
+2026-03-28T20:08:54.6957035Z               [36m>[39m
+2026-03-28T20:08:54.6957484Z                 [36m<button[39m
+2026-03-28T20:08:54.6958146Z                   [33mclass[39m=[32m"btn btn-small btn-primary"[39m
+2026-03-28T20:08:54.6959055Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.6959635Z                 [36m>[39m
+2026-03-28T20:08:54.6960171Z                   [0mThunderstore[0m
+2026-03-28T20:08:54.6960685Z                 [36m</button>[39m
+2026-03-28T20:08:54.6961187Z                 [36m<button[39m
+2026-03-28T20:08:54.6961853Z                   [33mclass[39m=[32m"btn btn-small btn-secondary"[39m
+2026-03-28T20:08:54.6968854Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.6969395Z                 [36m>[39m
+2026-03-28T20:08:54.6969852Z                   [0mNexus Mods[0m
+2026-03-28T20:08:54.6970375Z                 [36m</button>[39m
+2026-03-28T20:08:54.6970877Z               [36m</div>[39m
+2026-03-28T20:08:54.6971299Z               [36m<div[39m
+2026-03-28T20:08:54.6972038Z                 [33mclass[39m=[32m"workspace-collection__toolbar-search"[39m
+2026-03-28T20:08:54.6972925Z               [36m>[39m
+2026-03-28T20:08:54.6973374Z                 [36m<input[39m
+2026-03-28T20:08:54.6974170Z                   [33mplaceholder[39m=[32m"Search or browse Thunderstore mods..."[39m
+2026-03-28T20:08:54.6975021Z                   [33mtype[39m=[32m"text"[39m
+2026-03-28T20:08:54.6975654Z                   [33mvalue[39m=[32m"map"[39m
+2026-03-28T20:08:54.6976140Z                 [36m/>[39m
+2026-03-28T20:08:54.6976585Z                 [36m<button[39m
+2026-03-28T20:08:54.6977222Z                   [33mclass[39m=[32m"btn btn-primary btn-small"[39m
+2026-03-28T20:08:54.6977876Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.6978337Z                 [36m>[39m
+2026-03-28T20:08:54.6978763Z                   [0mSearch[0m
+2026-03-28T20:08:54.6979210Z                 [36m</button>[39m
+2026-03-28T20:08:54.6979672Z               [36m</div>[39m
+2026-03-28T20:08:54.6980062Z               [36m<div[39m
+2026-03-28T20:08:54.6980750Z                 [33mclass[39m=[32m"workspace-collection__toolbar-group"[39m
+2026-03-28T20:08:54.6981375Z               [36m>[39m
+2026-03-28T20:08:54.6981788Z                 [36m<label[39m
+2026-03-28T20:08:54.6982768Z                   [33mclass[39m=[32m"workspace-collection__toolbar-select"[39m
+2026-03-28T20:08:54.6983487Z                 [36m>[39m
+2026-03-28T20:08:54.6984166Z                   [36m<span[39m
+2026-03-28T20:08:54.6985014Z                     [33mclass[39m=[32m"workspace-collection__toolbar-select-wrap"[39m
+2026-03-28T20:08:54.6985719Z                   [36m>[39m
+2026-03-28T20:08:54.6986194Z                     [36m<select[39m
+2026-03-28T20:08:54.6986912Z                       [33maria-label[39m=[32m"Sort discover results"[39m
+2026-03-28T20:08:54.6987545Z                     [36m>[39m
+2026-03-28T20:08:54.6988040Z                       [36m<option[39m
+2026-03-28T20:08:54.6988666Z                         [33mvalue[39m=[32m"relevance"[39m
+2026-03-28T20:08:54.6989226Z                       [36m>[39m
+2026-03-28T20:08:54.6989744Z                         [0mRelevance[0m
+2026-03-28T20:08:54.6990286Z                       [36m</option>[39m
+2026-03-28T20:08:54.6990810Z                       [36m<option[39m
+2026-03-28T20:08:54.6991419Z                         [33mvalue[39m=[32m"updated"[39m
+2026-03-28T20:08:54.6992004Z                       [36m>[39m
+2026-03-28T20:08:54.6992779Z                         [0mLast updated[0m
+2026-03-28T20:08:54.6993343Z                       [36m</option>[39m
+2026-03-28T20:08:54.6993871Z                       [36m<option[39m
+2026-03-28T20:08:54.6994503Z                         [33mvalue[39m=[32m"popularity"[39m
+2026-03-28T20:08:54.6995075Z                       [36m>[39m
+2026-03-28T20:08:54.6995588Z                         [0mPopularity[0m
+2026-03-28T20:08:54.6996132Z                       [36m</option>[39m
+2026-03-28T20:08:54.6996661Z                       [36m<option[39m
+2026-03-28T20:08:54.6997252Z                         [33mvalue[39m=[32m"newest"[39m
+2026-03-28T20:08:54.6997998Z                       [36m>[39m
+2026-03-28T20:08:54.6998482Z                         [0mNewest[0m
+2026-03-28T20:08:54.6999009Z                       [36m</option>[39m
+2026-03-28T20:08:54.6999533Z                     [36m</select>[39m
+2026-03-28T20:08:54.7000020Z                     [36m<i[39m
+2026-03-28T20:08:54.7000645Z                       [33maria-hidden[39m=[32m"true"[39m
+2026-03-28T20:08:54.7001391Z                       [33mclass[39m=[32m"fas fa-chevron-down"[39m
+2026-03-28T20:08:54.7001993Z                     [36m/>[39m
+2026-03-28T20:08:54.7002690Z                   [36m</span>[39m
+2026-03-28T20:08:54.7003186Z                 [36m</label>[39m
+2026-03-28T20:08:54.7003665Z               [36m</div>[39m
+2026-03-28T20:08:54.7004123Z               [36m<button[39m
+2026-03-28T20:08:54.7004783Z                 [33mclass[39m=[32m"btn btn-secondary btn-small"[39m
+2026-03-28T20:08:54.7005372Z               [36m>[39m
+2026-03-28T20:08:54.7005771Z                 [36m<i[39m
+2026-03-28T20:08:54.7006345Z                   [33mclass[39m=[32m"fas fa-sync-alt"[39m
+2026-03-28T20:08:54.7006869Z                 [36m/>[39m
+2026-03-28T20:08:54.7007310Z                 [36m<span>[39m
+2026-03-28T20:08:54.7007789Z                   [0mRefresh[0m
+2026-03-28T20:08:54.7008279Z                 [36m</span>[39m
+2026-03-28T20:08:54.7008759Z               [36m</button>[39m
+2026-03-28T20:08:54.7009200Z             [36m</div>[39m
+2026-03-28T20:08:54.7009601Z           [36m</div>[39m
+2026-03-28T20:08:54.7009986Z           [36m<div[39m
+2026-03-28T20:08:54.7010624Z             [33mclass[39m=[32m"workspace-collection__content"[39m
+2026-03-28T20:08:54.7011195Z           [36m>[39m
+2026-03-28T20:08:54.7011611Z             [36m<section[39m
+2026-03-28T20:08:54.7012473Z               [33mclass[39m=[32m"workspace-collection__section"[39m
+2026-03-28T20:08:54.7013065Z             [36m>[39m
+2026-03-28T20:08:54.7013450Z               [36m<div[39m
+2026-03-28T20:08:54.7014193Z                 [33mclass[39m=[32m"workspace-collection__section-header"[39m
+2026-03-28T20:08:54.7014830Z               [36m>[39m
+2026-03-28T20:08:54.7015252Z                 [36m<h3>[39m
+2026-03-28T20:08:54.7015754Z                   [0mDiscover Results[0m
+2026-03-28T20:08:54.7016259Z                 [36m</h3>[39m
+2026-03-28T20:08:54.7016902Z                 [36m<span>[39m
+2026-03-28T20:08:54.7017364Z                   [0m1[0m
+2026-03-28T20:08:54.7017767Z                   [0m [0m
+2026-03-28T20:08:54.7018224Z                   [0mresult(s)[0m
+2026-03-28T20:08:54.7018707Z                 [36m</span>[39m
+2026-03-28T20:08:54.7019173Z               [36m</div>[39m
+2026-03-28T20:08:54.7019573Z               [36m<div[39m
+2026-03-28T20:08:54.7020260Z                 [33mclass[39m=[32m"workspace-collection__list"[39m
+2026-03-28T20:08:54.7020841Z               [36m>[39m
+2026-03-28T20:08:54.7021258Z                 [36m<div[39m
+2026-03-28T20:08:54.7021921Z                   [33mclass[39m=[32m"workspace-collection__row "[39m
+2026-03-28T20:08:54.7022857Z                   [33mrole[39m=[32m"button"[39m
+2026-03-28T20:08:54.7023459Z                   [33mtabindex[39m=[32m"0"[39m
+2026-03-28T20:08:54.7035076Z                 [36m>[39m
+2026-03-28T20:08:54.7035675Z                   [36m<div[39m
+2026-03-28T20:08:54.7036392Z                     [33mclass[39m=[32m"mod-card-icon-inline"[39m
+2026-03-28T20:08:54.7037031Z                   [36m>[39m
+2026-03-28T20:08:54.7037604Z                     [36m<img[39m
+2026-03-28T20:08:54.7038243Z                       [33malt[39m=[32m"MapTools icon"[39m
+2026-03-28T20:08:54.7039019Z                       [33mclass[39m=[32m"mod-card-icon-image"[39m
+2026-03-28T20:08:54.7039839Z                       [33msrc[39m=[32m"https://example.com/icon.png"[39m
+2026-03-28T20:08:54.7040508Z                     [36m/>[39m
+2026-03-28T20:08:54.7040999Z                   [36m</div>[39m
+2026-03-28T20:08:54.7041739Z                   [36m<div[39m
+2026-03-28T20:08:54.7042726Z                     [33mclass[39m=[32m"workspace-collection__row-body"[39m
+2026-03-28T20:08:54.7043445Z                   [36m>[39m
+2026-03-28T20:08:54.7043942Z                     [36m<div[39m
+2026-03-28T20:08:54.7044767Z                       [33mclass[39m=[32m"workspace-collection__row-title"[39m
+2026-03-28T20:08:54.7045477Z                     [36m>[39m
+2026-03-28T20:08:54.7045986Z                       [0mMapTools[0m
+2026-03-28T20:08:54.7046527Z                     [36m</div>[39m
+2026-03-28T20:08:54.7047064Z                     [36m<div[39m
+2026-03-28T20:08:54.7047852Z                       [33mclass[39m=[32m"workspace-collection__row-meta"[39m
+2026-03-28T20:08:54.7048557Z                     [36m>[39m
+2026-03-28T20:08:54.7049082Z                       [36m<span>[39m
+2026-03-28T20:08:54.7049650Z                         [0mTester[0m
+2026-03-28T20:08:54.7050170Z                       [36m</span>[39m
+2026-03-28T20:08:54.7050723Z                       [36m<span[39m
+2026-03-28T20:08:54.7051550Z                         [33mclass[39m=[32m"workspace-pill workspace-pill--source"[39m
+2026-03-28T20:08:54.7052556Z                       [36m>[39m
+2026-03-28T20:08:54.7053114Z                         [0mThunderstore[0m
+2026-03-28T20:08:54.7053683Z                       [36m</span>[39m
+2026-03-28T20:08:54.7054192Z                       [36m<span[39m
+2026-03-28T20:08:54.7054863Z                         [33mclass[39m=[32m"workspace-pill"[39m
+2026-03-28T20:08:54.7055533Z                       [36m>[39m
+2026-03-28T20:08:54.7056054Z                         [0mUpdated [0m
+2026-03-28T20:08:54.7056601Z                         [0mJan 2, 2025[0m
+2026-03-28T20:08:54.7057139Z                       [36m</span>[39m
+2026-03-28T20:08:54.7057666Z                     [36m</div>[39m
+2026-03-28T20:08:54.7058187Z                     [36m<p[39m
+2026-03-28T20:08:54.7058963Z                       [33mclass[39m=[32m"workspace-collection__row-summary"[39m
+2026-03-28T20:08:54.7059676Z                     [36m>[39m
+2026-03-28T20:08:54.7060249Z                       [0mMapTools package[0m
+2026-03-28T20:08:54.7060818Z                     [36m</p>[39m
+2026-03-28T20:08:54.7061356Z                   [36m</div>[39m
+2026-03-28T20:08:54.7062077Z                 [36m</div>[39m
+2026-03-28T20:08:54.7062904Z               [36m</div>[39m
+2026-03-28T20:08:54.7063416Z             [36m</section>[39m
+2026-03-28T20:08:54.7063882Z           [36m</div>[39m
+2026-03-28T20:08:54.7064312Z         [36m</div>[39m
+2026-03-28T20:08:54.7064751Z         [36m<aside[39m
+2026-03-28T20:08:54.7065418Z           [33mclass[39m=[32m"workspace-collection__inspector"[39m
+2026-03-28T20:08:54.7066056Z         [36m>[39m
+2026-03-28T20:08:54.7066449Z           [36m<div[39m
+2026-03-28T20:08:54.7067223Z             [33mclass[39m=[32m"workspace-collection__inspector-empty"[39m
+2026-03-28T20:08:54.7067908Z           [36m>[39m
+2026-03-28T20:08:54.7068596Z             [0mSelect a mod to review details and actions.[0m
+2026-03-28T20:08:54.7069244Z           [36m</div>[39m
+2026-03-28T20:08:54.7069693Z         [36m</aside>[39m
+2026-03-28T20:08:54.7070115Z       [36m</div>[39m
+2026-03-28T20:08:54.7070518Z     [36m</div>[39m
+2026-03-28T20:08:54.7070877Z   [36m</div>[39m
+2026-03-28T20:08:54.7071285Z [36m</body>[39m
+2026-03-28T20:08:54.7072752Z [90m [2m❯[22m Object.getElementError node_modules/@testing-library/dom/dist/config.js:[2m37:19[22m[39m
+2026-03-28T20:08:54.7074294Z [90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m76:38[22m[39m
+2026-03-28T20:08:54.7075704Z [90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m52:17[22m[39m
+2026-03-28T20:08:54.7077119Z [90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m95:19[22m[39m
+2026-03-28T20:08:54.7078399Z [36m [2m❯[22m src/components/ModLibraryOverlay.test.tsx:[2m261:19[22m[39m
+2026-03-28T20:08:54.7094487Z     [90m259| [39m    [34mexpect[39m(screen[33m.[39m[34mgetByText[39m([32m'1 result(s)'[39m))[33m.[39m[34mtoBeTruthy[39m()[33m;[39m
+2026-03-28T20:08:54.7103731Z     [90m260| [39m    expect(screen.getByText('Select a mod to review details and action…
+2026-03-28T20:08:54.7107021Z     [90m261| [39m    [34mexpect[39m(screen[33m.[39m[34mgetByText[39m([32m'Updated Jan 1, 2025'[39m))[33m.[39m[34mtoBeTruthy[39m()[33m;[39m
+2026-03-28T20:08:54.7111086Z     [90m   | [39m                  [31m^[39m
+2026-03-28T20:08:54.7112825Z     [90m262| [39m  })[33m;[39m
+2026-03-28T20:08:54.7115474Z     [90m263| [39m
+2026-03-28T20:08:54.7117419Z 
+2026-03-28T20:08:54.7119564Z [31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯[22m[39m
+2026-03-28T20:08:54.7121357Z 
+2026-03-28T20:08:54.7136881Z [41m[1m FAIL [22m[49m src/components/ModLibraryOverlay.test.tsx[2m > [22mModLibraryOverlay[2m > [22mdownloads the newest runtime-compatible Nexus file instead of the first matching file
+2026-03-28T20:08:54.7152603Z [31m[1mTestingLibraryElementError[22m[39m: Unable to find an element with the text: Updated Jan 1, 2025. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+2026-03-28T20:08:54.7154310Z 
+2026-03-28T20:08:54.7154634Z Ignored nodes: comments, script, style
+2026-03-28T20:08:54.7155215Z [36m<body>[39m
+2026-03-28T20:08:54.7155586Z   [36m<div>[39m
+2026-03-28T20:08:54.7155963Z     [36m<div[39m
+2026-03-28T20:08:54.7156905Z       [33mclass[39m=[32m"mods-overlay mods-overlay--library workspace-collection-shell"[39m
+2026-03-28T20:08:54.7157778Z     [36m>[39m
+2026-03-28T20:08:54.7158139Z       [36m<div[39m
+2026-03-28T20:08:54.7158723Z         [33mclass[39m=[32m"modal-header"[39m
+2026-03-28T20:08:54.7159256Z       [36m>[39m
+2026-03-28T20:08:54.7159646Z         [36m<h2>[39m
+2026-03-28T20:08:54.7160053Z           [0mMod Library[0m
+2026-03-28T20:08:54.7160478Z         [36m</h2>[39m
+2026-03-28T20:08:54.7160898Z       [36m</div>[39m
+2026-03-28T20:08:54.7161261Z       [36m<div[39m
+2026-03-28T20:08:54.7161860Z         [33mclass[39m=[32m"workspace-collection"[39m
+2026-03-28T20:08:54.7186142Z       [36m>[39m
+2026-03-28T20:08:54.7186528Z         [36m<div[39m
+2026-03-28T20:08:54.7187476Z           [33mclass[39m=[32m"workspace-collection__main"[39m
+2026-03-28T20:08:54.7188092Z         [36m>[39m
+2026-03-28T20:08:54.7188457Z           [36m<div[39m
+2026-03-28T20:08:54.7189110Z             [33mclass[39m=[32m"workspace-collection__header"[39m
+2026-03-28T20:08:54.7189734Z           [36m>[39m
+2026-03-28T20:08:54.7190116Z             [36m<div[39m
+2026-03-28T20:08:54.7190748Z               [33mclass[39m=[32m"workspace-collection__nav"[39m
+2026-03-28T20:08:54.7191372Z             [36m>[39m
+2026-03-28T20:08:54.7191809Z               [36m<div[39m
+2026-03-28T20:08:54.7193188Z                 [33mclass[39m=[32m"workspace-collection__rail-group workspace-collection__rail-group--inline"[39m
+2026-03-28T20:08:54.7194204Z               [36m>[39m
+2026-03-28T20:08:54.7194719Z                 [36m<button[39m
+2026-03-28T20:08:54.7195952Z                   [33mclass[39m=[32m"workspace-collection__rail-button workspace-collection__rail-button--active"[39m
+2026-03-28T20:08:54.7197106Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7197670Z                 [36m>[39m
+2026-03-28T20:08:54.7198177Z                   [36m<i[39m
+2026-03-28T20:08:54.7198830Z                     [33mclass[39m=[32m"fas fa-compass"[39m
+2026-03-28T20:08:54.7199500Z                   [36m/>[39m
+2026-03-28T20:08:54.7200012Z                   [36m<span>[39m
+2026-03-28T20:08:54.7200581Z                     [0mDiscover[0m
+2026-03-28T20:08:54.7201150Z                   [36m</span>[39m
+2026-03-28T20:08:54.7201694Z                 [36m</button>[39m
+2026-03-28T20:08:54.7202698Z                 [36m<button[39m
+2026-03-28T20:08:54.7203561Z                   [33mclass[39m=[32m"workspace-collection__rail-button "[39m
+2026-03-28T20:08:54.7204738Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7205314Z                 [36m>[39m
+2026-03-28T20:08:54.7205781Z                   [36m<i[39m
+2026-03-28T20:08:54.7206448Z                     [33mclass[39m=[32m"fas fa-book-open"[39m
+2026-03-28T20:08:54.7207109Z                   [36m/>[39m
+2026-03-28T20:08:54.7207695Z                   [36m<span>[39m
+2026-03-28T20:08:54.7208225Z                     [0mLibrary[0m
+2026-03-28T20:08:54.7208732Z                   [36m</span>[39m
+2026-03-28T20:08:54.7209183Z                 [36m</button>[39m
+2026-03-28T20:08:54.7209619Z                 [36m<button[39m
+2026-03-28T20:08:54.7210291Z                   [33mclass[39m=[32m"workspace-collection__rail-button "[39m
+2026-03-28T20:08:54.7210889Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7211299Z                 [36m>[39m
+2026-03-28T20:08:54.7211707Z                   [36m<i[39m
+2026-03-28T20:08:54.7212533Z                     [33mclass[39m=[32m"fas fa-arrow-up"[39m
+2026-03-28T20:08:54.7213134Z                   [36m/>[39m
+2026-03-28T20:08:54.7213570Z                   [36m<span>[39m
+2026-03-28T20:08:54.7214041Z                     [0mUpdates[0m
+2026-03-28T20:08:54.7214506Z                   [36m</span>[39m
+2026-03-28T20:08:54.7214956Z                 [36m</button>[39m
+2026-03-28T20:08:54.7215418Z               [36m</div>[39m
+2026-03-28T20:08:54.7215786Z               [36m<div[39m
+2026-03-28T20:08:54.7216438Z                 [33mclass[39m=[32m"workspace-collection__summary"[39m
+2026-03-28T20:08:54.7217043Z               [36m>[39m
+2026-03-28T20:08:54.7217461Z                 [36m<div[39m
+2026-03-28T20:08:54.7218162Z                   [33mclass[39m=[32m"workspace-collection__summary-chip"[39m
+2026-03-28T20:08:54.7218766Z                 [36m>[39m
+2026-03-28T20:08:54.7219224Z                   [36m<span>[39m
+2026-03-28T20:08:54.7219693Z                     [0mDownloaded[0m
+2026-03-28T20:08:54.7220147Z                   [36m</span>[39m
+2026-03-28T20:08:54.7220617Z                   [36m<strong>[39m
+2026-03-28T20:08:54.7221050Z                     [0m0[0m
+2026-03-28T20:08:54.7221483Z                   [36m</strong>[39m
+2026-03-28T20:08:54.7221937Z                 [36m</div>[39m
+2026-03-28T20:08:54.7233054Z                 [36m<div[39m
+2026-03-28T20:08:54.7233823Z                   [33mclass[39m=[32m"workspace-collection__summary-chip"[39m
+2026-03-28T20:08:54.7234456Z                 [36m>[39m
+2026-03-28T20:08:54.7234896Z                   [36m<span>[39m
+2026-03-28T20:08:54.7235374Z                     [0mUpdates[0m
+2026-03-28T20:08:54.7235850Z                   [36m</span>[39m
+2026-03-28T20:08:54.7236328Z                   [36m<strong>[39m
+2026-03-28T20:08:54.7236757Z                     [0m0[0m
+2026-03-28T20:08:54.7237216Z                   [36m</strong>[39m
+2026-03-28T20:08:54.7237682Z                 [36m</div>[39m
+2026-03-28T20:08:54.7238130Z                 [36m<div[39m
+2026-03-28T20:08:54.7238813Z                   [33mclass[39m=[32m"workspace-collection__summary-chip"[39m
+2026-03-28T20:08:54.7239435Z                 [36m>[39m
+2026-03-28T20:08:54.7239869Z                   [36m<span>[39m
+2026-03-28T20:08:54.7240355Z                     [0mInstalled[0m
+2026-03-28T20:08:54.7240838Z                   [36m</span>[39m
+2026-03-28T20:08:54.7241610Z                   [36m<strong>[39m
+2026-03-28T20:08:54.7242190Z                     [0m0[0m
+2026-03-28T20:08:54.7243285Z                   [36m</strong>[39m
+2026-03-28T20:08:54.7244045Z                 [36m</div>[39m
+2026-03-28T20:08:54.7244657Z               [36m</div>[39m
+2026-03-28T20:08:54.7245158Z             [36m</div>[39m
+2026-03-28T20:08:54.7245891Z             [36m<div[39m
+2026-03-28T20:08:54.7246707Z               [33mclass[39m=[32m"workspace-collection__toolbar"[39m
+2026-03-28T20:08:54.7247399Z             [36m>[39m
+2026-03-28T20:08:54.7248235Z               [36m<div[39m
+2026-03-28T20:08:54.7249108Z                 [33mclass[39m=[32m"workspace-collection__toolbar-group"[39m
+2026-03-28T20:08:54.7249863Z               [36m>[39m
+2026-03-28T20:08:54.7250621Z                 [36m<button[39m
+2026-03-28T20:08:54.7251480Z                   [33mclass[39m=[32m"btn btn-small btn-primary"[39m
+2026-03-28T20:08:54.7252530Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7253305Z                 [36m>[39m
+2026-03-28T20:08:54.7253879Z                   [0mThunderstore[0m
+2026-03-28T20:08:54.7257118Z                 [36m</button>[39m
+2026-03-28T20:08:54.7257922Z                 [36m<button[39m
+2026-03-28T20:08:54.7258693Z                   [33mclass[39m=[32m"btn btn-small btn-secondary"[39m
+2026-03-28T20:08:54.7274823Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7275369Z                 [36m>[39m
+2026-03-28T20:08:54.7275847Z                   [0mNexus Mods[0m
+2026-03-28T20:08:54.7276389Z                 [36m</button>[39m
+2026-03-28T20:08:54.7276875Z               [36m</div>[39m
+2026-03-28T20:08:54.7277300Z               [36m<div[39m
+2026-03-28T20:08:54.7278055Z                 [33mclass[39m=[32m"workspace-collection__toolbar-search"[39m
+2026-03-28T20:08:54.7278716Z               [36m>[39m
+2026-03-28T20:08:54.7279170Z                 [36m<input[39m
+2026-03-28T20:08:54.7280017Z                   [33mplaceholder[39m=[32m"Search or browse Thunderstore mods..."[39m
+2026-03-28T20:08:54.7280858Z                   [33mtype[39m=[32m"text"[39m
+2026-03-28T20:08:54.7281482Z                   [33mvalue[39m=[32m""[39m
+2026-03-28T20:08:54.7281973Z                 [36m/>[39m
+2026-03-28T20:08:54.7283441Z                 [36m<button[39m
+2026-03-28T20:08:54.7284152Z                   [33mclass[39m=[32m"btn btn-primary btn-small"[39m
+2026-03-28T20:08:54.7284855Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7285356Z                 [36m>[39m
+2026-03-28T20:08:54.7285814Z                   [0mBrowse[0m
+2026-03-28T20:08:54.7286293Z                 [36m</button>[39m
+2026-03-28T20:08:54.7286792Z               [36m</div>[39m
+2026-03-28T20:08:54.7287231Z               [36m<div[39m
+2026-03-28T20:08:54.7288180Z                 [33mclass[39m=[32m"workspace-collection__toolbar-group"[39m
+2026-03-28T20:08:54.7288851Z               [36m>[39m
+2026-03-28T20:08:54.7289306Z                 [36m<label[39m
+2026-03-28T20:08:54.7290065Z                   [33mclass[39m=[32m"workspace-collection__toolbar-select"[39m
+2026-03-28T20:08:54.7290715Z                 [36m>[39m
+2026-03-28T20:08:54.7291167Z                   [36m<span[39m
+2026-03-28T20:08:54.7291978Z                     [33mclass[39m=[32m"workspace-collection__toolbar-select-wrap"[39m
+2026-03-28T20:08:54.7292906Z                   [36m>[39m
+2026-03-28T20:08:54.7293407Z                     [36m<select[39m
+2026-03-28T20:08:54.7294137Z                       [33maria-label[39m=[32m"Sort discover results"[39m
+2026-03-28T20:08:54.7294815Z                     [36m>[39m
+2026-03-28T20:08:54.7295326Z                       [36m<option[39m
+2026-03-28T20:08:54.7295962Z                         [33mvalue[39m=[32m"relevance"[39m
+2026-03-28T20:08:54.7296549Z                       [36m>[39m
+2026-03-28T20:08:54.7297083Z                         [0mRelevance[0m
+2026-03-28T20:08:54.7297631Z                       [36m</option>[39m
+2026-03-28T20:08:54.7298218Z                       [36m<option[39m
+2026-03-28T20:08:54.7298842Z                         [33mvalue[39m=[32m"updated"[39m
+2026-03-28T20:08:54.7299415Z                       [36m>[39m
+2026-03-28T20:08:54.7299936Z                         [0mLast updated[0m
+2026-03-28T20:08:54.7300504Z                       [36m</option>[39m
+2026-03-28T20:08:54.7301043Z                       [36m<option[39m
+2026-03-28T20:08:54.7301664Z                         [33mvalue[39m=[32m"popularity"[39m
+2026-03-28T20:08:54.7302688Z                       [36m>[39m
+2026-03-28T20:08:54.7303212Z                         [0mPopularity[0m
+2026-03-28T20:08:54.7303758Z                       [36m</option>[39m
+2026-03-28T20:08:54.7304274Z                       [36m<option[39m
+2026-03-28T20:08:54.7304922Z                         [33mvalue[39m=[32m"newest"[39m
+2026-03-28T20:08:54.7305474Z                       [36m>[39m
+2026-03-28T20:08:54.7305958Z                         [0mNewest[0m
+2026-03-28T20:08:54.7306479Z                       [36m</option>[39m
+2026-03-28T20:08:54.7306992Z                     [36m</select>[39m
+2026-03-28T20:08:54.7307531Z                     [36m<i[39m
+2026-03-28T20:08:54.7308581Z                       [33maria-hidden[39m=[32m"true"[39m
+2026-03-28T20:08:54.7309320Z                       [33mclass[39m=[32m"fas fa-chevron-down"[39m
+2026-03-28T20:08:54.7309933Z                     [36m/>[39m
+2026-03-28T20:08:54.7310404Z                   [36m</span>[39m
+2026-03-28T20:08:54.7310888Z                 [36m</label>[39m
+2026-03-28T20:08:54.7311499Z               [36m</div>[39m
+2026-03-28T20:08:54.7311949Z               [36m<button[39m
+2026-03-28T20:08:54.7312815Z                 [33mclass[39m=[32m"btn btn-secondary btn-small"[39m
+2026-03-28T20:08:54.7313406Z               [36m>[39m
+2026-03-28T20:08:54.7313791Z                 [36m<i[39m
+2026-03-28T20:08:54.7314354Z                   [33mclass[39m=[32m"fas fa-sync-alt"[39m
+2026-03-28T20:08:54.7314826Z                 [36m/>[39m
+2026-03-28T20:08:54.7315217Z                 [36m<span>[39m
+2026-03-28T20:08:54.7315635Z                   [0mRefresh[0m
+2026-03-28T20:08:54.7316051Z                 [36m</span>[39m
+2026-03-28T20:08:54.7316480Z               [36m</button>[39m
+2026-03-28T20:08:54.7316875Z             [36m</div>[39m
+2026-03-28T20:08:54.7317235Z           [36m</div>[39m
+2026-03-28T20:08:54.7317591Z           [36m<div[39m
+2026-03-28T20:08:54.7318156Z             [33mclass[39m=[32m"workspace-collection__content"[39m
+2026-03-28T20:08:54.7318691Z           [36m>[39m
+2026-03-28T20:08:54.7319064Z             [36m<section[39m
+2026-03-28T20:08:54.7319657Z               [33mclass[39m=[32m"workspace-collection__section"[39m
+2026-03-28T20:08:54.7320187Z             [36m>[39m
+2026-03-28T20:08:54.7320529Z               [36m<div[39m
+2026-03-28T20:08:54.7321362Z                 [33mclass[39m=[32m"workspace-collection__section-header"[39m
+2026-03-28T20:08:54.7321962Z               [36m>[39m
+2026-03-28T20:08:54.7322538Z                 [36m<h3>[39m
+2026-03-28T20:08:54.7322999Z                   [0mNexus Results[0m
+2026-03-28T20:08:54.7323453Z                 [36m</h3>[39m
+2026-03-28T20:08:54.7323873Z                 [36m<span>[39m
+2026-03-28T20:08:54.7324258Z                   [0m1[0m
+2026-03-28T20:08:54.7324616Z                   [0m [0m
+2026-03-28T20:08:54.7325018Z                   [0mresult(s)[0m
+2026-03-28T20:08:54.7325462Z                 [36m</span>[39m
+2026-03-28T20:08:54.7325896Z               [36m</div>[39m
+2026-03-28T20:08:54.7326311Z               [36m<div[39m
+2026-03-28T20:08:54.7326945Z                 [33mclass[39m=[32m"workspace-collection__list"[39m
+2026-03-28T20:08:54.7327573Z               [36m>[39m
+2026-03-28T20:08:54.7327996Z                 [36m<div[39m
+2026-03-28T20:08:54.7329795Z                   [33mclass[39m=[32m"workspace-collection__row workspace-collection__row--selected"[39m
+2026-03-28T20:08:54.7330749Z                   [33mrole[39m=[32m"button"[39m
+2026-03-28T20:08:54.7331819Z                   [33mtabindex[39m=[32m"0"[39m
+2026-03-28T20:08:54.7332484Z                 [36m>[39m
+2026-03-28T20:08:54.7332928Z                   [36m<div[39m
+2026-03-28T20:08:54.7333560Z                     [33mclass[39m=[32m"mod-card-icon-inline"[39m
+2026-03-28T20:08:54.7334101Z                   [36m>[39m
+2026-03-28T20:08:54.7334545Z                     [36m<img[39m
+2026-03-28T20:08:54.7335117Z                       [33malt[39m=[32m"Pack Rat icon"[39m
+2026-03-28T20:08:54.7336032Z                       [33mclass[39m=[32m"mod-card-icon-image"[39m
+2026-03-28T20:08:54.7336861Z                       [33msrc[39m=[32m"https://example.com/packrat.png"[39m
+2026-03-28T20:08:54.7337509Z                     [36m/>[39m
+2026-03-28T20:08:54.7337961Z                   [36m</div>[39m
+2026-03-28T20:08:54.7338490Z                   [36m<div[39m
+2026-03-28T20:08:54.7339240Z                     [33mclass[39m=[32m"workspace-collection__row-body"[39m
+2026-03-28T20:08:54.7340058Z                   [36m>[39m
+2026-03-28T20:08:54.7340847Z                     [36m<div[39m
+2026-03-28T20:08:54.7341816Z                       [33mclass[39m=[32m"workspace-collection__row-title"[39m
+2026-03-28T20:08:54.7342845Z                     [36m>[39m
+2026-03-28T20:08:54.7343358Z                       [0mPack Rat[0m
+2026-03-28T20:08:54.7345053Z                     [36m</div>[39m
+2026-03-28T20:08:54.7346017Z                     [36m<div[39m
+2026-03-28T20:08:54.7347111Z                       [33mclass[39m=[32m"workspace-collection__row-meta"[39m
+2026-03-28T20:08:54.7348127Z                     [36m>[39m
+2026-03-28T20:08:54.7348928Z                       [36m<span>[39m
+2026-03-28T20:08:54.7349671Z                         [0mExampleAuthor[0m
+2026-03-28T20:08:54.7350224Z                       [36m</span>[39m
+2026-03-28T20:08:54.7350757Z                       [36m<span[39m
+2026-03-28T20:08:54.7351325Z                         [33mclass[39m=[32m"workspace-pill workspace-pill--source"[39m
+2026-03-28T20:08:54.7351737Z                       [36m>[39m
+2026-03-28T20:08:54.7352033Z                         [0mNexus Mods[0m
+2026-03-28T20:08:54.7352719Z                       [36m</span>[39m
+2026-03-28T20:08:54.7353257Z                       [36m<span[39m
+2026-03-28T20:08:54.7353906Z                         [33mclass[39m=[32m"workspace-pill"[39m
+2026-03-28T20:08:54.7354518Z                       [36m>[39m
+2026-03-28T20:08:54.7355050Z                         [0mUpdated [0m
+2026-03-28T20:08:54.7355642Z                         [0mJan 2, 2025[0m
+2026-03-28T20:08:54.7356173Z                       [36m</span>[39m
+2026-03-28T20:08:54.7356703Z                     [36m</div>[39m
+2026-03-28T20:08:54.7357204Z                     [36m<p[39m
+2026-03-28T20:08:54.7358187Z                       [33mclass[39m=[32m"workspace-collection__row-summary"[39m
+2026-03-28T20:08:54.7358944Z                     [36m>[39m
+2026-03-28T20:08:54.7359488Z                       [0mCarry more stuff.[0m
+2026-03-28T20:08:54.7360047Z                     [36m</p>[39m
+2026-03-28T20:08:54.7360537Z                   [36m</div>[39m
+2026-03-28T20:08:54.7361018Z                 [36m</div>[39m
+2026-03-28T20:08:54.7361489Z               [36m</div>[39m
+2026-03-28T20:08:54.7361954Z             [36m</section>[39m
+2026-03-28T20:08:54.7362650Z           [36m</div>[39m
+2026-03-28T20:08:54.7363064Z         [36m</div>[39m
+2026-03-28T20:08:54.7363449Z         [36m<aside[39m
+2026-03-28T20:08:54.7364123Z           [33mclass[39m=[32m"workspace-collection__inspector"[39m
+2026-03-28T20:08:54.7364736Z         [36m>[39m
+2026-03-28T20:08:54.7365091Z           [36m<div[39m
+2026-03-28T20:08:54.7365703Z             [33mclass[39m=[32m"workspace-inspector-card"[39m
+2026-03-28T20:08:54.7366270Z           [36m>[39m
+2026-03-28T20:08:54.7366680Z             [36m<div[39m
+2026-03-28T20:08:54.7367388Z               [33mclass[39m=[32m"workspace-inspector-card__header"[39m
+2026-03-28T20:08:54.7368016Z             [36m>[39m
+2026-03-28T20:08:54.7368402Z               [36m<div[39m
+2026-03-28T20:08:54.7368996Z                 [33mclass[39m=[32m"mod-card-icon-rail"[39m
+2026-03-28T20:08:54.7369544Z               [36m>[39m
+2026-03-28T20:08:54.7369985Z                 [36m<img[39m
+2026-03-28T20:08:54.7370548Z                   [33malt[39m=[32m"Pack Rat icon"[39m
+2026-03-28T20:08:54.7371281Z                   [33mclass[39m=[32m"mod-card-icon-image"[39m
+2026-03-28T20:08:54.7372628Z                   [33msrc[39m=[32m"https://example.com/packrat.png"[39m
+2026-03-28T20:08:54.7373281Z                 [36m/>[39m
+2026-03-28T20:08:54.7374139Z               [36m</div>[39m
+2026-03-28T20:08:54.7374575Z               [36m<div>[39m
+2026-03-28T20:08:54.7375030Z                 [36m<h3>[39m
+2026-03-28T20:08:54.7375520Z                   [0mPack Rat[0m
+2026-03-28T20:08:54.7376003Z                 [36m</h3>[39m
+2026-03-28T20:08:54.7376469Z                 [36m<div[39m
+2026-03-28T20:08:54.7377185Z                   [33mclass[39m=[32m"workspace-inspector-card__subtle"[39m
+2026-03-28T20:08:54.7377801Z                 [36m>[39m
+2026-03-28T20:08:54.7378273Z                   [0mNexus Mods • [0m
+2026-03-28T20:08:54.7378822Z                   [0mExampleAuthor[0m
+2026-03-28T20:08:54.7379328Z                 [36m</div>[39m
+2026-03-28T20:08:54.7379809Z               [36m</div>[39m
+2026-03-28T20:08:54.7380221Z             [36m</div>[39m
+2026-03-28T20:08:54.7380644Z             [36m<p[39m
+2026-03-28T20:08:54.7381374Z               [33mclass[39m=[32m"workspace-inspector-card__summary"[39m
+2026-03-28T20:08:54.7382032Z             [36m>[39m
+2026-03-28T20:08:54.7382765Z               [0mCarry more stuff.[0m
+2026-03-28T20:08:54.7383208Z             [36m</p>[39m
+2026-03-28T20:08:54.7383592Z             [36m<div[39m
+2026-03-28T20:08:54.7384306Z               [33mclass[39m=[32m"workspace-inspector-card__metrics"[39m
+2026-03-28T20:08:54.7384976Z             [36m>[39m
+2026-03-28T20:08:54.7385384Z               [36m<div>[39m
+2026-03-28T20:08:54.7385875Z                 [36m<span>[39m
+2026-03-28T20:08:54.7386362Z                   [0mLatest[0m
+2026-03-28T20:08:54.7386845Z                 [36m</span>[39m
+2026-03-28T20:08:54.7387354Z                 [36m<strong>[39m
+2026-03-28T20:08:54.7387879Z                   [0mv1.0.7r2[0m
+2026-03-28T20:08:54.7388412Z                 [36m</strong>[39m
+2026-03-28T20:08:54.7388902Z               [36m</div>[39m
+2026-03-28T20:08:54.7389341Z               [36m<div>[39m
+2026-03-28T20:08:54.7389793Z                 [36m<span>[39m
+2026-03-28T20:08:54.7390292Z                   [0mEndorsements[0m
+2026-03-28T20:08:54.7390807Z                 [36m</span>[39m
+2026-03-28T20:08:54.7391287Z                 [36m<strong>[39m
+2026-03-28T20:08:54.7391718Z                   [0m42[0m
+2026-03-28T20:08:54.7392651Z                 [36m</strong>[39m
+2026-03-28T20:08:54.7393191Z               [36m</div>[39m
+2026-03-28T20:08:54.7393629Z               [36m<div>[39m
+2026-03-28T20:08:54.7394097Z                 [36m<span>[39m
+2026-03-28T20:08:54.7394592Z                   [0mDownloads[0m
+2026-03-28T20:08:54.7395088Z                 [36m</span>[39m
+2026-03-28T20:08:54.7395575Z                 [36m<strong>[39m
+2026-03-28T20:08:54.7396024Z                   [0m250[0m
+2026-03-28T20:08:54.7396482Z                 [36m</strong>[39m
+2026-03-28T20:08:54.7396956Z               [36m</div>[39m
+2026-03-28T20:08:54.7397367Z               [36m<div>[39m
+2026-03-28T20:08:54.7397837Z                 [36m<span>[39m
+2026-03-28T20:08:54.7398316Z                   [0mUpdated[0m
+2026-03-28T20:08:54.7398804Z                 [36m</span>[39m
+2026-03-28T20:08:54.7399291Z                 [36m<strong>[39m
+2026-03-28T20:08:54.7399794Z                   [0mJan 2, 2025[0m
+2026-03-28T20:08:54.7400307Z                 [36m</strong>[39m
+2026-03-28T20:08:54.7400793Z               [36m</div>[39m
+2026-03-28T20:08:54.7401215Z             [36m</div>[39m
+2026-03-28T20:08:54.7401622Z             [36m<div[39m
+2026-03-28T20:08:54.7402553Z               [33mclass[39m=[32m"workspace-inspector-card__field"[39m
+2026-03-28T20:08:54.7403203Z             [36m>[39m
+2026-03-28T20:08:54.7403646Z               [36m<label>[39m
+2026-03-28T20:08:54.7404142Z                 [0mStatus[0m
+2026-03-28T20:08:54.7404624Z               [36m</label>[39m
+2026-03-28T20:08:54.7405103Z               [36m<div[39m
+2026-03-28T20:08:54.7405838Z                 [33mclass[39m=[32m"workspace-inspector-card__tags"[39m
+2026-03-28T20:08:54.7406734Z               [36m>[39m
+2026-03-28T20:08:54.7407203Z                 [36m<span[39m
+2026-03-28T20:08:54.7408048Z                   [33mclass[39m=[32m"workspace-pill workspace-pill--source"[39m
+2026-03-28T20:08:54.7408744Z                 [36m>[39m
+2026-03-28T20:08:54.7409230Z                   [0mNexus Mods[0m
+2026-03-28T20:08:54.7409769Z                 [36m</span>[39m
+2026-03-28T20:08:54.7410254Z                 [36m<span[39m
+2026-03-28T20:08:54.7410893Z                   [33mclass[39m=[32m"workspace-pill"[39m
+2026-03-28T20:08:54.7411440Z                 [36m>[39m
+2026-03-28T20:08:54.7411909Z                   [0mpublished[0m
+2026-03-28T20:08:54.7412663Z                 [36m</span>[39m
+2026-03-28T20:08:54.7413158Z               [36m</div>[39m
+2026-03-28T20:08:54.7413584Z             [36m</div>[39m
+2026-03-28T20:08:54.7413990Z             [36m<div[39m
+2026-03-28T20:08:54.7414691Z               [33mclass[39m=[32m"workspace-inspector-card__actions"[39m
+2026-03-28T20:08:54.7419479Z             [36m>[39m
+2026-03-28T20:08:54.7419761Z               [36m<button[39m
+2026-03-28T20:08:54.7420118Z                 [33mclass[39m=[32m"btn btn-primary"[39m
+2026-03-28T20:08:54.7420434Z               [36m>[39m
+2026-03-28T20:08:54.7420744Z                 [0mDownload selected version[0m
+2026-03-28T20:08:54.7421064Z               [36m</button>[39m
+2026-03-28T20:08:54.7421311Z               [36m<a[39m
+2026-03-28T20:08:54.7421637Z                 [33mclass[39m=[32m"btn btn-secondary"[39m
+2026-03-28T20:08:54.7422156Z                 [33mhref[39m=[32m"https://www.nexusmods.com/schedule1/mods/1629"[39m
+2026-03-28T20:08:54.7422945Z                 [33mrel[39m=[32m"noopener noreferrer"[39m
+2026-03-28T20:08:54.7423337Z                 [33mtarget[39m=[32m"_blank"[39m
+2026-03-28T20:08:54.7423628Z               [36m>[39m
+2026-03-28T20:08:54.7423903Z                 [0mOpen source page[0m
+2026-03-28T20:08:54.7424188Z               [36m</a>[39m
+2026-03-28T20:08:54.7424423Z             [36m</div>[39m
+2026-03-28T20:08:54.7424676Z             [36m<section[39m
+2026-03-28T20:08:54.7425089Z               [33maria-labelledby[39m=[32m"nexus-inspector-versions"[39m
+2026-03-28T20:08:54.7425814Z               [33mclass[39m=[32m"workspace-inspector-card__subsection"[39m
+2026-03-28T20:08:54.7426190Z             [36m>[39m
+2026-03-28T20:08:54.7426418Z               [36m<div[39m
+2026-03-28T20:08:54.7426858Z                 [33mclass[39m=[32m"workspace-inspector-card__subsection-header"[39m
+2026-03-28T20:08:54.7427257Z               [36m>[39m
+2026-03-28T20:08:54.7427513Z                 [36m<div>[39m
+2026-03-28T20:08:54.7427770Z                   [36m<h4[39m
+2026-03-28T20:08:54.7428131Z                     [33mid[39m=[32m"nexus-inspector-versions"[39m
+2026-03-28T20:08:54.7428455Z                   [36m>[39m
+2026-03-28T20:08:54.7428744Z                     [0mAvailable versions[0m
+2026-03-28T20:08:54.7429059Z                   [36m</h4>[39m
+2026-03-28T20:08:54.7429324Z                   [36m<p>[39m
+2026-03-28T20:08:54.7429785Z                     [0mPick the file you want to add to the library before downloading.[0m
+2026-03-28T20:08:54.7430209Z                   [36m</p>[39m
+2026-03-28T20:08:54.7430477Z                 [36m</div>[39m
+2026-03-28T20:08:54.7430738Z                 [36m<span[39m
+2026-03-28T20:08:54.7431179Z                   [33mclass[39m=[32m"workspace-inspector-card__subsection-count"[39m
+2026-03-28T20:08:54.7431561Z                 [36m>[39m
+2026-03-28T20:08:54.7431788Z                   [0m2[0m
+2026-03-28T20:08:54.7432053Z                   [0m available[0m
+2026-03-28T20:08:54.7432599Z                 [36m</span>[39m
+2026-03-28T20:08:54.7432882Z               [36m</div>[39m
+2026-03-28T20:08:54.7433116Z               [36m<div[39m
+2026-03-28T20:08:54.7433496Z                 [33maria-label[39m=[32m"Nexus available versions"[39m
+2026-03-28T20:08:54.7434102Z                 [33mclass[39m=[32m"workspace-version-list"[39m
+2026-03-28T20:08:54.7434489Z                 [33mrole[39m=[32m"listbox"[39m
+2026-03-28T20:08:54.7434770Z               [36m>[39m
+2026-03-28T20:08:54.7435023Z                 [36m<button[39m
+2026-03-28T20:08:54.7435354Z                   [33maria-selected[39m=[32m"true"[39m
+2026-03-28T20:08:54.7435905Z                   [33mclass[39m=[32m"workspace-version-row workspace-version-row--active"[39m
+2026-03-28T20:08:54.7436398Z                   [33mrole[39m=[32m"option"[39m
+2026-03-28T20:08:54.7436736Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7437017Z                 [36m>[39m
+2026-03-28T20:08:54.7437266Z                   [36m<div[39m
+2026-03-28T20:08:54.7437659Z                     [33mclass[39m=[32m"workspace-version-row__header"[39m
+2026-03-28T20:08:54.7438002Z                   [36m>[39m
+2026-03-28T20:08:54.7438260Z                     [36m<div[39m
+2026-03-28T20:08:54.7438662Z                       [33mclass[39m=[32m"workspace-version-row__title"[39m
+2026-03-28T20:08:54.7439027Z                     [36m>[39m
+2026-03-28T20:08:54.7439296Z                       [0mv1.0.7r2[0m
+2026-03-28T20:08:54.7439594Z                     [36m</div>[39m
+2026-03-28T20:08:54.7439867Z                     [36m<div[39m
+2026-03-28T20:08:54.7440274Z                       [33mclass[39m=[32m"workspace-version-row__badges"[39m
+2026-03-28T20:08:54.7440646Z                     [36m>[39m
+2026-03-28T20:08:54.7440909Z                       [36m<span[39m
+2026-03-28T20:08:54.7441272Z                         [33mclass[39m=[32m"workspace-pill"[39m
+2026-03-28T20:08:54.7441606Z                       [36m>[39m
+2026-03-28T20:08:54.7441872Z                         [0mMono[0m
+2026-03-28T20:08:54.7442161Z                       [36m</span>[39m
+2026-03-28T20:08:54.7442737Z                     [36m</div>[39m
+2026-03-28T20:08:54.7443013Z                   [36m</div>[39m
+2026-03-28T20:08:54.7443292Z                   [36m<div[39m
+2026-03-28T20:08:54.7443665Z                     [33mclass[39m=[32m"workspace-version-row__meta"[39m
+2026-03-28T20:08:54.7444018Z                   [36m>[39m
+2026-03-28T20:08:54.7444285Z                     [36m<span>[39m
+2026-03-28T20:08:54.7444565Z                       [0mUploaded [0m
+2026-03-28T20:08:54.7444996Z                       [0mJan 1, 1970[0m
+2026-03-28T20:08:54.7445303Z                     [36m</span>[39m
+2026-03-28T20:08:54.7445576Z                     [36m<span>[39m
+2026-03-28T20:08:54.7445907Z                       [0mPackRat-mono-1.0.7r2.zip[0m
+2026-03-28T20:08:54.7446224Z                     [36m</span>[39m
+2026-03-28T20:08:54.7446497Z                   [36m</div>[39m
+2026-03-28T20:08:54.7446766Z                   [36m<p[39m
+2026-03-28T20:08:54.7447152Z                     [33mclass[39m=[32m"workspace-version-row__summary"[39m
+2026-03-28T20:08:54.7447498Z                   [36m>[39m
+2026-03-28T20:08:54.7447800Z                     [0mPack Rat Mono 1.0.7r2[0m
+2026-03-28T20:08:54.7448097Z                   [36m</p>[39m
+2026-03-28T20:08:54.7448374Z                 [36m</button>[39m
+2026-03-28T20:08:54.7448646Z                 [36m<button[39m
+2026-03-28T20:08:54.7448977Z                   [33maria-selected[39m=[32m"false"[39m
+2026-03-28T20:08:54.7449394Z                   [33mclass[39m=[32m"workspace-version-row"[39m
+2026-03-28T20:08:54.7449772Z                   [33mrole[39m=[32m"option"[39m
+2026-03-28T20:08:54.7450118Z                   [33mtype[39m=[32m"button"[39m
+2026-03-28T20:08:54.7450395Z                 [36m>[39m
+2026-03-28T20:08:54.7450639Z                   [36m<div[39m
+2026-03-28T20:08:54.7451027Z                     [33mclass[39m=[32m"workspace-version-row__header"[39m
+2026-03-28T20:08:54.7451362Z                   [36m>[39m
+2026-03-28T20:08:54.7451614Z                     [36m<div[39m
+2026-03-28T20:08:54.7451998Z                       [33mclass[39m=[32m"workspace-version-row__title"[39m
+2026-03-28T20:08:54.7452719Z                     [36m>[39m
+2026-03-28T20:08:54.7452991Z                       [0mv1.0.0[0m
+2026-03-28T20:08:54.7453270Z                     [36m</div>[39m
+2026-03-28T20:08:54.7453538Z                     [36m<div[39m
+2026-03-28T20:08:54.7453940Z                       [33mclass[39m=[32m"workspace-version-row__badges"[39m
+2026-03-28T20:08:54.7454305Z                     [36m>[39m
+2026-03-28T20:08:54.7454580Z                       [36m<span[39m
+2026-03-28T20:08:54.7454938Z                         [33mclass[39m=[32m"workspace-pill"[39m
+2026-03-28T20:08:54.7455261Z                       [36m>[39m
+2026-03-28T20:08:54.7455532Z                         [0mMono[0m
+2026-03-28T20:08:54.7455816Z                       [36m</span>[39m
+2026-03-28T20:08:54.7456097Z                       [36m<span[39m
+2026-03-28T20:08:54.7456550Z                         [33mclass[39m=[32m"workspace-pill workspace-pill--success"[39m
+2026-03-28T20:08:54.7456963Z                       [36m>[39m
+2026-03-28T20:08:54.7457237Z                         [0mPrimary[0m
+2026-03-28T20:08:54.7457524Z                       [36m</span>[39m
+2026-03-28T20:08:54.7457803Z                     [36m</div>[39m
+2026-03-28T20:08:54.7458074Z                   [36m</div>[39m
+2026-03-28T20:08:54.7458345Z                   [36m<div[39m
+2026-03-28T20:08:54.7458720Z                     [33mclass[39m=[32m"workspace-version-row__meta"[39m
+2026-03-28T20:08:54.7459060Z                   [36m>[39m
+2026-03-28T20:08:54.7459320Z                     [36m<span>[39m
+2026-03-28T20:08:54.7459601Z                       [0mUploaded [0m
+2026-03-28T20:08:54.7459902Z                       [0mJan 1, 1970[0m
+2026-03-28T20:08:54.7460192Z                     [36m</span>[39m
+2026-03-28T20:08:54.7460465Z                     [36m<span>[39m
+2026-03-28T20:08:54.7460790Z                       [0mPackRat-mono-1.0.0.zip[0m
+2026-03-28T20:08:54.7461105Z                     [36m</span>[39m
+2026-03-28T20:08:54.7461403Z                   [36m</div>[39m
+2026-03-28T20:08:54.7461667Z                   [36m<p[39m
+2026-03-28T20:08:54.7462057Z                     [33mclass[39m=[32m"workspace-version-row__summary"[39m
+2026-03-28T20:08:54.7462621Z                   [36m>[39m
+2026-03-28T20:08:54.7463061Z                     [0mPack Rat Mono 1.0.0[0m
+2026-03-28T20:08:54.7463378Z                   [36m</p>[39m
+2026-03-28T20:08:54.7463645Z                 [36m</button>[39m
+2026-03-28T20:08:54.7463915Z               [36m</div>[39m
+2026-03-28T20:08:54.7464176Z             [36m</section>[39m
+2026-03-28T20:08:54.7464412Z           [36m</div>[39m
+2026-03-28T20:08:54.7464643Z         [36m</aside>[39m
+2026-03-28T20:08:54.7464857Z       [36m</div>[39m
+2026-03-28T20:08:54.7465070Z     [36m</div>[39m
+2026-03-28T20:08:54.7465271Z   [36m</div>[39m
+2026-03-28T20:08:54.7465477Z [36m</body>[39m
+2026-03-28T20:08:54.7466118Z [90m [2m❯[22m Object.getElementError node_modules/@testing-library/dom/dist/config.js:[2m37:19[22m[39m
+2026-03-28T20:08:54.7466924Z [90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m76:38[22m[39m
+2026-03-28T20:08:54.7467637Z [90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m52:17[22m[39m
+2026-03-28T20:08:54.7468351Z [90m [2m❯[22m node_modules/@testing-library/dom/dist/query-helpers.js:[2m95:19[22m[39m
+2026-03-28T20:08:54.7469000Z [36m [2m❯[22m src/components/ModLibraryOverlay.test.tsx:[2m377:19[22m[39m
+2026-03-28T20:08:54.7469418Z     [90m375| [39m    )[33m;[39m
+2026-03-28T20:08:54.7469669Z     [90m376| [39m
+2026-03-28T20:08:54.7470348Z     [90m377| [39m    [34mexpect[39m(screen[33m.[39m[34mgetByText[39m([32m'Updated Jan 1, 2025'[39m))[33m.[39m[34mtoBeTruthy[39m()[33m;[39m
+2026-03-28T20:08:54.7470972Z     [90m   | [39m                  [31m^[39m
+2026-03-28T20:08:54.7471241Z     [90m378| [39m
+2026-03-28T20:08:54.7471590Z     [90m379| [39m    [35mawait[39m [34mwaitFor[39m(() [33m=>[39m {
+2026-03-28T20:08:54.7471967Z 
+2026-03-28T20:08:54.7472203Z [31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯[22m[39m
+2026-03-28T20:08:54.7472610Z 
+2026-03-28T20:08:54.7472681Z 
+2026-03-28T20:08:54.7473149Z [2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m27 passed[39m[22m[90m (28)[39m
+2026-03-28T20:08:54.7473914Z [2m      Tests [22m [1m[31m2 failed[39m[22m[2m | [22m[1m[32m152 passed[39m[22m[90m (154)[39m
+2026-03-28T20:08:54.7474385Z [2m   Start at [22m 20:08:40
+2026-03-28T20:08:54.7475123Z [2m   Duration [22m 14.13s[2m (transform 2.03s, setup 2.25s, collect 6.45s, tests 10.64s, environment 14.62s, prepare 2.76s)[22m
+2026-03-28T20:08:54.7475544Z 
+2026-03-28T20:08:54.7475550Z 
+2026-03-28T20:08:54.7526938Z ##[error]TestingLibraryElementError: Unable to find an element with the text: Updated Jan 1, 2025. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="mods-overlay mods-overlay--library workspace-collection-shell"
+    >
+      <div
+        class="modal-header"
+      >
+        <h2>
+          Mod Library
+        </h2>
+      </div>
+      <div
+        class="workspace-collection"
+      >
+        <div
+          class="workspace-collection__main"
+        >
+          <div
+            class="workspace-collection__header"
+          >
+            <div
+              class="workspace-collection__nav"
+            >
+              <div
+                class="workspace-collection__rail-group workspace-collection__rail-group--inline"
+              >
+                <button
+                  class="workspace-collection__rail-button workspace-collection__rail-button--active"
+                  type="button"
+                >
+                  <i
+                    class="fas fa-compass"
+                  />
+                  <span>
+                    Discover
+                  </span>
+                </button>
+                <button
+                  class="workspace-collection__rail-button "
+                  type="button"
+                >
+                  <i
+                    class="fas fa-book-open"
+                  />
+                  <span>
+                    Library
+                  </span>
+                </button>
+                <button
+                  class="workspace-collection__rail-button "
+                  type="button"
+                >
+                  <i
+                    class="fas fa-arrow-up"
+                  />
+                  <span>
+                    Updates
+                  </span>
+                </button>
+              </div>
+              <div
+                class="workspace-collection__summary"
+              >
+                <div
+                  class="workspace-collection__summary-chip"
+                >
+                  <span>
+                    Downloaded
+                  </span>
+                  <strong>
+                    0
+                  </strong>
+                </div>
+                <div
+                  class="workspace-collection__summary-chip"
+                >
+                  <span>
+                    Updates
+                  </span>
+                  <strong>
+                    0
+                  </strong>
+                </div>
+                <div
+                  class="workspace-collection__summary-chip"
+                >
+                  <span>
+                    Installed
+                  </span>
+                  <strong>
+                    0
+                  </strong>
+                </div>
+              </div>
+            </div>
+            <div
+              class="workspace-collection__toolbar"
+            >
+              <div
+                class="workspace-collection__toolbar-group"
+              >
+                <button
+                  class="btn btn-small btn-primary"
+                  type="button"
+                >
+                  Thunderstore
+                </button>
+                <button
+                  class="btn btn-small btn-secondary"
+                  type="button"
+                >
+                  Nexus Mods
+                </button>
+              </div>
+              <div
+                class="workspace-collection__toolbar-search"
+              >
+                <input
+                  placeholder="Search or browse Thunderstore mods..."
+                  type="text"
+                  value="map"
+                />
+                <button
+                  class="btn btn-primary btn-small"
+                  type="button"
+                >
+                  Search
+                </button>
+              </div>
+              <div
+                class="workspace-collection__toolbar-group"
+              >
+                <label
+            
+2026-03-28T20:08:54.7543435Z 
+2026-03-28T20:08:54.7591278Z ##[error]TestingLibraryElementError: Unable to find an element with the text: Updated Jan 1, 2025. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="mods-overlay mods-overlay--library workspace-collection-shell"
+    >
+      <div
+        class="modal-header"
+      >
+        <h2>
+          Mod Library
+        </h2>
+      </div>
+      <div
+        class="workspace-collection"
+      >
+        <div
+          class="workspace-collection__main"
+        >
+          <div
+            class="workspace-collection__header"
+          >
+            <div
+              class="workspace-collection__nav"
+            >
+              <div
+                class="workspace-collection__rail-group workspace-collection__rail-group--inline"
+              >
+                <button
+                  class="workspace-collection__rail-button workspace-collection__rail-button--active"
+                  type="button"
+                >
+                  <i
+                    class="fas fa-compass"
+                  />
+                  <span>
+                    Discover
+                  </span>
+                </button>
+                <button
+                  class="workspace-collection__rail-button "
+                  type="button"
+                >
+                  <i
+                    class="fas fa-book-open"
+                  />
+                  <span>
+                    Library
+                  </span>
+                </button>
+                <button
+                  class="workspace-collection__rail-button "
+                  type="button"
+                >
+                  <i
+                    class="fas fa-arrow-up"
+                  />
+                  <span>
+                    Updates
+                  </span>
+                </button>
+              </div>
+              <div
+                class="workspace-collection__summary"
+              >
+                <div
+                  class="workspace-collection__summary-chip"
+                >
+                  <span>
+                    Downloaded
+                  </span>
+                  <strong>
+                    0
+                  </strong>
+                </div>
+                <div
+                  class="workspace-collection__summary-chip"
+                >
+                  <span>
+                    Updates
+                  </span>
+                  <strong>
+                    0
+                  </strong>
+                </div>
+                <div
+                  class="workspace-collection__summary-chip"
+                >
+                  <span>
+                    Installed
+                  </span>
+                  <strong>
+                    0
+                  </strong>
+                </div>
+              </div>
+            </div>
+            <div
+              class="workspace-collection__toolbar"
+            >
+              <div
+                class="workspace-collection__toolbar-group"
+              >
+                <button
+                  class="btn btn-small btn-primary"
+                  type="button"
+                >
+                  Thunderstore
+                </button>
+                <button
+                  class="btn btn-small btn-secondary"
+                  type="button"
+                >
+                  Nexus Mods
+                </button>
+              </div>
+              <div
+                class="workspace-collection__toolbar-search"
+              >
+                <input
+                  placeholder="Search or browse Thunderstore mods..."
+                  type="text"
+                  value=""
+                />
+                <button
+                  class="btn btn-primary btn-small"
+                  type="button"
+                >
+                  Browse
+                </button>
+              </div>
+              <div
+                class="workspace-collection__toolbar-group"
+              >
+                <label
+               
+2026-03-28T20:08:54.8328588Z ##[error]Process completed with exit code 1.
+2026-03-28T20:08:54.8438797Z Post job cleanup.
+2026-03-28T20:08:54.9369475Z [command]/usr/bin/git version
+2026-03-28T20:08:54.9404773Z git version 2.53.0
+2026-03-28T20:08:54.9446948Z Temporarily overriding HOME='/home/runner/work/_temp/00262c88-5d35-47ce-be77-a99a4bb8ea9d' before making global git config changes
+2026-03-28T20:08:54.9447859Z Adding repository directory to the temporary git global config as a safe directory
+2026-03-28T20:08:54.9458931Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/simm/simm
+2026-03-28T20:08:54.9491039Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-03-28T20:08:54.9521953Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-03-28T20:08:54.9736497Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-03-28T20:08:54.9756128Z http.https://github.com/.extraheader
+2026-03-28T20:08:54.9767742Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-03-28T20:08:54.9796939Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-03-28T20:08:55.0006683Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-03-28T20:08:55.0035738Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-03-28T20:08:55.0359466Z Cleaning up orphan processes
+2026-03-28T20:08:55.0784050Z ##[warning]Node.js 20 actions are deprecated. The following actions are running on Node.js 20 and may not work as expected: actions/checkout@v4, actions/setup-node@v4. Actions will be forced to run with Node.js 24 by default starting June 2nd, 2026. Node.js 20 will be removed from the runner on September 16th, 2026. Please check if updated versions of these actions are available that support Node.js 24. To opt into Node.js 24 now, set the FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true environment variable on the runner or in your workflow file. Once Node.js 24 becomes the default, you can temporarily opt out by setting ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

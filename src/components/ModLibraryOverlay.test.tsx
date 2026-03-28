@@ -258,7 +258,7 @@ describe('ModLibraryOverlay', () => {
     expect(await screen.findByText('MapTools')).toBeTruthy();
     expect(screen.getByText('1 result(s)')).toBeTruthy();
     expect(screen.getByText('Select a mod to review details and actions.')).toBeTruthy();
-    expect(screen.getByText('Updated Jan 1, 2025')).toBeTruthy();
+    expect(screen.getByText('Updated Jan 2, 2025')).toBeTruthy();
   });
 
   it('shows the Thunderstore updated date when package data uses camelCase fields', async () => {
@@ -374,7 +374,7 @@ describe('ModLibraryOverlay', () => {
       await screen.findByRole('button', { name: 'Download selected version' }),
     );
 
-    expect(screen.getByText('Updated Jan 1, 2025')).toBeTruthy();
+    expect(screen.getByText('Updated Jan 2, 2025')).toBeTruthy();
 
     await waitFor(() => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
