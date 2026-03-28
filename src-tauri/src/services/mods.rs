@@ -1,3 +1,4 @@
+use crate::services::fomod::{FomodInstallEntry, FomodService};
 use crate::services::settings::SettingsService;
 use crate::types::{
     Environment, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource,
@@ -36,6 +37,13 @@ const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
 const ICON_FETCH_TIMEOUT_SECONDS: u64 = 15;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FomodDestinationKind {
+    Mods,
+    Plugins,
+    UserLibs,
+}
 
 static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
@@ -1578,55 +1586,63 @@ impl ModsService {
 
         let mods_dir = storage_path.join("Mods");
         if mods_dir.exists() {
-            let mut entries = fs::read_dir(&mods_dir)
-                .await
-                .context("Failed to read storage mods directory")?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
-                let lower_name = file_name.to_lowercase();
-                if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
-                    files.push(file_name.to_string());
-                }
-            }
+            self.collect_storage_files_recursive(&mods_dir, true, &mut files)
+                .await?;
         }
 
         let plugins_dir = storage_path.join("Plugins");
         if plugins_dir.exists() {
-            let mut entries = fs::read_dir(&plugins_dir)
-                .await
-                .context("Failed to read storage plugins directory")?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
-                let lower_name = file_name.to_lowercase();
-                if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
-                    files.push(file_name.to_string());
-                }
-            }
+            self.collect_storage_files_recursive(&plugins_dir, true, &mut files)
+                .await?;
         }
 
         let userlibs_dir = storage_path.join("UserLibs");
         if userlibs_dir.exists() {
-            let mut entries = fs::read_dir(&userlibs_dir)
+            self.collect_storage_files_recursive(&userlibs_dir, false, &mut files)
+                .await?;
+        }
+
+        Ok(files)
+    }
+
+    async fn collect_storage_files_recursive(
+        &self,
+        dir: &Path,
+        dll_only: bool,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut pending = vec![dir.to_path_buf()];
+
+        while let Some(current) = pending.pop() {
+            let mut entries = fs::read_dir(&current)
                 .await
-                .context("Failed to read storage userlibs directory")?;
+                .with_context(|| format!("Failed to read storage directory {}", current.display()))?;
+
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
+                let metadata = fs::metadata(&path).await?;
+                if metadata.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+
                 let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
-                if !file_name.is_empty() {
+                if file_name.is_empty() {
+                    continue;
+                }
+
+                if dll_only {
+                    let lower_name = file_name.to_lowercase();
+                    if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
+                        files.push(file_name.to_string());
+                    }
+                } else {
                     files.push(file_name.to_string());
                 }
             }
         }
 
-        Ok(files)
+        Ok(())
     }
 
     fn detect_available_runtimes(
@@ -4554,6 +4570,17 @@ impl ModsService {
 
         let content_root = self.resolve_archive_content_root(temp_dir).await?;
 
+        if let Some(fomod_files) = self
+            .try_extract_fomod_content(&content_root, mods_dir, plugins_dir, userlibs_dir, runtime)
+            .await?
+        {
+            eprintln!(
+                "[DEBUG] ZIP extraction used FOMOD mapping. Installed files: {:?}",
+                fomod_files
+            );
+            return Ok(fomod_files);
+        }
+
         // Detect if this archive has IL2CPP/Mono subdirectories (runtime-specific structure)
         let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(&content_root).await?;
 
@@ -4712,6 +4739,13 @@ impl ModsService {
 
         let content_root = self.resolve_archive_content_root(temp_dir).await?;
 
+        if let Some(fomod_files) = self
+            .try_extract_fomod_content(&content_root, mods_dir, plugins_dir, userlibs_dir, runtime)
+            .await?
+        {
+            return Ok(fomod_files);
+        }
+
         // Detect if this archive has IL2CPP/Mono subdirectories (runtime-specific structure)
         let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(&content_root).await?;
 
@@ -4824,6 +4858,280 @@ impl ModsService {
         }
 
         Ok(installed_files)
+    }
+
+    async fn try_extract_fomod_content(
+        &self,
+        content_root: &Path,
+        mods_dir: &Path,
+        plugins_dir: &Path,
+        userlibs_dir: &Path,
+        runtime: Option<&str>,
+    ) -> Result<Option<Vec<String>>> {
+        let Some(config_path) = Self::find_fomod_config_path(content_root) else {
+            return Ok(None);
+        };
+
+        let fomod_service = FomodService::new();
+        let config = fomod_service.parse_fomod_xml_path(&config_path)?;
+        let entries = fomod_service.build_install_entries(&config, runtime);
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        let mut installed_files = Vec::new();
+        for entry in &entries {
+            if let (Some(target_runtime), Some(entry_runtime)) = (runtime, entry.runtime.as_deref())
+            {
+                if !entry_runtime.eq_ignore_ascii_case(target_runtime) {
+                    continue;
+                }
+            }
+
+            self.copy_fomod_install_entry(
+                content_root,
+                mods_dir,
+                plugins_dir,
+                userlibs_dir,
+                entry,
+                runtime,
+                &mut installed_files,
+            )
+            .await?;
+        }
+
+        Ok(Some(installed_files))
+    }
+
+    fn find_fomod_config_path(content_root: &Path) -> Option<PathBuf> {
+        let candidates = [
+            content_root.join("fomod").join("ModuleConfig.xml"),
+            content_root.join("fomod").join("moduleconfig.xml"),
+            content_root.join("fomod").join("Script.xml"),
+            content_root.join("fomod").join("script.xml"),
+        ];
+
+        candidates.into_iter().find(|path| path.exists())
+    }
+
+    async fn copy_fomod_install_entry(
+        &self,
+        content_root: &Path,
+        mods_dir: &Path,
+        plugins_dir: &Path,
+        userlibs_dir: &Path,
+        entry: &FomodInstallEntry,
+        runtime: Option<&str>,
+        installed_files: &mut Vec<String>,
+    ) -> Result<()> {
+        let source_relative = Self::path_buf_from_forward_slashes(&entry.source);
+        let source_path = content_root.join(&source_relative);
+        if !source_path.exists() {
+            eprintln!(
+                "[FOMOD] Skipping missing source path from installer mapping: {}",
+                source_path.display()
+            );
+            return Ok(());
+        }
+
+        let (destination_kind, destination_relative, explicit_file_target) =
+            self.resolve_fomod_destination(entry);
+        let destination_root = match destination_kind {
+            FomodDestinationKind::Mods => mods_dir,
+            FomodDestinationKind::Plugins => plugins_dir,
+            FomodDestinationKind::UserLibs => userlibs_dir,
+        };
+
+        if entry.is_folder {
+            let dest_dir = if destination_relative.as_os_str().is_empty() {
+                destination_root.to_path_buf()
+            } else {
+                destination_root.join(&destination_relative)
+            };
+
+            self.copy_fomod_directory(
+                &source_path,
+                &dest_dir,
+                destination_kind,
+                runtime,
+                installed_files,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let source_name = source_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid FOMOD source file path"))?;
+
+        let destination_path = if explicit_file_target {
+            destination_root.join(&destination_relative)
+        } else if destination_relative.as_os_str().is_empty() {
+            destination_root.join(source_name)
+        } else {
+            destination_root
+                .join(&destination_relative)
+                .join(source_name)
+        };
+
+        if let Some(target_runtime) = runtime {
+            let file_runtime = self.detect_mod_runtime_from_name(source_name);
+            if file_runtime != "unknown" && !file_runtime.eq_ignore_ascii_case(target_runtime) {
+                return Ok(());
+            }
+        }
+
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::copy(&source_path, &destination_path).await?;
+        self.track_fomod_installed_file(destination_kind, source_name, installed_files);
+        Ok(())
+    }
+
+    async fn copy_fomod_directory(
+        &self,
+        source: &Path,
+        dest: &Path,
+        destination_kind: FomodDestinationKind,
+        runtime: Option<&str>,
+        installed_files: &mut Vec<String>,
+    ) -> Result<()> {
+        fs::create_dir_all(dest).await?;
+
+        let mut entries = fs::read_dir(source).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let file_name = entry_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            let dest_path = dest.join(file_name);
+            let metadata = fs::metadata(&entry_path).await?;
+
+            if metadata.is_dir() {
+                Box::pin(self.copy_fomod_directory(
+                    &entry_path,
+                    &dest_path,
+                    destination_kind,
+                    runtime,
+                    installed_files,
+                ))
+                .await?;
+                continue;
+            }
+
+            if let Some(target_runtime) = runtime {
+                let file_runtime = self.detect_mod_runtime_from_name(file_name);
+                if file_runtime != "unknown" && !file_runtime.eq_ignore_ascii_case(target_runtime) {
+                    continue;
+                }
+            }
+
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::copy(&entry_path, &dest_path).await?;
+            self.track_fomod_installed_file(destination_kind, file_name, installed_files);
+        }
+
+        Ok(())
+    }
+
+    fn resolve_fomod_destination(
+        &self,
+        entry: &FomodInstallEntry,
+    ) -> (FomodDestinationKind, PathBuf, bool) {
+        let destination = Self::normalize_fomod_path_value(&entry.destination);
+        let source = Self::normalize_fomod_path_value(&entry.source);
+
+        let destination_kind = if Self::path_targets_bucket(&destination, "plugins")
+            || Self::path_targets_bucket(&source, "plugins")
+        {
+            FomodDestinationKind::Plugins
+        } else if Self::path_targets_bucket(&destination, "userlibs")
+            || Self::path_targets_bucket(&source, "userlibs")
+        {
+            FomodDestinationKind::UserLibs
+        } else {
+            FomodDestinationKind::Mods
+        };
+
+        let bucket_name = match destination_kind {
+            FomodDestinationKind::Mods => "mods",
+            FomodDestinationKind::Plugins => "plugins",
+            FomodDestinationKind::UserLibs => "userlibs",
+        };
+
+        let stripped_destination = Self::strip_bucket_prefix(&destination, bucket_name);
+        let explicit_file_target = !entry.is_folder
+            && !stripped_destination.is_empty()
+            && Path::new(&stripped_destination)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some();
+
+        (
+            destination_kind,
+            Self::path_buf_from_forward_slashes(&stripped_destination),
+            explicit_file_target,
+        )
+    }
+
+    fn track_fomod_installed_file(
+        &self,
+        destination_kind: FomodDestinationKind,
+        file_name: &str,
+        installed_files: &mut Vec<String>,
+    ) {
+        if destination_kind == FomodDestinationKind::UserLibs {
+            return;
+        }
+
+        let lower = file_name.to_ascii_lowercase();
+        if lower.ends_with(".dll") || lower.ends_with(".exe") {
+            installed_files.push(file_name.to_string());
+        }
+    }
+
+    fn path_targets_bucket(path: &str, bucket: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        path.eq_ignore_ascii_case(bucket)
+            || path
+                .to_ascii_lowercase()
+                .starts_with(&(bucket.to_string() + "/"))
+            || path.to_ascii_lowercase().contains(&format!("/{bucket}/"))
+    }
+
+    fn strip_bucket_prefix(path: &str, bucket: &str) -> String {
+        let lower = path.to_ascii_lowercase();
+        if lower == bucket {
+            return String::new();
+        }
+        if let Some(stripped) = lower.strip_prefix(&(bucket.to_string() + "/")) {
+            return path[path.len() - stripped.len()..]
+                .trim_matches('/')
+                .to_string();
+        }
+        path.trim_matches('/').to_string()
+    }
+
+    fn normalize_fomod_path_value(path: &str) -> String {
+        path.replace('\\', "/")
+            .trim_start_matches("./")
+            .trim_matches('/')
+            .to_string()
+    }
+
+    fn path_buf_from_forward_slashes(path: &str) -> PathBuf {
+        let mut buffer = PathBuf::new();
+        for component in path.split('/').filter(|value| !value.is_empty()) {
+            buffer.push(component);
+        }
+        buffer
     }
 
     fn detect_mod_runtime_from_name(&self, name: &str) -> &str {
@@ -5615,6 +5923,17 @@ mod tests {
             symlink_paths: None,
             security_scan: None,
         }
+    }
+
+    fn write_zip_fixture(zip_path: &Path, files: &[(&str, &[u8])]) -> Result<()> {
+        let file = File::create(zip_path)?;
+        let mut zip = ZipWriter::new(file);
+        for (path, contents) in files {
+            zip.start_file(*path, FileOptions::default())?;
+            zip.write_all(contents)?;
+        }
+        zip.finish()?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -6547,6 +6866,61 @@ mod tests {
             Some(storage_id)
         );
         assert!(!entry.storage_ids_by_runtime.contains_key("IL2CPP"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_mod_library_detects_nested_storage_files_for_fomod_archives() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let storage_dir = service.get_mods_storage_dir().await?.join("nested-fomod");
+        fs::create_dir_all(storage_dir.join("Mods").join("IL2CPP")).await?;
+        fs::create_dir_all(storage_dir.join("Mods").join("Mono")).await?;
+        fs::write(
+            storage_dir.join("Mods").join("IL2CPP").join("PackRat.IL2CPP.dll"),
+            b"il2cpp",
+        )
+        .await?;
+        fs::write(
+            storage_dir.join("Mods").join("Mono").join("PackRat.Mono.dll"),
+            b"mono",
+        )
+        .await?;
+
+        let mut storage_meta =
+            sample_metadata(Some("nested-fomod"), Some("1629"), Some("1.0.7r2"));
+        storage_meta.mod_name = Some("Pack Rat".to_string());
+        storage_meta.source = Some(ModSource::Nexusmods);
+        service
+            .save_storage_metadata(&storage_dir, &storage_meta)
+            .await?;
+
+        let library = service.get_mod_library().await?;
+        let entry = library
+            .downloaded
+            .iter()
+            .find(|item| item.storage_id == "nested-fomod")
+            .expect("library entry for nested fomod storage");
+
+        assert!(entry.files.iter().any(|file| file == "PackRat.IL2CPP.dll"));
+        assert!(entry.files.iter().any(|file| file == "PackRat.Mono.dll"));
+        assert!(entry.available_runtimes.iter().any(|runtime| runtime == "IL2CPP"));
+        assert!(entry.available_runtimes.iter().any(|runtime| runtime == "Mono"));
 
         Ok(())
     }
@@ -7533,6 +7907,176 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn store_mod_archive_extracts_fomod_runtime_variants_to_storage() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let zip_path = temp.path().join("PackRat-Fomod.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "fomod/moduleconfig.xml",
+                    br#"
+<config>
+  <moduleName>Pack Rat</moduleName>
+  <installSteps order="Explicit">
+    <installStep name="Runtime">
+      <optionalFileGroups order="Explicit">
+        <group name="Runtime" type="SelectExactlyOne">
+          <plugins order="Explicit">
+            <plugin name="IL2CPP">
+              <description>IL2CPP runtime</description>
+              <files>
+                <file source="IL2CPP/PackRat.IL2CPP.dll" destination="Mods" />
+              </files>
+            </plugin>
+            <plugin name="Mono">
+              <description>Mono runtime</description>
+              <files>
+                <file source="Mono/PackRat.Mono.dll" destination="Mods" />
+              </files>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+                ),
+                ("IL2CPP/PackRat.IL2CPP.dll", b"il2cpp-bytes"),
+                ("Mono/PackRat.Mono.dll", b"mono-bytes"),
+            ],
+        )?;
+
+        let stored = service
+            .store_mod_archive(
+                zip_path.to_string_lossy().as_ref(),
+                "PackRat-Fomod.zip",
+                None,
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "1629",
+                    "sourceVersion": "1.0.7r2"
+                })),
+                None,
+            )
+            .await?;
+
+        let storage_id = stored
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("storage id");
+        let storage_dir = service.get_mods_storage_dir().await?.join(storage_id);
+
+        assert!(storage_dir.join("Mods").join("PackRat.IL2CPP.dll").exists());
+        assert!(storage_dir.join("Mods").join("PackRat.Mono.dll").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn store_mod_archive_honors_requested_runtime_for_fomod_mods() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let zip_path = temp.path().join("RuntimeSpecific-Fomod.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "fomod/moduleconfig.xml",
+                    br#"
+<config>
+  <moduleName>Runtime Specific</moduleName>
+  <installSteps order="Explicit">
+    <installStep name="Runtime">
+      <optionalFileGroups order="Explicit">
+        <group name="Runtime" type="SelectExactlyOne">
+          <plugins order="Explicit">
+            <plugin name="IL2CPP">
+              <files>
+                <file source="IL2CPP/RuntimeSpecific.IL2CPP.dll" destination="Mods" />
+              </files>
+            </plugin>
+            <plugin name="Mono">
+              <files>
+                <file source="Mono/RuntimeSpecific.Mono.dll" destination="Mods" />
+              </files>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+                ),
+                ("IL2CPP/RuntimeSpecific.IL2CPP.dll", b"il2cpp-bytes"),
+                ("Mono/RuntimeSpecific.Mono.dll", b"mono-bytes"),
+            ],
+        )?;
+
+        let stored = service
+            .store_mod_archive(
+                zip_path.to_string_lossy().as_ref(),
+                "RuntimeSpecific-Fomod.zip",
+                Some(Runtime::Mono),
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "runtime-specific",
+                    "sourceVersion": "1.0.0"
+                })),
+                None,
+            )
+            .await?;
+
+        let storage_id = stored
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("storage id");
+        let storage_dir = service.get_mods_storage_dir().await?.join(storage_id);
+
+        assert!(storage_dir
+            .join("Mods")
+            .join("RuntimeSpecific.Mono.dll")
+            .exists());
+        assert!(!storage_dir
+            .join("Mods")
+            .join("RuntimeSpecific.IL2CPP.dll")
+            .exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn install_storage_mod_to_envs_installs_nested_mono_storage_files() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
@@ -7578,7 +8122,9 @@ mod tests {
         storage_meta.mod_name = Some("ScheduleToolbox".to_string());
         storage_meta.author = Some("Author".to_string());
         storage_meta.detected_runtime = Some(Runtime::Mono);
-        service.save_storage_metadata(&storage_base, &storage_meta).await?;
+        service
+            .save_storage_metadata(&storage_base, &storage_meta)
+            .await?;
 
         service
             .install_storage_mod_to_envs("storage-mono-nested", vec![stale_env.id.clone()])

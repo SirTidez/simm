@@ -1,5 +1,5 @@
-pub mod app_update;
 pub mod app_init;
+pub mod app_update;
 pub mod auth;
 pub mod config;
 pub mod depot_downloader;

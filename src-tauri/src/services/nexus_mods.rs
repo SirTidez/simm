@@ -208,11 +208,7 @@ impl NexusModsService {
         }
 
         let collapsed = original.replace([' ', '_', '-'], "");
-        if !collapsed.is_empty()
-            && !variants
-                .iter()
-                .any(|v| v.eq_ignore_ascii_case(&collapsed))
-        {
+        if !collapsed.is_empty() && !variants.iter().any(|v| v.eq_ignore_ascii_case(&collapsed)) {
             variants.push(collapsed);
         }
 
@@ -731,6 +727,7 @@ impl NexusModsService {
         Ok(downloaded.bytes)
     }
 }
+
 impl Default for NexusModsService {
     fn default() -> Self {
         Self::new()

@@ -178,7 +178,6 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
       >
         <div className="modal-header">
           <h2>Accounts</h2>
-          <button className="modal-close" onClick={onClose} aria-label="Close accounts panel">×</button>
         </div>
 
         <div className="accounts-pane">

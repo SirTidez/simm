@@ -19,6 +19,7 @@ import {
   SecurityScanReportOverlay,
   type SecurityScanReportOption,
 } from "./SecurityScanReportOverlay";
+import { type SecurityReportWorkspaceRequest } from "./SecurityScanReportPage";
 import {
   AnchoredContextMenu,
   type AnchoredContextMenuItem,
@@ -294,14 +295,87 @@ const getNexusModUpdatedAt = (
   );
 };
 
+const getNexusFileUpdatedAt = (
+  file?:
+    | NexusModFile
+    | (NexusModFile & {
+        uploaded_time?: string;
+        updated_time?: string;
+        uploadedAt?: string;
+        updatedAt?: string;
+        uploaded_at?: string;
+        updated_at?: string;
+      })
+    | null,
+): DateLike => {
+  if (!file) {
+    return undefined;
+  }
+
+  if (file.uploaded_timestamp) {
+    return new Date(file.uploaded_timestamp * 1000).toISOString();
+  }
+
+  return (
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).updated_time ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).uploaded_time ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).updated_at ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).uploaded_at ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).updatedAt ||
+    (file as NexusModFile & {
+      updated_time?: string;
+      uploaded_time?: string;
+      updated_at?: string;
+      uploaded_at?: string;
+      updatedAt?: string;
+      uploadedAt?: string;
+    }).uploadedAt
+  );
+};
+
 const normalizeSearchText = (value?: string): string => {
   return (value || "").toLowerCase().replace(/[\s_-]+/g, "");
 };
 
 const inferNexusFileRuntime = (
-  file: Pick<NexusModFile, "file_name" | "name">,
+  file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
 ): "IL2CPP" | "Mono" | "Unknown" => {
-  const fileName = (file.file_name || file.name || "").toLowerCase();
+  const fileName = `${file.file_name || ""} ${file.name || ""} ${file.category_name || ""}`.toLowerCase();
   if (fileName.includes("il2cpp")) {
     return "IL2CPP";
   }
@@ -309,6 +383,27 @@ const inferNexusFileRuntime = (
     return "Mono";
   }
   return "Unknown";
+};
+
+const isNexusFomodInstaller = (
+  file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
+): boolean => {
+  const haystack =
+    `${file.file_name || ""} ${file.name || ""} ${file.category_name || ""}`.toLowerCase();
+  return (
+    haystack.includes("vortex installer") ||
+    haystack.includes("fomod") ||
+    (haystack.includes("installer") && !haystack.includes("melonloader"))
+  );
+};
+
+const getNexusFileDisplayKind = (
+  file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
+): "FOMOD Installer" | "IL2CPP" | "Mono" | "Unknown" => {
+  if (isNexusFomodInstaller(file)) {
+    return "FOMOD Installer";
+  }
+  return inferNexusFileRuntime(file);
 };
 
 const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
@@ -325,6 +420,19 @@ const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
       Number(right.uploaded_timestamp || 0) - Number(left.uploaded_timestamp || 0);
     if (uploadedDelta !== 0) {
       return uploadedDelta;
+    }
+
+    const rightDate = parseTimestamp(getNexusFileUpdatedAt(right));
+    const leftDate = parseTimestamp(getNexusFileUpdatedAt(left));
+    const fallbackDateDelta = rightDate - leftDate;
+    if (fallbackDateDelta !== 0) {
+      return fallbackDateDelta;
+    }
+
+    const leftInstaller = isNexusFomodInstaller(left);
+    const rightInstaller = isNexusFomodInstaller(right);
+    if (leftInstaller !== rightInstaller) {
+      return leftInstaller ? 1 : -1;
     }
 
     if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
@@ -568,6 +676,7 @@ interface Props {
   focusRequestId?: number;
   focusModTag?: string | null;
   onOpenAccounts?: () => void;
+  onOpenSecurityReport?: (request: SecurityReportWorkspaceRequest) => void;
   navigationState?: ModLibraryNavigationState;
   onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
 }
@@ -601,6 +710,7 @@ export function ModLibraryOverlay({
   focusRequestId,
   focusModTag,
   onOpenAccounts,
+  onOpenSecurityReport,
   navigationState,
   onNavigationStateChange,
 }: Props) {
@@ -699,13 +809,7 @@ export function ModLibraryOverlay({
   );
   const [activeModView, setActiveModView] =
     useState<LibraryModViewState | null>(() => navigationState?.activeModView ?? null);
-  const [activeSecurityReport, setActiveSecurityReport] = useState<{
-    title: string;
-    report: SecurityScanReport;
-    reportOptions?: SecurityScanReportOption[];
-    confirmLabel?: string;
-    onConfirm?: (() => Promise<void>) | null;
-  } | null>(null);
+  const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [installDialog, setInstallDialog] = useState<InstallDialogState>({
@@ -736,9 +840,7 @@ export function ModLibraryOverlay({
   const libraryScrollTopRef = useRef(0);
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
-  const pendingSecurityGateResolutionRef = useRef<
-    ((accepted: boolean) => void) | null
-  >(null);
+  const pendingSecurityGateResolutionRef = useRef<(() => void) | null>(null);
   const pendingNexusManualActionRef = useRef<null | {
     onSuccess: () => Promise<void>;
     onErrorTitle?: string;
@@ -1107,16 +1209,24 @@ export function ModLibraryOverlay({
     [closeConfirmOverlay],
   );
 
+  const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
+    if (onOpenSecurityReport) {
+      onOpenSecurityReport(request);
+      return;
+    }
+
+    setActiveSecurityReport(request);
+  }, [onOpenSecurityReport]);
+
   const closeSecurityReport = useCallback(() => {
     if (securityActionBusy) {
       return;
     }
 
-    const resolvePending = pendingSecurityGateResolutionRef.current;
     pendingSecurityGateResolutionRef.current = null;
-    resolvePending?.(false);
+    activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
-  }, [securityActionBusy]);
+  }, [activeSecurityReport, securityActionBusy]);
 
   const handleSecurityReportConfirm = useCallback(async () => {
     if (!activeSecurityReport?.onConfirm) {
@@ -1210,7 +1320,7 @@ export function ModLibraryOverlay({
         );
 
         if (reportOptions.length > 0) {
-          setActiveSecurityReport({
+          openSecurityReport({
             title,
             report: reportOptions[0].report,
             reportOptions,
@@ -1228,7 +1338,7 @@ export function ModLibraryOverlay({
           return;
         }
 
-        setActiveSecurityReport({ title, report, onConfirm: null });
+        openSecurityReport({ title, report, onConfirm: null });
       } catch (err) {
         console.error("Failed to load security report:", err);
         showLibraryNotice(
@@ -1239,7 +1349,7 @@ export function ModLibraryOverlay({
         );
       }
     },
-    [downloadedGroups, loadStoredSecurityReportOptions, showLibraryNotice],
+    [downloadedGroups, loadStoredSecurityReportOptions, openSecurityReport, showLibraryNotice],
   );
 
   const handleSecurityGateResult = useCallback(
@@ -1261,7 +1371,7 @@ export function ModLibraryOverlay({
       const securityReport = result.securityScan;
 
       if (result.securityScanBlocked) {
-        setActiveSecurityReport({
+        openSecurityReport({
           title,
           report: securityReport,
           onConfirm: null,
@@ -1270,19 +1380,25 @@ export function ModLibraryOverlay({
       }
 
       if (result.securityScanConfirmationRequired) {
-        pendingSecurityGateResolutionRef.current?.(false);
+        pendingSecurityGateResolutionRef.current?.();
         return new Promise<boolean>((resolve) => {
-          pendingSecurityGateResolutionRef.current = resolve;
-          setActiveSecurityReport({
+          const finishResolution = () => {
+            if (pendingSecurityGateResolutionRef.current === finishResolution) {
+              pendingSecurityGateResolutionRef.current = null;
+            }
+            resolve(false);
+          };
+
+          pendingSecurityGateResolutionRef.current = finishResolution;
+          openSecurityReport({
             title,
             report: securityReport,
             confirmLabel: "Continue Download",
             onConfirm: async () => {
               await onConfirm();
-              const resolvePending = pendingSecurityGateResolutionRef.current;
-              pendingSecurityGateResolutionRef.current = null;
-              resolvePending?.(false);
+              finishResolution();
             },
+            onDismiss: finishResolution,
           });
         });
       }
@@ -1330,7 +1446,7 @@ export function ModLibraryOverlay({
     async (
       modId: number,
       fileId: number,
-      runtime: "IL2CPP" | "Mono",
+      runtime: "IL2CPP" | "Mono" | undefined,
       onSuccess: () => Promise<void>,
       onErrorTitle?: string,
     ) => {
@@ -1905,7 +2021,7 @@ export function ModLibraryOverlay({
       );
       return ownerMatch || null;
     },
-    [],
+    [openSecurityReport],
   );
 
   const resolveFeaturedThunderstorePackage = useCallback(
@@ -3018,6 +3134,9 @@ export function ModLibraryOverlay({
     );
     const hasIl2cpp = fileNames.some((name) => name.includes("il2cpp"));
     const hasMono = fileNames.some((name) => name.includes("mono"));
+    const fomodInstallerFile =
+      sortNexusFilesNewestFirst(files.filter((file) => isNexusFomodInstaller(file)))[0] ||
+      null;
 
     const access = await getEffectiveNexusDownloadAccess();
     if (!access.connected) {
@@ -3167,9 +3286,75 @@ export function ModLibraryOverlay({
       }
     };
 
+    const runFomodInstallerDownload = async (file: NexusModFile) => {
+      setDownloading(`nexus-${modId}`);
+      let keepPendingDownload = false;
+      try {
+        if (!access.canDirectDownload && access.requiresSiteConfirmation) {
+          await beginManualNexusLibraryDownload(
+            modId,
+            file.file_id,
+            undefined,
+            async () => {
+              await refreshLibrary();
+              notifyLibraryUpdated();
+            },
+          );
+          keepPendingDownload = true;
+          return;
+        }
+
+        const result = await downloadNexusWithSecurity(
+          modId,
+          file.file_id,
+          undefined,
+          "Security Findings - Nexus Download",
+        );
+        if (!result) {
+          return;
+        }
+
+        const nextLibrary = await ApiService.getModLibrary();
+        setLibrary(nextLibrary);
+        notifyLibraryUpdated();
+        const refreshedGroup = findDownloadedGroupForNexusMod(
+          modId,
+          nextLibrary,
+        );
+        showLibraryNotice(
+          "Download Complete",
+          `${refreshedGroup?.displayName || "This mod"}${
+            file.version || file.mod_version
+              ? ` ${formatVersionTag(file.version || file.mod_version)}`
+              : ""
+          } was added to your mod library. SIMM will resolve the FOMOD installer contents from the archive when you install it.`,
+        );
+      } catch (err) {
+        console.error("Failed to download Nexus FOMOD installer:", err);
+        showLibraryNotice(
+          "Nexus Download Failed",
+          err instanceof Error ? err.message : "Failed to download Nexus mod.",
+        );
+      } finally {
+        if (!keepPendingDownload) {
+          setDownloading(null);
+        }
+      }
+    };
+
     if (selectedFile?.file_id) {
+      if (isNexusFomodInstaller(selectedFile)) {
+        void runFomodInstallerDownload(selectedFile);
+        return;
+      }
+
       const runtime = inferNexusFileRuntime(selectedFile);
       void runDownload(runtime === "Unknown" ? "Mono" : runtime);
+      return;
+    }
+
+    if (!hasIl2cpp && !hasMono && fomodInstallerFile?.file_id) {
+      void runFomodInstallerDownload(fomodInstallerFile);
       return;
     }
 
@@ -3875,13 +4060,6 @@ export function ModLibraryOverlay({
       >
         <div className="modal-header">
           <h2>Mod Library</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i
-              className="fas fa-arrow-left"
-              style={{ marginRight: "0.45rem" }}
-            ></i>
-            Back
-          </button>
         </div>
 
         <div className="mods-content" ref={libraryScrollContainerRef}>
@@ -5945,13 +6123,6 @@ export function ModLibraryOverlay({
       <div className="mods-overlay mods-overlay--library workspace-collection-shell">
         <div className="modal-header">
           <h2>Mod Library</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i
-              className="fas fa-arrow-left"
-              style={{ marginRight: "0.45rem" }}
-            ></i>
-            Back
-          </button>
         </div>
 
         <div className="workspace-collection">
@@ -7075,7 +7246,7 @@ export function ModLibraryOverlay({
                       aria-label="Nexus available versions"
                     >
                       {selectedNexusFiles.map((file) => {
-                        const inferredRuntime = inferNexusFileRuntime(file);
+                        const displayKind = getNexusFileDisplayKind(file);
                         const versionLabel =
                           file.version || file.mod_version || "unknown";
                         const isActive =
@@ -7100,7 +7271,7 @@ export function ModLibraryOverlay({
                               </div>
                               <div className="workspace-version-row__badges">
                                 <span className="workspace-pill">
-                                  {inferredRuntime}
+                                  {displayKind}
                                 </span>
                                 {file.is_primary && (
                                   <span className="workspace-pill workspace-pill--success">
@@ -7117,11 +7288,8 @@ export function ModLibraryOverlay({
                             <div className="workspace-version-row__meta">
                               <span>
                                 Uploaded {formatInspectorDate(
-                                  file.uploaded_timestamp
-                                    ? new Date(
-                                        file.uploaded_timestamp * 1000,
-                                      ).toISOString()
-                                    : undefined,
+                                  getNexusFileUpdatedAt(file) ||
+                                    getNexusModUpdatedAt(selectedNexusResult),
                                 )}
                               </span>
                               <span>{file.file_name || file.name}</span>

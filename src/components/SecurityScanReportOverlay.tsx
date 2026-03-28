@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type {
   Finding,
   SecurityScanReport,
@@ -24,6 +24,17 @@ export interface SecurityScanReportOption {
   label: string;
   description?: string;
   report: SecurityScanReport;
+}
+
+export interface SecurityScanReportViewProps {
+  title: string;
+  report: SecurityScanReport | null;
+  reportOptions?: SecurityScanReportOption[];
+  onClose?: () => void;
+  onConfirm?: () => void;
+  confirmLabel?: string;
+  busy?: boolean;
+  presentation?: 'overlay' | 'page';
 }
 
 const severityOrder: Record<Severity, number> = {
@@ -146,8 +157,7 @@ const getThreatFamilyLabel = (families?: ThreatFamily[]): string | null => {
     : `Known malware family match: ${primary.displayName}`;
 };
 
-export function SecurityScanReportOverlay({
-  isOpen,
+export function SecurityScanReportView({
   title,
   report,
   reportOptions,
@@ -155,7 +165,8 @@ export function SecurityScanReportOverlay({
   onConfirm,
   confirmLabel = 'Continue Anyway',
   busy = false,
-}: SecurityScanReportOverlayProps) {
+  presentation = 'overlay',
+}: SecurityScanReportViewProps) {
   const normalizedReportOptions = useMemo<SecurityScanReportOption[]>(() => {
     if (Array.isArray(reportOptions) && reportOptions.length > 0) {
       return reportOptions;
@@ -225,7 +236,7 @@ export function SecurityScanReportOverlay({
     }
   }, [filteredFindings, selectedFinding]);
 
-  if (!isOpen || !activeReport) {
+  if (!activeReport) {
     return null;
   }
 
@@ -237,25 +248,40 @@ export function SecurityScanReportOverlay({
   const summaryDispositionBadge = getSecurityDispositionBadgeConfig(summaryDisposition);
   const activeDispositionBadge = getSecurityDispositionBadgeConfig(activeDisposition);
 
-  return (
-    <div className="modal-overlay modal-overlay-nested" onClick={onClose}>
-      <div
-        className="modal-content modal-content-nested"
-        onClick={(event) => event.stopPropagation()}
-        style={{
-          maxWidth: '1240px',
-          width: 'min(1240px, calc(100vw - 2rem))',
-          maxHeight: 'calc(100vh - max(clamp(8rem, 16vw, 10rem), 140px))',
-          display: 'flex',
-          flexDirection: 'column',
-          padding: 0,
-          overflow: 'hidden',
-          border: '1px solid #324158',
-          borderRadius: '16px',
-          background: 'linear-gradient(180deg, rgba(18, 24, 36, 0.98) 0%, rgba(11, 16, 25, 0.98) 100%)',
-          boxShadow: '0 28px 80px rgba(0, 0, 0, 0.5)',
-        }}
-      >
+  const showCloseActions = presentation === 'overlay' && !!onClose;
+  const shellStyle: CSSProperties = presentation === 'overlay'
+    ? {
+        maxWidth: '1240px',
+        width: 'min(1240px, calc(100vw - 2rem))',
+        maxHeight: 'calc(100vh - max(clamp(8rem, 16vw, 10rem), 140px))',
+        display: 'flex',
+        flexDirection: 'column',
+        padding: 0,
+        overflow: 'hidden',
+        border: '1px solid #324158',
+        borderRadius: '16px',
+        background: 'linear-gradient(180deg, rgba(18, 24, 36, 0.98) 0%, rgba(11, 16, 25, 0.98) 100%)',
+        boxShadow: '0 28px 80px rgba(0, 0, 0, 0.5)',
+      }
+    : {
+        height: '100%',
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        padding: 0,
+        overflow: 'hidden',
+        border: '1px solid #324158',
+        borderRadius: '16px',
+        background: 'linear-gradient(180deg, rgba(18, 24, 36, 0.98) 0%, rgba(11, 16, 25, 0.98) 100%)',
+        boxShadow: '0 18px 44px rgba(0, 0, 0, 0.28)',
+      };
+
+  const shell = (
+    <div
+      className={presentation === 'overlay' ? 'modal-content modal-content-nested' : 'security-report-view security-report-view--page'}
+      onClick={presentation === 'overlay' ? (event) => event.stopPropagation() : undefined}
+      style={shellStyle}
+    >
         <div className="modal-header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
             <span>{title}</span>
@@ -278,7 +304,9 @@ export function SecurityScanReportOverlay({
               {summaryStyle.label}
             </span>
           </h2>
-          <button className="modal-close" onClick={onClose}>×</button>
+          {showCloseActions && (
+            <button className="modal-close" onClick={onClose}>×</button>
+          )}
         </div>
 
         <div
@@ -658,27 +686,68 @@ export function SecurityScanReportOverlay({
           </section>
         </div>
 
-        <div
-          style={{
-            flexShrink: 0,
-            padding: '0.95rem 1.25rem 1.15rem',
-            borderTop: '1px solid #2c3a50',
-            display: 'flex',
-            justifyContent: 'flex-end',
-            gap: '0.6rem',
-            flexWrap: 'wrap',
-          }}
-        >
-          <button className="btn btn-secondary" onClick={onClose}>
-            Close
-          </button>
-          {onConfirm && (
-            <button className="btn btn-primary" onClick={onConfirm} disabled={busy}>
-              {busy ? 'Working...' : confirmLabel}
-            </button>
-          )}
-        </div>
+        {(showCloseActions || onConfirm) && (
+          <div
+            style={{
+              flexShrink: 0,
+              padding: '0.95rem 1.25rem 1.15rem',
+              borderTop: '1px solid #2c3a50',
+              display: 'flex',
+              justifyContent: 'flex-end',
+              gap: '0.6rem',
+              flexWrap: 'wrap',
+            }}
+          >
+            {showCloseActions && (
+              <button className="btn btn-secondary" onClick={onClose}>
+                Close
+              </button>
+            )}
+            {onConfirm && (
+              <button className="btn btn-primary" onClick={onConfirm} disabled={busy}>
+                {busy ? 'Working...' : confirmLabel}
+              </button>
+            )}
+          </div>
+        )}
       </div>
-    </div>
+  );
+
+  if (presentation === 'overlay') {
+    return (
+      <div className="modal-overlay modal-overlay-nested" onClick={onClose}>
+        {shell}
+      </div>
+    );
+  }
+
+  return shell;
+}
+
+export function SecurityScanReportOverlay({
+  isOpen,
+  title,
+  report,
+  reportOptions,
+  onClose,
+  onConfirm,
+  confirmLabel = 'Continue Anyway',
+  busy = false,
+}: SecurityScanReportOverlayProps) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <SecurityScanReportView
+      title={title}
+      report={report}
+      reportOptions={reportOptions}
+      onClose={onClose}
+      onConfirm={onConfirm}
+      confirmLabel={confirmLabel}
+      busy={busy}
+      presentation="overlay"
+    />
   );
 }

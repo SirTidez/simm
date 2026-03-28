@@ -440,7 +440,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     >
       <div className="modal-header">
         <h2>Create Environment</h2>
-        <button className="modal-close" onClick={onClose} aria-label="Close create environment panel">×</button>
       </div>
 
       {error && <div className="settings-error-banner">{error}</div>}

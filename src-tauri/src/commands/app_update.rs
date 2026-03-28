@@ -10,7 +10,8 @@ pub async fn get_app_update_status(
     db: State<'_, Arc<SqlitePool>>,
     current_version: String,
 ) -> Result<serde_json::Value, String> {
-    let mut settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let mut settings_service =
+        SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let settings = settings_service
         .load_settings()
         .await

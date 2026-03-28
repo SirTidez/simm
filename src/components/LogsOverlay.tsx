@@ -743,10 +743,6 @@ export function LogsOverlay({ isOpen, onClose, environmentId, environment, onOpe
             Review live and archived environment logs for {environment.name}.
           </p>
         </div>
-        <button className="btn btn-secondary btn-small" onClick={onClose}>
-          <i className="fas fa-arrow-left"></i>
-          Back
-        </button>
       </div>
 
       <div

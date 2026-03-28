@@ -5,6 +5,7 @@ import {
   SecurityScanReportOverlay,
   type SecurityScanReportOption,
 } from './SecurityScanReportOverlay';
+import { type SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from './modCardHelpers';
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
@@ -63,6 +64,7 @@ interface Props {
   onOpenAccounts?: () => void;
   onOpenModLibrary?: () => void;
   onOpenConfig?: () => void;
+  onOpenSecurityReport?: (request: SecurityReportWorkspaceRequest) => void;
   navigationState?: ModsOverlayNavigationState;
   onNavigationStateChange?: (state: ModsOverlayNavigationState) => void;
 }
@@ -284,6 +286,7 @@ export function ModsOverlay({
   onOpenAccounts,
   onOpenModLibrary,
   onOpenConfig,
+  onOpenSecurityReport,
   navigationState,
   onNavigationStateChange,
 }: Props) {
@@ -313,13 +316,7 @@ export function ModsOverlay({
   const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<{ filePath: string; fileName: string; sourceInfo: any } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [installingDownloaded, setInstallingDownloaded] = useState<string | null>(null);
-  const [activeSecurityReport, setActiveSecurityReport] = useState<{
-    title: string;
-    report: SecurityScanReport;
-    reportOptions?: SecurityScanReportOption[];
-    confirmLabel?: string;
-    onConfirm?: (() => Promise<void>) | null;
-  } | null>(null);
+  const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -484,11 +481,21 @@ export function ModsOverlay({
     };
   }, []);
 
+  const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
+    if (onOpenSecurityReport) {
+      onOpenSecurityReport(request);
+      return;
+    }
+
+    setActiveSecurityReport(request);
+  }, [onOpenSecurityReport]);
+
   const closeSecurityReport = () => {
     if (securityActionBusy) {
       return;
     }
 
+    activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
   };
 
@@ -518,12 +525,12 @@ export function ModsOverlay({
     }
 
     if (result.securityScanBlocked) {
-      setActiveSecurityReport({ title, report: result.securityScan, onConfirm: null });
+      openSecurityReport({ title, report: result.securityScan, onConfirm: null });
       return true;
     }
 
     if (result.securityScanConfirmationRequired) {
-      setActiveSecurityReport({
+      openSecurityReport({
         title,
         report: result.securityScan,
         confirmLabel: 'Continue Install',
@@ -597,7 +604,7 @@ export function ModsOverlay({
         );
 
       if (reportOptions.length > 0) {
-        setActiveSecurityReport({
+        openSecurityReport({
           title,
           report: reportOptions[0].report,
           reportOptions,
@@ -2247,10 +2254,6 @@ export function ModsOverlay({
                 </>
               )}
             </button>
-            <button className="btn btn-secondary btn-small" onClick={onClose}>
-              <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-              Back
-            </button>
           </div>
         </div>
 
@@ -3336,10 +3339,6 @@ export function ModsOverlay({
       <div className="mods-overlay mods-overlay--environment workspace-collection-shell">
         <div className="modal-header">
           <h2>Mods</h2>
-          <button className="btn btn-secondary btn-small" onClick={onClose}>
-            <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-            Back
-          </button>
         </div>
 
         <div className="workspace-collection">

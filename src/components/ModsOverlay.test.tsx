@@ -227,6 +227,67 @@ describe('ModsOverlay', () => {
     expect(await screen.findByText('Security Report - Trusted Mod')).toBeTruthy();
   });
 
+  it('forwards security reports to the workspace page when requested', async () => {
+    const onOpenSecurityReport = vi.fn();
+
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Trusted Mod',
+          fileName: 'Trusted.Mod.dll',
+          path: 'C:/env/Mods/Trusted.Mod.dll',
+          source: 'github',
+          managed: true,
+          disabled: false,
+          modStorageId: 'trusted-storage',
+          securityScan: {
+            state: 'verified',
+            verified: true,
+            totalFindings: 0,
+            threatFamilyCount: 0,
+          },
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModSecurityScanReport.mockResolvedValue({
+      summary: {
+        state: 'verified',
+        verified: true,
+        totalFindings: 0,
+        threatFamilyCount: 0,
+      },
+      policy: {
+        enabled: true,
+        requiresConfirmation: false,
+        blocked: false,
+        promptOnHighFindings: false,
+        blockCriticalFindings: false,
+      },
+      files: [],
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        onOpenSecurityReport={onOpenSecurityReport}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+
+    await waitFor(() => {
+      expect(onOpenSecurityReport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Security Report - Trusted Mod',
+        }),
+      );
+    });
+  });
+
   it('prompts for runtime on ambiguous upload and forwards selected runtime metadata', async () => {
     openMock.mockResolvedValueOnce('C:/mods/Example.dll');
 

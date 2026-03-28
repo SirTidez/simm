@@ -190,10 +190,6 @@ export function UserLibsOverlay({ isOpen, onClose, environmentId, onUserLibsChan
     <div className="mods-overlay workspace-collection-shell">
       <div className="modal-header">
         <h2>User Libraries</h2>
-        <button className="btn btn-secondary btn-small" onClick={onClose}>
-          <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
-          Back
-        </button>
       </div>
 
       <div className="workspace-collection">

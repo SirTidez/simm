@@ -99,7 +99,6 @@ export function WelcomeOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings }
     <section className="modal-content workspace-panel welcome-panel" aria-label="Welcome panel">
       <div className="modal-header">
         <h2>Welcome</h2>
-        <button className="modal-close" onClick={onClose} aria-label="Close welcome panel">×</button>
       </div>
 
       <div className="welcome-panel__body">

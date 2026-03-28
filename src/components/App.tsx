@@ -17,6 +17,10 @@ import { PluginsOverlay } from './PluginsOverlay';
 import { UserLibsOverlay } from './UserLibsOverlay';
 import { LogsOverlay } from './LogsOverlay';
 import { ConfigurationOverlay } from './ConfigurationOverlay';
+import {
+  SecurityScanReportPage,
+  type SecurityReportWorkspaceRequest,
+} from './SecurityScanReportPage';
 import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
@@ -25,7 +29,10 @@ import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { logger } from '../services/logger';
-import type { AppUpdatePreferences, AppUpdateStatus } from '../types';
+import type {
+  AppUpdatePreferences,
+  AppUpdateStatus,
+} from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DownloadsPanel } from './DownloadsPanel';
 
@@ -78,6 +85,7 @@ function AppContent() {
     libraryState?: ModLibraryNavigationState;
     modsState?: ModsOverlayNavigationState;
     libraryFocusRequest?: LibraryFocusRequest | null;
+    securityReportState?: SecurityReportWorkspaceRequest;
   };
   type AppUpdateState =
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
@@ -95,6 +103,7 @@ function AppContent() {
     libraryState: seed?.libraryState,
     modsState: seed?.modsState,
     libraryFocusRequest: seed?.libraryFocusRequest ?? null,
+    securityReportState: seed?.securityReportState,
   }), []);
   const [workspaceStack, setWorkspaceStack] = useState<WorkspaceEntry[]>(() => [
     createWorkspaceEntry({ view: 'home' }),
@@ -122,6 +131,9 @@ function AppContent() {
 
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
+      return false;
+    }
+    if (a.view === 'securityReport' && b.view === 'securityReport') {
       return false;
     }
     if ('environmentId' in a || 'environmentId' in b) {
@@ -177,6 +189,15 @@ function AppContent() {
 
   const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
     pushWorkspace(workspace);
+  }, [pushWorkspace]);
+
+  const openSecurityReportWorkspace = useCallback((reportState: SecurityReportWorkspaceRequest) => {
+    pushWorkspace(
+      { view: 'securityReport' },
+      {
+        securityReportState: reportState,
+      },
+    );
   }, [pushWorkspace]);
 
   const openLibraryWorkspace = useCallback((options?: {
@@ -746,8 +767,21 @@ function AppContent() {
               }));
             }}
             onOpenAccounts={() => pushWorkspace({ view: 'accounts' })}
+            onOpenSecurityReport={openSecurityReportWorkspace}
           />
         );
+      case 'securityReport':
+        return entry.securityReportState ? (
+          <SecurityScanReportPage
+            title={entry.securityReportState.title}
+            report={entry.securityReportState.report}
+            reportOptions={entry.securityReportState.reportOptions}
+            confirmLabel={entry.securityReportState.confirmLabel}
+            onConfirm={entry.securityReportState.onConfirm}
+            onDismiss={entry.securityReportState.onDismiss}
+            onReturn={onCloseHandler}
+          />
+        ) : null;
       case 'wizard':
         return <EnvironmentCreationWizard onClose={onCloseHandler} />;
       case 'accounts':
@@ -791,6 +825,7 @@ function AppContent() {
             onOpenAccounts={() => pushWorkspace({ view: 'accounts' })}
             onOpenModLibrary={() => openLibraryWorkspace()}
             onOpenConfig={() => pushWorkspace({ view: 'config', environmentId: workspace.environmentId })}
+            onOpenSecurityReport={openSecurityReportWorkspace}
             onModUpdatesChecked={(count) => {
               window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
             }}
@@ -835,7 +870,7 @@ function AppContent() {
       default:
         return null;
     }
-  }, [getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, pushWorkspace, updateWorkspaceEntry]);
+  }, [getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, pushWorkspace, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);

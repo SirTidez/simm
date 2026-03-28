@@ -164,7 +164,10 @@ fn score_candidate(candidate: &Value, preferred_query: Option<&str>) -> i32 {
 }
 
 fn build_files_tab_url(game_id: &str, mod_id: u32) -> String {
-    format!("https://www.nexusmods.com/{}/mods/{}?tab=files", game_id, mod_id)
+    format!(
+        "https://www.nexusmods.com/{}/mods/{}?tab=files",
+        game_id, mod_id
+    )
 }
 
 fn build_file_target_url(game_id: &str, mod_id: u32, file: &Value) -> String {
@@ -177,7 +180,11 @@ fn build_file_target_url(game_id: &str, mod_id: u32, file: &Value) -> String {
         })
         .unwrap_or_else(|| build_files_tab_url(game_id, mod_id));
 
-    match file.get("uri").and_then(|value| value.as_str()).map(str::trim) {
+    match file
+        .get("uri")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+    {
         Some(uri) if uri.starts_with("http://") || uri.starts_with("https://") => uri.to_string(),
         Some(uri) if uri.starts_with('/') => format!("https://www.nexusmods.com{}", uri),
         _ => file_target,
@@ -186,8 +193,14 @@ fn build_file_target_url(game_id: &str, mod_id: u32, file: &Value) -> String {
 
 fn select_latest_file<'a>(files: &'a [Value]) -> Option<&'a Value> {
     files.iter().max_by(|left, right| {
-        let left_version = left.get("version").and_then(|value| value.as_str()).unwrap_or("");
-        let right_version = right.get("version").and_then(|value| value.as_str()).unwrap_or("");
+        let left_version = left
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let right_version = right
+            .get("version")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
 
         compare_normalized_versions(left_version, right_version)
             .then_with(|| {
@@ -217,9 +230,12 @@ async fn resolve_app_mod(
         .filter(|value| !value.is_empty())
     {
         if let Ok(mod_id) = configured.parse::<u32>() {
-            return nexus_service.get_mod(game_id, mod_id).await.with_context(|| {
-                format!("Failed to resolve configured Nexus app mod id {}", mod_id)
-            });
+            return nexus_service
+                .get_mod(game_id, mod_id)
+                .await
+                .with_context(|| {
+                    format!("Failed to resolve configured Nexus app mod id {}", mod_id)
+                });
         }
     }
 
@@ -272,7 +288,8 @@ pub async fn fetch_app_update_status(
         .unwrap_or(DEFAULT_GAME_ID);
 
     let app_mod = resolve_app_mod(nexus_service, settings, game_id).await?;
-    let mod_id = parse_mod_id(&app_mod).ok_or_else(|| anyhow!("Resolved app listing is missing a mod id"))?;
+    let mod_id = parse_mod_id(&app_mod)
+        .ok_or_else(|| anyhow!("Resolved app listing is missing a mod id"))?;
     let files = nexus_service.get_mod_files(game_id, mod_id).await?;
     let latest_file = select_latest_file(&files)
         .ok_or_else(|| anyhow!("The SIMM Nexus listing does not expose any versioned files"))?;
@@ -356,6 +373,9 @@ mod tests {
         ];
 
         let latest = select_latest_file(&files).expect("should choose a file");
-        assert_eq!(latest.get("file_id").and_then(|value| value.as_u64()), Some(2));
+        assert_eq!(
+            latest.get("file_id").and_then(|value| value.as_u64()),
+            Some(2)
+        );
     }
 }

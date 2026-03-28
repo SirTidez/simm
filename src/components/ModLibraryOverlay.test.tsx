@@ -91,14 +91,17 @@ function makeThunderstorePackage(
 function renderLibraryOverlay({
   libraryTab,
   navigationState,
+  onOpenSecurityReport,
 }: {
   libraryTab?: 'discover' | 'library' | 'updates';
   navigationState?: Record<string, unknown>;
+  onOpenSecurityReport?: (request: { title: string }) => void;
 } = {}) {
   return render(
     <ModLibraryOverlay
       isOpen={true}
       onClose={() => {}}
+      onOpenSecurityReport={onOpenSecurityReport}
       navigationState={navigationState ?? (libraryTab ? { libraryTab } : undefined)}
     />,
   );
@@ -536,6 +539,202 @@ describe('ModLibraryOverlay', () => {
     });
   });
 
+  it('falls back to the Nexus mod updated date when file rows do not expose upload timestamps', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 301,
+        name: 'Pack Rat Mono',
+        file_name: 'PackRat-mono-1.0.7r2.zip',
+        version: '1.0.7r2',
+        mod_version: '1.0.7r2',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 0,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.7r2',
+            author: 'ExampleAuthor',
+            updated_time: '2026-03-23T12:00:00Z',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.7r2',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    expect(await screen.findByText('Uploaded Mar 23, 2026')).toBeTruthy();
+  });
+
+  it('de-prioritizes FOMOD installers in the Nexus inspector when direct runtime files exist', async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValueOnce({ downloaded: [] });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 501,
+        name: 'Pack Rat Vortex Installer',
+        file_name: 'PackRat-Vortex-Installer-1.0.7r2.zip',
+        version: '1.0.7r2',
+        mod_version: '1.0.7r2',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 2000,
+      },
+      {
+        file_id: 502,
+        name: 'Pack Rat Mono',
+        file_name: 'PackRat-Mono-1.0.7r2.zip',
+        version: '1.0.7r2',
+        mod_version: '1.0.7r2',
+        category_name: 'MAIN',
+        is_primary: false,
+        uploaded_timestamp: 2000,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.7r2',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.7r2',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    expect(await screen.findByText('FOMOD Installer')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Download selected version' }));
+
+    await waitFor(() => {
+      expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+        1629,
+        502,
+        'Mono',
+      );
+    });
+  });
+
+  it('downloads a selected Nexus FOMOD installer without forcing a runtime', async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValueOnce({ downloaded: [] });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 501,
+        name: 'Pack Rat Vortex Installer',
+        file_name: 'PackRat-Vortex-Installer-1.0.7r2.zip',
+        version: '1.0.7r2',
+        mod_version: '1.0.7r2',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 2000,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.7r2',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.7r2',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    fireEvent.click(await screen.findByRole('option', { name: /v1\.0\.7r2/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download selected version' }));
+
+    await waitFor(() => {
+      expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
+        1629,
+        501,
+        undefined,
+      );
+    });
+  });
+
   it('shows version, runtime, and update state in downloaded mod rows', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
@@ -660,6 +859,63 @@ describe('ModLibraryOverlay', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
 
     expect(await screen.findByText('Security Findings - Questionable Mod')).toBeTruthy();
+  });
+
+  it('forwards downloaded security reports to the workspace page when requested', async () => {
+    const onOpenSecurityReport = vi.fn();
+
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: 'Questionable Mod',
+          storageId: 'questionable-storage',
+          securityScan: {
+            state: 'review',
+            verified: false,
+            totalFindings: 1,
+            threatFamilyCount: 0,
+          },
+        }),
+      ],
+    });
+    apiMocks.getModSecurityScanReport.mockResolvedValue({
+      summary: {
+        state: 'review',
+        verified: false,
+        totalFindings: 1,
+        threatFamilyCount: 0,
+      },
+      policy: {
+        enabled: true,
+        requiresConfirmation: false,
+        blocked: false,
+        promptOnHighFindings: false,
+        blockCriticalFindings: false,
+      },
+      files: [],
+    });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: 'v1.0.0',
+      name: 'v1.0.0',
+      published_at: '2025-01-01',
+      prerelease: false,
+      download_url: 'https://example.com/s1api.zip',
+    });
+
+    renderLibraryOverlay({
+      libraryTab: 'library',
+      onOpenSecurityReport,
+    });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Security Report' }));
+
+    await waitFor(() => {
+      expect(onOpenSecurityReport).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Security Findings - Questionable Mod',
+        }),
+      );
+    });
   });
 
   it('loads security reports for sibling runtime downloads in the same mod group', async () => {

@@ -501,13 +501,6 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         >
           <div className="modal-header">
             <h2>Settings</h2>
-            <button
-              className="modal-close"
-              onClick={onClose}
-              aria-label="Close settings panel"
-            >
-              ×
-            </button>
           </div>
 
           {error && <div className="settings-error-banner">{error}</div>}

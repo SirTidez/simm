@@ -2085,6 +2085,33 @@ body::before {
   gap: 0.6rem;
 }
 
+.wizard-overview__stats .settings-stat-card {
+  display: grid;
+  gap: 0.22rem;
+  min-width: 8.75rem;
+  padding: 0.72rem 0.82rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(96, 127, 166, 0.24);
+  background: rgba(12, 21, 34, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.wizard-overview__stats .settings-stat-card span {
+  display: block;
+  color: #9ab0cb;
+  font-size: 0.73rem;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+}
+
+.wizard-overview__stats .settings-stat-card strong {
+  display: block;
+  color: #eef5ff;
+  font-size: 0.98rem;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
 .settings-field-card {
   display: grid;
   gap: 0.48rem;
@@ -5388,6 +5415,7 @@ body {
 
 .window-toolbar-actions .btn.app-shell-toolbar-button--active {
   color: #f4f9ff;
+  font-weight: 700;
   border-color: color-mix(in srgb, var(--primary-btn-color, #646cff) 54%, rgba(255, 255, 255, 0.16));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
@@ -5400,17 +5428,6 @@ body {
 
 .window-toolbar-actions .btn.btn-primary.app-shell-toolbar-button--active {
   background: linear-gradient(180deg, color-mix(in srgb, var(--primary-btn-hover, #535bf2) 76%, white 6%), var(--primary-btn-color, #646cff));
-}
-
-.window-toolbar-actions .btn.app-shell-toolbar-button--active::after {
-  content: "";
-  position: absolute;
-  left: 0.6rem;
-  right: 0.6rem;
-  bottom: 0.28rem;
-  height: 2px;
-  border-radius: 999px;
-  background: rgba(196, 223, 255, 0.88);
 }
 
 .app-body {
@@ -6799,6 +6816,10 @@ body {
   min-height: 0;
   flex: 1;
   padding: 0.85rem 0.95rem 0.95rem;
+}
+
+.security-report-page .workspace-collection {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .workspace-collection__main,

@@ -75,6 +75,7 @@ interface EnvironmentListProps {
 export type WorkspaceRoute =
   | { view: 'home' }
   | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
+  | { view: 'securityReport' }
   | { view: 'mods'; environmentId: string; initialTab?: 'installed' | 'updates' }
   | { view: 'plugins'; environmentId: string }
   | { view: 'userLibs'; environmentId: string }

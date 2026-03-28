@@ -533,19 +533,6 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
     applyFileSelection(file, preferredMode);
   };
 
-  const handleCloseRequest = () => {
-    if (hasDirtyDraft(drafts)) {
-      requestConfirm(
-        'Discard Unsaved Changes?',
-        'Closing the configuration editor will discard any unsaved drafts for this session.',
-        onClose
-      );
-      return;
-    }
-
-    onClose();
-  };
-
   const handleReload = async () => {
     if (!selectedFilePath) return;
     const requestedFilePath = selectedFilePath;
@@ -759,12 +746,6 @@ export function ConfigurationOverlay({ isOpen, onClose, environmentId, environme
           <p className="config-editor__subtitle">
             Manage loader, mod, and auxiliary configuration files for {environment.name}.
           </p>
-        </div>
-        <div className="config-editor__header-actions">
-          <button className="btn btn-secondary btn-small" onClick={handleCloseRequest}>
-            <i className="fas fa-arrow-left"></i>
-            Back
-          </button>
         </div>
       </div>
 

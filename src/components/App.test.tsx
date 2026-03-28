@@ -87,11 +87,13 @@ vi.mock('./ModLibraryOverlay', () => ({
     onClose,
     navigationState,
     onNavigationStateChange,
+    onOpenSecurityReport,
   }: {
     isOpen: boolean;
     onClose: () => void;
     navigationState?: any;
     onNavigationStateChange?: (state: any) => void;
+    onOpenSecurityReport?: (state: any) => void;
   }) =>
     isOpen ? (
       <div>
@@ -100,9 +102,44 @@ vi.mock('./ModLibraryOverlay', () => ({
         <button onClick={() => onNavigationStateChange?.({ libraryTab: 'library', searchQuery: 'pack rat' })}>
           Save Library State
         </button>
+        <button
+          onClick={() =>
+            onOpenSecurityReport?.({
+              title: 'Security Findings - Pack Rat',
+              report: {
+                summary: {
+                  state: 'verified',
+                  verified: true,
+                  totalFindings: 0,
+                  threatFamilyCount: 0,
+                },
+                policy: {
+                  enabled: true,
+                  requiresConfirmation: false,
+                  blocked: false,
+                  promptOnHighFindings: false,
+                  blockCriticalFindings: false,
+                },
+                files: [],
+              },
+            })
+          }
+        >
+          Open Security Report
+        </button>
         <button onClick={onClose}>Close Mod Library</button>
       </div>
     ) : null,
+}));
+
+vi.mock('./SecurityScanReportPage', () => ({
+  SecurityScanReportPage: ({ title, onReturn }: { title: string; onReturn: () => void }) => (
+    <div>
+      <span>Security Report Page</span>
+      <span>{title}</span>
+      <button onClick={onReturn}>Return From Security Report</button>
+    </div>
+  ),
 }));
 
 vi.mock('./SteamAccountOverlay', () => ({
@@ -259,6 +296,24 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
     expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
+  });
+
+  it('renders the security report workspace page when Mod Library opens a report', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Security Report' }));
+
+    expect(await screen.findByText('Security Report Page')).toBeTruthy();
+    expect(screen.getByText('Security Findings - Pack Rat')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Return From Security Report' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Mod Library Overlay')).toBeTruthy();
+    });
   });
 
   it('marks top-level workspace buttons active when their panel is open', async () => {

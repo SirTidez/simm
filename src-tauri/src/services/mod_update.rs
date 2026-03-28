@@ -5,8 +5,8 @@ use crate::services::nexus_mods::NexusModsService;
 use crate::services::thunderstore::ThunderStoreService;
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tauri::{AppHandle, Runtime};
 
@@ -594,9 +594,19 @@ impl ModUpdateService {
 
     fn is_prerelease_marker(value: &str) -> bool {
         let lower = value.to_ascii_lowercase();
-        ["alpha", "beta", "preview", "pre", "rc", "nightly", "experimental", "dev", "test"]
-            .iter()
-            .any(|marker| lower.contains(marker))
+        [
+            "alpha",
+            "beta",
+            "preview",
+            "pre",
+            "rc",
+            "nightly",
+            "experimental",
+            "dev",
+            "test",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
     }
 
     fn compare_versions(current: &str, latest: &str) -> Ordering {
@@ -643,9 +653,7 @@ impl ModUpdateService {
             .to_lowercase();
 
         if runtime_lower == "il2cpp" {
-            file_name.contains("il2cpp")
-                || file_name.contains("main")
-                || file_name.contains("beta")
+            file_name.contains("il2cpp") || file_name.contains("main") || file_name.contains("beta")
         } else {
             file_name.contains("mono") || file_name.contains("alternate")
         }
@@ -883,7 +891,7 @@ impl ModUpdateService {
                     runtime_label,
                     metadata.source_version.as_deref(),
                 )
-                    .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
+                .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
 
                 let file_id = target_file
                     .get("file_id")
@@ -1288,12 +1296,9 @@ mod tests {
             }),
         ];
 
-        let selected = ModUpdateService::select_best_nexus_file_for_update(
-            &files,
-            "IL2CPP",
-            Some("1.0.0"),
-        )
-        .expect("selected nexus file");
+        let selected =
+            ModUpdateService::select_best_nexus_file_for_update(&files, "IL2CPP", Some("1.0.0"))
+                .expect("selected nexus file");
 
         assert_eq!(selected.get("file_id").and_then(|v| v.as_u64()), Some(2));
     }

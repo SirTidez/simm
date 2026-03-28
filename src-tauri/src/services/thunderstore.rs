@@ -232,10 +232,7 @@ impl ThunderStoreService {
 
         let selected_version = if let Some(target_version_uuid) = version_uuid {
             versions.iter().find(|version| {
-                version
-                    .get("uuid4")
-                    .and_then(|value| value.as_str())
-                    == Some(target_version_uuid)
+                version.get("uuid4").and_then(|value| value.as_str()) == Some(target_version_uuid)
             })
         } else {
             versions.first()
