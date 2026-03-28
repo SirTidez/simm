@@ -153,7 +153,19 @@ function AppContent() {
     setWorkspaceStack((previous) => {
       const current = previous[previous.length - 1];
       if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
-        return previous;
+        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+          return previous;
+        }
+        return [
+          ...previous.slice(0, -1),
+          {
+            ...current,
+            route,
+            libraryState: seed?.libraryState ?? current.libraryState,
+            modsState: seed?.modsState ?? current.modsState,
+            securityReportState: seed?.securityReportState ?? current.securityReportState,
+          },
+        ];
       }
       return [...previous, createWorkspaceEntry(route, seed)];
     });

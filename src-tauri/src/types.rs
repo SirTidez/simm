@@ -483,6 +483,7 @@ pub struct ModLibraryEntry {
     pub storage_id: String,
     pub display_name: String,
     pub files: Vec<String>,
+    #[serde(rename = "attachedUserLibs")]
     pub attached_userlibs: Vec<String>,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
@@ -638,8 +639,10 @@ mod tests {
         let json = serde_json::to_value(entry).expect("serialize");
         assert!(json.get("storageId").is_some());
         assert!(json.get("displayName").is_some());
+        assert!(json.get("attachedUserLibs").is_some());
         assert!(json.get("sourceId").is_some());
         assert!(json.get("availableRuntimes").is_some());
+        assert!(json.get("attachedUserlibs").is_none());
         assert!(json.get("storage_ids_by_runtime").is_none());
     }
 

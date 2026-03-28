@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use quick_xml::de::from_str;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,8 +39,8 @@ pub struct InstallSteps {
 pub struct InstallStep {
     #[serde(default, rename = "@name", alias = "name")]
     pub name: Option<String>,
-    #[serde(default, rename = "@visible", alias = "visible")]
-    pub visible: Option<String>,
+    #[serde(rename = "visible")]
+    pub visible: Option<Dependencies>,
     #[serde(rename = "optionalFileGroups")]
     pub optional_file_groups: Option<GroupList>,
     #[serde(rename = "requiredInstallFiles")]
@@ -188,12 +188,16 @@ pub struct Pattern {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dependencies {
+    #[serde(default, rename = "@operator", alias = "operator")]
+    pub operator: Option<String>,
     #[serde(default, rename = "flagDependency")]
     pub flag_dependency: Vec<FlagDependency>,
     #[serde(default, rename = "fileDependency")]
     pub file_dependency: Vec<FileDependency>,
     #[serde(default, rename = "gameDependency")]
     pub game_dependency: Vec<GameDependency>,
+    #[serde(default, rename = "dependencies")]
+    pub dependencies: Vec<Dependencies>,
 }
 
 /// Flag dependency
@@ -212,6 +216,8 @@ pub struct FlagDependency {
 pub struct FileDependency {
     #[serde(default, rename = "@file", alias = "file")]
     pub file: String,
+    #[serde(default, rename = "@state", alias = "state")]
+    pub state: Option<String>,
 }
 
 /// Game dependency
@@ -369,15 +375,19 @@ impl FomodService {
         &self,
         config: &FomodConfig,
         runtime: Option<&str>,
-    ) -> Vec<FomodInstallEntry> {
+    ) -> Result<Vec<FomodInstallEntry>> {
         let mut entries = Vec::new();
         let mut selected_flags = HashMap::<String, String>::new();
 
         let Some(steps) = config.install_steps.as_ref() else {
-            return entries;
+            return Ok(entries);
         };
 
         for step in &steps.install_step {
+            if !self.dependencies_match(step.visible.as_ref(), &selected_flags)? {
+                continue;
+            }
+
             if let Some(required) = step.required_install_files.as_ref() {
                 self.collect_file_entries(required, None, None, &mut entries);
             }
@@ -408,10 +418,10 @@ impl FomodService {
             if let Some(conditional) = step.conditional_file_installs.as_ref() {
                 if let Some(patterns) = conditional.patterns.as_ref() {
                     for pattern in &patterns.pattern {
-                        if self.pattern_dependencies_match(
+                        if self.dependencies_match(
                             pattern.dependencies.as_ref(),
                             &selected_flags,
-                        ) {
+                        )? {
                             if let Some(files) = pattern.files.as_ref() {
                                 self.collect_file_entries(
                                     files,
@@ -428,9 +438,10 @@ impl FomodService {
 
         entries.sort_by_key(|entry| {
             (
-                entry.priority,
-                entry.destination.clone(),
-                entry.source.clone(),
+                entry.destination.to_ascii_lowercase(),
+                entry.source.to_ascii_lowercase(),
+                entry.is_folder,
+                std::cmp::Reverse(entry.priority),
             )
         });
         entries.dedup_by(|right, left| {
@@ -438,7 +449,7 @@ impl FomodService {
                 && right.destination.eq_ignore_ascii_case(&left.destination)
                 && right.is_folder == left.is_folder
         });
-        entries
+        Ok(entries)
     }
 
     /// Extract files from FOMOD archive based on selected options
@@ -491,6 +502,15 @@ impl FomodService {
             }
         }
 
+        let group_type = group
+            .group_type
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if group_type.contains("selectall") || group_type.contains("selectany") {
+            return plugins.plugin.iter().collect();
+        }
+
         let preferred: Vec<&Plugin> = plugins
             .plugin
             .iter()
@@ -502,15 +522,6 @@ impl FomodService {
 
         if plugins.plugin.len() == 1 {
             return vec![&plugins.plugin[0]];
-        }
-
-        let group_type = group
-            .group_type
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if group_type.contains("selectall") || group_type.contains("selectany") {
-            return plugins.plugin.iter().collect();
         }
 
         vec![&plugins.plugin[0]]
@@ -614,20 +625,28 @@ impl FomodService {
         ])
     }
 
-    fn pattern_dependencies_match(
+    fn dependencies_match(
         &self,
         dependencies: Option<&Dependencies>,
         selected_flags: &HashMap<String, String>,
-    ) -> bool {
+    ) -> Result<bool> {
         let Some(dependencies) = dependencies else {
-            return true;
+            return Ok(true);
         };
 
         if !dependencies.file_dependency.is_empty() {
-            return false;
+            return Err(anyhow!(
+                "Unsupported FOMOD fileDependency conditions in installer metadata"
+            ));
+        }
+        if !dependencies.game_dependency.is_empty() {
+            return Err(anyhow!(
+                "Unsupported FOMOD gameDependency conditions in installer metadata"
+            ));
         }
 
-        dependencies.flag_dependency.iter().all(|dependency| {
+        let mut evaluations = Vec::new();
+        evaluations.extend(dependencies.flag_dependency.iter().map(|dependency| {
             let Some(actual) = selected_flags.get(&dependency.flag) else {
                 return false;
             };
@@ -636,7 +655,30 @@ impl FomodService {
                 .as_deref()
                 .map(|expected| actual.eq_ignore_ascii_case(expected))
                 .unwrap_or(true)
-        })
+        }));
+
+        for nested in &dependencies.dependencies {
+            evaluations.push(self.dependencies_match(Some(nested), selected_flags)?);
+        }
+
+        if evaluations.is_empty() {
+            return Ok(true);
+        }
+
+        match dependencies
+            .operator
+            .as_deref()
+            .unwrap_or("And")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "or" => Ok(evaluations.into_iter().any(|value| value)),
+            "and" => Ok(evaluations.into_iter().all(|value| value)),
+            other => Err(anyhow!(
+                "Unsupported FOMOD dependency operator: {}",
+                other
+            )),
+        }
     }
 
     fn normalize_path_value(value: &str) -> String {
@@ -665,5 +707,194 @@ impl Plugin {
                     .and_then(|dependency| dependency.default_type.as_ref())
                     .and_then(|kind| kind.name.as_deref())
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_install_entries_honors_visible_flag_dependencies() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config>
+  <installSteps>
+    <installStep name="Select Runtime">
+      <optionalFileGroups>
+        <group name="Runtime" type="SelectExactlyOne">
+          <plugins>
+            <plugin name="Mono">
+              <conditionFlags>
+                <flag name="runtime" value="mono" />
+              </conditionFlags>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+    <installStep name="Mono Extras">
+      <visible>
+        <flagDependency flag="runtime" value="mono" />
+      </visible>
+      <requiredInstallFiles>
+        <file source="data/Runtime/Mono/Mods/Extra.dll" destination="Mods" />
+      </requiredInstallFiles>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let entries = service
+            .build_install_entries(&config, None)
+            .expect("expected visible dependency evaluation to succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "data/Runtime/Mono/Mods/Extra.dll");
+    }
+
+    #[test]
+    fn build_install_entries_supports_nested_or_flag_dependencies() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config>
+  <installSteps>
+    <installStep name="Select Channel">
+      <optionalFileGroups>
+        <group name="Channel" type="SelectExactlyOne">
+          <plugins>
+            <plugin name="Stable">
+              <conditionFlags>
+                <flag name="channel" value="stable" />
+              </conditionFlags>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+    <installStep name="Shared Payload">
+      <visible operator="Or">
+        <dependencies operator="Or">
+          <flagDependency flag="channel" value="beta" />
+          <flagDependency flag="channel" value="stable" />
+        </dependencies>
+      </visible>
+      <requiredInstallFiles>
+        <file source="data/shared.dll" destination="Mods" />
+      </requiredInstallFiles>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let entries = service
+            .build_install_entries(&config, None)
+            .expect("expected nested OR evaluation to succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "data/shared.dll");
+    }
+
+    #[test]
+    fn build_install_entries_errors_on_unsupported_file_dependencies() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config>
+  <installSteps>
+    <installStep name="File Gated">
+      <visible>
+        <fileDependency file="Mods/Dependency.dll" state="Active" />
+      </visible>
+      <requiredInstallFiles>
+        <file source="data/file-gated.dll" destination="Mods" />
+      </requiredInstallFiles>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let error = service
+            .build_install_entries(&config, None)
+            .expect_err("expected unsupported fileDependency usage to fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported FOMOD fileDependency conditions"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn build_install_entries_keeps_highest_priority_duplicate_mapping() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config>
+  <installSteps>
+    <installStep name="Overrides">
+      <requiredInstallFiles>
+        <file source="data/override.dll" destination="Mods/Example.dll" priority="0" />
+        <file source="data/override.dll" destination="Mods/Example.dll" priority="10" />
+      </requiredInstallFiles>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let entries = service
+            .build_install_entries(&config, None)
+            .expect("expected duplicate priority resolution to succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "data/override.dll");
+        assert_eq!(entries[0].priority, 10);
+    }
+
+    #[test]
+    fn select_plugins_for_group_keeps_all_plugins_for_select_all() {
+        let service = FomodService::new();
+        let group = Group {
+            name: Some("Extras".to_string()),
+            group_type: Some("SelectAll".to_string()),
+            plugins: Some(PluginList {
+                plugin: vec![
+                    Plugin {
+                        name: "Required".to_string(),
+                        description: None,
+                        image: None,
+                        plugin_type: Some("Required".to_string()),
+                        type_descriptor: None,
+                        files: None,
+                        condition_flags: None,
+                    },
+                    Plugin {
+                        name: "Optional".to_string(),
+                        description: None,
+                        image: None,
+                        plugin_type: Some("Optional".to_string()),
+                        type_descriptor: None,
+                        files: None,
+                        condition_flags: None,
+                    },
+                ],
+                order: None,
+            }),
+        };
+
+        let selected = service.select_plugins_for_group(&group, None);
+
+        assert_eq!(selected.len(), 2);
     }
 }

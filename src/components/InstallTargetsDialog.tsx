@@ -18,7 +18,7 @@ interface Props {
   installing: boolean;
 }
 
-function getNormalizedRuntime(environment: Pick<Environment, 'branch' | 'runtime'>): 'IL2CPP' | 'Mono' {
+export function getNormalizedRuntime(environment: Pick<Environment, 'branch' | 'runtime'>): 'IL2CPP' | 'Mono' {
   const normalizedBranch = (environment.branch || '').toLowerCase().replace(/[\s_]+/g, '-');
   if (
     normalizedBranch === 'alternate' ||
@@ -57,9 +57,12 @@ export function InstallTargetsDialog({
   const compatibleCount = compatibleEnvironments.length;
   const selectedCount = selectedEnvironmentIds.size;
   const lockedIds = new Set(lockedEnvironmentIds);
+  const selectableEnvironments = compatibleEnvironments.filter(
+    (environment) => !lockedIds.has(environment.id),
+  );
   const byRuntime = {
-    IL2CPP: compatibleEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'IL2CPP'),
-    Mono: compatibleEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'Mono'),
+    IL2CPP: selectableEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'IL2CPP'),
+    Mono: selectableEnvironments.filter((environment) => getNormalizedRuntime(environment) === 'Mono'),
   };
 
   return (

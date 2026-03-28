@@ -24,7 +24,7 @@ import {
   AnchoredContextMenu,
   type AnchoredContextMenuItem,
 } from "./AnchoredContextMenu";
-import { InstallTargetsDialog } from "./InstallTargetsDialog";
+import { InstallTargetsDialog, getNormalizedRuntime } from "./InstallTargetsDialog";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
   areVersionsEquivalent,
@@ -6030,7 +6030,11 @@ export function ModLibraryOverlay({
           setSelectedInstallEnvironmentIds(
             new Set(
               installDialog.compatibleEnvironments
-                .filter((environment) => environment.runtime === runtime)
+                .filter(
+                  (environment) =>
+                    !installDialog.lockedEnvironmentIds.includes(environment.id)
+                    && getNormalizedRuntime(environment) === runtime,
+                )
                 .map((environment) => environment.id),
             ),
           )

@@ -576,7 +576,13 @@ impl ModUpdateService {
         let mut parts = Vec::new();
         let mut current = String::new();
 
-        for ch in value.trim_start_matches(['v', 'V']).chars() {
+        let core = value
+            .trim_start_matches(['v', 'V'])
+            .split(['-', '+'])
+            .next()
+            .unwrap_or_default();
+
+        for ch in core.chars() {
             if ch.is_ascii_digit() {
                 current.push(ch);
             } else if !current.is_empty() {
@@ -1276,6 +1282,14 @@ mod tests {
         assert!(!ModUpdateService::versions_differ(
             Some("1.1.0-beta"),
             "1.0.2",
+        ));
+    }
+
+    #[test]
+    fn versions_differ_treats_same_core_stable_as_newer_than_numbered_prerelease() {
+        assert!(ModUpdateService::versions_differ(
+            Some("1.1.0-beta.1"),
+            "1.1.0",
         ));
     }
 

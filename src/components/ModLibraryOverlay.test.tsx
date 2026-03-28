@@ -914,6 +914,12 @@ describe('ModLibraryOverlay', () => {
       expect(onOpenSecurityReport).toHaveBeenCalledWith(
         expect.objectContaining({
           title: 'Security Findings - Questionable Mod',
+          report: expect.objectContaining({
+            summary: expect.objectContaining({
+              state: 'review',
+              totalFindings: 1,
+            }),
+          }),
         }),
       );
     });

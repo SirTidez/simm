@@ -18,7 +18,11 @@ pub async fn get_app_update_status(
         .map_err(|e| e.to_string())?;
 
     let nexus_service = NexusModsService::new();
-    if let Some(api_key) = settings.nexus_mods_api_key.clone() {
+    let persisted_api_key = settings_service
+        .get_nexus_mods_api_key()
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(api_key) = persisted_api_key.or(settings.nexus_mods_api_key.clone()) {
         nexus_service.set_api_key(api_key).await;
     }
 

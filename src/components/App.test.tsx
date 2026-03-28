@@ -204,7 +204,11 @@ vi.mock('./Settings', () => ({
 }));
 
 vi.mock('./Footer', () => ({
-  Footer: () => <div>Footer</div>,
+  Footer: ({ onOpenModUpdates }: { onOpenModUpdates?: () => void }) => (
+    <div>
+      <button onClick={onOpenModUpdates}>Open Mod Updates</button>
+    </div>
+  ),
 }));
 
 vi.mock('./DownloadsPanel', () => ({
@@ -296,6 +300,19 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
     expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
+  });
+
+  it('retargets the current mod library workspace when a same-route navigation carries new state', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+    expect(await screen.findByText('Active Library Tab: discover')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Library State' }));
+    expect(await screen.findByText('Active Library Tab: library')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Mod Updates' }));
+    expect(await screen.findByText('Active Library Tab: updates')).toBeTruthy();
   });
 
   it('renders the security report workspace page when Mod Library opens a report', async () => {

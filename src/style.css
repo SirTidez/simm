@@ -558,7 +558,7 @@ body::before {
   font-size: clamp(1rem, 2vw, 1.1rem);
   font-weight: 600;
   line-height: 1.4;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   flex: 1;
   min-width: 0;
   color: var(--app-text-color, #ffffff);
@@ -636,7 +636,7 @@ body::before {
   font-size: clamp(0.85rem, 1.5vw, 0.9rem);
   color: var(--text-secondary, #cccccc);
   line-height: 1.5;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   min-height: 1.5em;
 }
 
@@ -731,8 +731,7 @@ body::before {
 
 .environment-details .detail-value {
   flex: 1;
-  word-break: break-word;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   min-width: 0;
 }
 
@@ -2367,7 +2366,7 @@ body::before {
   font-weight: 700;
   line-height: 1.3;
   color: #e5eefc;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .melonloader-dialog__empty {
@@ -3704,7 +3703,6 @@ body::before {
   display: flex;
   align-items: center;
   overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 .config-entry-row textarea {
@@ -4400,7 +4398,7 @@ body::before {
   grid-row: 2;
   color: #eef5ff;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   line-height: 1.34;
   font-size: 0.74rem;
   padding-left: 0;
@@ -4521,7 +4519,7 @@ body::before {
   background: rgba(14, 22, 34, 0.54);
   color: #e8f1ff;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   font-size: 0.74rem;
 }
 
@@ -4807,7 +4805,7 @@ body::before {
   margin: 0;
   color: var(--workspace-copy-color);
   line-height: 1.45;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .settings-callout code {
@@ -7179,7 +7177,7 @@ body {
   overflow: visible;
   text-overflow: clip;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   line-height: 1.25;
 }
 
@@ -7273,7 +7271,6 @@ body {
   min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
-  word-break: break-word;
   line-height: 1.2;
 }
 
@@ -8179,7 +8176,7 @@ body {
   font-size: 0.65rem;
   color: var(--text-secondary, #cccccc);
   text-align: center;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   line-height: 1.2;
 }
 

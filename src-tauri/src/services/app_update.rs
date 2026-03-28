@@ -102,6 +102,7 @@ fn build_search_queries(settings: &Settings) -> Vec<String> {
 fn parse_mod_id(value: &Value) -> Option<u32> {
     value
         .get("mod_id")
+        .or_else(|| value.get("modId"))
         .and_then(|candidate| candidate.as_u64())
         .map(|candidate| candidate as u32)
 }
@@ -109,6 +110,7 @@ fn parse_mod_id(value: &Value) -> Option<u32> {
 fn parse_file_id(value: &Value) -> Option<u32> {
     value
         .get("file_id")
+        .or_else(|| value.get("fileId"))
         .and_then(|candidate| candidate.as_u64())
         .map(|candidate| candidate as u32)
 }
@@ -377,5 +379,14 @@ mod tests {
             latest.get("file_id").and_then(|value| value.as_u64()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn parse_mod_id_supports_graphql_camel_case_shape() {
+        let entry = serde_json::json!({
+            "modId": 42
+        });
+
+        assert_eq!(super::parse_mod_id(&entry), Some(42));
     }
 }
