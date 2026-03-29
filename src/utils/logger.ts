@@ -12,6 +12,10 @@ const originalConsole = {
 
 let consoleIntercepted = false;
 
+function shouldForwardToBackend(level: string): boolean {
+  return level === 'warn' || level === 'error';
+}
+
 /**
  * Safely stringify an object, handling circular references
  */
@@ -28,6 +32,10 @@ function safeStringify(obj: any): string {
  * Fire-and-forget - don't wait for the backend response
  */
 function sendToBackend(level: string, message: string, data?: any) {
+  if (!shouldForwardToBackend(level)) {
+    return;
+  }
+
   // Fire and forget - don't await, don't block
   invoke('log_frontend_message', {
     level,
@@ -132,9 +140,9 @@ export function interceptConsole() {
     sendToBackend('debug', message);
   };
 
-  const readyMessage = '[Logger] Console interception enabled - all console output will be logged to file';
+  const readyMessage = '[Logger] Console interception enabled - warnings and errors will be logged to file';
   originalConsole.info(readyMessage);
-  sendToBackend('info', readyMessage);
+  sendToBackend('warn', readyMessage);
 }
 
 

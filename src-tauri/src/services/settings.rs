@@ -108,9 +108,12 @@ impl SettingsService {
             if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&data) {
                 let sanitized = Self::sanitize_legacy_settings_value(raw_value);
                 if let Ok(settings) = serde_json::from_value::<Settings>(sanitized) {
+                    log::warn!("Recovered persisted settings through legacy sanitization");
                     return Ok(settings);
                 }
             }
+
+            log::warn!("Stored settings could not be parsed; falling back to defaults");
         }
 
         let platform = if cfg!(target_os = "windows") {
@@ -144,7 +147,7 @@ impl SettingsService {
             show_security_scan_badges: Some(true),
             update_check_interval: Some(60),
             auto_check_updates: Some(true),
-            log_level: Some(crate::types::LogLevel::Info),
+            log_level: Some(crate::types::LogLevel::Warn),
             nexus_mods_api_key: None,
             nexus_mods_rate_limits: None,
             nexus_mods_game_id: Some("schedule1".to_string()),

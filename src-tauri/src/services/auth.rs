@@ -1,4 +1,5 @@
 use crate::utils::depot_downloader_detector::detect_depot_downloader;
+use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
 use std::process::Stdio;
 use tokio::process::Command;
@@ -26,6 +27,7 @@ impl AuthService {
     ) -> Result<AuthResult> {
         let detector_info = detect_depot_downloader().await?;
         if !detector_info.installed || detector_info.path.is_none() {
+            warn_with_location("Steam auth rejected because DepotDownloader is not installed");
             return Ok(AuthResult {
                 success: false,
                 error: Some(
@@ -57,10 +59,17 @@ impl AuthService {
 
         // Get depots directory from SIMM folder
         let depots_dir = crate::utils::directory_init::get_depots_dir()
-            .context("Failed to get depots directory")?;
+            .context("Failed to get depots directory")
+            .map_err(|error| {
+                error_with_location(format!(
+                    "Steam auth failed to resolve DepotDownloader working directory: {}",
+                    error
+                ));
+                error
+            })?;
 
         #[cfg(target_os = "windows")]
-        let mut child = {
+        let mut child = ({
             #[allow(unused_imports)] // Required for CommandExt trait methods
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
@@ -71,8 +80,15 @@ impl AuthService {
                 .stderr(Stdio::piped())
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
-                .context("Failed to spawn DepotDownloader process")?
-        };
+                .context("Failed to spawn DepotDownloader process")
+        })
+        .map_err(|error| {
+            error_with_location(format!(
+                "Steam auth failed to spawn DepotDownloader: {}",
+                error
+            ));
+            error
+        })?;
 
         #[cfg(not(target_os = "windows"))]
         let mut child = Command::new(&executable_path)
@@ -82,7 +98,14 @@ impl AuthService {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("Failed to spawn DepotDownloader process")?;
+            .context("Failed to spawn DepotDownloader process")
+            .map_err(|error| {
+                error_with_location(format!(
+                    "Steam auth failed to spawn DepotDownloader: {}",
+                    error
+                ));
+                error
+            })?;
 
         // Handle password if provided
         if let Some(pwd) = password {
@@ -96,7 +119,13 @@ impl AuthService {
             }
         }
 
-        let output = child.wait_with_output().await?;
+        let output = child.wait_with_output().await.map_err(|error| {
+            error_with_location(format!(
+                "Steam auth failed while waiting for DepotDownloader output: {}",
+                error
+            ));
+            error
+        })?;
         let all_output = String::from_utf8_lossy(&output.stdout).to_string()
             + &String::from_utf8_lossy(&output.stderr).to_string();
         let sanitized_output =
@@ -113,6 +142,10 @@ impl AuthService {
                 requires_steam_guard: None,
             })
         } else if lower_output.contains("steam guard") || lower_output.contains("two-factor") {
+            warn_with_location(format!(
+                "Steam auth requires Steam Guard approval: {}",
+                sanitized_output
+            ));
             Ok(AuthResult {
                 success: false,
                 error: Some("Steam Guard approval required".to_string()),
@@ -121,12 +154,20 @@ impl AuthService {
         } else if lower_output.contains("password")
             && (lower_output.contains("incorrect") || lower_output.contains("invalid"))
         {
+            warn_with_location(format!(
+                "Steam auth rejected invalid credentials: {}",
+                sanitized_output
+            ));
             Ok(AuthResult {
                 success: false,
                 error: Some("Invalid password".to_string()),
                 requires_steam_guard: None,
             })
         } else {
+            error_with_location(format!(
+                "Steam auth failed with DepotDownloader output: {}",
+                sanitized_output
+            ));
             Ok(AuthResult {
                 success: false,
                 error: Some(format!("Authentication failed: {}", sanitized_output)),

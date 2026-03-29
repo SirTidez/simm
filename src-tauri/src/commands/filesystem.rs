@@ -1,5 +1,6 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
+use crate::utils::logging::{error_with_location, warn_with_location};
 use crate::utils::validation::validate_directory_path;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -8,12 +9,6 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
-
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{
-        crate::utils::logging::route_stderr_log(format!($($arg)*));
-    }};
-}
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
@@ -24,6 +19,20 @@ async fn get_fs_service() -> Result<Arc<FileSystemService>, String> {
         *service = Some(Arc::new(FileSystemService::new()));
     }
     Ok(service.as_ref().unwrap().clone())
+}
+
+#[track_caller]
+fn command_warn(message: impl Into<String>) -> String {
+    let message = message.into();
+    warn_with_location(&message);
+    message
+}
+
+#[track_caller]
+fn command_error(message: impl Into<String>) -> String {
+    let message = message.into();
+    error_with_location(&message);
+    message
 }
 
 #[tauri::command]
@@ -77,39 +86,43 @@ pub async fn launch_game(
         .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
+        .ok_or_else(|| {
+            command_warn(format!(
+                "Launch requested for unknown environment {}",
+                environment_id
+            ))
+        })?;
 
     if env.output_dir.is_empty() {
-        return Err("Output directory not set".to_string());
+        return Err(command_warn(format!(
+            "Launch requested for environment {} but output directory is not set",
+            environment_id
+        )));
     }
 
     match env.status {
         crate::types::EnvironmentStatus::Completed => {}
-        _ => return Err("Game must be downloaded before launching".to_string()),
+        _ => {
+            return Err(command_warn(format!(
+                "Launch requested for environment {} before download completed",
+                environment_id
+            )))
+        }
     }
 
     let fs_service = get_fs_service().await?;
 
     // Determine launch method based on environment type or provided method
     let method_str = if let Some(ref m) = launch_method {
-        eprintln!("[Launch] Using provided launch method: {}", m);
         m.as_str()
     } else if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
-        eprintln!("[Launch] Defaulting to Steam for Steam environment");
         "steam" // Steam environments should launch via Steam
     } else {
-        eprintln!("[Launch] Defaulting to direct for DepotDownloader environment");
         "direct" // DepotDownloader environments should launch directly
     };
 
-    eprintln!(
-        "[Launch] Final method_str: {}, environment_type: {:?}",
-        method_str, env.environment_type
-    );
-
     let is_steam_environment = env.environment_type == Some(crate::types::EnvironmentType::Steam);
     let game_dir_for_launch = if method_str == "steam" && is_steam_environment {
-        eprintln!("[Launch] Steam environment + steam method: launching via Steam client");
         None
     } else {
         Some(env.output_dir.as_str())
@@ -118,7 +131,12 @@ pub async fn launch_game(
     let result = fs_service
         .launch_game(game_dir_for_launch, Some(method_str))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            command_error(format!(
+                "Launch command failed for environment {} via {}: {}",
+                environment_id, method_str, e
+            ))
+        })?;
 
     Ok(serde_json::json!({
         "success": true,

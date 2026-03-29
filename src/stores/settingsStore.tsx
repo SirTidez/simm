@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { Settings, DepotDownloaderInfo } from '../types';
 import { ApiService } from '../services/api';
+import { logger } from '../services/logger';
 import {
   applyBuiltInTheme,
   normalizeThemeSelection,
@@ -48,6 +49,7 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       setSettings(sanitizedSettings);
       applyTheme(sanitizedSettings.theme);
     } catch (err) {
+      logger.error('Failed to refresh application settings', err);
       setError(err instanceof Error ? err.message : 'Failed to load settings');
     } finally {
       setLoading(false);
@@ -59,7 +61,7 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       const info = await ApiService.detectDepotDownloader();
       setDepotDownloader(info);
     } catch (err) {
-      console.error('Failed to detect DepotDownloader:', err);
+      logger.warn('Failed to detect DepotDownloader', err);
     }
   }, []);
 
@@ -82,6 +84,7 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
         applyTheme(newSettings.theme);
       }
     } catch (err) {
+      logger.error('Failed to persist settings update', err);
       throw err;
     }
   }, [applyTheme, settings]);

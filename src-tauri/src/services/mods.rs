@@ -733,47 +733,142 @@ impl ModsService {
         }
     }
 
+    async fn storage_dir_contains_matching_file(
+        &self,
+        storage_path: &Path,
+        file_name_variants: &HashSet<String>,
+        managed_file_path: &Path,
+    ) -> bool {
+        let mut pending = vec![
+            storage_path.join("Mods"),
+            storage_path.join("Plugins"),
+            storage_path.join("UserLibs"),
+        ];
+
+        while let Some(current) = pending.pop() {
+            if !current.exists() {
+                continue;
+            }
+
+            let mut entries = match fs::read_dir(&current).await {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let metadata = match entry.metadata().await {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+
+                if metadata.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+
+                let file_name = match path.file_name().and_then(|value| value.to_str()) {
+                    Some(value) => value.to_lowercase(),
+                    None => continue,
+                };
+                if !file_name_variants.contains(&file_name) {
+                    continue;
+                }
+
+                if self
+                    .path_matches_storage_source(managed_file_path, &path)
+                    .await
+                {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     async fn infer_storage_id_from_symlink(
         &self,
         mod_file_path: &Path,
         storage_root: &Path,
     ) -> Option<String> {
         let metadata = fs::symlink_metadata(mod_file_path).await.ok()?;
-        if !metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            let link_target = fs::read_link(mod_file_path).await.ok()?;
+            let resolved_target = if link_target.is_absolute() {
+                link_target
+            } else {
+                mod_file_path.parent()?.join(link_target)
+            };
+
+            let canonical_target = match fs::canonicalize(&resolved_target).await {
+                Ok(path) => path,
+                Err(_) => resolved_target,
+            };
+
+            let canonical_storage_root = match fs::canonicalize(storage_root).await {
+                Ok(path) => path,
+                Err(_) => storage_root.to_path_buf(),
+            };
+
+            let relative = canonical_target
+                .strip_prefix(&canonical_storage_root)
+                .ok()?;
+            return match relative.components().next() {
+                Some(Component::Normal(value)) => {
+                    let storage_id = value.to_string_lossy().trim().to_string();
+                    if storage_id.is_empty() {
+                        None
+                    } else {
+                        Some(storage_id)
+                    }
+                }
+                _ => None,
+            };
+        }
+
+        if !metadata.is_file() {
             return None;
         }
 
-        let link_target = fs::read_link(mod_file_path).await.ok()?;
-        let resolved_target = if link_target.is_absolute() {
-            link_target
-        } else {
-            mod_file_path.parent()?.join(link_target)
-        };
+        let file_name = mod_file_path.file_name()?.to_str()?;
+        let variants: HashSet<String> = Self::tracked_name_variants(file_name)
+            .into_iter()
+            .map(|value| value.to_lowercase())
+            .collect();
+        let mut matches = HashSet::new();
+        let mut entries = fs::read_dir(storage_root).await.ok()?;
 
-        let canonical_target = match fs::canonicalize(&resolved_target).await {
-            Ok(path) => path,
-            Err(_) => resolved_target,
-        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let entry_path = entry.path();
+            let entry_meta = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if !entry_meta.is_dir() {
+                continue;
+            }
 
-        let canonical_storage_root = match fs::canonicalize(storage_root).await {
-            Ok(path) => path,
-            Err(_) => storage_root.to_path_buf(),
-        };
+            let storage_id = match entry_path.file_name().and_then(|value| value.to_str()) {
+                Some(value) => value.trim().to_string(),
+                None => continue,
+            };
+            if storage_id.is_empty() {
+                continue;
+            }
 
-        let relative = canonical_target
-            .strip_prefix(&canonical_storage_root)
-            .ok()?;
-        match relative.components().next() {
-            Some(Component::Normal(value)) => {
-                let storage_id = value.to_string_lossy().trim().to_string();
-                if storage_id.is_empty() {
-                    None
-                } else {
-                    Some(storage_id)
+            if self
+                .storage_dir_contains_matching_file(&entry_path, &variants, mod_file_path)
+                .await
+            {
+                matches.insert(storage_id);
+                if matches.len() > 1 {
+                    return None;
                 }
             }
-            _ => None,
         }
+
+        matches.into_iter().next()
     }
 
     async fn path_belongs_to_storage_source(&self, path: &Path, source_path: &Path) -> bool {
@@ -1812,9 +1907,9 @@ impl ModsService {
         let mut pending = vec![dir.to_path_buf()];
 
         while let Some(current) = pending.pop() {
-            let mut entries = fs::read_dir(&current)
-                .await
-                .with_context(|| format!("Failed to read storage directory {}", current.display()))?;
+            let mut entries = fs::read_dir(&current).await.with_context(|| {
+                format!("Failed to read storage directory {}", current.display())
+            })?;
 
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
@@ -2163,30 +2258,78 @@ impl ModsService {
         Ok(storage_dir)
     }
 
-    /// Creates a symbolic link for a file.
+    /// Creates a managed file link.
+    /// On Windows, falls back to a hard link or a copied file when symlink privileges are unavailable.
     pub async fn create_symlink_file(&self, src: &Path, dst: &Path) -> Result<()> {
         let src_owned = src.to_owned();
         let dst_owned = dst.to_owned();
         tokio::task::spawn_blocking(move || {
+            let materialized_via = {
             #[cfg(target_os = "windows")]
             {
-                std::os::windows::fs::symlink_file(&src_owned, &dst_owned).map_err(|e| {
-                    eprintln!("[create_symlink_file] Failed to create file symlink from {:?} to {:?}: {:?}", 
-                             src_owned, dst_owned, e);
-                    anyhow::anyhow!("Failed to create file symlink from {:?} to {:?}: {}", 
-                                   src_owned, dst_owned, e)
-                })?;
+                match std::os::windows::fs::symlink_file(&src_owned, &dst_owned) {
+                    Ok(()) => "symlink",
+                    Err(symlink_error)
+                        if matches!(symlink_error.raw_os_error(), Some(1314) | Some(5)) =>
+                    {
+                        match std::fs::hard_link(&src_owned, &dst_owned) {
+                            Ok(()) => {
+                                log::warn!(
+                                    "Symlink privilege unavailable for {}. Used hard-link fallback.",
+                                    dst_owned.display()
+                                );
+                                "hard link"
+                            }
+                            Err(hard_link_error) => {
+                                std::fs::copy(&src_owned, &dst_owned)
+                                    .map_err(|copy_error| {
+                                        anyhow::anyhow!(
+                                            "Failed to create file symlink from {:?} to {:?}: {}. Hard-link fallback failed: {}. Copy fallback failed: {}",
+                                            src_owned,
+                                            dst_owned,
+                                            symlink_error,
+                                            hard_link_error,
+                                            copy_error
+                                        )
+                                    })?;
+                                log::warn!(
+                                    "Symlink privilege unavailable for {}. Hard-link fallback failed: {}. Used copy fallback.",
+                                    dst_owned.display(),
+                                    hard_link_error
+                                );
+                                "copied file"
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to create file symlink from {:?} to {:?}: {}",
+                            src_owned,
+                            dst_owned,
+                            e
+                        ));
+                    }
+                }
             }
             #[cfg(target_family = "unix")]
             {
                 std::os::unix::fs::symlink(&src_owned, &dst_owned).map_err(|e| {
-                    eprintln!("[create_symlink_file] Failed to create file symlink from {:?} to {:?}: {:?}", 
-                             src_owned, dst_owned, e);
-                    anyhow::anyhow!("Failed to create file symlink from {:?} to {:?}: {}", 
-                                   src_owned, dst_owned, e)
+                    anyhow::anyhow!(
+                        "Failed to create file symlink from {:?} to {:?}: {}",
+                        src_owned,
+                        dst_owned,
+                        e
+                    )
                 })?;
+                "symlink"
             }
-            eprintln!("[create_symlink_file] Successfully created symlink from {:?} to {:?}", src_owned, dst_owned);
+            };
+            eprintln!(
+                "[create_symlink_file] Successfully materialized managed file from {:?} to {:?} via {}",
+                src_owned,
+                dst_owned,
+                materialized_via
+            );
             Ok(())
         })
         .await?
@@ -2991,8 +3134,7 @@ impl ModsService {
             };
             let available_runtimes = self
                 .detect_available_runtimes(runtime_files, template_meta.detected_runtime.clone());
-            let files_by_runtime =
-                self.build_files_by_runtime(runtime_files, &available_runtimes);
+            let files_by_runtime = self.build_files_by_runtime(runtime_files, &available_runtimes);
 
             let mut storage_ids_by_runtime = HashMap::new();
             for runtime in &available_runtimes {
@@ -3608,7 +3750,10 @@ impl ModsService {
             }
 
             let mut removed = false;
-            if self.path_belongs_to_storage_source(&dest_path, &source_path).await {
+            if self
+                .path_matches_storage_source(&dest_path, &source_path)
+                .await
+            {
                 if let Ok(did_remove) = self.remove_path_if_exists(&dest_path).await {
                     removed |= did_remove;
                 }
@@ -3622,7 +3767,10 @@ impl ModsService {
                 )))
             };
             if let Some(disabled) = disabled_path {
-                if self.path_belongs_to_storage_source(&disabled, &source_path).await {
+                if self
+                    .path_matches_storage_source(&disabled, &source_path)
+                    .await
+                {
                     if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await {
                         removed |= did_remove;
                     }
@@ -3841,8 +3989,7 @@ impl ModsService {
                                 .as_deref()
                                 == Some(storage_id)
                             {
-                                if let Ok(did_remove) =
-                                    self.remove_path_if_exists(&disabled).await
+                                if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await
                                 {
                                     removed |= did_remove;
                                 }
@@ -3880,9 +4027,11 @@ impl ModsService {
                             }
                         }
                         if let Some(disabled) = disabled_path {
-                            if self.path_matches_storage_source(&disabled, &source_path).await {
-                                if let Ok(did_remove) =
-                                    self.remove_path_if_exists(&disabled).await
+                            if self
+                                .path_matches_storage_source(&disabled, &source_path)
+                                .await
+                            {
+                                if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await
                                 {
                                     removed |= did_remove;
                                 }
@@ -4289,9 +4438,7 @@ impl ModsService {
                         installed_version: template_meta
                             .as_ref()
                             .and_then(|t| t.installed_version.clone()),
-                        library_added_at: template_meta
-                            .as_ref()
-                            .and_then(|t| t.library_added_at),
+                        library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
                         installed_at: None,
                         last_update_check: None,
                         metadata_last_refreshed: None,
@@ -4303,9 +4450,7 @@ impl ModsService {
                         runtime_match: template_meta.as_ref().and_then(|t| t.runtime_match),
                         mod_storage_id: None,
                         symlink_paths: None,
-                        security_scan: template_meta
-                            .as_ref()
-                            .and_then(|t| t.security_scan.clone()),
+                        security_scan: template_meta.as_ref().and_then(|t| t.security_scan.clone()),
                     });
 
                     if let Some(template) = template_meta.as_ref() {
@@ -7184,18 +7329,23 @@ mod tests {
         fs::create_dir_all(storage_dir.join("Mods").join("IL2CPP")).await?;
         fs::create_dir_all(storage_dir.join("Mods").join("Mono")).await?;
         fs::write(
-            storage_dir.join("Mods").join("IL2CPP").join("PackRat.IL2CPP.dll"),
+            storage_dir
+                .join("Mods")
+                .join("IL2CPP")
+                .join("PackRat.IL2CPP.dll"),
             b"il2cpp",
         )
         .await?;
         fs::write(
-            storage_dir.join("Mods").join("Mono").join("PackRat.Mono.dll"),
+            storage_dir
+                .join("Mods")
+                .join("Mono")
+                .join("PackRat.Mono.dll"),
             b"mono",
         )
         .await?;
 
-        let mut storage_meta =
-            sample_metadata(Some("nested-fomod"), Some("1629"), Some("1.0.7r2"));
+        let mut storage_meta = sample_metadata(Some("nested-fomod"), Some("1629"), Some("1.0.7r2"));
         storage_meta.mod_name = Some("Pack Rat".to_string());
         storage_meta.source = Some(ModSource::Nexusmods);
         service
@@ -7211,8 +7361,14 @@ mod tests {
 
         assert!(entry.files.iter().any(|file| file == "PackRat.IL2CPP.dll"));
         assert!(entry.files.iter().any(|file| file == "PackRat.Mono.dll"));
-        assert!(entry.available_runtimes.iter().any(|runtime| runtime == "IL2CPP"));
-        assert!(entry.available_runtimes.iter().any(|runtime| runtime == "Mono"));
+        assert!(entry
+            .available_runtimes
+            .iter()
+            .any(|runtime| runtime == "IL2CPP"));
+        assert!(entry
+            .available_runtimes
+            .iter()
+            .any(|runtime| runtime == "Mono"));
 
         Ok(())
     }
@@ -8299,7 +8455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_storage_entries_creates_destination_directory_and_symlinks_file(
+    async fn install_storage_entries_creates_destination_directory_and_materializes_file(
     ) -> Result<()> {
         let temp = tempdir()?;
         let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
@@ -8327,10 +8483,14 @@ mod tests {
             .await?;
 
         let installed_path = dest_dir.join("Example.dll");
-        let symlink_meta = fs::symlink_metadata(&installed_path).await?;
+        let installed_meta = fs::symlink_metadata(&installed_path).await?;
 
         assert!(dest_dir.exists());
-        assert!(symlink_meta.file_type().is_symlink());
+        assert!(
+            installed_meta.file_type().is_symlink() || installed_meta.is_file(),
+            "install should create either a symlink or a regular fallback file"
+        );
+        assert_eq!(fs::read(&installed_path).await?, b"data");
         assert_eq!(installed_files, vec!["Example.dll".to_string()]);
         assert!(metadata_map.contains_key("Example.dll"));
 
@@ -8543,13 +8703,7 @@ mod tests {
         fs::create_dir_all(&userlibs_dir).await?;
 
         let result = service
-            .try_extract_fomod_content(
-                &content_root,
-                &mods_dir,
-                &plugins_dir,
-                &userlibs_dir,
-                None,
-            )
+            .try_extract_fomod_content(&content_root, &mods_dir, &plugins_dir, &userlibs_dir, None)
             .await?;
 
         assert!(result.is_none());
@@ -8557,7 +8711,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_fomod_destination_uses_explicit_destination_over_source_layout() -> Result<()> {
+    async fn resolve_fomod_destination_uses_explicit_destination_over_source_layout() -> Result<()>
+    {
         let pool = SqlitePool::connect_lazy("sqlite::memory:")?;
         let service = ModsService::new(Arc::new(pool));
         let entry = FomodInstallEntry {
@@ -8646,8 +8801,11 @@ mod tests {
         )
         .await?;
 
-        let mut storage_meta =
-            sample_metadata(Some("userlibs-owned"), Some("example/source"), Some("1.0.0"));
+        let mut storage_meta = sample_metadata(
+            Some("userlibs-owned"),
+            Some("example/source"),
+            Some("1.0.0"),
+        );
         storage_meta.mod_name = Some("Example Mod".to_string());
         service
             .save_storage_metadata(&storage_dir, &storage_meta)
@@ -8704,13 +8862,7 @@ mod tests {
         fs::create_dir_all(&userlibs_dir).await?;
 
         let installed_files = service
-            .try_extract_fomod_content(
-                &content_root,
-                &mods_dir,
-                &plugins_dir,
-                &userlibs_dir,
-                None,
-            )
+            .try_extract_fomod_content(&content_root, &mods_dir, &plugins_dir, &userlibs_dir, None)
             .await?
             .expect("fomod extraction should materialize files");
 
@@ -8846,14 +8998,18 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(result.get("success").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(true)
+        );
 
         let installed_path = output_dir.join("Mods").join("Net35").join("Nested.dll");
         let installed_meta = fs::symlink_metadata(&installed_path).await?;
         assert!(
-            installed_meta.file_type().is_symlink(),
-            "nested initial install should create a symlink into storage"
+            installed_meta.file_type().is_symlink() || installed_meta.is_file(),
+            "nested initial install should create a symlink or a regular fallback file"
         );
+        assert_eq!(fs::read(&installed_path).await?, b"nested");
 
         Ok(())
     }

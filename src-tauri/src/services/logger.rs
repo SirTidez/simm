@@ -1,18 +1,20 @@
 use crate::types::LogLevel;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
+use log::LevelFilter;
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
 
 static SESSION_LOG_FILENAME: Lazy<String> = Lazy::new(|| {
     let now = Local::now();
     format!("SIMM-log-{}.log", now.format("%Y-%m-%d-%H-%M-%S"))
 });
+static SHARED_LOG_LEVEL: Lazy<RwLock<LogLevel>> = Lazy::new(|| RwLock::new(LogLevel::Warn));
+static SHARED_RETENTION_DAYS: Lazy<RwLock<u32>> = Lazy::new(|| RwLock::new(7));
 static WINDOWS_PATH_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b[a-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*"#)
         .expect("windows path regex")
@@ -35,13 +37,65 @@ static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub struct LoggerService {
-    log_level: Arc<RwLock<LogLevel>>,
     logs_dir: PathBuf,
     session_log_file: PathBuf, // Unified app log file for this session
-    retention_days: Arc<RwLock<u32>>,
 }
 
 impl LoggerService {
+    fn runtime_log_level(configured_level: LogLevel) -> LogLevel {
+        match configured_level {
+            LogLevel::Error => LogLevel::Error,
+            LogLevel::Debug | LogLevel::Info | LogLevel::Warn => LogLevel::Warn,
+        }
+    }
+
+    fn read_log_level() -> LogLevel {
+        *SHARED_LOG_LEVEL
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn read_retention_days() -> u32 {
+        *SHARED_RETENTION_DAYS
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_log_level(level: LogLevel) {
+        let mut current = SHARED_LOG_LEVEL
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = level;
+    }
+
+    fn write_retention_days(days: u32) {
+        let mut current = SHARED_RETENTION_DAYS
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = days;
+    }
+
+    pub fn level_filter(level: LogLevel) -> LevelFilter {
+        match level {
+            LogLevel::Debug => LevelFilter::Trace,
+            LogLevel::Info => LevelFilter::Info,
+            LogLevel::Warn => LevelFilter::Warn,
+            LogLevel::Error => LevelFilter::Error,
+        }
+    }
+
+    pub fn current_log_level() -> LogLevel {
+        Self::read_log_level()
+    }
+
+    pub fn apply_settings(settings: &crate::types::Settings) {
+        let level = Self::runtime_log_level(settings.log_level.unwrap_or(LogLevel::Warn));
+        let retention_days = settings.log_retention_days.unwrap_or(7);
+        Self::write_log_level(level);
+        Self::write_retention_days(retention_days);
+        log::set_max_level(Self::level_filter(level));
+    }
+
     fn summarize_path(path: &str) -> String {
         let trimmed = path.trim_matches('"');
         let tail = trimmed
@@ -139,30 +193,31 @@ impl LoggerService {
 
         // Use one process-global session filename per app launch
         let session_log_file = logs_dir.join(SESSION_LOG_FILENAME.as_str());
+        log::set_max_level(Self::level_filter(Self::read_log_level()));
 
         Ok(Self {
-            log_level: Arc::new(RwLock::new(LogLevel::Info)),
             logs_dir,
             session_log_file,
-            retention_days: Arc::new(RwLock::new(7)), // Default 7 days
         })
     }
 
     pub async fn set_log_level(&self, level: LogLevel) {
-        *self.log_level.write().await = level;
+        let level = Self::runtime_log_level(level);
+        Self::write_log_level(level);
+        log::set_max_level(Self::level_filter(level));
     }
 
     pub async fn set_retention_days(&self, days: u32) {
-        *self.retention_days.write().await = days;
+        Self::write_retention_days(days);
     }
 
     pub async fn get_retention_days(&self) -> u32 {
-        *self.retention_days.read().await
+        Self::read_retention_days()
     }
 
     pub async fn log(&self, level: LogLevel, message: &str, data: Option<serde_json::Value>) {
-        let current_level = self.log_level.read().await.clone();
-        if !self.should_log(level.clone(), current_level.clone()) {
+        let current_level = Self::read_log_level();
+        if !Self::should_log(level, current_level) {
             return;
         }
 
@@ -205,7 +260,7 @@ impl LoggerService {
 
         // Periodically cleanup old logs (do it async without blocking)
         let logs_dir = self.logs_dir.clone();
-        let retention = *self.retention_days.read().await;
+        let retention = Self::read_retention_days();
         tokio::spawn(async move {
             let _ = Self::cleanup_old_logs(&logs_dir, retention).await;
         });
@@ -264,7 +319,7 @@ impl LoggerService {
         Ok(())
     }
 
-    fn should_log(&self, message_level: LogLevel, current_level: LogLevel) -> bool {
+    pub fn should_log(message_level: LogLevel, current_level: LogLevel) -> bool {
         match message_level {
             LogLevel::Debug => matches!(current_level, LogLevel::Debug),
             LogLevel::Info => matches!(current_level, LogLevel::Debug | LogLevel::Info),
@@ -293,8 +348,8 @@ impl LoggerService {
         message: &str,
         data: Option<serde_json::Value>,
     ) {
-        let current_level = self.log_level.read().await.clone();
-        if !self.should_log(level.clone(), current_level.clone()) {
+        let current_level = Self::read_log_level();
+        if !Self::should_log(level, current_level) {
             return;
         }
 
@@ -329,7 +384,7 @@ impl LoggerService {
 
         // Periodically cleanup old logs (do it async without blocking)
         let logs_dir = self.logs_dir.clone();
-        let retention = *self.retention_days.read().await;
+        let retention = Self::read_retention_days();
         tokio::spawn(async move {
             let _ = Self::cleanup_old_logs(&logs_dir, retention).await;
         });
@@ -424,5 +479,72 @@ impl LoggerService {
 impl Default for LoggerService {
     fn default() -> Self {
         Self::new().expect("Failed to create LoggerService")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn should_log_respects_thresholds() {
+        assert!(LoggerService::should_log(LogLevel::Error, LogLevel::Error));
+        assert!(LoggerService::should_log(LogLevel::Warn, LogLevel::Info));
+        assert!(LoggerService::should_log(LogLevel::Debug, LogLevel::Debug));
+        assert!(!LoggerService::should_log(LogLevel::Debug, LogLevel::Info));
+        assert!(!LoggerService::should_log(LogLevel::Info, LogLevel::Warn));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn logger_service_clamps_runtime_level_to_warn_or_error() -> Result<()> {
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+
+        let logger_a = LoggerService::new()?;
+        let logger_b = LoggerService::new()?;
+
+        logger_a.set_log_level(LogLevel::Debug).await;
+        logger_a.set_retention_days(14).await;
+
+        assert_eq!(LoggerService::current_log_level(), LogLevel::Warn);
+        assert_eq!(
+            LoggerService::level_filter(LoggerService::current_log_level()),
+            LevelFilter::Warn
+        );
+        assert_eq!(logger_b.get_retention_days().await, 14);
+
+        logger_b.set_log_level(LogLevel::Error).await;
+        logger_b.set_retention_days(7).await;
+
+        assert_eq!(LoggerService::current_log_level(), LogLevel::Error);
+        assert_eq!(logger_a.get_retention_days().await, 7);
+
+        Ok(())
     }
 }

@@ -1,3 +1,4 @@
+use crate::services::logger::LoggerService;
 use crate::services::settings::SettingsService;
 use crate::types::Settings;
 use sqlx::SqlitePool;
@@ -7,7 +8,9 @@ use tauri::State;
 #[tauri::command]
 pub async fn get_settings(db: State<'_, Arc<SqlitePool>>) -> Result<Settings, String> {
     let mut service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service.load_settings().await.map_err(|e| e.to_string())
+    let settings = service.load_settings().await.map_err(|e| e.to_string())?;
+    LoggerService::apply_settings(&settings);
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -19,7 +22,12 @@ pub async fn save_settings(
     service
         .save_settings(updates)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let settings = service.load_settings().await.map_err(|e| e.to_string())?;
+    LoggerService::apply_settings(&settings);
+
+    Ok(())
 }
 
 #[tauri::command]

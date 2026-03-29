@@ -63,7 +63,8 @@
     "deep-link": {
       "desktop": {
         "schemes": [
-          "simm"
+          "simm",
+          "nxm"
         ]
       }
     }

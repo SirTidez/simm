@@ -90,8 +90,17 @@ impl GlobalLogger {
 
 impl log::Log for GlobalLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        // Log everything at Info level and above
-        metadata.level() <= Level::Info
+        let message_level = match metadata.level() {
+            Level::Error => LogLevel::Error,
+            Level::Warn => LogLevel::Warn,
+            Level::Info => LogLevel::Info,
+            Level::Debug | Level::Trace => LogLevel::Debug,
+        };
+
+        crate::services::logger::LoggerService::should_log(
+            message_level,
+            crate::services::logger::LoggerService::current_log_level(),
+        )
     }
 
     fn log(&self, record: &Record) {
@@ -133,8 +142,10 @@ pub fn init_global_logger() {
         return;
     }
 
-    // Set max log level
-    log::set_max_level(log::LevelFilter::Info);
+    // Set max log level from the shared logger state.
+    log::set_max_level(crate::services::logger::LoggerService::level_filter(
+        crate::services::logger::LoggerService::current_log_level(),
+    ));
 
     eprintln!("[GlobalLogger] Global logger initialized");
 }

@@ -2711,6 +2711,13 @@ export function ModLibraryOverlay({
     ],
   );
 
+  const showInstallSuccessNotice = useCallback(() => {
+    showLibraryNotice(
+      "Installed",
+      "Installed successfully. It may take a couple seconds before it shows in Mods.",
+    );
+  }, [showLibraryNotice]);
+
   const promptInstallTargets = useCallback(
     async (entry: ModLibraryEntry, title: string, installMoreOnly: boolean) => {
       const installEntry = getInstallableEntry(entry);
@@ -2783,6 +2790,7 @@ export function ModLibraryOverlay({
         setInstallingTargets(true);
         try {
           await installEntryToEnvironmentIds(installEntry, [compatible[0].id]);
+          showInstallSuccessNotice();
           await refreshLibrary();
           notifyLibraryUpdated();
           notifyModUpdateStateChanged();
@@ -2820,6 +2828,7 @@ export function ModLibraryOverlay({
       notifyLibraryUpdated,
       notifyModUpdateStateChanged,
       refreshLibrary,
+      showInstallSuccessNotice,
       showLibraryNotice,
     ],
   );
@@ -2835,10 +2844,11 @@ export function ModLibraryOverlay({
         installDialog.entry,
         Array.from(selectedInstallEnvironmentIds),
       );
+      closeInstallDialog();
+      showInstallSuccessNotice();
       await refreshLibrary();
       notifyLibraryUpdated();
       notifyModUpdateStateChanged();
-      closeInstallDialog();
     } catch (error) {
       showLibraryNotice(
         "Install Failed",
@@ -2857,6 +2867,7 @@ export function ModLibraryOverlay({
     notifyModUpdateStateChanged,
     refreshLibrary,
     selectedInstallEnvironmentIds,
+    showInstallSuccessNotice,
     showLibraryNotice,
   ]);
 
@@ -3154,6 +3165,84 @@ export function ModLibraryOverlay({
       return;
     }
 
+    const isManualNexusDownloadRequiredError = (error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : String(error ?? "");
+      const normalized = message.toLowerCase();
+      return (
+        normalized.includes("download-link request failed (403)") ||
+        normalized.includes("forbidden") ||
+        normalized.includes("requires website confirmation") ||
+        normalized.includes("confirm downloads") ||
+        normalized.includes("confirm the download") ||
+        normalized.includes("site confirmation") ||
+        normalized.includes("premium")
+      );
+    };
+
+    const promptManualNexusConfirmation = (
+      fileId: number,
+      runtime: "IL2CPP" | "Mono" | undefined,
+    ) => {
+      showLibraryNotice(
+        "Nexus Download Failed",
+        "This Nexus account must confirm the download on the Nexus Mods website. Press Confirm to open the Files page in your browser, then approve the download there.",
+        {
+          label: "Confirm",
+          cancelText: "Cancel",
+          onAction: () => {
+            setDownloading(`nexus-${modId}`);
+            void beginManualNexusLibraryDownload(
+              modId,
+              fileId,
+              runtime,
+              async () => {
+                await refreshLibrary();
+                notifyLibraryUpdated();
+              },
+              "Nexus Download Failed",
+            ).catch((manualError) => {
+              setDownloading(null);
+              showLibraryNotice(
+                "Nexus Download Failed",
+                manualError instanceof Error
+                  ? manualError.message
+                  : "Failed to open the Nexus manual download flow.",
+              );
+            });
+          },
+        },
+      );
+    };
+
+    const tryDownloadNexusFile = async (
+      fileId: number,
+      runtime: "IL2CPP" | "Mono" | undefined,
+    ) => {
+      try {
+        const result = await downloadNexusWithSecurity(
+          modId,
+          fileId,
+          runtime,
+          "Security Findings - Nexus Download",
+        );
+        return {
+          result,
+          manualConfirmationPrompted: false,
+        };
+      } catch (error) {
+        if (!isManualNexusDownloadRequiredError(error)) {
+          throw error;
+        }
+
+        promptManualNexusConfirmation(fileId, runtime);
+        return {
+          result: null,
+          manualConfirmationPrompted: true,
+        };
+      }
+    };
+
     const runDownload = async (runtime: "IL2CPP" | "Mono" | "Both") => {
       setDownloading(`nexus-${modId}`);
       let keepPendingDownload = false;
@@ -3205,12 +3294,14 @@ export function ModLibraryOverlay({
 
         if (selectedFile?.file_id) {
           const inferredRuntime = inferNexusFileRuntime(selectedFile);
-          const result = await downloadNexusWithSecurity(
-            modId,
-            selectedFile.file_id,
-            inferredRuntime === "Unknown" ? undefined : inferredRuntime,
-            "Security Findings - Nexus Download",
-          );
+          const { result, manualConfirmationPrompted } =
+            await tryDownloadNexusFile(
+              selectedFile.file_id,
+              inferredRuntime === "Unknown" ? undefined : inferredRuntime,
+            );
+          if (manualConfirmationPrompted) {
+            return;
+          }
           if (!result) {
             return;
           }
@@ -3219,24 +3310,22 @@ export function ModLibraryOverlay({
           const il2cppFile = selectNexusFileForRuntime(files, "IL2CPP");
           const monoFile = selectNexusFileForRuntime(files, "Mono");
           if (il2cppFile?.file_id) {
-            const result = await downloadNexusWithSecurity(
-              modId,
-              il2cppFile.file_id,
-              "IL2CPP",
-              "Security Findings - Nexus Download",
-            );
+            const { result, manualConfirmationPrompted } =
+              await tryDownloadNexusFile(il2cppFile.file_id, "IL2CPP");
+            if (manualConfirmationPrompted) {
+              return;
+            }
             if (!result) {
               return;
             }
             results.push(result);
           }
           if (monoFile?.file_id && monoFile?.file_id !== il2cppFile?.file_id) {
-            const result = await downloadNexusWithSecurity(
-              modId,
-              monoFile.file_id,
-              "Mono",
-              "Security Findings - Nexus Download",
-            );
+            const { result, manualConfirmationPrompted } =
+              await tryDownloadNexusFile(monoFile.file_id, "Mono");
+            if (manualConfirmationPrompted) {
+              return;
+            }
             if (!result) {
               return;
             }
@@ -3245,12 +3334,11 @@ export function ModLibraryOverlay({
         } else {
           const targetFile = selectNexusFileForRuntime(files, runtime);
           if (!targetFile?.file_id) return;
-          const result = await downloadNexusWithSecurity(
-            modId,
-            targetFile.file_id,
-            runtime,
-            "Security Findings - Nexus Download",
-          );
+          const { result, manualConfirmationPrompted } =
+            await tryDownloadNexusFile(targetFile.file_id, runtime);
+          if (manualConfirmationPrompted) {
+            return;
+          }
           if (!result) {
             return;
           }
@@ -3306,12 +3394,11 @@ export function ModLibraryOverlay({
           return;
         }
 
-        const result = await downloadNexusWithSecurity(
-          modId,
-          file.file_id,
-          undefined,
-          "Security Findings - Nexus Download",
-        );
+        const { result, manualConfirmationPrompted } =
+          await tryDownloadNexusFile(file.file_id, undefined);
+        if (manualConfirmationPrompted) {
+          return;
+        }
         if (!result) {
           return;
         }
@@ -3343,6 +3430,7 @@ export function ModLibraryOverlay({
         }
       }
     };
+
 
     if (selectedFile?.file_id) {
       if (isNexusFomodInstaller(selectedFile)) {

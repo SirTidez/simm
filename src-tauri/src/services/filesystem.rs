@@ -1,11 +1,6 @@
+use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
 use std::path::Path;
-
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{
-        crate::utils::logging::route_stderr_log(format!($($arg)*));
-    }};
-}
 
 #[derive(Clone)]
 pub struct FileSystemService;
@@ -113,44 +108,38 @@ impl FileSystemService {
     ) -> Result<String> {
         let method = launch_method.unwrap_or("steam");
 
-        eprintln!(
-            "[Launch] launch_game called with method: {:?}, game_dir: {:?}",
-            method, game_dir
-        );
-
         match method {
-            "steam" => {
-                eprintln!("[Launch] Using Steam launch method");
-                self.launch_via_steam(game_dir).await
-            }
+            "steam" => self.launch_via_steam(game_dir).await,
             "direct" => {
-                eprintln!("[Launch] Using direct launch method");
                 let dir = game_dir.ok_or_else(|| {
-                    anyhow::anyhow!("Game directory is required for direct launch")
+                    let message = "Game directory is required for direct launch";
+                    warn_with_location(message);
+                    anyhow::anyhow!(message)
                 })?;
                 self.launch_directly(dir).await
             }
-            _ => Err(anyhow::anyhow!("Unknown launch method: {}", method)),
+            _ => {
+                let message = format!("Unknown launch method: {}", method);
+                warn_with_location(&message);
+                Err(anyhow::anyhow!(message))
+            }
         }
     }
 
     async fn launch_via_steam(&self, game_dir: Option<&str>) -> Result<String> {
         let app_id = crate::services::steam::SteamService::get_steam_app_id();
 
-        eprintln!(
-            "[Launch] launch_via_steam called with game_dir: {:?}",
-            game_dir
-        );
-
         // If we have a custom game directory, use executable method to pass the path
         // Otherwise, try protocol first for simplicity
         if let Some(dir) = game_dir {
-            eprintln!("[Launch] Launching custom environment via Steam: {}", dir);
             self.launch_via_steam_executable(&app_id, Some(dir)).await?;
         } else {
-            eprintln!("[Launch] Launching Steam's own installation");
             // Try Steam protocol first
-            if let Err(_) = self.launch_via_steam_protocol(&app_id).await {
+            if let Err(error) = self.launch_via_steam_protocol(&app_id).await {
+                warn_with_location(format!(
+                    "Steam protocol launch failed for app {}. Falling back to Steam executable: {}",
+                    app_id, error
+                ));
                 // Fallback to Steam executable method
                 self.launch_via_steam_executable(&app_id, None).await?;
             }
@@ -231,10 +220,14 @@ impl FileSystemService {
 
             let executable_path = Path::new(dir).join(executable_name);
             if !executable_path.exists() {
-                return Err(anyhow::anyhow!(
-                    "Game executable not found at {:?}",
-                    executable_path
-                ));
+                let message = format!(
+                    "Game executable not found at {}",
+                    crate::services::logger::LoggerService::sanitize_log_text(
+                        &executable_path.to_string_lossy()
+                    )
+                );
+                error_with_location(&message);
+                return Err(anyhow::anyhow!(message));
             }
 
             // Launch with Steam environment variables to ensure proper authentication
@@ -251,14 +244,27 @@ impl FileSystemService {
                 cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW flag
             }
 
-            cmd.spawn().context("Failed to launch game executable")?;
+            cmd.spawn()
+                .context("Failed to launch game executable")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to spawn game executable for {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(dir),
+                        error
+                    ));
+                    error
+                })?;
 
             return Ok(());
         }
 
         // For Steam's own installations, use standard Steam launch
-        let steam_path = crate::services::steam::SteamService::get_steam_path()
-            .ok_or_else(|| anyhow::anyhow!("Steam installation not found"))?;
+        let steam_path =
+            crate::services::steam::SteamService::get_steam_path().ok_or_else(|| {
+                let message = "Steam installation not found";
+                error_with_location(message);
+                anyhow::anyhow!(message)
+            })?;
 
         let steam_exe = if cfg!(target_os = "windows") {
             steam_path.join("steam.exe")
@@ -273,10 +279,14 @@ impl FileSystemService {
         };
 
         if !steam_exe.exists() {
-            return Err(anyhow::anyhow!(
-                "Steam executable not found at {:?}",
-                steam_exe
-            ));
+            let message = format!(
+                "Steam executable not found at {}",
+                crate::services::logger::LoggerService::sanitize_log_text(
+                    &steam_exe.to_string_lossy()
+                )
+            );
+            error_with_location(&message);
+            return Err(anyhow::anyhow!(message));
         }
 
         #[cfg(target_os = "windows")]
@@ -287,7 +297,18 @@ impl FileSystemService {
                 .arg(app_id)
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
-                .context("Failed to launch game via Steam")?;
+                .context("Failed to launch game via Steam")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to spawn Steam executable {} for app {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &steam_exe.to_string_lossy()
+                        ),
+                        app_id,
+                        error
+                    ));
+                    error
+                })?;
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -296,7 +317,18 @@ impl FileSystemService {
                 .arg("-applaunch")
                 .arg(app_id)
                 .spawn()
-                .context("Failed to launch game via Steam")?;
+                .context("Failed to launch game via Steam")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to spawn Steam executable {} for app {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &steam_exe.to_string_lossy()
+                        ),
+                        app_id,
+                        error
+                    ));
+                    error
+                })?;
         }
 
         Ok(())
@@ -319,10 +351,14 @@ impl FileSystemService {
         };
 
         if !steam_exe.exists() {
-            return Err(anyhow::anyhow!(
-                "Steam executable not found at {:?}",
-                steam_exe
-            ));
+            let message = format!(
+                "Steam executable not found at {}",
+                crate::services::logger::LoggerService::sanitize_log_text(
+                    &steam_exe.to_string_lossy()
+                )
+            );
+            error_with_location(&message);
+            return Err(anyhow::anyhow!(message));
         }
 
         // Check if Steam is already running
@@ -372,14 +408,34 @@ impl FileSystemService {
             std::process::Command::new(&steam_exe)
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
-                .context("Failed to start Steam")?;
+                .context("Failed to start Steam")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to start Steam executable {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &steam_exe.to_string_lossy()
+                        ),
+                        error
+                    ));
+                    error
+                })?;
         }
 
         #[cfg(not(target_os = "windows"))]
         {
             std::process::Command::new(&steam_exe)
                 .spawn()
-                .context("Failed to start Steam")?;
+                .context("Failed to start Steam")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to start Steam executable {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &steam_exe.to_string_lossy()
+                        ),
+                        error
+                    ));
+                    error
+                })?;
         }
 
         // Give Steam a moment to start
@@ -401,10 +457,14 @@ impl FileSystemService {
         let executable_path = Path::new(game_dir).join(executable_name);
 
         if !executable_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Game executable not found at {:?}",
-                executable_path
-            ));
+            let message = format!(
+                "Game executable not found at {}",
+                crate::services::logger::LoggerService::sanitize_log_text(
+                    &executable_path.to_string_lossy()
+                )
+            );
+            error_with_location(&message);
+            return Err(anyhow::anyhow!(message));
         }
 
         #[cfg(target_os = "windows")]
@@ -414,7 +474,17 @@ impl FileSystemService {
                 .current_dir(game_dir)
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
-                .context("Failed to launch game")?;
+                .context("Failed to launch game")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to spawn game executable {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &executable_path.to_string_lossy()
+                        ),
+                        error
+                    ));
+                    error
+                })?;
         }
 
         #[cfg(target_os = "macos")]
@@ -422,7 +492,17 @@ impl FileSystemService {
             std::process::Command::new("open")
                 .arg(&executable_path)
                 .spawn()
-                .context("Failed to launch game")?;
+                .context("Failed to launch game")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to spawn game executable {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &executable_path.to_string_lossy()
+                        ),
+                        error
+                    ));
+                    error
+                })?;
         }
 
         #[cfg(target_os = "linux")]
@@ -430,7 +510,17 @@ impl FileSystemService {
             std::process::Command::new(&executable_path)
                 .current_dir(game_dir)
                 .spawn()
-                .context("Failed to launch game")?;
+                .context("Failed to launch game")
+                .map_err(|error| {
+                    error_with_location(format!(
+                        "Failed to spawn game executable {}: {}",
+                        crate::services::logger::LoggerService::sanitize_log_text(
+                            &executable_path.to_string_lossy()
+                        ),
+                        error
+                    ));
+                    error
+                })?;
         }
 
         Ok(executable_path.to_string_lossy().to_string())

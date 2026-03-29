@@ -21,3 +21,29 @@ pub fn route_stderr_log(message: String) {
         log::info!("{}", trimmed);
     }
 }
+
+#[track_caller]
+pub fn warn_with_location(message: impl AsRef<str>) {
+    let location = std::panic::Location::caller();
+    let message = crate::services::logger::LoggerService::sanitize_log_text(message.as_ref());
+    route_stderr_log(format!(
+        "[WARN] [{}:{}:{}] {}",
+        location.file(),
+        location.line(),
+        location.column(),
+        message
+    ));
+}
+
+#[track_caller]
+pub fn error_with_location(message: impl AsRef<str>) {
+    let location = std::panic::Location::caller();
+    let message = crate::services::logger::LoggerService::sanitize_log_text(message.as_ref());
+    route_stderr_log(format!(
+        "[ERROR] [{}:{}:{}] {}",
+        location.file(),
+        location.line(),
+        location.column(),
+        message
+    ));
+}

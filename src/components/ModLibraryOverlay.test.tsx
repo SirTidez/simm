@@ -19,6 +19,7 @@ const apiMocks = vi.hoisted(() => ({
   getNexusModsLatestUpdated: vi.fn(),
   getNexusModsTrending: vi.fn(),
   getNexusModsLatestAdded: vi.fn(),
+  beginNexusManualDownloadSession: vi.fn(),
   downloadNexusModToLibrary: vi.fn(),
   downloadThunderstoreToLibrary: vi.fn(),
   uninstallDownloadedMod: vi.fn(),
@@ -133,6 +134,7 @@ describe('ModLibraryOverlay', () => {
     apiMocks.getNexusModsLatestUpdated.mockReset();
     apiMocks.getNexusModsTrending.mockReset();
     apiMocks.getNexusModsLatestAdded.mockReset();
+    apiMocks.beginNexusManualDownloadSession.mockReset();
     apiMocks.downloadNexusModToLibrary.mockReset();
     apiMocks.downloadThunderstoreToLibrary.mockReset();
     apiMocks.uninstallDownloadedMod.mockReset();
@@ -167,6 +169,14 @@ describe('ModLibraryOverlay', () => {
     apiMocks.getNexusModsLatestUpdated.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsTrending.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsLatestAdded.mockResolvedValue({ mods: [] });
+    apiMocks.beginNexusManualDownloadSession.mockResolvedValue({
+      success: true,
+      kind: 'library',
+      filesPageUrl: 'https://www.nexusmods.com/schedule1/mods/1629?tab=files',
+      modId: 1629,
+      fileId: 301,
+      gameId: 'schedule1',
+    });
     apiMocks.downloadNexusModToLibrary.mockResolvedValue({
       success: true,
       storageId: 'downloaded-storage',
@@ -537,6 +547,78 @@ describe('ModLibraryOverlay', () => {
         301,
         'Mono',
       );
+    });
+  });
+
+  it('uses the existing failure popup to open manual Nexus confirmation when direct download requires site confirmation', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+    apiMocks.downloadNexusModToLibrary.mockRejectedValue(
+      new Error('This Nexus account must confirm downloads on Nexus Mods website.'),
+    );
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 301,
+        name: 'Pack Rat Mono 1.0.0',
+        file_name: 'PackRat-mono-1.0.0.zip',
+        version: '1.0.0',
+        mod_version: '1.0.0',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.0',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.0',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    fireEvent.click(await screen.findByRole('option', { name: /v1\.0\.0/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download selected version' }));
+
+    await screen.findByText('Nexus Download Failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => {
+      expect(apiMocks.beginNexusManualDownloadSession).toHaveBeenCalledWith({
+        kind: 'library',
+        modId: 1629,
+        fileId: 301,
+        gameId: 'schedule1',
+        runtime: 'Mono',
+      });
     });
   });
 
@@ -1243,6 +1325,13 @@ describe('ModLibraryOverlay', () => {
   });
 
   it('treats alternate beta environments as Mono install targets in the library dialog', async () => {
+    const refreshController: {
+      resolve?: (value: { downloaded: ModLibraryEntry[] }) => void;
+    } = {};
+    const pendingRefresh = new Promise<{ downloaded: ModLibraryEntry[] }>((resolve) => {
+      refreshController.resolve = resolve;
+    });
+
     apiMocks.getEnvironments.mockResolvedValue([
       {
         id: 'env-alt-beta',
@@ -1269,6 +1358,24 @@ describe('ModLibraryOverlay', () => {
         }),
       ],
     });
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({
+        downloaded: [
+          makeEntry({
+            storageId: 'mono-only-storage',
+            displayName: 'Mono Only Mod',
+            source: 'nexusmods',
+            sourceId: '1234',
+            sourceVersion: '1.0.0',
+            installedVersion: '1.0.0',
+            availableRuntimes: ['Mono'],
+            storageIdsByRuntime: { Mono: 'mono-only-storage' },
+            installedInByRuntime: { Mono: [] },
+            filesByRuntime: { Mono: ['MonoOnlyMod.dll'] },
+          }),
+        ],
+      })
+      .mockImplementationOnce(() => pendingRefresh);
 
     renderLibraryOverlay({ libraryTab: 'library' });
 
@@ -1279,6 +1386,39 @@ describe('ModLibraryOverlay', () => {
         'mono-only-storage',
         ['env-alt-beta'],
       );
+    });
+
+    expect(
+      await screen.findByRole('heading', { name: 'Installed' }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        'Installed successfully. It may take a couple seconds before it shows in Mods.',
+      ),
+    ).toBeTruthy();
+
+    const completeRefresh = refreshController.resolve;
+    expect(completeRefresh).toBeTruthy();
+    if (!completeRefresh) {
+      throw new Error('expected pending library refresh resolver');
+    }
+
+    completeRefresh({
+      downloaded: [
+        makeEntry({
+          storageId: 'mono-only-storage',
+          displayName: 'Mono Only Mod',
+          source: 'nexusmods',
+          sourceId: '1234',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          availableRuntimes: ['Mono'],
+          installedIn: ['env-alt-beta'],
+          storageIdsByRuntime: { Mono: 'mono-only-storage' },
+          installedInByRuntime: { Mono: ['env-alt-beta'] },
+          filesByRuntime: { Mono: ['MonoOnlyMod.dll'] },
+        }),
+      ],
     });
   });
 

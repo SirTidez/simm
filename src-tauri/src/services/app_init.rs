@@ -1,5 +1,6 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
+use crate::services::logger::LoggerService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
 use crate::utils::directory_init;
@@ -88,19 +89,36 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
             let watcher_guard = watcher_arc.lock().await;
             for env in &environments {
                 if !env.output_dir.is_empty() {
-                    let mods_dir = std::path::Path::new(&env.output_dir).join("Mods");
-                    let plugins_dir = std::path::Path::new(&env.output_dir).join("Plugins");
-                    let userlibs_dir = std::path::Path::new(&env.output_dir).join("UserLibs");
+                    let watch_targets = [
+                        ("mods", std::path::Path::new(&env.output_dir).join("Mods")),
+                        (
+                            "plugins",
+                            std::path::Path::new(&env.output_dir).join("Plugins"),
+                        ),
+                        (
+                            "userlibs",
+                            std::path::Path::new(&env.output_dir).join("UserLibs"),
+                        ),
+                    ];
 
-                    let _ = watcher_guard
-                        .start_watching(&env.id, mods_dir.to_str().unwrap_or(""), "mods")
-                        .await;
-                    let _ = watcher_guard
-                        .start_watching(&env.id, plugins_dir.to_str().unwrap_or(""), "plugins")
-                        .await;
-                    let _ = watcher_guard
-                        .start_watching(&env.id, userlibs_dir.to_str().unwrap_or(""), "userlibs")
-                        .await;
+                    for (kind, path) in watch_targets {
+                        let path_string = path.to_string_lossy().to_string();
+                        match watcher_guard
+                            .start_watching(&env.id, &path_string, kind)
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(error) => {
+                                log::warn!(
+                                    "Failed to start {} watcher for {} at {}: {}",
+                                    kind,
+                                    env.id,
+                                    LoggerService::sanitize_log_text(&path_string),
+                                    error
+                                );
+                            }
+                        }
+                    }
                 }
             }
             log::info!("Started watching {} environment(s)", env_count);

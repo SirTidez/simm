@@ -1,5 +1,6 @@
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
+use crate::utils::logging::{error_with_location, warn_with_location};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -21,6 +22,20 @@ const DEFAULT_NEXUS_OAUTH_CLIENT_ID: &str = "simm";
 const NEXUS_V1_API_BASE: &str = "https://api.nexusmods.com/v1";
 const NXM_PROTOCOL: &str = "nxm";
 const SUPPORTED_NEXUS_GAME_ID: &str = "schedule1";
+
+#[track_caller]
+fn nexus_error(message: impl Into<String>) -> String {
+    let message = message.into();
+    error_with_location(&message);
+    message
+}
+
+#[track_caller]
+fn nexus_warn(message: impl Into<String>) -> String {
+    let message = message.into();
+    warn_with_location(&message);
+    message
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -270,7 +285,12 @@ async fn get_nxm_download_links(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("Failed to build Nexus manual download client: {}", e))?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to build Nexus manual download client: {}",
+                e
+            ))
+        })?;
 
     let response = client
         .get(&url)
@@ -279,23 +299,30 @@ async fn get_nxm_download_links(
         .header("Application-Version", env!("CARGO_PKG_VERSION"))
         .send()
         .await
-        .map_err(|e| format!("Failed to request Nexus manual download links: {}", e))?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to request Nexus manual download links: {}",
+                e
+            ))
+        })?;
 
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read Nexus manual download response: {}", e))?;
+    let body = response.text().await.map_err(|e| {
+        nexus_error(format!(
+            "Failed to read Nexus manual download response: {}",
+            e
+        ))
+    })?;
 
     if !status.is_success() {
-        return Err(format!(
+        return Err(nexus_error(format!(
             "Nexus manual download-link request failed ({}): {}",
             status, body
-        ));
+        )));
     }
 
     let value = serde_json::from_str::<Value>(&body)
-        .map_err(|e| format!("Invalid Nexus manual download response: {}", e))?;
+        .map_err(|e| nexus_error(format!("Invalid Nexus manual download response: {}", e)))?;
 
     let links = value
         .as_array()
@@ -310,7 +337,7 @@ async fn get_nxm_download_links(
         .collect::<Vec<_>>();
 
     if links.is_empty() {
-        return Err("No Nexus manual download links returned".to_string());
+        return Err(nexus_error("No Nexus manual download links returned"));
     }
 
     Ok(links)
@@ -519,7 +546,7 @@ fn parse_callback_url(
     let query = callback
         .split_once('?')
         .map(|(_, q)| q)
-        .ok_or_else(|| "OAuth callback URL missing query string".to_string())?;
+        .ok_or_else(|| nexus_error("OAuth callback URL missing query string"))?;
 
     let mut code = None;
     let mut state = None;
@@ -529,7 +556,7 @@ fn parse_callback_url(
     for pair in query.split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         let decoded = urlencoding::decode(v)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| nexus_error(e.to_string()))?
             .to_string();
         match k {
             "code" => code = Some(decoded),
@@ -567,18 +594,18 @@ async fn oauth_exchange_code_local(
         .form(&form)
         .send()
         .await
-        .map_err(|e| format!("OAuth token request failed: {}", e))?;
+        .map_err(|e| nexus_error(format!("OAuth token request failed: {}", e)))?;
 
     let status = response.status();
     let value = response
         .json::<Value>()
         .await
-        .map_err(|e| format!("Invalid OAuth token response: {}", e))?;
+        .map_err(|e| nexus_error(format!("Invalid OAuth token response: {}", e)))?;
     if !status.is_success() {
-        return Err(format!(
+        return Err(nexus_error(format!(
             "OAuth token exchange failed ({}): {}",
             status, value
-        ));
+        )));
     }
 
     Ok(value)
@@ -604,18 +631,18 @@ async fn oauth_refresh_token_local(
         .form(&form)
         .send()
         .await
-        .map_err(|e| format!("OAuth refresh request failed: {}", e))?;
+        .map_err(|e| nexus_error(format!("OAuth refresh request failed: {}", e)))?;
 
     let status = response.status();
     let value = response
         .json::<Value>()
         .await
-        .map_err(|e| format!("Invalid OAuth refresh response: {}", e))?;
+        .map_err(|e| nexus_error(format!("Invalid OAuth refresh response: {}", e)))?;
     if !status.is_success() {
-        return Err(format!(
+        return Err(nexus_error(format!(
             "OAuth token refresh failed ({}): {}",
             status, value
-        ));
+        )));
     }
 
     Ok(value)
@@ -627,15 +654,18 @@ async fn oauth_userinfo_local(access_token: &str) -> Result<Value, String> {
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|e| format!("OAuth userinfo request failed: {}", e))?;
+        .map_err(|e| nexus_error(format!("OAuth userinfo request failed: {}", e)))?;
 
     let status = response.status();
     let value = response
         .json::<Value>()
         .await
-        .map_err(|e| format!("Invalid OAuth userinfo response: {}", e))?;
+        .map_err(|e| nexus_error(format!("Invalid OAuth userinfo response: {}", e)))?;
     if !status.is_success() {
-        return Err(format!("OAuth userinfo failed ({}): {}", status, value));
+        return Err(nexus_error(format!(
+            "OAuth userinfo failed ({}): {}",
+            status, value
+        )));
     }
 
     Ok(value)
@@ -923,11 +953,12 @@ async fn spawn_localhost_oauth_listener(db: Arc<SqlitePool>) {
 async fn refresh_nexus_oauth_token_if_needed_inner(
     db: Arc<SqlitePool>,
 ) -> Result<Option<Value>, String> {
-    let settings = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
+    let settings = SettingsService::new(db.clone())
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
     let mut session = match settings
         .get_nexus_oauth_session()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| nexus_error(format!("Failed to load Nexus OAuth session: {}", e)))?
     {
         Some(s) => s,
         None => return Ok(None),
@@ -945,17 +976,17 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
     let refresh_token = session
         .get("refreshToken")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Nexus OAuth refresh token missing. Please login again.".to_string())?
+        .ok_or_else(|| nexus_warn("Nexus OAuth refresh token missing. Please login again."))?
         .to_string();
 
-    let client_id = oauth_client_id()?;
+    let client_id = oauth_client_id().map_err(nexus_error)?;
     let scope = oauth_scope();
     let token = oauth_refresh_token_local(&client_id, &refresh_token, &scope).await?;
 
     let next_access = token
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "OAuth refresh response missing access_token".to_string())?;
+        .ok_or_else(|| nexus_error("OAuth refresh response missing access_token"))?;
     let next_refresh = token
         .get("refresh_token")
         .and_then(|v| v.as_str())
@@ -977,7 +1008,12 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
     settings
         .save_nexus_oauth_session(&session)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to save refreshed Nexus OAuth session: {}",
+                e
+            ))
+        })?;
 
     Ok(Some(session))
 }
@@ -990,15 +1026,21 @@ pub(crate) async fn get_valid_nexus_access_token(db: Arc<SqlitePool>) -> Result<
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
-        .ok_or_else(|| "Nexus OAuth login required".to_string())
+        .ok_or_else(|| nexus_warn("Nexus OAuth login required"))
 }
 
 async fn clear_nxm_pending_download(db: Arc<SqlitePool>) -> Result<(), String> {
-    let settings = SettingsService::new(db).map_err(|e| e.to_string())?;
+    let settings = SettingsService::new(db)
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
     settings
         .clear_nexus_nxm_pending_download()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to clear pending Nexus manual download: {}",
+                e
+            ))
+        })?;
     Ok(())
 }
 
@@ -1144,16 +1186,31 @@ async fn complete_pending_nxm_download(
     let mod_info = nexus_service
         .get_mod(&nxm.game_id, nxm.mod_id)
         .await
-        .map_err(|e| format!("Failed to fetch mod info for mod {}: {}", nxm.mod_id, e))?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to fetch mod info for mod {}: {}",
+                nxm.mod_id, e
+            ))
+        })?;
     let files = nexus_service
         .get_mod_files(&nxm.game_id, nxm.mod_id)
         .await
-        .map_err(|e| format!("Failed to fetch files for mod {}: {}", nxm.mod_id, e))?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to fetch files for mod {}: {}",
+                nxm.mod_id, e
+            ))
+        })?;
 
     let file_info = files
         .iter()
         .find(|f| f.get("file_id").and_then(|id| id.as_u64()) == Some(nxm.file_id as u64))
-        .ok_or_else(|| format!("File {} not found in mod {}", nxm.file_id, nxm.mod_id))?;
+        .ok_or_else(|| {
+            nexus_warn(format!(
+                "File {} not found in mod {}",
+                nxm.file_id, nxm.mod_id
+            ))
+        })?;
     let access_token = get_valid_nexus_access_token(db.clone()).await?;
     let version = file_info
         .get("version")
@@ -1201,15 +1258,25 @@ async fn complete_pending_nxm_download(
                 runtime.clone(),
             )
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| {
+                nexus_error(format!(
+                    "Failed to check Nexus storage cache for mod {} version {}: {}",
+                    nxm.mod_id, version, e
+                ))
+            })?
         {
             let environment_id = install_target
                 .clone()
-                .ok_or_else(|| "Pending Nexus install is missing an environment id".to_string())?;
+                .ok_or_else(|| nexus_error("Pending Nexus install is missing an environment id"))?;
             let install_result = mods_service
                 .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    nexus_error(format!(
+                        "Failed to install cached Nexus mod {} into environment {}: {}",
+                        existing_mod_id, environment_id, e
+                    ))
+                })?;
             return Ok(json!({
                 "success": true,
                 "kind": "install",
@@ -1235,7 +1302,7 @@ async fn complete_pending_nxm_download(
     .await?
     .into_iter()
     .next()
-    .ok_or_else(|| "No Nexus manual download links returned".to_string())?;
+    .ok_or_else(|| nexus_error("No Nexus manual download links returned"))?;
 
     let context_label = if let Some(environment_id) = install_target.as_ref() {
         if let Ok(service) = EnvironmentService::new(db.clone()) {
@@ -1265,7 +1332,10 @@ async fn complete_pending_nxm_download(
     let downloaded = nexus_api::download_from_url(&first_url, None)
         .await
         .map_err(|e| {
-            let message = format!("Failed to download Nexus file from manual link: {}", e);
+            let message = nexus_error(format!(
+                "Failed to download Nexus file from manual link: {}",
+                e
+            ));
             let _ = crate::services::tracked_downloads::emit(
                 app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1290,7 +1360,10 @@ async fn complete_pending_nxm_download(
     tokio::fs::write(&archive_path, downloaded.bytes)
         .await
         .map_err(|e| {
-            let message = format!("Failed to save manually downloaded Nexus file: {}", e);
+            let message = nexus_error(format!(
+                "Failed to save manually downloaded Nexus file: {}",
+                e
+            ));
             let _ = crate::services::tracked_downloads::emit(
                 app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1323,7 +1396,12 @@ async fn complete_pending_nxm_download(
             None,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to store manually downloaded Nexus archive: {}",
+                e
+            ))
+        })?;
     let _ = tokio::fs::remove_file(&archive_path).await;
 
     if install_target.is_none() {
@@ -1341,24 +1419,35 @@ async fn complete_pending_nxm_download(
     }
 
     let environment_id = install_target
-        .ok_or_else(|| "Pending Nexus install is missing an environment id".to_string())?;
+        .ok_or_else(|| nexus_error("Pending Nexus install is missing an environment id"))?;
     let storage_id = store_result
         .get("storageId")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "Stored Nexus archive did not return a storage ID".to_string())?
+        .ok_or_else(|| nexus_error("Stored Nexus archive did not return a storage ID"))?
         .to_string();
 
-    let env_service = EnvironmentService::new(db.clone()).map_err(|e| e.to_string())?;
+    let env_service = EnvironmentService::new(db.clone())
+        .map_err(|e| nexus_error(format!("Failed to create environment service: {}", e)))?;
     env_service
         .get_environment(&environment_id)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found for manual Nexus install".to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to load environment {}: {}",
+                environment_id, e
+            ))
+        })?
+        .ok_or_else(|| nexus_warn("Environment not found for manual Nexus install"))?;
 
     let install_result = mods_service
         .install_storage_mod_to_envs(&storage_id, vec![environment_id.clone()])
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to install stored Nexus archive {} into environment {}: {}",
+                storage_id, environment_id, e
+            ))
+        })?;
 
     Ok(json!({
         "success": true,
@@ -1380,7 +1469,7 @@ pub async fn begin_nexus_oauth_login(
     db: State<'_, Arc<SqlitePool>>,
     prefer_localhost: Option<bool>,
 ) -> Result<Value, String> {
-    let client_id = oauth_client_id()?;
+    let client_id = oauth_client_id().map_err(nexus_error)?;
     let use_localhost = prefer_localhost.unwrap_or(false);
     let redirect_uri = oauth_redirect_uri(use_localhost);
     let scope = oauth_scope();
@@ -1390,7 +1479,8 @@ pub async fn begin_nexus_oauth_login(
     let authorize_url =
         build_authorize_url(&client_id, &redirect_uri, &scope, &state, &code_challenge);
 
-    let settings = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let settings = SettingsService::new(db.inner().clone())
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
     settings
         .save_nexus_oauth_pending(&json!({
             "state": state,
@@ -1399,19 +1489,27 @@ pub async fn begin_nexus_oauth_login(
             "createdAt": now_epoch_seconds(),
         }))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| nexus_error(format!("Failed to save pending Nexus OAuth flow: {}", e)))?;
     settings
         .clear_nexus_oauth_last_callback_url()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to clear previous Nexus OAuth callback: {}",
+                e
+            ))
+        })?;
 
     if use_localhost {
         spawn_localhost_oauth_listener(db.inner().clone()).await;
     }
     #[allow(deprecated)]
-    app.shell()
-        .open(authorize_url.clone(), None)
-        .map_err(|e| format!("Failed to open browser: {}", e))?;
+    app.shell().open(authorize_url.clone(), None).map_err(|e| {
+        nexus_error(format!(
+            "Failed to open browser for Nexus OAuth login: {}",
+            e
+        ))
+    })?;
 
     Ok(json!({
         "authorizeUrl": authorize_url,
@@ -1425,54 +1523,60 @@ pub async fn complete_nexus_oauth_callback(
     db: State<'_, Arc<SqlitePool>>,
     callback_url: Option<String>,
 ) -> Result<Value, String> {
-    let settings = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let settings = SettingsService::new(db.inner().clone())
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
 
     let callback = match callback_url.filter(|u| !u.trim().is_empty()) {
         Some(url) => url,
         None => settings
             .get_nexus_oauth_last_callback_url()
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "No OAuth callback URL available yet".to_string())?,
+            .map_err(|e| {
+                nexus_error(format!(
+                    "Failed to read saved Nexus OAuth callback URL: {}",
+                    e
+                ))
+            })?
+            .ok_or_else(|| nexus_warn("No OAuth callback URL available yet"))?,
     };
 
     let pending = settings
         .get_nexus_oauth_pending()
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "No pending Nexus OAuth login flow".to_string())?;
+        .map_err(|e| nexus_error(format!("Failed to load pending Nexus OAuth flow: {}", e)))?
+        .ok_or_else(|| nexus_warn("No pending Nexus OAuth login flow"))?;
 
     let pending_state = pending
         .get("state")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Invalid pending OAuth state".to_string())?;
+        .ok_or_else(|| nexus_error("Invalid pending OAuth state"))?;
     let code_verifier = pending
         .get("codeVerifier")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Invalid pending PKCE verifier".to_string())?;
+        .ok_or_else(|| nexus_error("Invalid pending PKCE verifier"))?;
     let redirect_uri = pending
         .get("redirectUri")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Invalid pending OAuth redirect URI".to_string())?;
+        .ok_or_else(|| nexus_error("Invalid pending OAuth redirect URI"))?;
 
     let (code_opt, state_opt, error_opt, error_description_opt) = parse_callback_url(&callback)?;
 
     if let Some(err) = error_opt {
         let description = error_description_opt.unwrap_or_default();
-        return Err(format!(
+        return Err(nexus_warn(format!(
             "Nexus OAuth authorization failed: {} {}",
             err, description
-        ));
+        )));
     }
 
-    let code = code_opt.ok_or_else(|| "OAuth callback missing authorization code".to_string())?;
+    let code = code_opt.ok_or_else(|| nexus_warn("OAuth callback missing authorization code"))?;
 
-    let callback_state = state_opt.ok_or_else(|| "OAuth callback missing state".to_string())?;
+    let callback_state = state_opt.ok_or_else(|| nexus_warn("OAuth callback missing state"))?;
     if callback_state != pending_state {
-        return Err("OAuth callback state mismatch".to_string());
+        return Err(nexus_warn("OAuth callback state mismatch"));
     }
 
-    let client_id = oauth_client_id()?;
+    let client_id = oauth_client_id().map_err(nexus_error)?;
     let scope = oauth_scope();
     let token =
         oauth_exchange_code_local(&client_id, redirect_uri, &code, code_verifier, &scope).await?;
@@ -1480,7 +1584,7 @@ pub async fn complete_nexus_oauth_callback(
     let access_token = token
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "OAuth token response missing access_token".to_string())?;
+        .ok_or_else(|| nexus_error("OAuth token response missing access_token"))?;
     let userinfo = oauth_userinfo_local(access_token).await?;
 
     let account = derive_account_summary(Some(access_token), Some(&userinfo), None);
@@ -1499,15 +1603,15 @@ pub async fn complete_nexus_oauth_callback(
     settings
         .save_nexus_oauth_session(&session)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| nexus_error(format!("Failed to save Nexus OAuth session: {}", e)))?;
     settings
         .clear_nexus_oauth_pending()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| nexus_error(format!("Failed to clear pending Nexus OAuth flow: {}", e)))?;
     settings
         .clear_nexus_oauth_last_callback_url()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| nexus_error(format!("Failed to clear Nexus OAuth callback URL: {}", e)))?;
 
     Ok(json!({ "success": true, "status": build_nexus_oauth_status_value(&session) }))
 }
@@ -1576,7 +1680,7 @@ pub async fn begin_nexus_manual_download_session(
 ) -> Result<Value, String> {
     let kind = kind.trim().to_ascii_lowercase();
     if kind != "library" && kind != "install" {
-        return Err("Unsupported Nexus manual download session kind".to_string());
+        return Err(nexus_warn("Unsupported Nexus manual download session kind"));
     }
 
     if kind == "install"
@@ -1585,14 +1689,17 @@ pub async fn begin_nexus_manual_download_session(
             .map(|v| v.trim().is_empty())
             .unwrap_or(true)
     {
-        return Err("Nexus manual install requires an environment id".to_string());
+        return Err(nexus_warn(
+            "Nexus manual install requires an environment id",
+        ));
     }
 
     let game_id = normalize_nexus_game_id(game_id.as_deref());
     let files_page_url = build_nexus_files_page_url(&game_id, mod_id, file_id);
     let created_at = now_epoch_seconds();
 
-    let settings = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let settings = SettingsService::new(db.inner().clone())
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
 
     let pending = PendingNexusManualDownload {
         session_id: new_pending_session_id(),
@@ -1606,11 +1713,19 @@ pub async fn begin_nexus_manual_download_session(
     };
 
     settings
-        .save_nexus_nxm_pending_download(
-            &serde_json::to_value(&pending).map_err(|e| e.to_string())?,
-        )
+        .save_nexus_nxm_pending_download(&serde_json::to_value(&pending).map_err(|e| {
+            nexus_error(format!(
+                "Failed to serialize pending Nexus download session: {}",
+                e
+            ))
+        })?)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to save pending Nexus download session: {}",
+                e
+            ))
+        })?;
 
     let db_for_cleanup = db.inner().clone();
     let session_id = pending.session_id.clone();
@@ -1640,7 +1755,7 @@ pub async fn begin_nexus_manual_download_session(
     #[allow(deprecated)]
     app.shell()
         .open(files_page_url.clone(), None)
-        .map_err(|e| format!("Failed to open Nexus files page: {}", e))?;
+        .map_err(|e| nexus_error(format!("Failed to open Nexus files page: {}", e)))?;
 
     Ok(json!({
         "success": true,
@@ -1659,22 +1774,31 @@ pub async fn complete_nexus_manual_download_session(
     nxm_url: String,
     runtime_override: Option<String>,
 ) -> Result<Value, String> {
-    let settings = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let settings = SettingsService::new(db.inner().clone())
+        .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
     let pending = settings
         .get_nexus_nxm_pending_download()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to load pending Nexus manual download session: {}",
+                e
+            ))
+        })?
         .map(|value| {
-            serde_json::from_value::<PendingNexusManualDownload>(value)
-                .map_err(|e| format!("Invalid pending Nexus manual download session: {}", e))
+            serde_json::from_value::<PendingNexusManualDownload>(value).map_err(|e| {
+                nexus_error(format!(
+                    "Invalid pending Nexus manual download session: {}",
+                    e
+                ))
+            })
         })
         .transpose()?;
-    let nxm = parse_nxm_callback_url(&nxm_url)?;
+    let nxm = parse_nxm_callback_url(&nxm_url).map_err(nexus_warn)?;
     if normalize_nexus_game_id(Some(&nxm.game_id)) != SUPPORTED_NEXUS_GAME_ID {
-        return Err(
+        return Err(nexus_warn(
             "SIMM only handles Schedule I Nexus downloads while it is open. Close SIMM to download Nexus mods for other games."
-                .to_string(),
-        );
+        ));
     }
     let result = complete_pending_nxm_download(
         &app,
@@ -1707,10 +1831,11 @@ pub async fn complete_nexus_manual_download_session(
             "error": error,
             "requestedKind": pending.as_ref().map(|value| value.kind.clone()),
         })),
-        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(error), Err(cleanup_error)) => {
-            Err(format!("{}; cleanup failed: {}", error, cleanup_error))
-        }
+        (Ok(_), Err(cleanup_error)) => Err(nexus_error(cleanup_error)),
+        (Err(error), Err(cleanup_error)) => Err(nexus_error(format!(
+            "{}; cleanup failed: {}",
+            error, cleanup_error
+        ))),
     }
 }
 
@@ -1843,12 +1968,14 @@ pub async fn download_nexus_mods_mod_file(
     );
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
 
-    let token = get_valid_nexus_access_token(db.inner().clone()).await?;
+    let token = get_valid_nexus_access_token(db.inner().clone())
+        .await
+        .map_err(nexus_error)?;
     let bytes = service
         .download_mod_file(&token, &game_id, mod_id, file_id)
         .await
         .map_err(|e| {
-            let message = e.to_string();
+            let message = nexus_error(e.to_string());
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1863,7 +1990,7 @@ pub async fn download_nexus_mods_mod_file(
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("nexusmods-{}-{}.zip", mod_id, file_id));
     tokio::fs::write(&temp_file, bytes).await.map_err(|e| {
-        let message = format!("Failed to save downloaded file: {}", e);
+        let message = nexus_error(format!("Failed to save downloaded file: {}", e));
         let _ = crate::services::tracked_downloads::emit(
             &app,
             crate::services::tracked_downloads::fail_file_download(
@@ -1927,30 +2054,37 @@ pub async fn install_nexus_mods_mod(
     use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
 
-    let access_token = get_valid_nexus_access_token(db.inner().clone()).await?;
+    let access_token = get_valid_nexus_access_token(db.inner().clone())
+        .await
+        .map_err(nexus_error)?;
 
     let db_pool = db.inner().clone();
     let game_id = if let Some(ref id) = game_id_param {
         normalize_nexus_game_id(Some(id))
     } else {
-        let mut settings_service =
-            SettingsService::new(db_pool.clone()).map_err(|e| e.to_string())?;
-        let settings = settings_service
-            .load_settings()
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut settings_service = SettingsService::new(db_pool.clone())
+            .map_err(|e| nexus_error(format!("Failed to create settings service: {}", e)))?;
+        let settings = settings_service.load_settings().await.map_err(|e| {
+            nexus_error(format!("Failed to load settings for Nexus install: {}", e))
+        })?;
         normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
     };
 
-    let env_service = EnvironmentService::new(db_pool.clone()).map_err(|e| e.to_string())?;
+    let env_service = EnvironmentService::new(db_pool.clone())
+        .map_err(|e| nexus_error(format!("Failed to create environment service: {}", e)))?;
     let env = env_service
         .get_environment(&environment_id)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to load environment {}: {}",
+                environment_id, e
+            ))
+        })?
+        .ok_or_else(|| nexus_warn("Environment not found"))?;
 
     if env.output_dir.is_empty() {
-        return Err("Output directory not set".to_string());
+        return Err(nexus_warn("Output directory not set"));
     }
 
     let runtime_str = match env.runtime {
@@ -1959,20 +2093,22 @@ pub async fn install_nexus_mods_mod(
     };
 
     let nexus_service = get_nexus_mods_service().await?;
-    let mod_info = nexus_service
-        .get_mod(&game_id, mod_id)
-        .await
-        .map_err(|e| format!("Failed to fetch mod info for mod {}: {}", mod_id, e))?;
+    let mod_info = nexus_service.get_mod(&game_id, mod_id).await.map_err(|e| {
+        nexus_error(format!(
+            "Failed to fetch mod info for mod {}: {}",
+            mod_id, e
+        ))
+    })?;
 
     let files = nexus_service
         .get_mod_files(&game_id, mod_id)
         .await
-        .map_err(|e| format!("Failed to fetch files for mod {}: {}", mod_id, e))?;
+        .map_err(|e| nexus_error(format!("Failed to fetch files for mod {}: {}", mod_id, e)))?;
 
     let file_info = files
         .iter()
         .find(|f| f.get("file_id").and_then(|id| id.as_u64()) == Some(file_id as u64))
-        .ok_or_else(|| format!("File {} not found in mod {}", file_id, mod_id))?;
+        .ok_or_else(|| nexus_warn(format!("File {} not found in mod {}", file_id, mod_id)))?;
 
     let version = file_info
         .get("version")
@@ -1982,7 +2118,7 @@ pub async fn install_nexus_mods_mod(
         .to_string();
 
     let mods_service = ModsService::new(db_pool.clone());
-    if let Ok(Some(existing_mod_id)) = mods_service
+    match mods_service
         .find_existing_mod_storage_by_source_version(
             &mod_id.to_string(),
             &version,
@@ -1990,15 +2126,29 @@ pub async fn install_nexus_mods_mod(
         )
         .await
     {
-        let install_result = mods_service
-            .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(json!({
-            "success": true,
-            "fromStorage": true,
-            "result": install_result
-        }));
+        Ok(Some(existing_mod_id)) => {
+            let install_result = mods_service
+                .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
+                .await
+                .map_err(|e| {
+                    nexus_error(format!(
+                        "Failed to install cached Nexus mod {} into environment {}: {}",
+                        existing_mod_id, environment_id, e
+                    ))
+                })?;
+            return Ok(json!({
+                "success": true,
+                "fromStorage": true,
+                "result": install_result
+            }));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            nexus_warn(format!(
+                "Failed to check existing Nexus mod storage for mod {} version {}: {}",
+                mod_id, version, error
+            ));
+        }
     }
 
     let links = match nexus_service
@@ -2007,24 +2157,28 @@ pub async fn install_nexus_mods_mod(
     {
         Ok(links) => links,
         Err(error) if should_require_manual_nexus_download(&error.to_string()) => {
+            nexus_warn(format!(
+                "Nexus direct download for mod {} file {} requires website confirmation: {}",
+                mod_id, file_id, error
+            ));
             return Ok(json!({
                 "success": false,
                 "requiresManualDownload": true,
                 "modUrl": build_nexus_files_page_url(&game_id, mod_id, file_id),
                 "error": "This Nexus account must confirm downloads on Nexus Mods website.",
-            }))
+            }));
         }
         Err(error) => {
-            return Err(format!(
+            return Err(nexus_error(format!(
                 "Failed to request Nexus OAuth download links for mod {} file {}: {}",
                 mod_id, file_id, error
-            ))
+            )))
         }
     };
 
     let first_url = links
         .first()
-        .ok_or_else(|| "No Nexus download links returned".to_string())?
+        .ok_or_else(|| nexus_error("No Nexus download links returned"))?
         .clone();
     let default_filename = format!("nexusmods-{}-{}.zip", mod_id, file_id);
     let original_filename = file_info
@@ -2043,10 +2197,10 @@ pub async fn install_nexus_mods_mod(
     let downloaded = nexus_api::download_from_url(&first_url, None)
         .await
         .map_err(|e| {
-            let message = format!(
+            let message = nexus_error(format!(
                 "Failed to download file {} from mod {}: {}",
                 file_id, mod_id, e
-            );
+            ));
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -2066,7 +2220,7 @@ pub async fn install_nexus_mods_mod(
     tokio::fs::write(&archive_path, downloaded.bytes)
         .await
         .map_err(|e| {
-            let message = format!("Failed to save downloaded file: {}", e);
+            let message = nexus_error(format!("Failed to save downloaded file: {}", e));
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -2157,7 +2311,8 @@ pub async fn install_nexus_mods_mod(
         Some(metadata),
         security_override.unwrap_or(false),
     )
-    .await?;
+    .await
+    .map_err(|e| nexus_error(e.to_string()))?;
 
     let (metadata, security_report) = match security_scan {
         crate::commands::mods::SecurityGateResult::Continue { metadata, report } => {
@@ -2179,7 +2334,12 @@ pub async fn install_nexus_mods_mod(
             metadata,
         )
         .await
-        .map_err(|e| format!("Failed to install mod {} file {}: {}", mod_id, file_id, e))?;
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to install mod {} file {}: {}",
+                mod_id, file_id, e
+            ))
+        })?;
 
     let _ = tokio::fs::remove_file(&archive_path).await;
 

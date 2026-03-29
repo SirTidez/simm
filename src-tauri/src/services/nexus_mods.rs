@@ -1,15 +1,10 @@
+use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{
-        crate::utils::logging::route_stderr_log(format!($($arg)*));
-    }};
-}
 
 #[derive(Clone)]
 pub struct NexusModsService {
@@ -39,7 +34,11 @@ impl NexusModsService {
         let api_key = self.get_api_key_optional().await;
         let response = nexus_api::execute_graphql(api_key.as_deref(), query, Some(&variables))
             .await
-            .map_err(|e| anyhow::anyhow!("Nexus GraphQL crate request failed: {}", e))?;
+            .map_err(|e| {
+                let message = format!("Nexus GraphQL crate request failed: {}", e);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
+            })?;
 
         Ok(response.data.unwrap_or_else(|| serde_json::json!({})))
     }
@@ -610,7 +609,10 @@ impl NexusModsService {
                 Ok(update_info) => results.push(update_info),
                 Err(e) => {
                     // Log error but continue checking other mods
-                    eprintln!("Failed to check update for mod {}: {}", mod_id, e);
+                    warn_with_location(format!(
+                        "Failed to check Nexus update for mod {} in {}: {}",
+                        mod_id, game_domain, e
+                    ));
                     results.push(serde_json::json!({
                         "hasUpdate": false,
                         "currentVersion": current_version,
@@ -634,7 +636,9 @@ impl NexusModsService {
     ) -> Result<Vec<String>> {
         let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
         let game_id_i64 = resolved_game_id.parse::<i64>().map_err(|e| {
-            anyhow::anyhow!("Invalid resolved game id '{}': {}", resolved_game_id, e)
+            let message = format!("Invalid resolved game id '{}': {}", resolved_game_id, e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
         })?;
 
         let game_query = r#"query($id: ID) { game(id: $id) { domainName } }"#;
@@ -644,7 +648,11 @@ impl NexusModsService {
             .get("game")
             .and_then(|g| g.get("domainName"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing game domainName for game {}", game_id_i64))?;
+            .ok_or_else(|| {
+                let message = format!("Missing game domainName for game {}", game_id_i64);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
+            })?;
 
         let endpoint = format!(
             "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
@@ -654,7 +662,9 @@ impl NexusModsService {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| {
-                anyhow::anyhow!("Failed to build Nexus OAuth download link client: {}", e)
+                let message = format!("Failed to build Nexus OAuth download link client: {}", e);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
             })?;
 
         let response = client
@@ -664,28 +674,39 @@ impl NexusModsService {
             .header("Application-Version", env!("CARGO_PKG_VERSION"))
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed Nexus OAuth download link request: {}", e))?;
+            .map_err(|e| {
+                let message = format!("Failed Nexus OAuth download link request: {}", e);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
+            })?;
 
         let status = response.status();
         let body = response.text().await.map_err(|e| {
-            anyhow::anyhow!("Failed to read Nexus OAuth download link response: {}", e)
+            let message = format!("Failed to read Nexus OAuth download link response: {}", e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
         })?;
 
         if !status.is_success() {
-            return Err(anyhow::anyhow!(
+            let message = format!(
                 "Nexus OAuth download-link request failed ({}): {}",
-                status,
-                body
-            ));
+                status, body
+            );
+            error_with_location(&message);
+            return Err(anyhow::anyhow!(message));
         }
 
         let value = serde_json::from_str::<serde_json::Value>(&body).map_err(|e| {
-            anyhow::anyhow!("Failed to parse Nexus OAuth download link response: {}", e)
+            let message = format!("Failed to parse Nexus OAuth download link response: {}", e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
         })?;
 
-        let arr = value
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Nexus download-link response was not an array"))?;
+        let arr = value.as_array().ok_or_else(|| {
+            let message = "Nexus download-link response was not an array";
+            error_with_location(message);
+            anyhow::anyhow!(message)
+        })?;
         let links: Vec<String> = arr
             .iter()
             .filter_map(|item| {
@@ -697,7 +718,9 @@ impl NexusModsService {
             .collect();
 
         if links.is_empty() {
-            return Err(anyhow::anyhow!("No Nexus OAuth download links returned"));
+            let message = "No Nexus OAuth download links returned";
+            error_with_location(message);
+            return Err(anyhow::anyhow!(message));
         }
 
         Ok(links)
@@ -717,12 +740,18 @@ impl NexusModsService {
             .into_iter()
             .next()
             .ok_or_else(|| {
-                anyhow::anyhow!("No Nexus download links returned for file {}", file_id)
+                let message = format!("No Nexus download links returned for file {}", file_id);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
             })?;
 
         let downloaded = nexus_api::download_from_url(&first_url, None)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to download Nexus file via crate: {}", e))?;
+            .map_err(|e| {
+                let message = format!("Failed to download Nexus file via crate: {}", e);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
+            })?;
 
         Ok(downloaded.bytes)
     }

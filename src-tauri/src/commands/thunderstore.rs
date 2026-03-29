@@ -116,7 +116,10 @@ pub async fn download_thunderstore_package(
         .map(sanitize_temp_component)
         .map(|value| format!("-{}", value))
         .unwrap_or_default();
-    let temp_file = temp_dir.join(format!("thunderstore-{}{}.zip", package_uuid, version_suffix));
+    let temp_file = temp_dir.join(format!(
+        "thunderstore-{}{}.zip",
+        package_uuid, version_suffix
+    ));
     tokio::fs::write(&temp_file, bytes).await.map_err(|e| {
         let message = format!("Failed to save downloaded file: {}", e);
         let _ = crate::services::tracked_downloads::emit(

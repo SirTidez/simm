@@ -61,6 +61,23 @@ fn main() {
                     e
                 })?;
 
+            let mut settings_service =
+                crate::services::settings::SettingsService::new(db_pool.clone()).map_err(|e| {
+                    log::error!("Failed to create SettingsService during setup: {}", e);
+                    e
+                })?;
+            match tauri::async_runtime::block_on(settings_service.load_settings()) {
+                Ok(settings) => {
+                    crate::services::logger::LoggerService::apply_settings(&settings);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Failed to load settings for logger configuration: {}",
+                        error
+                    );
+                }
+            }
+
             app.manage(db_pool.clone());
 
             if let Err(error) = tauri::async_runtime::block_on(

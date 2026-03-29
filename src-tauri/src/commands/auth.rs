@@ -1,5 +1,6 @@
 use crate::services::auth::AuthService;
 use crate::services::settings::SettingsService;
+use crate::utils::logging::error_with_location;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -29,7 +30,13 @@ pub async fn authenticate(
     let result = auth_service
         .authenticate(username.clone(), password.clone(), steam_guard)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            error_with_location(format!(
+                "Steam auth command failed for user credential flow: {}",
+                e
+            ));
+            e.to_string()
+        })?;
 
     if result.success {
         // Save credentials if requested
@@ -40,14 +47,26 @@ pub async fn authenticate(
                 settings_service
                     .save_credentials(username.clone(), pwd)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        error_with_location(format!(
+                            "Steam auth succeeded but saving credentials failed: {}",
+                            e
+                        ));
+                        e.to_string()
+                    })?;
 
                 let mut updates = serde_json::Map::new();
                 updates.insert("steamUsername".to_string(), serde_json::json!(username));
                 settings_service
                     .save_settings(serde_json::Value::Object(updates))
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        error_with_location(format!(
+                            "Steam auth succeeded but persisting steamUsername failed: {}",
+                            e
+                        ));
+                        e.to_string()
+                    })?;
             }
         }
 

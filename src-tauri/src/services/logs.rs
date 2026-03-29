@@ -8,6 +8,8 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
+use crate::services::logger::LoggerService;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogFile {
     pub name: String,
@@ -229,8 +231,10 @@ impl LogsService {
         max_lines: Option<usize>,
     ) -> Result<Vec<LogLine>> {
         let path = Path::new(log_path);
+        let sanitized_path = LoggerService::sanitize_log_text(log_path);
 
         if !path.exists() {
+            log::warn!("Requested log file does not exist: {}", sanitized_path);
             return Err(anyhow::anyhow!("Log file does not exist: {}", log_path));
         }
 
@@ -623,8 +627,10 @@ impl LogsService {
 
     pub async fn watch_log_file(&self, log_path: &str, app_handle: AppHandle) -> Result<()> {
         let path = Path::new(log_path).to_path_buf();
+        let sanitized_path = LoggerService::sanitize_log_text(log_path);
 
         if !path.exists() {
+            log::warn!("Cannot watch missing log file: {}", sanitized_path);
             return Err(anyhow::anyhow!("Log file does not exist: {}", log_path));
         }
 

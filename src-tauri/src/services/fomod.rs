@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use quick_xml::de::from_str;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -418,10 +418,9 @@ impl FomodService {
             if let Some(conditional) = step.conditional_file_installs.as_ref() {
                 if let Some(patterns) = conditional.patterns.as_ref() {
                     for pattern in &patterns.pattern {
-                        if self.dependencies_match(
-                            pattern.dependencies.as_ref(),
-                            &selected_flags,
-                        )? {
+                        if self
+                            .dependencies_match(pattern.dependencies.as_ref(), &selected_flags)?
+                        {
                             if let Some(files) = pattern.files.as_ref() {
                                 self.collect_file_entries(
                                     files,
@@ -674,10 +673,7 @@ impl FomodService {
         {
             "or" => Ok(evaluations.into_iter().any(|value| value)),
             "and" => Ok(evaluations.into_iter().all(|value| value)),
-            other => Err(anyhow!(
-                "Unsupported FOMOD dependency operator: {}",
-                other
-            )),
+            other => Err(anyhow!("Unsupported FOMOD dependency operator: {}", other)),
         }
     }
 
