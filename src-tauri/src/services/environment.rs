@@ -131,16 +131,55 @@ impl EnvironmentService {
         Ok(changed)
     }
 
+    async fn heal_environment_payload_id(
+        &self,
+        row_id: &str,
+        mut env: Environment,
+    ) -> Result<Environment> {
+        if env.id == row_id {
+            return Ok(env);
+        }
+
+        let payload_id = env.id.clone();
+        env.id = row_id.to_string();
+
+        let serialized =
+            serde_json::to_string(&env).context("Failed to serialize healed environment")?;
+        sqlx::query("UPDATE environments SET data = ? WHERE id = ?")
+            .bind(&serialized)
+            .bind(row_id)
+            .execute(&*self.pool)
+            .await
+            .with_context(|| format!("Failed to heal environment id mismatch for {}", row_id))?;
+
+        log::warn!(
+            "Healed environment row id mismatch: row id {} replaced payload id {}",
+            row_id,
+            payload_id
+        );
+
+        Ok(env)
+    }
+
     async fn fetch_environments(&self) -> Result<Vec<Environment>> {
-        let rows = sqlx::query_scalar::<_, String>("SELECT data FROM environments")
+        let rows = sqlx::query_as::<_, (String, String)>("SELECT id, data FROM environments")
             .fetch_all(&*self.pool)
             .await
             .context("Failed to query environments")?;
 
         let mut envs = Vec::new();
-        for row in rows {
-            match serde_json::from_str::<Environment>(&row) {
-                Ok(env) => envs.push(env),
+        for (row_id, row_data) in rows {
+            match serde_json::from_str::<Environment>(&row_data) {
+                Ok(env) => match self.heal_environment_payload_id(&row_id, env).await {
+                    Ok(healed) => envs.push(healed),
+                    Err(err) => {
+                        log::warn!(
+                            "Skipping environment {} with unhealable payload id mismatch: {}",
+                            row_id,
+                            err
+                        );
+                    }
+                },
                 Err(err) => {
                     log::warn!("Skipping invalid environment record: {}", err);
                 }
@@ -178,9 +217,80 @@ impl EnvironmentService {
             }
         }
     }
+
+    async fn environment_row_exists(&self, id: &str) -> Result<bool> {
+        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM environments WHERE id = ? LIMIT 1")
+            .bind(id)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to query environment row existence")?;
+
+        Ok(exists.is_some())
+    }
+
+    async fn find_environment_storage_id_by_output_dir(
+        &self,
+        output_dir: &str,
+    ) -> Result<Option<String>> {
+        let normalized_output_dir = Self::normalize_path(output_dir);
+        let result = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM environments WHERE normalized_output_dir = ? OR output_dir = ? LIMIT 1",
+        )
+        .bind(&normalized_output_dir)
+        .bind(output_dir)
+        .fetch_optional(&*self.pool)
+        .await;
+
+        match result {
+            Ok(id) => Ok(id),
+            Err(err) if Self::is_missing_normalized_output_dir_column(&err) => {
+                let rows = sqlx::query_as::<_, (String, String)>("SELECT id, output_dir FROM environments")
+                    .fetch_all(&*self.pool)
+                    .await
+                    .context("Failed to query environments by output_dir fallback")?;
+
+                Ok(rows
+                    .into_iter()
+                    .find(|(_, existing_output_dir)| {
+                        Self::normalize_path(existing_output_dir) == normalized_output_dir
+                    })
+                    .map(|(id, _)| id))
+            }
+            Err(err) => Err(err).context("Failed to query environment by output_dir"),
+        }
+    }
+
+    async fn resolve_environment_for_save(&self, env: &Environment) -> Result<Environment> {
+        if self.environment_row_exists(&env.id).await? {
+            return Ok(env.clone());
+        }
+
+        let Some(existing_id) = self
+            .find_environment_storage_id_by_output_dir(&env.output_dir)
+            .await?
+        else {
+            return Ok(env.clone());
+        };
+
+        if existing_id == env.id {
+            return Ok(env.clone());
+        }
+
+        let mut canonical_env = env.clone();
+        canonical_env.id = existing_id.clone();
+        log::info!(
+            "Reusing canonical environment id {} for path {} instead of transient id {}",
+            existing_id,
+            env.output_dir,
+            env.id
+        );
+        Ok(canonical_env)
+    }
+
     async fn save_environment(&self, env: &Environment) -> Result<()> {
+        let env = self.resolve_environment_for_save(env).await?;
         let normalized_output_dir = Self::normalize_path(&env.output_dir);
-        let serialized = serde_json::to_string(env).context("Failed to serialize environment")?;
+        let serialized = serde_json::to_string(&env).context("Failed to serialize environment")?;
         let upsert_with_normalized = {
             let mut last_error: Option<sqlx::Error> = None;
             let mut success = None;
@@ -242,7 +352,7 @@ impl EnvironmentService {
                 }
 
                 let serialized =
-                    serde_json::to_string(env).context("Failed to serialize environment")?;
+                    serde_json::to_string(&env).context("Failed to serialize environment")?;
                 sqlx::query(
                     "INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?) \
                      ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, data = excluded.data",
@@ -335,7 +445,13 @@ impl EnvironmentService {
             .context("Failed to query environment")?;
 
         match row {
-            Some(data) => Ok(serde_json::from_str::<Environment>(&data).ok()),
+            Some(data) => match serde_json::from_str::<Environment>(&data) {
+                Ok(env) => Ok(Some(self.heal_environment_payload_id(id, env).await?)),
+                Err(err) => {
+                    log::warn!("Skipping invalid environment record {}: {}", id, err);
+                    Ok(None)
+                }
+            },
             None => Ok(None),
         }
     }
@@ -402,6 +518,7 @@ impl EnvironmentService {
             environment_type: Some(crate::types::EnvironmentType::DepotDownloader),
         };
 
+        let env = self.resolve_environment_for_save(&env).await?;
         self.save_environment(&env).await?;
         Ok(env)
     }
@@ -493,6 +610,7 @@ impl EnvironmentService {
             environment_type: Some(crate::types::EnvironmentType::Steam),
         };
 
+        let env = self.resolve_environment_for_save(&env).await?;
         self.save_environment(&env).await?;
         Ok(env)
     }
@@ -572,6 +690,7 @@ impl EnvironmentService {
             environment_type: Some(crate::types::EnvironmentType::Local),
         };
 
+        let env = self.resolve_environment_for_save(&env).await?;
         self.save_environment(&env).await?;
 
         Ok(env)
@@ -1144,6 +1263,114 @@ mod tests {
         assert!(err
             .to_string()
             .contains("already exists for this installation path"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_environments_heals_payload_id_mismatch() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+
+        let row_id = "stored-id";
+        let payload_id = "payload-id";
+        let output_dir = temp.path().join("envs").join("mismatched");
+        let env = Environment {
+            id: payload_id.to_string(),
+            name: "Mismatched".to_string(),
+            description: Some("corrupted".to_string()),
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: output_dir.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: Some(chrono::Utc::now()),
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: Some("0.1.0".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind(row_id)
+        .bind(&env.output_dir)
+        .bind(EnvironmentService::normalize_path(&env.output_dir))
+        .bind(serde_json::to_string(&env)?)
+        .execute(&*pool)
+        .await?;
+
+        let envs = service.get_environments().await?;
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].id, row_id);
+
+        let healed = service
+            .get_environment(row_id)
+            .await?
+            .expect("healed environment");
+        assert_eq!(healed.id, row_id);
+
+        let stored_payload: String =
+            sqlx::query_scalar("SELECT data FROM environments WHERE id = ?")
+                .bind(row_id)
+                .fetch_one(&*pool)
+                .await?;
+        let stored_env: Environment = serde_json::from_str(&stored_payload)?;
+        assert_eq!(stored_env.id, row_id);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn create_steam_environment_reuses_existing_storage_id_for_same_path() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+
+        let steam_path = temp.path().join("steam-shared");
+        fs::create_dir_all(&steam_path).await?;
+        fs::write(steam_path.join("Schedule I.exe"), b"").await?;
+
+        let existing = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                steam_path.to_string_lossy().to_string(),
+                Some("Legacy env".to_string()),
+                None,
+            )
+            .await?;
+
+        let steam_env = service
+            .create_steam_environment(steam_path.to_string_lossy().to_string(), None, None)
+            .await?;
+
+        assert_eq!(steam_env.id, existing.id);
+        assert_eq!(service.get_environments().await?.len(), 1);
+
+        let stored = service
+            .get_environment(&existing.id)
+            .await?
+            .expect("stored environment");
+        assert_eq!(stored.id, existing.id);
+        assert!(matches!(stored.environment_type, Some(EnvironmentType::Steam)));
+        assert!(matches!(stored.status, EnvironmentStatus::Completed));
 
         Ok(())
     }
