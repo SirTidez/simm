@@ -3527,57 +3527,68 @@ impl ModsService {
             return Ok(());
         }
 
-        let mut entries = fs::read_dir(root).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let meta = entry.metadata().await?;
-            if meta.is_dir() {
-                continue;
-            }
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(current_dir) = directories.pop() {
+            let mut entries = fs::read_dir(&current_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let meta = entry.metadata().await?;
+                if meta.is_dir() {
+                    directories.push(path);
+                    continue;
+                }
 
-            let file_name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if file_name.is_empty() || file_name == selected_file_name {
-                continue;
-            }
+                let file_name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if file_name.is_empty() || file_name == selected_file_name {
+                    continue;
+                }
 
-            if metadata_map
-                .get(&file_name)
-                .and_then(|value| value.mod_storage_id.as_ref())
-                .is_some()
-            {
-                continue;
-            }
+                let relative_path = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let relative_path_windows = relative_path.replace('/', "\\");
+                if metadata_map
+                    .get(&relative_path)
+                    .or_else(|| metadata_map.get(&relative_path_windows))
+                    .or_else(|| metadata_map.get(&file_name))
+                    .and_then(|value| value.mod_storage_id.as_ref())
+                    .is_some()
+                {
+                    continue;
+                }
 
-            let normalized_name = Self::normalize_local_link_name(&file_name);
-            if normalized_name.is_empty() {
-                continue;
-            }
+                let normalized_name = Self::normalize_local_link_name(&file_name);
+                let normalized_relative_path = Self::normalize_local_link_name(&relative_path);
+                if normalized_name.is_empty() && normalized_relative_path.is_empty() {
+                    continue;
+                }
 
-            let matches_seed = seeds.iter().any(|seed| {
-                !seed.is_empty()
-                    && (normalized_name == *seed
-                        || normalized_name.contains(seed)
-                        || seed.contains(&normalized_name))
-            });
-            if !matches_seed {
-                continue;
-            }
+                let matches_seed = seeds.iter().any(|seed| {
+                    !seed.is_empty()
+                        && ((normalized_name == *seed
+                            || normalized_name.contains(seed)
+                            || seed.contains(&normalized_name))
+                            || (normalized_relative_path == *seed
+                                || normalized_relative_path.contains(seed)
+                                || seed.contains(&normalized_relative_path)))
+                });
+                if !matches_seed {
+                    continue;
+                }
 
-            let relative_path = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            candidates.push(LocalModOwnershipCandidate {
-                id: Self::normalize_link_candidate_id(bucket, &relative_path),
-                bucket: bucket.to_string(),
-                relative_path,
-                file_name,
-            });
+                candidates.push(LocalModOwnershipCandidate {
+                    id: Self::normalize_link_candidate_id(bucket, &relative_path),
+                    bucket: bucket.to_string(),
+                    relative_path,
+                    file_name,
+                });
+            }
         }
 
         Ok(())
@@ -3675,6 +3686,53 @@ impl ModsService {
         Ok(candidates)
     }
 
+    async fn copy_selected_local_link_candidates_to_storage(
+        &self,
+        game_dir: &str,
+        allowed_candidate_ids: &HashSet<String>,
+        owned_file_ids: &[String],
+        storage_mods: &Path,
+        storage_plugins: &Path,
+        storage_userlibs: &Path,
+        storage_userdata: &Path,
+    ) -> Result<()> {
+        for candidate_id in owned_file_ids {
+            if !allowed_candidate_ids.contains(candidate_id) {
+                continue;
+            }
+            let Some((bucket, relative_path)) = Self::parse_link_candidate_id(candidate_id) else {
+                continue;
+            };
+            let Some(source_root) = self.bucket_root_for_game_dir(game_dir, bucket) else {
+                continue;
+            };
+            let source_path = source_root.join(relative_path);
+            if !source_path.exists() {
+                continue;
+            }
+
+            let destination_root = match bucket {
+                "mods" => storage_mods,
+                "plugins" => storage_plugins,
+                "userlibs" => storage_userlibs,
+                "userdata" => storage_userdata,
+                _ => continue,
+            };
+            let destination_path = destination_root.join(relative_path);
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::copy(&source_path, &destination_path).await.with_context(|| {
+                format!(
+                    "Failed to copy selected ownership candidate into storage: {}",
+                    relative_path
+                )
+            })?;
+        }
+
+        Ok(())
+    }
+
     pub async fn promote_local_mod_to_managed(
         &self,
         game_dir: &str,
@@ -3710,9 +3768,11 @@ impl ModsService {
         let storage_mods = storage_base.join("Mods");
         let storage_plugins = storage_base.join("Plugins");
         let storage_userlibs = storage_base.join("UserLibs");
+        let storage_userdata = storage_base.join("UserData");
         fs::create_dir_all(&storage_mods).await?;
         fs::create_dir_all(&storage_plugins).await?;
         fs::create_dir_all(&storage_userlibs).await?;
+        fs::create_dir_all(&storage_userdata).await?;
 
         let selected_source_path = mods_directory.join(file_name);
         let selected_disabled_path = mods_directory.join(format!("{}.disabled", file_name));
@@ -3738,39 +3798,16 @@ impl ModsService {
             .into_iter()
             .map(|candidate| candidate.id)
             .collect();
-
-        for candidate_id in owned_file_ids {
-            if !allowed_candidate_ids.contains(candidate_id) {
-                continue;
-            }
-            let Some((bucket, relative_path)) = Self::parse_link_candidate_id(candidate_id) else {
-                continue;
-            };
-            let Some(source_root) = self.bucket_root_for_game_dir(game_dir, bucket) else {
-                continue;
-            };
-            let source_path = source_root.join(relative_path);
-            if !source_path.exists() {
-                continue;
-            }
-
-            let destination_root = match bucket {
-                "mods" => &storage_mods,
-                "plugins" => &storage_plugins,
-                "userlibs" => &storage_userlibs,
-                _ => continue,
-            };
-            let destination_path = destination_root.join(relative_path);
-            if let Some(parent) = destination_path.parent() {
-                fs::create_dir_all(parent).await?;
-            }
-            fs::copy(&source_path, &destination_path).await.with_context(|| {
-                format!(
-                    "Failed to copy selected ownership candidate into storage: {}",
-                    relative_path
-                )
-            })?;
-        }
+        self.copy_selected_local_link_candidates_to_storage(
+            game_dir,
+            &allowed_candidate_ids,
+            owned_file_ids,
+            &storage_mods,
+            &storage_plugins,
+            &storage_userlibs,
+            &storage_userdata,
+        )
+        .await?;
 
         if let Some(summary) = existing_meta.and_then(|meta| meta.security_scan) {
             storage_metadata.security_scan = Some(summary);
@@ -9936,6 +9973,105 @@ mod tests {
             entry.attached_userlibs,
             vec!["Config/settings.json".to_string()]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn get_local_mod_ownership_candidates_includes_nested_bucket_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-local-link-candidates");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        let userdata_dir = output_dir.join("UserData").join("MyFeature");
+        let userlibs_dir = output_dir.join("UserLibs").join("MyFeature");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&userdata_dir).await?;
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::write(mods_dir.join("MyFeature.dll"), b"mod").await?;
+        fs::write(userdata_dir.join("config.json"), br#"{"enabled":true}"#).await?;
+        fs::write(userlibs_dir.join("helper.dll"), b"helper").await?;
+
+        let candidates = service
+            .get_local_mod_ownership_candidates(
+                output_dir.to_string_lossy().as_ref(),
+                "MyFeature.dll",
+                Some("MyFeature"),
+            )
+            .await?;
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.bucket == "userdata" && candidate.relative_path == "MyFeature/config.json"
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.bucket == "userlibs" && candidate.relative_path == "MyFeature/helper.dll"
+        }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn copy_selected_local_link_candidates_to_storage_copies_userdata_files() -> Result<()> {
+        let temp = tempdir()?;
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+
+        let game_dir = temp.path().join("game");
+        let source_userdata = game_dir.join("UserData").join("MyFeature");
+        fs::create_dir_all(&source_userdata).await?;
+        fs::write(source_userdata.join("state.json"), br#"{"debug":true}"#).await?;
+
+        let storage_root = temp.path().join("storage");
+        let storage_mods = storage_root.join("Mods");
+        let storage_plugins = storage_root.join("Plugins");
+        let storage_userlibs = storage_root.join("UserLibs");
+        let storage_userdata = storage_root.join("UserData");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::create_dir_all(&storage_plugins).await?;
+        fs::create_dir_all(&storage_userlibs).await?;
+        fs::create_dir_all(&storage_userdata).await?;
+
+        let candidate_id = ModsService::normalize_link_candidate_id(
+            "userdata",
+            "MyFeature/state.json",
+        );
+        let allowed = HashSet::from([candidate_id.clone()]);
+        service
+            .copy_selected_local_link_candidates_to_storage(
+                game_dir.to_string_lossy().as_ref(),
+                &allowed,
+                &[candidate_id],
+                &storage_mods,
+                &storage_plugins,
+                &storage_userlibs,
+                &storage_userdata,
+            )
+            .await?;
+
+        assert!(storage_userdata.join("MyFeature").join("state.json").exists());
 
         Ok(())
     }
