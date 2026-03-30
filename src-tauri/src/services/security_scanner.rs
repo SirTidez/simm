@@ -1260,7 +1260,7 @@ enum ArchiveKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Platform, Theme};
+    use crate::types::Platform;
     use serde_json::json;
     use std::io::Write;
     use tempfile::tempdir;
@@ -1282,7 +1282,7 @@ mod tests {
             max_concurrent_downloads: 1,
             platform: Platform::Windows,
             language: "en-US".to_string(),
-            theme: Theme::Dark,
+            theme: "dark".to_string(),
             melon_loader_version: None,
             auto_install_melon_loader: None,
             enable_security_scanner: Some(true),

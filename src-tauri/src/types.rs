@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,7 +172,7 @@ pub struct Settings {
     pub max_concurrent_downloads: u32,
     pub platform: Platform,
     pub language: String,
-    pub theme: Theme,
+    pub theme: String,
     pub melon_loader_version: Option<String>,
     pub auto_install_melon_loader: Option<bool>,
     pub enable_security_scanner: Option<bool>,
@@ -207,12 +208,13 @@ pub struct NexusRateLimits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Theme {
-    Light,
-    Dark,
-    #[serde(rename = "modern-blue", alias = "custom")]
-    ModernBlue,
+#[serde(rename_all = "camelCase")]
+pub struct CustomThemeDefinition {
+    pub id: String,
+    pub name: String,
+    pub base_theme: String,
+    pub file_path: String,
+    pub variables: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

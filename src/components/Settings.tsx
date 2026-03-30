@@ -7,7 +7,7 @@ import {
   lastUpdateCheckTimeRef,
   notifyBatchUpdateCheckStarted,
 } from "./EnvironmentList";
-import type { SecurityScannerStatus } from "../types";
+import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
 
 type SettingsProps = {
   isOpen: boolean;
@@ -19,7 +19,7 @@ type SettingsFormData = {
   maxConcurrentDownloads: number;
   platform: "windows" | "macos" | "linux";
   language: string;
-  theme: "light" | "dark" | "modern-blue";
+  theme: string;
   melonLoaderVersion: string;
   autoInstallMelonLoader: boolean;
   enableSecurityScanner?: boolean;
@@ -38,6 +38,29 @@ const MIN_MOD_ICON_CACHE_LIMIT_MB = 100;
 const MAX_MOD_ICON_CACHE_LIMIT_MB = 8192;
 const MIN_DATABASE_BACKUP_COUNT = 1;
 const MAX_DATABASE_BACKUP_COUNT = 100;
+const BUILT_IN_THEME_OPTIONS = [
+  { id: "modern-blue", label: "Modern Blue" },
+  { id: "dark", label: "Dark" },
+  { id: "light", label: "Light" },
+] as const;
+
+function getCustomThemeDescription(theme: CustomThemeDefinition): string {
+  const variableCount = Object.keys(theme.variables).length;
+  const suffix = variableCount === 1 ? "variable" : "variables";
+  return `${theme.baseTheme} base, ${variableCount} ${suffix}`;
+}
+
+function getActiveBuiltInTheme(
+  selectedThemeId: string,
+  customThemes: CustomThemeDefinition[],
+): string {
+  const activeCustomTheme = customThemes.find((theme) => theme.id === selectedThemeId);
+  if (activeCustomTheme) {
+    return activeCustomTheme.baseTheme;
+  }
+
+  return BUILT_IN_THEME_OPTIONS.find((theme) => theme.id === selectedThemeId)?.id || "modern-blue";
+}
 
 export function normalizeModIconCacheLimitMb(value: unknown): number {
   const parsed =
@@ -107,10 +130,13 @@ function extractReleaseApiLastUpdated(
 export function Settings({ isOpen, onClose }: SettingsProps) {
   const {
     settings,
+    customThemes,
+    themesDirectory,
     depotDownloader,
     loading,
     updateSettings,
     refreshDepotDownloader,
+    refreshThemes,
   } = useSettingsStore();
   const { environments, checkAllUpdates } = useEnvironmentStore();
   const [checkingAllUpdates, setCheckingAllUpdates] = useState(false);
@@ -126,12 +152,16 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     tone: "success" | "error";
     message: string;
   } | null>(null);
+  const [themeFeedback, setThemeFeedback] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
   const [formData, setFormData] = useState<SettingsFormData>({
     defaultDownloadDir: "",
     maxConcurrentDownloads: 2,
     platform: "windows" as "windows" | "macos" | "linux",
     language: "english",
-    theme: "modern-blue" as "light" | "dark" | "modern-blue",
+    theme: "modern-blue",
     melonLoaderVersion: "",
     autoInstallMelonLoader: false,
     enableSecurityScanner: true,
@@ -164,6 +194,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     useState(false);
   const [installingSecurityScanner, setInstallingSecurityScanner] =
     useState(false);
+  const [openingThemesFolder, setOpeningThemesFolder] = useState(false);
+  const [reloadingThemes, setReloadingThemes] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const runCheckAllUpdates = async () => {
@@ -215,12 +247,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
         platform: "windows" as "windows" | "macos" | "linux", // Always Windows
         language: "english", // Always English
-        theme:
-          settings.theme === "light" ||
-          settings.theme === "dark" ||
-          settings.theme === "modern-blue"
-            ? settings.theme
-            : "modern-blue",
+        theme: settings.theme || "modern-blue",
         melonLoaderVersion: settings.melonLoaderVersion || "",
         autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
         enableSecurityScanner: settings.enableSecurityScanner,
@@ -492,6 +519,55 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     }
   };
 
+  const handleOpenThemesFolder = async () => {
+    if (!themesDirectory) {
+      setThemeFeedback({
+        tone: "error",
+        message: "Themes folder is unavailable",
+      });
+      return;
+    }
+
+    try {
+      setOpeningThemesFolder(true);
+      setThemeFeedback(null);
+      await ApiService.openPath(themesDirectory);
+    } catch (err) {
+      setThemeFeedback({
+        tone: "error",
+        message:
+          err instanceof Error ? err.message : "Failed to open the themes folder",
+      });
+    } finally {
+      setOpeningThemesFolder(false);
+    }
+  };
+
+  const handleReloadThemes = async () => {
+    try {
+      setReloadingThemes(true);
+      setThemeFeedback(null);
+      await refreshThemes();
+      setThemeFeedback({
+        tone: "success",
+        message: "Reloaded theme files from disk",
+      });
+    } catch (err) {
+      setThemeFeedback({
+        tone: "error",
+        message:
+          err instanceof Error ? err.message : "Failed to reload theme files",
+      });
+    } finally {
+      setReloadingThemes(false);
+    }
+  };
+
+  const selectedCustomTheme =
+    customThemes.find((theme) => theme.id === formData.theme) ?? null;
+  const selectedBuiltInTheme = getActiveBuiltInTheme(formData.theme, customThemes);
+  const selectedCustomThemeId = selectedCustomTheme?.id || "";
+
   return (
     <>
       {isOpen && (
@@ -548,8 +624,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       </h3>
                     </div>
                     <p>
-                      Pick the built-in app palette and the amount of diagnostic
-                      detail SIMM writes while it runs.
+                      Pick a built-in palette, optionally layer a custom theme
+                      file on top, then choose how much diagnostic detail SIMM
+                      writes while it runs.
                     </p>
                   </div>
 
@@ -557,23 +634,47 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     <div className="settings-field">
                       <label>Theme preset</label>
                       <select
-                        value={formData.theme || "modern-blue"}
-                        onChange={(e) => {
-                          const nextTheme = e.target.value as
-                            | "light"
-                            | "dark"
-                            | "modern-blue";
-                          setFormData({ ...formData, theme: nextTheme });
-                        }}
+                        value={selectedBuiltInTheme}
+                        onChange={(e) =>
+                          setFormData({ ...formData, theme: e.target.value })
+                        }
                         disabled={loading}
                       >
-                        <option value="modern-blue">Modern Blue</option>
-                        <option value="dark">Dark</option>
-                        <option value="light">Light</option>
+                        {BUILT_IN_THEME_OPTIONS.map((theme) => (
+                          <option key={theme.id} value={theme.id}>
+                            {theme.label}
+                          </option>
+                        ))}
                       </select>
                       <small>
-                        Built-in SIMM palettes only. Modern Blue remains the
-                        default app theme.
+                        Choosing a built-in preset clears any active custom
+                        theme override.
+                      </small>
+                    </div>
+
+                    <div className="settings-field">
+                      <label>Custom theme</label>
+                      <select
+                        value={selectedCustomThemeId}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            theme: e.target.value || selectedBuiltInTheme,
+                          })
+                        }
+                        disabled={loading}
+                      >
+                        <option value="">None</option>
+                        {customThemes.map((theme) => (
+                          <option key={theme.id} value={theme.id}>
+                            {theme.name}
+                          </option>
+                        ))}
+                      </select>
+                      <small>
+                        JSON files inside the themes folder appear here after
+                        reload and apply on top of the <code>baseTheme</code>{" "}
+                        defined inside each file.
                       </small>
                     </div>
 
@@ -599,6 +700,88 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       </small>
                     </div>
                   </div>
+
+                  <div className="settings-inline-status-grid">
+                    <div className="settings-inline-status settings-inline-status--path">
+                      <span>Themes Folder</span>
+                      <strong title={themesDirectory || undefined}>
+                        {themesDirectory || "Unavailable"}
+                      </strong>
+                      <small>
+                        Drop JSON files here with <code>baseTheme</code> and{" "}
+                        <code>variables</code> keys. SIMM layers them over a
+                        built-in base palette.
+                      </small>
+                    </div>
+
+                    <div className="settings-inline-status">
+                      <span>Theme Files</span>
+                      <strong>
+                        {customThemes.length === 0
+                          ? "No custom themes"
+                          : `${customThemes.length} loaded`}
+                      </strong>
+                      <small>
+                        {customThemes.length === 0
+                          ? "Create a .json file in the themes folder and reload to register it."
+                          : "Custom themes can override any CSS variable already used by the app."}
+                      </small>
+                    </div>
+
+                    <div className="settings-inline-status settings-inline-status--path">
+                      <span>Selected Theme</span>
+                      <strong title={selectedCustomTheme?.filePath || undefined}>
+                        {selectedCustomTheme
+                          ? selectedCustomTheme.name
+                          : BUILT_IN_THEME_OPTIONS.find(
+                              (theme) => theme.id === formData.theme,
+                            )?.label || formData.theme}
+                      </strong>
+                      <small>
+                        {selectedCustomTheme
+                          ? `${getCustomThemeDescription(selectedCustomTheme)} from ${selectedCustomTheme.filePath}`
+                          : "Built-in palettes are stored in the app bundle and can be used as custom theme bases."}
+                      </small>
+                    </div>
+
+                    <div className="settings-inline-status settings-inline-status--action">
+                      <span>Theme File Actions</span>
+                      <strong>Manage JSON themes</strong>
+                      <small>
+                        Open the folder to edit files directly, then reload to
+                        rescan the directory without restarting SIMM.
+                      </small>
+                      <div className="settings-backup-panel__actions">
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenThemesFolder()}
+                          disabled={openingThemesFolder || !themesDirectory}
+                          className="btn btn-secondary btn-small"
+                        >
+                          {openingThemesFolder
+                            ? "Opening..."
+                            : "Open Themes Folder"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleReloadThemes()}
+                          disabled={reloadingThemes}
+                          className="btn btn-secondary btn-small"
+                        >
+                          {reloadingThemes ? "Reloading..." : "Reload Theme Files"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {themeFeedback && (
+                    <div
+                      className={`settings-inline-feedback settings-inline-feedback--${themeFeedback.tone}`}
+                      role={themeFeedback.tone === "error" ? "alert" : "status"}
+                    >
+                      {themeFeedback.message}
+                    </div>
+                  )}
                 </div>
 
                 <hr className="settings-divider" />

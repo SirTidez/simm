@@ -91,7 +91,11 @@ describe("normalizeDatabaseBackupCount", () => {
 });
 
 describe("Settings", () => {
+  const refreshThemes = vi.fn();
+
   beforeEach(() => {
+    refreshThemes.mockReset();
+    refreshThemes.mockResolvedValue(undefined);
     settingsStoreMocks.useSettingsStore.mockReturnValue({
       settings: {
         defaultDownloadDir: "C:\\Games",
@@ -105,10 +109,23 @@ describe("Settings", () => {
         modIconCacheLimitMb: 500,
         databaseBackupCount: 10,
       },
+      customThemes: [
+        {
+          id: "sunset",
+          name: "Sunset",
+          baseTheme: "dark",
+          filePath: "C:\\Users\\SirTidez\\SIMM\\themes\\sunset.json",
+          variables: {
+            "--app-bg-color": "#1b120f",
+          },
+        },
+      ],
+      themesDirectory: "C:\\Users\\SirTidez\\SIMM\\themes",
       depotDownloader: null,
       loading: false,
       updateSettings: vi.fn().mockResolvedValue(undefined),
       refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+      refreshThemes,
     });
 
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({
@@ -193,25 +210,41 @@ describe("Settings", () => {
     });
   });
 
-  it("only exposes built-in theme presets", async () => {
+  it("shows separate built-in and custom theme selectors", async () => {
     render(<Settings isOpen={true} onClose={vi.fn()} />);
 
-    const themeField = screen
-      .getByText(/theme preset/i)
-      .closest(".settings-field");
-    const select = themeField?.querySelector(
+    const presetLabel = screen
+      .getAllByText(/^theme preset$/i)
+      .find((node) => node.tagName === "LABEL");
+    const presetField = presetLabel?.closest(".settings-field");
+    const presetSelect = presetField?.querySelector(
+      "select",
+    ) as HTMLSelectElement | null;
+    const customLabel = screen
+      .getAllByText(/^custom theme$/i)
+      .find((node) => node.tagName === "LABEL");
+    const customField = customLabel?.closest(".settings-field");
+    const customSelect = customField?.querySelector(
       "select",
     ) as HTMLSelectElement | null;
 
-    expect(select).toBeTruthy();
-    if (!select) {
+    expect(presetSelect).toBeTruthy();
+    expect(customSelect).toBeTruthy();
+    if (!presetSelect || !customSelect) {
       throw new Error("Theme preset select not found");
     }
-    const optionValues = Array.from(select.options).map(
+
+    const presetOptionValues = Array.from(presetSelect.options).map(
+      (option) => option.value,
+    );
+    const customOptionValues = Array.from(customSelect.options).map(
       (option) => option.value,
     );
 
-    expect(optionValues).toEqual(["modern-blue", "dark", "light"]);
+    expect(presetOptionValues).toEqual(["modern-blue", "dark", "light"]);
+    expect(customOptionValues).toEqual(["", "sunset"]);
+    expect(screen.getByText(/drop json files here/i)).toBeTruthy();
+    expect(screen.getByText(/sunset/i)).toBeTruthy();
   });
 
   it("creates a manual database backup from settings", async () => {
@@ -241,6 +274,33 @@ describe("Settings", () => {
         "C:\\Users\\SirTidez\\SIMM\\backups",
       );
     });
+  });
+
+  it("opens the themes folder from settings", async () => {
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /open themes folder/i }),
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.openPath).toHaveBeenCalledWith(
+        "C:\\Users\\SirTidez\\SIMM\\themes",
+      );
+    });
+  });
+
+  it("reloads theme files from settings", async () => {
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /reload theme files/i }),
+    );
+
+    await waitFor(() => {
+      expect(refreshThemes).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText(/reloaded theme files from disk/i)).toBeTruthy();
   });
 
   it("offers a fallback MLVScan install action when the scanner is missing", async () => {

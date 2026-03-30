@@ -112,7 +112,7 @@ export interface Settings {
   maxConcurrentDownloads: number;
   platform: 'windows' | 'macos' | 'linux';
   language: string;
-  theme: 'light' | 'dark' | 'modern-blue';
+  theme: string;
   melonLoaderVersion?: string;
   autoInstallMelonLoader?: boolean;
   enableSecurityScanner?: boolean;
@@ -133,6 +133,14 @@ export interface Settings {
   databaseBackupCount?: number;
   logRetentionDays?: number;
   appUpdate?: AppUpdatePreferences | null;
+}
+
+export interface CustomThemeDefinition {
+  id: string;
+  name: string;
+  baseTheme: 'light' | 'dark' | 'modern-blue';
+  filePath: string;
+  variables: Record<string, string>;
 }
 
 export interface AppUpdateStatus {

@@ -16,6 +16,7 @@ import type {
   ExtractGameVersionResult,
   LocalModOwnershipCandidate,
   LocalModSourcePreview,
+  CustomThemeDefinition,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -57,6 +58,14 @@ export class ApiService {
   static async backupDatabase(): Promise<{ success: boolean; path: string }> {
     const path = await invoke<string>('backup_database');
     return { success: true, path };
+  }
+
+  static async getCustomThemes(): Promise<CustomThemeDefinition[]> {
+    return invoke('get_custom_themes');
+  }
+
+  static async getThemesDirectory(): Promise<string> {
+    return invoke('get_themes_directory');
   }
 
   // Environments

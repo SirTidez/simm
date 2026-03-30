@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 import { SettingsStoreProvider, useSettingsStore } from './settingsStore';
-import type { Settings } from '../types';
+import type { CustomThemeDefinition, Settings } from '../types';
 import { THEME_STORAGE_KEY } from '../utils/theme';
 
 const apiMocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
   detectDepotDownloader: vi.fn(),
+  getCustomThemes: vi.fn(),
+  getThemesDirectory: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -30,6 +32,17 @@ const modernBlueSettings: Settings = {
 const darkSettings: Settings = {
   ...baseSettings,
   theme: 'dark',
+};
+
+const sunsetTheme: CustomThemeDefinition = {
+  id: 'sunset',
+  name: 'Sunset',
+  baseTheme: 'dark',
+  filePath: 'C:/SIMM/themes/sunset.json',
+  variables: {
+    '--app-bg-color': '#1b120f',
+    '--primary-btn-color': '#d96b3a',
+  },
 };
 
 const legacyCustomSettings: Settings = {
@@ -59,8 +72,15 @@ describe('SettingsStore', () => {
     apiMocks.getSettings.mockReset();
     apiMocks.saveSettings.mockReset();
     apiMocks.detectDepotDownloader.mockReset();
+    apiMocks.getCustomThemes.mockReset();
+    apiMocks.getThemesDirectory.mockReset();
     document.documentElement.removeAttribute('data-theme');
-    window.localStorage.clear();
+    document.documentElement.removeAttribute('data-custom-theme');
+    document.documentElement.style.cssText = '';
+    document.body.style.cssText = '';
+    window.localStorage.removeItem(THEME_STORAGE_KEY);
+    apiMocks.getCustomThemes.mockResolvedValue([]);
+    apiMocks.getThemesDirectory.mockResolvedValue('C:/SIMM/themes');
   });
 
   afterEach(() => {
@@ -175,6 +195,29 @@ describe('SettingsStore', () => {
     expect(document.documentElement.style.getPropertyValue('--card-bg-color')).toBe('#1d2631');
     expect(document.documentElement.style.getPropertyValue('--badge-blue')).toBe('#5b83d2');
     expect(document.documentElement.style.getPropertyValue('--update-version-bg')).toBe('rgba(225, 164, 77, 0.16)');
+  });
+
+  it('applies custom theme files over their base theme', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes.mockResolvedValueOnce([sunsetTheme]);
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <Consumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('theme').textContent).toBe('sunset');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('sunset');
+    expect(document.documentElement.style.getPropertyValue('--app-bg-color')).toBe('#1b120f');
+    expect(document.documentElement.style.getPropertyValue('--primary-btn-color')).toBe('#d96b3a');
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('sunset');
   });
 
   it('falls back legacy custom themes to modern blue', async () => {
