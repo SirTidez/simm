@@ -10,7 +10,16 @@ import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { getSecurityBadgeConfig } from './securityScanHelpers';
-import type { Environment, ModLibraryEntry, NexusMod, NexusModFile, SecurityScanReport, SecurityScanSummary } from '../types';
+import type {
+  Environment,
+  LocalModOwnershipCandidate,
+  LocalModSourcePreview,
+  ModLibraryEntry,
+  NexusMod,
+  NexusModFile,
+  SecurityScanReport,
+  SecurityScanSummary,
+} from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 
 interface ModInfo {
@@ -20,6 +29,7 @@ interface ModInfo {
   version?: string;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceUrl?: string;
+  author?: string;
   disabled?: boolean;
   modStorageId?: string;
   managed?: boolean;
@@ -93,6 +103,28 @@ export interface ModsOverlayNavigationState {
   modListFilter?: 'all' | 'updates' | 'enabled' | 'disabled';
   installedSearchTerm?: string;
   activeModView?: ModViewState | null;
+}
+
+type LocalSourceLinkStage = 'chooseSource' | 'edit' | 'confirmMismatch' | 'pickOwnership' | 'saving';
+type LocalSourceLinkStrategy = 'existing' | 'manual' | null;
+
+interface LocalSourceLinkState {
+  modId: string;
+  modFileName: string;
+  sourceUrl: string;
+  sourceUrlTouched: boolean;
+  stage: LocalSourceLinkStage;
+  strategy: LocalSourceLinkStrategy;
+  loadingExistingHint: boolean;
+  loadingPreview: boolean;
+  loadingOwnership: boolean;
+  existingSourceHint?: LocalModSourcePreview | null;
+  preview?: LocalModSourcePreview;
+  selectedVersion?: string;
+  customVersion: string;
+  error?: string | null;
+  ownershipCandidates: LocalModOwnershipCandidate[];
+  selectedOwnershipIds: string[];
 }
 
 const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
@@ -358,6 +390,7 @@ export function ModsOverlay({
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
+  const [localSourceLinkState, setLocalSourceLinkState] = useState<LocalSourceLinkState | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
   const activeModViewSecurityBadge = getSecurityBadgeConfig(activeModView?.securityScan);
   const openExternalSourceUrl = useCallback((url?: string) => {
@@ -1874,6 +1907,230 @@ export function ModsOverlay({
     }
   };
 
+  const isLinkableLocalMod = useCallback((mod?: ModInfo | null) => {
+    if (!mod) {
+      return false;
+    }
+    return !mod.managed && (!mod.source || mod.source === 'local' || mod.source === 'unknown');
+  }, []);
+
+  const localModRequiresLinkConfirmation = useCallback((mod: ModInfo, preview: LocalModSourcePreview) => {
+    const localName = normalizeModNameKey(mod.name || mod.fileName);
+    const remoteName = normalizeModNameKey(preview.displayName);
+    return !!localName && !!remoteName && localName !== remoteName;
+  }, []);
+
+  const closeLocalSourceLink = useCallback(() => {
+    setLocalSourceLinkState(null);
+  }, []);
+
+  const openLocalSourceLink = useCallback((mod: ModInfo) => {
+    setLocalSourceLinkState({
+      modId: `${mod.fileName}-${mod.path}`,
+      modFileName: mod.fileName,
+      sourceUrl: mod.sourceUrl || '',
+      sourceUrlTouched: false,
+      stage: 'chooseSource',
+      strategy: null,
+      loadingExistingHint: true,
+      loadingPreview: false,
+      loadingOwnership: false,
+      existingSourceHint: null,
+      preview: undefined,
+      selectedVersion: undefined,
+      customVersion: '',
+      error: null,
+      ownershipCandidates: [],
+      selectedOwnershipIds: [],
+    });
+    void ApiService.getLocalModExistingSourceHint(environmentId, mod.fileName)
+      .then((hint) => {
+        setLocalSourceLinkState((current) => {
+          if (!current || current.modId !== `${mod.fileName}-${mod.path}`) {
+            return current;
+          }
+          return {
+            ...current,
+            loadingExistingHint: false,
+            existingSourceHint: hint,
+            stage: hint ? 'chooseSource' : 'edit',
+          };
+        });
+      })
+      .catch((err) => {
+        setLocalSourceLinkState((current) => {
+          if (!current || current.modId !== `${mod.fileName}-${mod.path}`) {
+            return current;
+          }
+          return {
+            ...current,
+            loadingExistingHint: false,
+            existingSourceHint: null,
+            stage: 'edit',
+            error: err instanceof Error ? err.message : 'Failed to load existing source hint.',
+          };
+        });
+      });
+  }, [environmentId]);
+
+  const requestLocalSourcePreview = useCallback(async (
+    mod: ModInfo,
+    sourceUrl: string,
+  ): Promise<LocalModSourcePreview | null> => {
+    const trimmed = sourceUrl.trim();
+    if (!trimmed) {
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        preview: undefined,
+        selectedVersion: undefined,
+        error: 'Source URL is required.',
+        loadingPreview: false,
+      } : current);
+      return null;
+    }
+
+    setLocalSourceLinkState((current) => current ? {
+      ...current,
+      loadingPreview: true,
+      error: null,
+    } : current);
+
+    try {
+      const preview = await ApiService.previewLocalModSourceLink(environmentId, mod.fileName, trimmed);
+      const exactVersion = mod.version && preview.versions.some((entry) => entry.version === mod.version)
+        ? mod.version
+        : undefined;
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        sourceUrl: preview.sourceUrl,
+        preview,
+        strategy: current.strategy ?? 'manual',
+        selectedVersion: exactVersion
+          ?? (current.selectedVersion && preview.versions.some((entry) => entry.version === current.selectedVersion)
+            ? current.selectedVersion
+            : undefined),
+        loadingPreview: false,
+        error: null,
+      } : current);
+      return preview;
+    } catch (err) {
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        preview: undefined,
+        selectedVersion: undefined,
+        loadingPreview: false,
+        error: err instanceof Error ? err.message : 'Failed to load source preview.',
+      } : current);
+      return null;
+    }
+  }, [environmentId]);
+
+  const promoteLocalSourceLink = useCallback(async (
+    mod: ModInfo,
+    preview: LocalModSourcePreview,
+    selectedVersion: string,
+    selectedOwnershipIds: string[],
+    resumeStage: LocalSourceLinkStage,
+  ) => {
+    setLocalSourceLinkState((current) => current ? {
+      ...current,
+      stage: 'saving',
+      error: null,
+    } : current);
+
+    try {
+      await ApiService.promoteLocalModToManaged(
+        environmentId,
+        mod.fileName,
+        preview.sourceUrl,
+        selectedVersion,
+        selectedOwnershipIds,
+      );
+      setToastMessage('Mod linked and added to Mod Library.');
+      closeLocalSourceLink();
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
+      onModsChanged?.();
+    } catch (err) {
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        stage: resumeStage,
+        error: err instanceof Error ? err.message : 'Failed to link local mod source.',
+      } : current);
+    }
+  }, [closeLocalSourceLink, environmentId, onModsChanged]);
+
+  const prepareLocalOwnershipStep = useCallback(async (
+    mod: ModInfo,
+    preview: LocalModSourcePreview,
+    resolvedVersion: string,
+  ) => {
+    setLocalSourceLinkState((current) => current ? {
+      ...current,
+      loadingOwnership: true,
+      error: null,
+    } : current);
+    try {
+      const candidates = await ApiService.getLocalModOwnershipCandidates(
+        environmentId,
+        mod.fileName,
+        preview.displayName,
+      );
+      if (candidates.length === 0) {
+        await promoteLocalSourceLink(mod, preview, resolvedVersion, [], 'edit');
+        return;
+      }
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        preview,
+        selectedVersion: resolvedVersion,
+        loadingOwnership: false,
+        stage: 'pickOwnership',
+        ownershipCandidates: candidates,
+        selectedOwnershipIds: [],
+        error: null,
+      } : current);
+    } catch (err) {
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        loadingOwnership: false,
+        error: err instanceof Error ? err.message : 'Failed to load ownership candidates.',
+      } : current);
+    }
+  }, [environmentId, promoteLocalSourceLink]);
+
+  const continueLocalSourceLink = useCallback(async (mod: ModInfo, state: LocalSourceLinkState) => {
+    const preview = state.preview ?? await requestLocalSourcePreview(mod, state.sourceUrl);
+    if (!preview) {
+      return;
+    }
+
+    const resolvedVersion = state.customVersion.trim()
+      || state.selectedVersion
+      || (mod.version && preview.versions.some((entry) => entry.version === mod.version) ? mod.version : undefined);
+    if (!resolvedVersion) {
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        error: 'Choose the installed version before continuing.',
+      } : current);
+      return;
+    }
+
+    if (localModRequiresLinkConfirmation(mod, preview)) {
+      setLocalSourceLinkState((current) => current ? {
+        ...current,
+        preview,
+        selectedVersion: resolvedVersion,
+        stage: 'confirmMismatch',
+        error: null,
+      } : current);
+      return;
+    }
+
+    await prepareLocalOwnershipStep(mod, preview, resolvedVersion);
+  }, [localModRequiresLinkConfirmation, prepareLocalOwnershipStep, requestLocalSourcePreview]);
+
   if (!isOpen) return null;
 
   const envRuntime = environment?.runtime;
@@ -1939,11 +2196,12 @@ export function ModsOverlay({
       id: `${mod.fileName}-${mod.path}`,
       storageId: mod.modStorageId,
       name: mod.name,
-      source: mod.source || 'unknown',
+      source: mod.source || 'local',
       summary: mod.summary,
       iconUrl: mod.iconUrl,
       iconCachePath: mod.iconCachePath,
       sourceUrl: mod.sourceUrl,
+      author: mod.author,
       downloads: mod.downloads,
       likesOrEndorsements: mod.likesOrEndorsements,
       updatedAt: mod.updatedAt,
@@ -2022,6 +2280,15 @@ export function ModsOverlay({
     return mods.find((mod) => `${mod.fileName}-${mod.path}` === activeModView.id) || null;
   }, [activeModView, mods]);
   const selectedInstalledSecurityBadge = getSecurityBadgeConfig(selectedInstalledMod?.securityScan);
+
+  useEffect(() => {
+    if (!localSourceLinkState) {
+      return;
+    }
+    if (!selectedInstalledMod || `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` !== localSourceLinkState.modId) {
+      setLocalSourceLinkState(null);
+    }
+  }, [localSourceLinkState, selectedInstalledMod]);
 
   useEffect(() => {
     if (!isOpen || filteredMods.length === 0) {
@@ -3522,14 +3789,428 @@ export function ModsOverlay({
 
           <aside className="workspace-collection__inspector">
             {!selectedInstalledMod && <div className="workspace-collection__inspector-empty">Select an installed mod to review details and actions.</div>}
-            {selectedInstalledMod && (
+            {selectedInstalledMod && localSourceLinkState && localSourceLinkState.modId === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` && (
+              <div className="workspace-inspector-link-panel">
+                <div className="workspace-inspector-link-panel__header">
+                  <div>
+                    <h3>Link Mod Source</h3>
+                    <p>Connect this local install to a known source so SIMM can track updates and add it to Mod Library.</p>
+                  </div>
+                  <span className="workspace-pill workspace-pill--source">Local</span>
+                </div>
+                <div className="workspace-inspector-link-panel__summary">
+                  <strong>{selectedInstalledMod.name}</strong>
+                  <span>{selectedInstalledMod.fileName}</span>
+                </div>
+                {localSourceLinkState.error && (
+                  <div className="workspace-inspector-link-panel__error">{localSourceLinkState.error}</div>
+                )}
+                {localSourceLinkState.stage === 'chooseSource' && (
+                  <div className="workspace-inspector-link-panel__step">
+                    <h4>Choose source strategy</h4>
+                    {localSourceLinkState.loadingExistingHint ? (
+                      <p>Checking whether this local file matches an existing linked mod family.</p>
+                    ) : localSourceLinkState.existingSourceHint ? (
+                      <>
+                        <p>
+                          This local file appears to match the existing linked source family{' '}
+                          <strong>{localSourceLinkState.existingSourceHint.displayName}</strong>.
+                        </p>
+                        <div className="workspace-inspector-link-panel__actions">
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => {
+                              setLocalSourceLinkState((current) => current ? {
+                                ...current,
+                                strategy: 'manual',
+                                stage: 'edit',
+                                preview: undefined,
+                                sourceUrl: '',
+                                sourceUrlTouched: false,
+                                selectedVersion: undefined,
+                                customVersion: '',
+                                error: null,
+                              } : current);
+                            }}
+                          >
+                            Choose Different Source
+                          </button>
+                          <button
+                            className="btn btn-primary"
+                            onClick={() => {
+                              const preview = localSourceLinkState.existingSourceHint!;
+                              const runtimeLabel = environment?.runtime;
+                              const matchingRuntimeVersion = runtimeLabel
+                                ? preview.versions.find((entry) => !entry.runtime || entry.runtime === runtimeLabel)
+                                : undefined;
+                              setLocalSourceLinkState((current) => current ? {
+                                ...current,
+                                strategy: 'existing',
+                                stage: 'edit',
+                                preview,
+                                sourceUrl: preview.sourceUrl,
+                                sourceUrlTouched: false,
+                                selectedVersion: matchingRuntimeVersion?.version,
+                                customVersion: '',
+                                error: null,
+                              } : current);
+                            }}
+                          >
+                            Use Existing Source Family
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <p>No existing managed source family confidently matches this local file yet.</p>
+                        <div className="workspace-inspector-link-panel__actions">
+                          <button className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</button>
+                          <button
+                            className="btn btn-primary"
+                            onClick={() => {
+                              setLocalSourceLinkState((current) => current ? {
+                                ...current,
+                                strategy: 'manual',
+                                stage: 'edit',
+                                preview: undefined,
+                                sourceUrl: '',
+                                sourceUrlTouched: false,
+                                selectedVersion: undefined,
+                                customVersion: '',
+                                error: null,
+                              } : current);
+                            }}
+                          >
+                            Link Different Source
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+                {localSourceLinkState.stage === 'edit' && (
+                  <>
+                    <div className="workspace-inspector-card__field">
+                      <label htmlFor="local-source-url">Source URL</label>
+                      <input
+                        id="local-source-url"
+                        className="workspace-inspector-link-panel__input"
+                        type="url"
+                        value={localSourceLinkState.sourceUrl}
+                        placeholder="https://thunderstore.io/... or https://www.nexusmods.com/..."
+                        readOnly={localSourceLinkState.strategy === 'existing'}
+                        onChange={(event) => {
+                          const nextValue = event.target.value;
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            strategy: 'manual',
+                            sourceUrl: nextValue,
+                            sourceUrlTouched: true,
+                            preview: undefined,
+                            selectedVersion: undefined,
+                            customVersion: '',
+                            error: null,
+                          } : current);
+                        }}
+                        onBlur={() => {
+                          if (localSourceLinkState.strategy === 'existing') {
+                            return;
+                          }
+                          if (!localSourceLinkState.sourceUrlTouched) {
+                            return;
+                          }
+                          void requestLocalSourcePreview(selectedInstalledMod, localSourceLinkState.sourceUrl);
+                        }}
+                      />
+                      <span className="workspace-inspector-link-panel__hint">
+                        Paste the full Thunderstore package page or Nexus Mods mod page URL.
+                      </span>
+                    </div>
+                    <div className="workspace-inspector-card__field">
+                      <label>Source</label>
+                      <div className="workspace-inspector-card__value">
+                        {localSourceLinkState.preview ? getSourceLabel(localSourceLinkState.preview.source) : 'Awaiting source URL'}
+                      </div>
+                    </div>
+                    <div className="workspace-inspector-card__field">
+                      <label>Remote mod</label>
+                      <div className="workspace-inspector-card__value">
+                        {localSourceLinkState.preview?.displayName || 'Paste a source URL to load mod details.'}
+                      </div>
+                    </div>
+                    <div className="workspace-inspector-card__field">
+                      <label>Author</label>
+                      <div className="workspace-inspector-card__value">
+                        {localSourceLinkState.preview?.author || 'Author will be filled automatically after source detection.'}
+                      </div>
+                    </div>
+                    <div className="workspace-inspector-card__field">
+                      <label htmlFor="local-source-version">Which version do you currently have installed?</label>
+                      <select
+                        id="local-source-version"
+                        className="workspace-inspector-link-panel__input"
+                        value={localSourceLinkState.selectedVersion || ''}
+                        onChange={(event) => {
+                          const nextValue = event.target.value;
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            selectedVersion: nextValue || undefined,
+                            customVersion: '',
+                            error: null,
+                          } : current);
+                        }}
+                        disabled={!localSourceLinkState.preview || localSourceLinkState.loadingPreview}
+                      >
+                        <option value="">Select installed version</option>
+                        {(localSourceLinkState.preview?.versions || [])
+                          .filter((version) => {
+                            if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
+                              return true;
+                            }
+                            return !version.runtime || version.runtime === environment.runtime;
+                          })
+                          .map((version) => (
+                          <option key={version.key} value={version.version}>
+                            {version.version}
+                            {version.runtime ? ` • ${version.runtime}` : ''}
+                            {version.isLatest ? ' • Latest' : ''}
+                            {version.updatedAt ? ` • ${new Date(version.updatedAt).toLocaleDateString()}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="workspace-inspector-card__field">
+                      <label htmlFor="local-custom-version">Or enter a custom local version</label>
+                      <input
+                        id="local-custom-version"
+                        className="workspace-inspector-link-panel__input"
+                        type="text"
+                        value={localSourceLinkState.customVersion}
+                        placeholder="dev, 1.0.7r2+local, custom build"
+                        onChange={(event) => {
+                          const nextValue = event.target.value;
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            customVersion: nextValue,
+                            selectedVersion: nextValue.trim() ? undefined : current.selectedVersion,
+                            error: null,
+                          } : current);
+                        }}
+                      />
+                    </div>
+                    {localSourceLinkState.preview && (
+                      <div className="workspace-inspector-card__subsection">
+                        <div className="workspace-inspector-card__subsection-header">
+                          <div>
+                            <h4>Available versions</h4>
+                            <p>
+                              {localSourceLinkState.strategy === 'existing' && environment?.runtime
+                                ? `These are the versions already known for ${environment.runtime}.`
+                                : 'Pick the remote version that matches this local install.'}
+                            </p>
+                          </div>
+                          <span className="workspace-inspector-card__subsection-count">
+                            {(localSourceLinkState.preview.versions || []).filter((version) => {
+                              if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
+                                return true;
+                              }
+                              return !version.runtime || version.runtime === environment.runtime;
+                            }).length} available
+                          </span>
+                        </div>
+                        <div className="workspace-version-list">
+                          {(localSourceLinkState.preview.versions || [])
+                            .filter((version) => {
+                              if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
+                                return true;
+                              }
+                              return !version.runtime || version.runtime === environment.runtime;
+                            })
+                            .map((version) => (
+                            <button
+                              key={version.key}
+                              type="button"
+                              className={`workspace-version-row${localSourceLinkState.selectedVersion === version.version ? ' workspace-version-row--selected' : ''}`}
+                              onClick={() => {
+                                setLocalSourceLinkState((current) => current ? {
+                                  ...current,
+                                  selectedVersion: version.version,
+                                  customVersion: '',
+                                  error: null,
+                                } : current);
+                              }}
+                            >
+                              <div className="workspace-version-row__topline">
+                                <strong>{version.version}</strong>
+                                <div className="workspace-version-row__badges">
+                                  {version.runtime && <span className="workspace-pill">{version.runtime}</span>}
+                                  {version.isLatest && <span className="workspace-pill workspace-pill--success">Latest</span>}
+                                </div>
+                              </div>
+                              <div className="workspace-version-row__meta">
+                                <span>{version.updatedAt ? `Updated ${new Date(version.updatedAt).toLocaleDateString()}` : 'Updated unknown'}</span>
+                                {version.label && <span>{version.label}</span>}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="workspace-inspector-link-panel__actions">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => {
+                          if (localSourceLinkState.existingSourceHint) {
+                            setLocalSourceLinkState((current) => current ? {
+                              ...current,
+                              stage: 'chooseSource',
+                              error: null,
+                            } : current);
+                            return;
+                          }
+                          closeLocalSourceLink();
+                        }}
+                      >
+                        {localSourceLinkState.existingSourceHint ? 'Back' : 'Cancel'}
+                      </button>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => void continueLocalSourceLink(selectedInstalledMod, localSourceLinkState)}
+                        disabled={
+                          localSourceLinkState.loadingPreview
+                          || localSourceLinkState.loadingOwnership
+                          || !localSourceLinkState.preview
+                          || (!localSourceLinkState.selectedVersion && !localSourceLinkState.customVersion.trim())
+                        }
+                      >
+                        Continue
+                      </button>
+                    </div>
+                  </>
+                )}
+                {localSourceLinkState.stage === 'confirmMismatch' && localSourceLinkState.preview && (
+                  <div className="workspace-inspector-link-panel__step">
+                    <h4>Confirm source link</h4>
+                    <p>
+                      You are linking local mod <strong>{selectedInstalledMod.fileName}</strong> to remote mod{' '}
+                      <strong>{localSourceLinkState.preview.displayName}</strong>.
+                    </p>
+                    <div className="workspace-inspector-link-panel__actions">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => {
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            stage: 'edit',
+                            error: null,
+                          } : current);
+                        }}
+                      >
+                        Back
+                      </button>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => void prepareLocalOwnershipStep(
+                          selectedInstalledMod,
+                          localSourceLinkState.preview!,
+                          localSourceLinkState.customVersion.trim() || localSourceLinkState.selectedVersion!,
+                        )}
+                      >
+                        Confirm Link
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {localSourceLinkState.stage === 'pickOwnership' && localSourceLinkState.preview && (
+                  <div className="workspace-inspector-link-panel__step">
+                    <h4>Associate additional files</h4>
+                    <p>Select any additional unowned files that should belong to this promoted mod. Skip this step if the current DLL is the only file that belongs to it.</p>
+                    <div className="workspace-inspector-link-panel__candidate-list">
+                      {localSourceLinkState.ownershipCandidates.map((candidate) => {
+                        const checked = localSourceLinkState.selectedOwnershipIds.includes(candidate.id);
+                        return (
+                          <label key={candidate.id} className="workspace-inspector-link-panel__candidate">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(event) => {
+                                const isChecked = event.target.checked;
+                                setLocalSourceLinkState((current) => current ? {
+                                  ...current,
+                                  selectedOwnershipIds: isChecked
+                                    ? [...current.selectedOwnershipIds, candidate.id]
+                                    : current.selectedOwnershipIds.filter((id) => id !== candidate.id),
+                                } : current);
+                              }}
+                            />
+                            <div>
+                              <strong>{candidate.fileName}</strong>
+                              <span>{candidate.bucket} • {candidate.relativePath}</span>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="workspace-inspector-link-panel__actions">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => {
+                          setLocalSourceLinkState((current) => current ? {
+                            ...current,
+                            stage: localModRequiresLinkConfirmation(selectedInstalledMod, current.preview!)
+                              ? 'confirmMismatch'
+                              : 'edit',
+                            error: null,
+                          } : current);
+                        }}
+                      >
+                        Back
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => void promoteLocalSourceLink(
+                          selectedInstalledMod,
+                          localSourceLinkState.preview!,
+                          localSourceLinkState.customVersion.trim() || localSourceLinkState.selectedVersion!,
+                          [],
+                          'pickOwnership',
+                        )}
+                      >
+                        Skip extra files
+                      </button>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => void promoteLocalSourceLink(
+                          selectedInstalledMod,
+                          localSourceLinkState.preview!,
+                          localSourceLinkState.customVersion.trim() || localSourceLinkState.selectedVersion!,
+                          localSourceLinkState.selectedOwnershipIds,
+                          'pickOwnership',
+                        )}
+                      >
+                        Promote Selected Files
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {localSourceLinkState.stage === 'saving' && (
+                  <div className="workspace-inspector-link-panel__step">
+                    <h4>Promoting local mod</h4>
+                    <p>SIMM is linking the source, importing the current install into Mod Library, and updating this environment to managed ownership.</p>
+                  </div>
+                )}
+              </div>
+            )}
+            {selectedInstalledMod && (!localSourceLinkState || localSourceLinkState.modId !== `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`) && (
               <div className="workspace-inspector-card">
                 <div className="workspace-inspector-card__header">
                   {renderCardIcon(selectedInstalledMod.name, selectedInstalledMod.iconCachePath, selectedInstalledMod.iconUrl, 'rail')}
                   <div>
                     <h3>{selectedInstalledMod.name}</h3>
                     <div className="workspace-inspector-card__subtle">
-                      {getSourceLabel(selectedInstalledMod.source)} {selectedInstalledMod.version ? `• ${selectedInstalledMod.version}` : ''}
+                      {getSourceLabel(selectedInstalledMod.source)}
+                      {selectedInstalledMod.author ? ` • ${selectedInstalledMod.author}` : ''}
+                      {selectedInstalledMod.version ? ` • ${selectedInstalledMod.version}` : ''}
                     </div>
                     {selectedInstalledSecurityBadge && (
                       <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
@@ -3597,6 +4278,11 @@ export function ModsOverlay({
                   <button className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</button>
                   <button className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</button>
                   <button className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</button>
+                  {isLinkableLocalMod(selectedInstalledMod) && (
+                    <button className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
+                      Link Source
+                    </button>
+                  )}
                   <button className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</button>
                 </div>
               </div>

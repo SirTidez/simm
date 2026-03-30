@@ -6963,7 +6963,9 @@ body {
 }
 
 .workspace-collection__toolbar-search input,
-.workspace-inspector-card__field select {
+.workspace-inspector-card__field select,
+.workspace-inspector-card__field input,
+.workspace-inspector-link-panel__input {
   width: 100%;
   padding: 0.55rem 0.75rem;
   border-radius: 0.65rem;
@@ -7347,6 +7349,105 @@ body {
 
 .workspace-inspector-card__actions .btn {
   white-space: nowrap;
+}
+
+.workspace-inspector-link-panel {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.workspace-inspector-link-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.workspace-inspector-link-panel__header h3,
+.workspace-inspector-link-panel__step h4 {
+  margin: 0;
+  color: var(--workspace-title-color);
+}
+
+.workspace-inspector-link-panel__header p,
+.workspace-inspector-link-panel__step p {
+  margin: 0.28rem 0 0;
+  color: var(--workspace-copy-color);
+  line-height: 1.45;
+}
+
+.workspace-inspector-link-panel__summary {
+  display: grid;
+  gap: 0.18rem;
+  padding: 0.72rem 0.8rem;
+  border-radius: 0.78rem;
+  border: 1px solid var(--workspace-stroke-soft);
+  background: var(--workspace-surface-muted-soft);
+}
+
+.workspace-inspector-link-panel__summary strong {
+  color: var(--workspace-title-color);
+}
+
+.workspace-inspector-link-panel__summary span,
+.workspace-inspector-link-panel__hint {
+  color: var(--workspace-copy-color);
+  font-size: 0.78rem;
+}
+
+.workspace-inspector-link-panel__error {
+  padding: 0.72rem 0.8rem;
+  border-radius: 0.78rem;
+  border: 1px solid rgba(255, 121, 121, 0.3);
+  background: rgba(110, 33, 33, 0.28);
+  color: #ffd0d0;
+  line-height: 1.45;
+}
+
+.workspace-inspector-link-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.workspace-inspector-link-panel__step {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.workspace-inspector-link-panel__candidate-list {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 280px;
+  overflow: auto;
+  padding-right: 0.15rem;
+}
+
+.workspace-inspector-link-panel__candidate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.72rem 0.78rem;
+  border-radius: 0.78rem;
+  border: 1px solid var(--workspace-stroke-soft);
+  background: var(--workspace-surface-muted-soft);
+  color: var(--workspace-title-color);
+}
+
+.workspace-inspector-link-panel__candidate input {
+  margin-top: 0.15rem;
+}
+
+.workspace-inspector-link-panel__candidate div {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.workspace-inspector-link-panel__candidate span {
+  color: var(--workspace-copy-color);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .workspace-inspector-card__subsection {

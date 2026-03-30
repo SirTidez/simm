@@ -521,6 +521,42 @@ pub struct ModLibraryResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalModSourceVersionOption {
+    pub key: String,
+    pub version: String,
+    pub runtime: Option<String>,
+    pub updated_at: Option<String>,
+    pub is_latest: bool,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModSourcePreview {
+    pub source: ModSource,
+    pub source_id: String,
+    pub source_url: String,
+    pub display_name: String,
+    pub author: Option<String>,
+    pub summary: Option<String>,
+    pub icon_url: Option<String>,
+    pub downloads: Option<u64>,
+    pub likes_or_endorsements: Option<i64>,
+    pub updated_at: Option<String>,
+    pub versions: Vec<LocalModSourceVersionOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModOwnershipCandidate {
+    pub id: String,
+    pub bucket: String,
+    pub relative_path: String,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DepotDownloaderInfo {
     pub installed: bool,
     pub path: Option<String>,

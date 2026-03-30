@@ -3,7 +3,7 @@ use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
-use crate::types::SecurityScanReport;
+use crate::types::{LocalModOwnershipCandidate, LocalModSourcePreview, SecurityScanReport};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
@@ -348,6 +348,117 @@ pub async fn get_mod_library(db: State<'_, Arc<SqlitePool>>) -> Result<serde_jso
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(library).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_local_mod_source_link(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    file_name: String,
+    source_url: String,
+) -> Result<LocalModSourcePreview, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .preview_local_mod_source_link(&env.output_dir, &file_name, &source_url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_local_mod_existing_source_hint(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    file_name: String,
+) -> Result<Option<LocalModSourcePreview>, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .get_local_mod_existing_source_hint(&env.output_dir, &file_name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_local_mod_ownership_candidates(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    file_name: String,
+    linked_name: Option<String>,
+) -> Result<Vec<LocalModOwnershipCandidate>, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .get_local_mod_ownership_candidates(
+            &env.output_dir,
+            &file_name,
+            linked_name.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn promote_local_mod_to_managed(
+    db: State<'_, Arc<SqlitePool>>,
+    environment_id: String,
+    file_name: String,
+    source_url: String,
+    selected_version: String,
+    owned_file_ids: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let mods_service = ModsService::new(db.inner().clone());
+    mods_service
+        .promote_local_mod_to_managed(
+            &env.output_dir,
+            &file_name,
+            &source_url,
+            &selected_version,
+            owned_file_ids.as_deref().unwrap_or(&[]),
+        )
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -14,6 +14,8 @@ import type {
   ConfigEditOperation,
   ConfigFileSummary,
   ExtractGameVersionResult,
+  LocalModOwnershipCandidate,
+  LocalModSourcePreview,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -266,6 +268,7 @@ export class ApiService {
       version?: string;
       source?: string;
       sourceUrl?: string;
+      author?: string;
       disabled?: boolean;
       modStorageId?: string;
       managed?: boolean;
@@ -287,6 +290,56 @@ export class ApiService {
 
   static async getModLibrary(): Promise<import('../types').ModLibraryResult> {
     return invoke('get_mod_library');
+  }
+
+  static async previewLocalModSourceLink(
+    environmentId: string,
+    fileName: string,
+    sourceUrl: string,
+  ): Promise<LocalModSourcePreview> {
+    return invoke('preview_local_mod_source_link', {
+      environmentId,
+      fileName,
+      sourceUrl,
+    });
+  }
+
+  static async getLocalModExistingSourceHint(
+    environmentId: string,
+    fileName: string,
+  ): Promise<LocalModSourcePreview | null> {
+    return invoke('get_local_mod_existing_source_hint', {
+      environmentId,
+      fileName,
+    });
+  }
+
+  static async getLocalModOwnershipCandidates(
+    environmentId: string,
+    fileName: string,
+    linkedName?: string,
+  ): Promise<LocalModOwnershipCandidate[]> {
+    return invoke('get_local_mod_ownership_candidates', {
+      environmentId,
+      fileName,
+      linkedName: linkedName ?? null,
+    });
+  }
+
+  static async promoteLocalModToManaged(
+    environmentId: string,
+    fileName: string,
+    sourceUrl: string,
+    selectedVersion: string,
+    ownedFileIds?: string[],
+  ): Promise<{ success: boolean; storageId?: string }> {
+    return invoke('promote_local_mod_to_managed', {
+      environmentId,
+      fileName,
+      sourceUrl,
+      selectedVersion,
+      ownedFileIds: ownedFileIds ?? null,
+    });
   }
 
   static async installDownloadedMod(

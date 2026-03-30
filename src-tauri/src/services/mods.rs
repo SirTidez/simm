@@ -1,9 +1,12 @@
 use crate::services::fomod::{FomodInstallEntry, FomodService};
+use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
+use crate::services::thunderstore::ThunderStoreService;
 use crate::types::{
-    Environment, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource,
-    SecurityFindingSeverity, SecurityScanDisposition, SecurityScanDispositionClassification,
-    SecurityScanPolicy, SecurityScanReport, SecurityScanState, SecurityScanSummary,
+    Environment, LocalModOwnershipCandidate, LocalModSourcePreview, LocalModSourceVersionOption,
+    ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, SecurityFindingSeverity,
+    SecurityScanDisposition, SecurityScanDispositionClassification, SecurityScanPolicy,
+    SecurityScanReport, SecurityScanState, SecurityScanSummary,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -19,8 +22,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
-#[cfg(target_os = "windows")]
-use tokio::process::Command;
 use unrar::Archive;
 use uuid::Uuid;
 use zip::ZipArchive;
@@ -51,6 +52,27 @@ struct StoragePayloadSummary {
     attached_userlibs: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+enum LinkedSourceProvider {
+    Thunderstore {
+        game_id: String,
+        owner: String,
+        package_name: String,
+        normalized_url: String,
+    },
+    NexusMods {
+        game_id: String,
+        mod_id: u32,
+        normalized_url: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct LocalSourcePreviewResolved {
+    preview: LocalModSourcePreview,
+    metadata: ModMetadata,
+}
+
 static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         Regex::new(r"(?i)\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$").expect("runtime suffix regex"),
@@ -73,6 +95,7 @@ struct ModInfo {
     version: Option<String>,
     source: Option<ModSource>,
     source_url: Option<String>,
+    author: Option<String>,
     disabled: Option<bool>,
     mod_storage_id: Option<String>,
     managed: bool,
@@ -236,6 +259,458 @@ impl ModsService {
             serde_json::Value::Null => false,
             serde_json::Value::String(text) => !text.trim().is_empty(),
             _ => true,
+        }
+    }
+
+    fn normalize_local_link_name(value: &str) -> String {
+        Self::normalize_runtime_suffix_token(
+            value.trim_end_matches(".disabled")
+                .trim_end_matches(".dll")
+                .trim_end_matches(".DLL"),
+        )
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
+    fn names_materially_differ(local_name: &str, remote_name: &str) -> bool {
+        let local = Self::normalize_local_link_name(local_name);
+        let remote = Self::normalize_local_link_name(remote_name);
+        if local.is_empty() || remote.is_empty() {
+            return false;
+        }
+
+        local != remote
+    }
+
+    fn parse_linked_source_provider(&self, source_url: &str) -> Result<LinkedSourceProvider> {
+        let parsed = reqwest::Url::parse(source_url.trim())
+            .context("Source URL must be a valid full URL")?;
+        let scheme = parsed.scheme().to_ascii_lowercase();
+        if scheme != "http" && scheme != "https" {
+            return Err(anyhow::anyhow!(
+                "Only full http/https source URLs are supported"
+            ));
+        }
+
+        let host = parsed
+            .host_str()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let segments: Vec<&str> = parsed
+            .path_segments()
+            .map(|parts| parts.filter(|part| !part.is_empty()).collect())
+            .unwrap_or_default();
+
+        if host == "thunderstore.io" {
+            if segments.len() < 5 || segments[0] != "c" || segments[2] != "p" {
+                return Err(anyhow::anyhow!(
+                    "Thunderstore URLs must point to a package page"
+                ));
+            }
+
+            return Ok(LinkedSourceProvider::Thunderstore {
+                game_id: segments[1].to_string(),
+                owner: segments[3].to_string(),
+                package_name: segments[4].to_string(),
+                normalized_url: format!(
+                    "https://thunderstore.io/c/{}/p/{}/{}/",
+                    segments[1], segments[3], segments[4]
+                ),
+            });
+        }
+
+        if host == "www.nexusmods.com" || host == "nexusmods.com" {
+            if segments.len() < 3 || segments[1] != "mods" {
+                return Err(anyhow::anyhow!(
+                    "Nexus Mods URLs must point to a mod page"
+                ));
+            }
+
+            let mod_id = segments[2]
+                .parse::<u32>()
+                .context("Invalid Nexus Mods mod id")?;
+            return Ok(LinkedSourceProvider::NexusMods {
+                game_id: segments[0].to_string(),
+                mod_id,
+                normalized_url: format!(
+                    "https://www.nexusmods.com/{}/mods/{}",
+                    segments[0], mod_id
+                ),
+            });
+        }
+
+        Err(anyhow::anyhow!(
+            "Only Thunderstore and Nexus Mods URLs are supported for linking"
+        ))
+    }
+
+    fn infer_runtime_label_from_text(value: &str) -> Option<String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            text if text.contains("il2cpp") => Some(RUNTIME_IL2CPP.to_string()),
+            text if text.contains("mono") => Some(RUNTIME_MONO.to_string()),
+            _ => None,
+        }
+    }
+
+    async fn resolve_local_mod_source_preview(
+        &self,
+        source_url: &str,
+    ) -> Result<LocalSourcePreviewResolved> {
+        match self.parse_linked_source_provider(source_url)? {
+            LinkedSourceProvider::Thunderstore {
+                game_id,
+                owner,
+                package_name,
+                normalized_url,
+            } => {
+                let service = ThunderStoreService::new();
+                let packages = service
+                    .search_packages_filtered_by_runtime(&game_id, "unknown", Some(&package_name))
+                    .await
+                    .context("Failed to query Thunderstore package metadata")?;
+
+                let owner_lower = owner.to_ascii_lowercase();
+                let package_lower = package_name.to_ascii_lowercase();
+                let normalized_url_lower = normalized_url.to_ascii_lowercase();
+                let package = packages
+                    .into_iter()
+                    .find(|package| {
+                        let package_owner = package
+                            .get("owner")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        let package_name_value = package
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        let package_url = package
+                            .get("package_url")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .trim_end_matches('/')
+                            .to_ascii_lowercase();
+
+                        (package_owner == owner_lower && package_name_value == package_lower)
+                            || package_url == normalized_url_lower.trim_end_matches('/')
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("Thunderstore package not found"))?;
+
+                let display_name = package
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&package_name)
+                    .to_string();
+                let author = package
+                    .get("owner")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                let summary = package
+                    .get("latest")
+                    .and_then(|value| value.get("description"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        package
+                            .get("versions")
+                            .and_then(|value| value.as_array())
+                            .and_then(|versions| versions.first())
+                            .and_then(|value| value.get("description"))
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string())
+                    });
+                let icon_url = package
+                    .get("latest")
+                    .and_then(|value| value.get("icon"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        package
+                            .get("icon")
+                            .or_else(|| package.get("icon_url"))
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string())
+                    });
+                let downloads = package
+                    .get("versions")
+                    .and_then(|value| value.as_array())
+                    .map(|versions| {
+                        versions.iter().fold(0_u64, |acc, version| {
+                            acc.saturating_add(
+                                version
+                                    .get("downloads")
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0),
+                            )
+                        })
+                    });
+                let likes_or_endorsements = package
+                    .get("rating_score")
+                    .and_then(|value| value.as_i64());
+                let updated_at = package
+                    .get("date_updated")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                let versions = package
+                    .get("versions")
+                    .and_then(|value| value.as_array())
+                    .map(|versions| {
+                        versions
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, version)| {
+                                let key = version.get("uuid4")?.as_str()?.to_string();
+                                let version_number = version
+                                    .get("version_number")
+                                    .and_then(|value| value.as_str())?
+                                    .to_string();
+                                let label = version
+                                    .get("full_name")
+                                    .and_then(|value| value.as_str())
+                                    .map(|value| value.to_string());
+                                let runtime = label
+                                    .as_deref()
+                                    .and_then(Self::infer_runtime_label_from_text)
+                                    .or_else(|| {
+                                        version
+                                            .get("name")
+                                            .and_then(|value| value.as_str())
+                                            .and_then(Self::infer_runtime_label_from_text)
+                                    });
+                                let updated = version
+                                    .get("date_updated")
+                                    .and_then(|value| value.as_str())
+                                    .map(|value| value.to_string())
+                                    .or_else(|| {
+                                        version
+                                            .get("date_created")
+                                            .and_then(|value| value.as_str())
+                                            .map(|value| value.to_string())
+                                    });
+
+                                Some(LocalModSourceVersionOption {
+                                    key,
+                                    version: version_number,
+                                    runtime,
+                                    updated_at: updated,
+                                    is_latest: index == 0,
+                                    label,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                let metadata = ModMetadata {
+                    source: Some(ModSource::Thunderstore),
+                    source_id: Some(format!("{}/{}", owner, package_name)),
+                    source_version: None,
+                    author: author.clone(),
+                    mod_name: Some(display_name.clone()),
+                    source_url: Some(
+                        package
+                            .get("package_url")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(&normalized_url)
+                            .to_string(),
+                    ),
+                    summary: summary.clone(),
+                    icon_url: icon_url.clone(),
+                    icon_cache_path: None,
+                    downloads,
+                    likes_or_endorsements,
+                    updated_at: updated_at.clone(),
+                    tags: package
+                        .get("categories")
+                        .and_then(|value| value.as_array())
+                        .map(|tags| {
+                            tags.iter()
+                                .filter_map(|tag| tag.as_str().map(|value| value.to_string()))
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|tags| !tags.is_empty()),
+                    installed_version: None,
+                    library_added_at: None,
+                    installed_at: None,
+                    last_update_check: None,
+                    metadata_last_refreshed: Some(Utc::now()),
+                    update_available: None,
+                    remote_version: None,
+                    detected_runtime: None,
+                    runtime_match: None,
+                    mod_storage_id: None,
+                    symlink_paths: None,
+                    security_scan: None,
+                };
+
+                Ok(LocalSourcePreviewResolved {
+                    preview: LocalModSourcePreview {
+                        source: ModSource::Thunderstore,
+                        source_id: metadata.source_id.clone().unwrap_or_default(),
+                        source_url: metadata.source_url.clone().unwrap_or(normalized_url),
+                        display_name,
+                        author,
+                        summary,
+                        icon_url,
+                        downloads,
+                        likes_or_endorsements,
+                        updated_at,
+                        versions,
+                    },
+                    metadata,
+                })
+            }
+            LinkedSourceProvider::NexusMods {
+                game_id,
+                mod_id,
+                normalized_url,
+            } => {
+                let service = NexusModsService::new();
+                let mod_data = service
+                    .get_mod(&game_id, mod_id)
+                    .await
+                    .context("Failed to query Nexus Mods metadata")?;
+                let files = service
+                    .get_mod_files(&game_id, mod_id)
+                    .await
+                    .context("Failed to query Nexus Mods versions")?;
+
+                let display_name = mod_data
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Unknown mod")
+                    .to_string();
+                let author = mod_data
+                    .get("author")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                let summary = mod_data
+                    .get("summary")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                let icon_url = mod_data
+                    .get("picture_url")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+                let downloads = mod_data
+                    .get("mod_downloads")
+                    .and_then(|value| value.as_u64());
+                let likes_or_endorsements = mod_data
+                    .get("endorsement_count")
+                    .and_then(|value| value.as_i64());
+                let updated_at = mod_data
+                    .get("updated_time")
+                    .or_else(|| mod_data.get("uploaded_time"))
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string());
+
+                let mut versions = files
+                    .into_iter()
+                    .filter_map(|file| {
+                        let file_id = file.get("file_id")?.as_u64()?;
+                        let version = file
+                            .get("version")
+                            .or_else(|| file.get("mod_version"))
+                            .and_then(|value| value.as_str())?
+                            .to_string();
+                        let label = file
+                            .get("name")
+                            .or_else(|| file.get("file_name"))
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string());
+                        let runtime = label
+                            .as_deref()
+                            .and_then(Self::infer_runtime_label_from_text)
+                            .or_else(|| {
+                                file
+                                    .get("category_name")
+                                    .and_then(|value| value.as_str())
+                                    .and_then(Self::infer_runtime_label_from_text)
+                            });
+                        let updated = file
+                            .get("updated_time")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string())
+                            .or_else(|| {
+                                file.get("uploaded_timestamp")
+                                    .and_then(|value| value.as_i64())
+                                    .and_then(|timestamp| Utc.timestamp_opt(timestamp, 0).single())
+                                    .map(|value| value.to_rfc3339())
+                            });
+                        let is_latest = file
+                            .get("is_primary")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(false);
+
+                        Some(LocalModSourceVersionOption {
+                            key: file_id.to_string(),
+                            version,
+                            runtime,
+                            updated_at: updated,
+                            is_latest,
+                            label,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                versions.sort_by(|left, right| {
+                    right
+                        .is_latest
+                        .cmp(&left.is_latest)
+                        .then_with(|| right.updated_at.cmp(&left.updated_at))
+                        .then_with(|| right.version.cmp(&left.version))
+                });
+
+                let metadata = ModMetadata {
+                    source: Some(ModSource::Nexusmods),
+                    source_id: Some(mod_id.to_string()),
+                    source_version: None,
+                    author: author.clone(),
+                    mod_name: Some(display_name.clone()),
+                    source_url: Some(normalized_url.clone()),
+                    summary: summary.clone(),
+                    icon_url: icon_url.clone(),
+                    icon_cache_path: None,
+                    downloads,
+                    likes_or_endorsements,
+                    updated_at: updated_at.clone(),
+                    tags: None,
+                    installed_version: None,
+                    library_added_at: None,
+                    installed_at: None,
+                    last_update_check: None,
+                    metadata_last_refreshed: Some(Utc::now()),
+                    update_available: None,
+                    remote_version: None,
+                    detected_runtime: None,
+                    runtime_match: None,
+                    mod_storage_id: None,
+                    symlink_paths: None,
+                    security_scan: None,
+                };
+
+                Ok(LocalSourcePreviewResolved {
+                    preview: LocalModSourcePreview {
+                        source: ModSource::Nexusmods,
+                        source_id: metadata.source_id.clone().unwrap_or_default(),
+                        source_url: normalized_url,
+                        display_name,
+                        author,
+                        summary,
+                        icon_url,
+                        downloads,
+                        likes_or_endorsements,
+                        updated_at,
+                        versions,
+                    },
+                    metadata,
+                })
+            }
         }
     }
 
@@ -723,152 +1198,45 @@ impl ModsService {
         index
     }
 
-    async fn build_storage_file_index_if_needed(
-        &self,
-        storage_root: &Path,
-        index: &mut Option<HashMap<String, Vec<String>>>,
-    ) {
-        if index.is_none() {
-            *index = Some(self.build_storage_file_index(storage_root).await);
-        }
-    }
-
-    async fn storage_dir_contains_matching_file(
-        &self,
-        storage_path: &Path,
-        file_name_variants: &HashSet<String>,
-        managed_file_path: &Path,
-    ) -> bool {
-        let mut pending = vec![
-            storage_path.join("Mods"),
-            storage_path.join("Plugins"),
-            storage_path.join("UserLibs"),
-        ];
-
-        while let Some(current) = pending.pop() {
-            if !current.exists() {
-                continue;
-            }
-
-            let mut entries = match fs::read_dir(&current).await {
-                Ok(entries) => entries,
-                Err(_) => continue,
-            };
-
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                let metadata = match entry.metadata().await {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
-
-                if metadata.is_dir() {
-                    pending.push(path);
-                    continue;
-                }
-
-                let file_name = match path.file_name().and_then(|value| value.to_str()) {
-                    Some(value) => value.to_lowercase(),
-                    None => continue,
-                };
-                if !file_name_variants.contains(&file_name) {
-                    continue;
-                }
-
-                if self
-                    .path_matches_storage_source(managed_file_path, &path)
-                    .await
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
     async fn infer_storage_id_from_symlink(
         &self,
         mod_file_path: &Path,
         storage_root: &Path,
     ) -> Option<String> {
         let metadata = fs::symlink_metadata(mod_file_path).await.ok()?;
-        if metadata.file_type().is_symlink() {
-            let link_target = fs::read_link(mod_file_path).await.ok()?;
-            let resolved_target = if link_target.is_absolute() {
-                link_target
-            } else {
-                mod_file_path.parent()?.join(link_target)
-            };
-
-            let canonical_target = match fs::canonicalize(&resolved_target).await {
-                Ok(path) => path,
-                Err(_) => resolved_target,
-            };
-
-            let canonical_storage_root = match fs::canonicalize(storage_root).await {
-                Ok(path) => path,
-                Err(_) => storage_root.to_path_buf(),
-            };
-
-            let relative = canonical_target
-                .strip_prefix(&canonical_storage_root)
-                .ok()?;
-            return match relative.components().next() {
-                Some(Component::Normal(value)) => {
-                    let storage_id = value.to_string_lossy().trim().to_string();
-                    if storage_id.is_empty() {
-                        None
-                    } else {
-                        Some(storage_id)
-                    }
-                }
-                _ => None,
-            };
-        }
-
-        if !metadata.is_file() {
+        if !metadata.file_type().is_symlink() {
             return None;
         }
 
-        let file_name = mod_file_path.file_name()?.to_str()?;
-        let variants: HashSet<String> = Self::tracked_name_variants(file_name)
-            .into_iter()
-            .map(|value| value.to_lowercase())
-            .collect();
-        let mut matches = HashSet::new();
-        let mut entries = fs::read_dir(storage_root).await.ok()?;
+        let link_target = fs::read_link(mod_file_path).await.ok()?;
+        let resolved_target = if link_target.is_absolute() {
+            link_target
+        } else {
+            mod_file_path.parent()?.join(link_target)
+        };
 
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let entry_path = entry.path();
-            let entry_meta = match entry.metadata().await {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if !entry_meta.is_dir() {
-                continue;
-            }
+        let canonical_target = match fs::canonicalize(&resolved_target).await {
+            Ok(path) => path,
+            Err(_) => resolved_target,
+        };
 
-            let storage_id = match entry_path.file_name().and_then(|value| value.to_str()) {
-                Some(value) => value.trim().to_string(),
-                None => continue,
-            };
-            if storage_id.is_empty() {
-                continue;
-            }
+        let canonical_storage_root = match fs::canonicalize(storage_root).await {
+            Ok(path) => path,
+            Err(_) => storage_root.to_path_buf(),
+        };
 
-            if self
-                .storage_dir_contains_matching_file(&entry_path, &variants, mod_file_path)
-                .await
-            {
-                matches.insert(storage_id);
-                if matches.len() > 1 {
-                    return None;
+        let relative = canonical_target.strip_prefix(&canonical_storage_root).ok()?;
+        match relative.components().next() {
+            Some(Component::Normal(value)) => {
+                let storage_id = value.to_string_lossy().trim().to_string();
+                if storage_id.is_empty() {
+                    None
+                } else {
+                    Some(storage_id)
                 }
             }
+            _ => None,
         }
-
-        matches.into_iter().next()
     }
 
     async fn path_belongs_to_storage_source(&self, path: &Path, source_path: &Path) -> bool {
@@ -1038,7 +1406,6 @@ impl ModsService {
         metadata: &mut HashMap<String, ModMetadata>,
     ) -> Result<bool> {
         let storage_root = self.get_mods_storage_dir().await?;
-        let mut storage_file_index: Option<HashMap<String, Vec<String>>> = None;
 
         let mut entries = match fs::read_dir(mods_directory).await {
             Ok(entries) => entries,
@@ -1087,15 +1454,6 @@ impl ModsService {
                 storage_id = self
                     .infer_storage_id_from_symlink(&path, &storage_root)
                     .await;
-
-                if storage_id.is_none() {
-                    self.build_storage_file_index_if_needed(&storage_root, &mut storage_file_index)
-                        .await;
-
-                    if let Some(index) = storage_file_index.as_ref() {
-                        storage_id = Self::infer_storage_id_from_index(index, &canonical_name);
-                    }
-                }
             }
 
             let Some(storage_id) = storage_id else {
@@ -1144,6 +1502,24 @@ impl ModsService {
         }
 
         Ok(changed)
+    }
+
+    async fn find_confident_storage_metadata_by_file_name(
+        &self,
+        file_name: &str,
+    ) -> Result<Option<ModMetadata>> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        if !storage_root.exists() {
+            return Ok(None);
+        }
+
+        let index = self.build_storage_file_index(&storage_root).await;
+        let Some(storage_id) = Self::infer_storage_id_from_index(&index, file_name) else {
+            return Ok(None);
+        };
+
+        let storage_path = Self::validated_storage_path(&storage_root, &storage_id)?;
+        self.load_storage_metadata(&storage_path).await
     }
 
     async fn get_mod_icon_cache_dir(&self) -> Result<PathBuf> {
@@ -2487,6 +2863,56 @@ impl ModsService {
         false
     }
 
+    fn tracked_candidate_paths(
+        &self,
+        output_dir: &str,
+        file_name: &str,
+        symlink_paths: Option<&Vec<String>>,
+    ) -> Vec<PathBuf> {
+        let mods_dir = self.get_mods_directory(output_dir);
+        let plugins_dir = self.get_plugins_directory(output_dir);
+        let userlibs_dir = Path::new(output_dir).join("UserLibs");
+
+        let mut candidate_paths: Vec<PathBuf> = Vec::new();
+        for variant in Self::tracked_name_variants(file_name) {
+            candidate_paths.push(mods_dir.join(&variant));
+            candidate_paths.push(plugins_dir.join(&variant));
+            candidate_paths.push(userlibs_dir.join(&variant));
+        }
+
+        if let Some(paths) = symlink_paths {
+            for path in paths {
+                for variant in Self::tracked_name_variants(path) {
+                    candidate_paths.push(PathBuf::from(variant));
+                }
+            }
+        }
+
+        candidate_paths
+    }
+
+    async fn tracked_entry_owned_by_storage(
+        &self,
+        output_dir: &str,
+        file_name: &str,
+        storage_id: &str,
+        symlink_paths: Option<&Vec<String>>,
+        storage_root: &Path,
+    ) -> bool {
+        for path in self.tracked_candidate_paths(output_dir, file_name, symlink_paths) {
+            if self
+                .infer_storage_id_from_symlink(&path, storage_root)
+                .await
+                .as_deref()
+                == Some(storage_id)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub async fn reconcile_tracked_mod_state(&self) -> Result<Vec<String>> {
         #[derive(Clone)]
         struct ReconcileEntry {
@@ -2598,6 +3024,23 @@ impl ModsService {
                 }
             };
 
+            if let Some(storage_id) = entry.mod_storage_id.as_deref() {
+                let entry_owned = self
+                    .tracked_entry_owned_by_storage(
+                        output_dir,
+                        &entry.file_name,
+                        storage_id,
+                        entry.symlink_paths.as_ref(),
+                        &storage_root,
+                    )
+                    .await;
+                if !entry_owned {
+                    rows_to_delete.insert((entry.environment_id.clone(), entry.file_name.clone()));
+                    affected_env_ids.insert(entry.environment_id.clone());
+                }
+                continue;
+            }
+
             let entry_exists = self
                 .tracked_entry_exists_in_environment(
                     output_dir,
@@ -2678,18 +3121,50 @@ impl ModsService {
             }
         }
 
+        let storage_root = self.get_mods_storage_dir().await?;
+        let mut metadata_changed = false;
+        if !game_dir.is_empty() && !metadata.is_empty() {
+            let mut stale_managed_entries = Vec::new();
+            for (file_name, meta) in &metadata {
+                let Some(storage_id) = meta.mod_storage_id.as_deref() else {
+                    continue;
+                };
+                let owned = self
+                    .tracked_entry_owned_by_storage(
+                        game_dir,
+                        file_name,
+                        storage_id,
+                        meta.symlink_paths.as_ref(),
+                        &storage_root,
+                    )
+                    .await;
+                if !owned {
+                    stale_managed_entries.push(file_name.clone());
+                }
+            }
+
+            if !stale_managed_entries.is_empty() {
+                for file_name in stale_managed_entries {
+                    metadata.remove(&file_name);
+                }
+                metadata_changed = true;
+            }
+        }
+
         if let Ok(repaired) = self
             .recover_mod_metadata_from_storage(mods_directory, &mut metadata)
             .await
         {
-            if repaired {
-                if let Err(err) = self.save_mod_metadata(mods_directory, &metadata).await {
-                    log::warn!(
-                        "Failed to persist recovered mod metadata for {}: {}",
-                        mods_directory.display(),
-                        err
-                    );
-                }
+            metadata_changed |= repaired;
+        }
+
+        if metadata_changed {
+            if let Err(err) = self.save_mod_metadata(mods_directory, &metadata).await {
+                log::warn!(
+                    "Failed to persist recovered mod metadata for {}: {}",
+                    mods_directory.display(),
+                    err
+                );
             }
         }
 
@@ -2767,50 +3242,11 @@ impl ModsService {
     }
 
     pub async fn extract_mod_version(&self, dll_path: &Path) -> Option<String> {
-        // Method 1: Use PowerShell on Windows to get file version
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(version) = self.extract_version_powershell(dll_path).await {
-                if !version.is_empty() && version != "null" {
-                    return Some(version);
-                }
-            }
-        }
-
-        // Method 2: Try to read version from DLL binary
         if let Ok(version) = self.extract_version_from_binary(dll_path).await {
             return Some(version);
         }
 
         None
-    }
-
-    #[cfg(target_os = "windows")]
-    async fn extract_version_powershell(&self, dll_path: &Path) -> Result<String> {
-        #[allow(unused_imports)] // Required for CommandExt trait methods
-        use std::os::windows::process::CommandExt;
-
-        let path_str = dll_path.to_string_lossy().replace('\'', "''");
-
-        let _output = Command::new("powershell")
-            .arg("-Command")
-            .arg(&format!(
-                "(Get-Item '{}').VersionInfo.FileVersion",
-                path_str
-            ))
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
-            .output()
-            .await
-            .context("Failed to execute PowerShell command")?;
-
-        if _output.status.success() {
-            let version = String::from_utf8_lossy(&_output.stdout).trim().to_string();
-            if !version.is_empty() && version != "null" {
-                return Ok(version);
-            }
-        }
-
-        Err(anyhow::anyhow!("PowerShell version extraction failed"))
     }
 
     async fn extract_version_from_binary(&self, dll_path: &Path) -> Result<String> {
@@ -2923,18 +3359,31 @@ impl ModsService {
                 meta.source_version
                     .clone()
                     .or(meta.installed_version.clone())
-            } else if !is_disabled {
-                self.extract_mod_version(Path::new(&file_path)).await
             } else {
                 None
             };
 
-            let source = file_metadata.as_ref().and_then(|m| m.source.clone());
-            let source_url = file_metadata.as_ref().and_then(|m| m.source_url.clone());
             let mod_storage_id = file_metadata
                 .as_ref()
                 .and_then(|m| m.mod_storage_id.clone());
             let managed = mod_storage_id.is_some();
+            let confident_hint_metadata = if managed {
+                None
+            } else {
+                self.find_confident_storage_metadata_by_file_name(&original_file_name)
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            let source = file_metadata
+                .as_ref()
+                .and_then(|m| m.source.clone())
+                .or_else(|| if managed { None } else { Some(ModSource::Local) });
+            let source_url = file_metadata.as_ref().and_then(|m| m.source_url.clone());
+            let author = file_metadata
+                .as_ref()
+                .and_then(|m| m.author.clone())
+                .or_else(|| confident_hint_metadata.as_ref().and_then(|meta| meta.author.clone()));
             let summary = file_metadata.as_ref().and_then(|m| m.summary.clone());
             let icon_url = file_metadata.as_ref().and_then(|m| m.icon_url.clone());
             let icon_cache_path = file_metadata
@@ -2963,6 +3412,7 @@ impl ModsService {
                 version,
                 source,
                 source_url,
+                author,
                 disabled: Some(is_disabled),
                 mod_storage_id,
                 managed,
@@ -2996,6 +3446,326 @@ impl ModsService {
 
         let data = row.ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
         serde_json::from_str::<Environment>(&data).context("Failed to parse environment")
+    }
+
+    async fn ensure_linkable_local_mod(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+    ) -> Result<(PathBuf, HashMap<String, ModMetadata>, Option<ModMetadata>)> {
+        let mods_directory = self.get_mods_directory(game_dir);
+        let metadata_map = self.load_mod_metadata(&mods_directory).await?;
+        let entry_metadata = metadata_map.get(file_name).cloned();
+
+        if entry_metadata
+            .as_ref()
+            .and_then(|meta| meta.mod_storage_id.as_ref())
+            .is_some()
+        {
+            return Err(anyhow::anyhow!("Managed mods cannot be linked manually"));
+        }
+
+        let active_path = mods_directory.join(file_name);
+        let disabled_path = mods_directory.join(format!("{}.disabled", file_name));
+        if !active_path.exists() && !disabled_path.exists() {
+            return Err(anyhow::anyhow!("Installed mod file not found"));
+        }
+
+        Ok((mods_directory, metadata_map, entry_metadata))
+    }
+
+    fn normalize_link_candidate_id(bucket: &str, relative_path: &str) -> String {
+        format!("{}:{}", bucket, relative_path.replace('\\', "/"))
+    }
+
+    fn parse_link_candidate_id(candidate_id: &str) -> Option<(&str, &str)> {
+        let (bucket, relative_path) = candidate_id.split_once(':')?;
+        if relative_path.trim().is_empty() {
+            return None;
+        }
+        Some((bucket, relative_path))
+    }
+
+    fn bucket_root_for_game_dir(&self, game_dir: &str, bucket: &str) -> Option<PathBuf> {
+        match bucket {
+            "mods" => Some(self.get_mods_directory(game_dir)),
+            "plugins" => Some(self.get_plugins_directory(game_dir)),
+            "userlibs" => Some(Path::new(game_dir).join("UserLibs")),
+            _ => None,
+        }
+    }
+
+    async fn collect_local_link_candidates_from_bucket(
+        &self,
+        bucket: &str,
+        root: &Path,
+        selected_file_name: &str,
+        seeds: &[String],
+        metadata_map: &HashMap<String, ModMetadata>,
+        candidates: &mut Vec<LocalModOwnershipCandidate>,
+    ) -> Result<()> {
+        if !root.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(root).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let meta = entry.metadata().await?;
+            if meta.is_dir() {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if file_name.is_empty() || file_name == selected_file_name {
+                continue;
+            }
+
+            if metadata_map
+                .get(&file_name)
+                .and_then(|value| value.mod_storage_id.as_ref())
+                .is_some()
+            {
+                continue;
+            }
+
+            let normalized_name = Self::normalize_local_link_name(&file_name);
+            if normalized_name.is_empty() {
+                continue;
+            }
+
+            let matches_seed = seeds.iter().any(|seed| {
+                !seed.is_empty()
+                    && (normalized_name == *seed
+                        || normalized_name.contains(seed)
+                        || seed.contains(&normalized_name))
+            });
+            if !matches_seed {
+                continue;
+            }
+
+            let relative_path = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            candidates.push(LocalModOwnershipCandidate {
+                id: Self::normalize_link_candidate_id(bucket, &relative_path),
+                bucket: bucket.to_string(),
+                relative_path,
+                file_name,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn preview_local_mod_source_link(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+        source_url: &str,
+    ) -> Result<LocalModSourcePreview> {
+        let _ = self.ensure_linkable_local_mod(game_dir, file_name).await?;
+        let resolved = self.resolve_local_mod_source_preview(source_url).await?;
+        Ok(resolved.preview)
+    }
+
+    pub async fn get_local_mod_existing_source_hint(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+    ) -> Result<Option<LocalModSourcePreview>> {
+        let _ = self.ensure_linkable_local_mod(game_dir, file_name).await?;
+        let Some(metadata) = self
+            .find_confident_storage_metadata_by_file_name(file_name)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let Some(source_url) = metadata.source_url.as_deref() else {
+            return Ok(None);
+        };
+
+        let resolved = self.resolve_local_mod_source_preview(source_url).await?;
+        Ok(Some(resolved.preview))
+    }
+
+    pub async fn get_local_mod_ownership_candidates(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+        linked_name: Option<&str>,
+    ) -> Result<Vec<LocalModOwnershipCandidate>> {
+        let (_, metadata_map, _) = self.ensure_linkable_local_mod(game_dir, file_name).await?;
+        let mut seeds = vec![Self::normalize_local_link_name(file_name)];
+        if let Some(name) = linked_name {
+            let normalized = Self::normalize_local_link_name(name);
+            if !normalized.is_empty() && !seeds.contains(&normalized) {
+                seeds.push(normalized);
+            }
+        }
+
+        let mut candidates = Vec::new();
+        self.collect_local_link_candidates_from_bucket(
+            "mods",
+            &self.get_mods_directory(game_dir),
+            file_name,
+            &seeds,
+            &metadata_map,
+            &mut candidates,
+        )
+        .await?;
+        self.collect_local_link_candidates_from_bucket(
+            "plugins",
+            &self.get_plugins_directory(game_dir),
+            file_name,
+            &seeds,
+            &metadata_map,
+            &mut candidates,
+        )
+        .await?;
+        self.collect_local_link_candidates_from_bucket(
+            "userlibs",
+            &Path::new(game_dir).join("UserLibs"),
+            file_name,
+            &seeds,
+            &metadata_map,
+            &mut candidates,
+        )
+        .await?;
+        candidates.sort_by(|left, right| {
+            left.bucket
+                .cmp(&right.bucket)
+                .then_with(|| left.relative_path.cmp(&right.relative_path))
+        });
+        Ok(candidates)
+    }
+
+    pub async fn promote_local_mod_to_managed(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+        source_url: &str,
+        selected_version: &str,
+        owned_file_ids: &[String],
+    ) -> Result<serde_json::Value> {
+        let (mods_directory, _, existing_meta) =
+            self.ensure_linkable_local_mod(game_dir, file_name).await?;
+        let env_id = self
+            .environment_id_for_dir(game_dir)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
+        let resolved = self.resolve_local_mod_source_preview(source_url).await?;
+        if selected_version.trim().is_empty() {
+            return Err(anyhow::anyhow!("Selected version is required"));
+        }
+
+        let mut storage_metadata = resolved.metadata.clone();
+        storage_metadata.source_version = Some(selected_version.trim().to_string());
+        storage_metadata.installed_version = Some(selected_version.trim().to_string());
+        storage_metadata.installed_at = Some(Utc::now());
+        storage_metadata.library_added_at = Some(Utc::now());
+        storage_metadata.metadata_last_refreshed = Some(Utc::now());
+        storage_metadata.icon_cache_path = self
+            .cache_icon_from_url(storage_metadata.icon_url.as_deref())
+            .await;
+
+        let mod_storage_dir = self.get_mods_storage_dir().await?;
+        let storage_id = self.generate_mod_id();
+        let storage_base = mod_storage_dir.join(&storage_id);
+        let storage_mods = storage_base.join("Mods");
+        let storage_plugins = storage_base.join("Plugins");
+        let storage_userlibs = storage_base.join("UserLibs");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::create_dir_all(&storage_plugins).await?;
+        fs::create_dir_all(&storage_userlibs).await?;
+
+        let selected_source_path = mods_directory.join(file_name);
+        let selected_disabled_path = mods_directory.join(format!("{}.disabled", file_name));
+        let (selected_existing_path, selected_was_disabled) = if selected_source_path.exists() {
+            (selected_source_path, false)
+        } else if selected_disabled_path.exists() {
+            (selected_disabled_path, true)
+        } else {
+            return Err(anyhow::anyhow!("Installed mod file not found"));
+        };
+
+        fs::copy(&selected_existing_path, storage_mods.join(file_name))
+            .await
+            .context("Failed to copy selected mod into storage")?;
+
+        let allowed_candidate_ids: HashSet<String> = self
+            .get_local_mod_ownership_candidates(
+                game_dir,
+                file_name,
+                Some(&resolved.preview.display_name),
+            )
+            .await?
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect();
+
+        for candidate_id in owned_file_ids {
+            if !allowed_candidate_ids.contains(candidate_id) {
+                continue;
+            }
+            let Some((bucket, relative_path)) = Self::parse_link_candidate_id(candidate_id) else {
+                continue;
+            };
+            let Some(source_root) = self.bucket_root_for_game_dir(game_dir, bucket) else {
+                continue;
+            };
+            let source_path = source_root.join(relative_path);
+            if !source_path.exists() {
+                continue;
+            }
+
+            let destination_root = match bucket {
+                "mods" => &storage_mods,
+                "plugins" => &storage_plugins,
+                "userlibs" => &storage_userlibs,
+                _ => continue,
+            };
+            let destination_path = destination_root.join(relative_path);
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::copy(&source_path, &destination_path).await.with_context(|| {
+                format!(
+                    "Failed to copy selected ownership candidate into storage: {}",
+                    relative_path
+                )
+            })?;
+        }
+
+        if let Some(summary) = existing_meta.and_then(|meta| meta.security_scan) {
+            storage_metadata.security_scan = Some(summary);
+        }
+        storage_metadata.mod_storage_id = Some(storage_id.clone());
+        self.save_storage_metadata(&storage_base, &storage_metadata)
+            .await?;
+
+        self.install_storage_mod_to_envs(&storage_id, vec![env_id]).await?;
+        if selected_was_disabled {
+            self.disable_mod(game_dir, file_name).await?;
+        }
+
+        Ok(serde_json::json!({
+            "success": true,
+            "storageId": storage_id,
+            "nameMismatchRequiresConfirmation": resolved
+                .metadata
+                .mod_name
+                .as_ref()
+                .map(|remote_name| Self::names_materially_differ(file_name, remote_name))
+                .unwrap_or(false),
+        }))
     }
 
     pub async fn get_mod_library(&self) -> Result<ModLibraryResult> {
@@ -6396,7 +7166,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn load_mod_metadata_recovers_storage_metadata_when_db_is_empty() -> Result<()> {
+    async fn load_mod_metadata_does_not_recover_plain_file_copies_from_library_storage() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
@@ -6432,6 +7202,7 @@ mod tests {
         let mut storage_meta =
             sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
         storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.author = Some("Recovered Author".to_string());
         storage_meta.mod_name = Some("Recovered Managed".to_string());
         storage_meta.icon_url = Some("https://example.com/icon.png".to_string());
         storage_meta.summary = Some("Recovered metadata from storage".to_string());
@@ -6444,16 +7215,9 @@ mod tests {
         fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
 
         let loaded = service.load_mod_metadata(&mods_dir).await?;
-        let recovered = loaded
-            .get("RecoveredManaged.dll")
-            .expect("recovered metadata entry");
-
-        assert_eq!(recovered.mod_storage_id.as_deref(), Some(storage_id));
-        assert_eq!(recovered.source_id.as_deref(), Some("owner/recovered"));
-        assert!(matches!(recovered.source, Some(ModSource::Thunderstore)));
-        assert_eq!(
-            recovered.icon_url.as_deref(),
-            Some("https://example.com/icon.png")
+        assert!(
+            !loaded.contains_key("RecoveredManaged.dll"),
+            "plain local copies should not auto-recover managed metadata from library storage"
         );
 
         Ok(())
@@ -6523,7 +7287,8 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn list_mods_marks_recovered_storage_entries_as_managed() -> Result<()> {
+    async fn list_mods_keeps_plain_file_copies_local_even_when_library_has_matching_storage(
+    ) -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
@@ -6559,6 +7324,7 @@ mod tests {
         let mut storage_meta =
             sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
         storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.author = Some("Recovered Author".to_string());
         storage_meta.mod_name = Some("Recovered Managed".to_string());
         service
             .save_storage_metadata(&storage_base, &storage_meta)
@@ -6582,16 +7348,111 @@ mod tests {
                 item.get("fileName").and_then(|value| value.as_str())
                     == Some("RecoveredManaged.dll")
             })
-            .expect("recovered managed mod");
+            .expect("plain copied mod");
 
         assert_eq!(
             entry.get("managed").and_then(|value| value.as_bool()),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             entry.get("source").and_then(|value| value.as_str()),
-            Some("thunderstore")
+            Some("local")
         );
+        assert_eq!(
+            entry.get("version").and_then(|value| value.as_str()),
+            None
+        );
+        assert_eq!(
+            entry.get("author").and_then(|value| value.as_str()),
+            Some("Recovered Author")
+        );
+        assert!(entry.get("sourceUrl").is_none() || entry.get("sourceUrl").is_some_and(|value| value.is_null()));
+        assert!(entry.get("securityScan").is_none() || entry.get("securityScan").is_some_and(|value| value.is_null()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn load_mod_metadata_prunes_stale_managed_entries_for_plain_local_copies() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-stale-local-copy");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let storage_id = "storage-stale-local-copy";
+        let storage_base = download_dir.join("Mods").join(storage_id);
+        let storage_mods = storage_base.join("Mods");
+        fs::create_dir_all(&storage_mods).await?;
+        fs::write(storage_mods.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let mut storage_meta =
+            sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.author = Some("Recovered Author".to_string());
+        storage_meta.mod_name = Some("Recovered Managed".to_string());
+        service
+            .save_storage_metadata(&storage_base, &storage_meta)
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
+
+        let mut metadata = HashMap::new();
+        let mut stale_meta = sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        stale_meta.source = Some(ModSource::Thunderstore);
+        stale_meta.author = Some("Recovered Author".to_string());
+        stale_meta.security_scan = Some(SecurityScanSummary {
+            state: SecurityScanState::Verified,
+            verified: true,
+            disposition: None,
+            highest_severity: None,
+            total_findings: 0,
+            threat_family_count: 0,
+            scanned_at: None,
+            scanner_version: None,
+            schema_version: None,
+            status_message: Some("Verified".to_string()),
+        });
+        metadata.insert("RecoveredManaged.dll".to_string(), stale_meta);
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let loaded = service.load_mod_metadata(&mods_dir).await?;
+        assert!(
+            !loaded.contains_key("RecoveredManaged.dll"),
+            "stale managed metadata should be pruned once the environment file is a plain local copy"
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ? AND kind = 'mods' AND file_name = ?",
+        )
+        .bind(&env.id)
+        .bind("RecoveredManaged.dll")
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(count, 0);
 
         Ok(())
     }

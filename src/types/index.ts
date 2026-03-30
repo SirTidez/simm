@@ -268,6 +268,36 @@ export interface ModLibraryResult {
   downloaded: ModLibraryEntry[];
 }
 
+export interface LocalModSourceVersionOption {
+  key: string;
+  version: string;
+  runtime?: string;
+  updatedAt?: string;
+  isLatest: boolean;
+  label?: string;
+}
+
+export interface LocalModSourcePreview {
+  source: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
+  sourceId: string;
+  sourceUrl: string;
+  displayName: string;
+  author?: string;
+  summary?: string;
+  iconUrl?: string;
+  downloads?: number;
+  likesOrEndorsements?: number;
+  updatedAt?: string;
+  versions: LocalModSourceVersionOption[];
+}
+
+export interface LocalModOwnershipCandidate {
+  id: string;
+  bucket: string;
+  relativePath: string;
+  fileName: string;
+}
+
 export type SecurityScanState = 'verified' | 'review' | 'unavailable' | 'disabled' | 'skipped';
 export type SecurityFindingSeverity = 'Low' | 'Medium' | 'High' | 'Critical';
 
