@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.9]
+
+- Reworked workspace navigation into a persistent back/home stack, preserved Mod Library and Mods state across navigation, promoted security findings into a browsable page, and tightened the desktop shell with active toolbar states, refined environment tabs, and cleaner inspector/layout behavior.
+- Overhauled Mod Library and installed-mod flows with browser-style Discover behavior, inline version selection, consistent update counts, stronger Nexus recovery/manual-download handling, and richer security reporting across grouped downloads and stored files.
+- Added local-to-managed source linking for manual mods, including explicit source confirmation, runtime-aware version selection, optional ownership transfer for related files, and safer handling so copied local DLLs stay local until the user links them.
+- Hardened install and storage behavior across Thunderstore, Nexus, FOMOD, and local archives by tracking attached `UserLibs` / `UserData`, handling nested payloads and runtime splits correctly, preserving Steam manifest context, improving partial install failure handling, and tightening path-safety and ownership rules.
+- Improved update handling for both mods and SIMM itself with Nexus-backed app update notices, better prerelease/version comparison, runtime-aware environment update summaries, and consistent footer/home/library update surfaces.
+- Brought local verification back in line with GitHub CI by standardizing the frontend test flow, fixing timezone-sensitive expectations, and updating stale backend/frontend fixtures that had been passing locally but failing in Actions.
+- Contributors:
+  - `SirTidez`: workspace/navigation overhaul, Mod Library and local-linking flows, install/update/runtime fixes, Steam/storage/FOMOD hardening, release/versioning work, and CI/test stabilization.
+  - `ESTONlA`: Nexus/game-launch integration work and supporting branch changes merged into this release line.
+
 ## [0.7.8]
 
 - Added managed MLVScan integration for protected downloads, including automatic scanner setup, status reporting, local security scans for `.dll` / `.zip` / `.rar` payloads, and report-driven block / confirm decisions before files enter the library.
