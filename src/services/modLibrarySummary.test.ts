@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDownloadedGroups, compareVersionTokensDesc } from './modLibrarySummary';
+import { buildDownloadedGroups, buildEnvironmentModSnapshot, compareVersionTokensDesc } from './modLibrarySummary';
 import type { ModLibraryEntry } from '../types';
 
 function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
@@ -40,5 +40,49 @@ describe('modLibrarySummary', () => {
     expect(groups[0].sourceVersion).toBe('1.1.0-beta');
     expect(groups[0].remoteVersion).toBe('1.1.0-beta');
     expect(groups[0].updateAvailable).toBe(false);
+  });
+
+  it('derives environment updates from the installed runtime entry instead of group maxima', () => {
+    const snapshot = buildEnvironmentModSnapshot({
+      downloaded: [
+        makeEntry({
+          storageId: 'storage-il2cpp',
+          displayName: 'Split Runtime Mod',
+          sourceId: 'split-runtime-mod',
+          sourceVersion: '2.0.0',
+          remoteVersion: '2.0.0',
+          updateAvailable: false,
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'storage-il2cpp' },
+          installedInByRuntime: { IL2CPP: [] },
+          filesByRuntime: { IL2CPP: ['SplitRuntimeMod-IL2CPP.dll'] },
+          installedIn: [],
+        }),
+        makeEntry({
+          storageId: 'storage-mono',
+          displayName: 'Split Runtime Mod',
+          sourceId: 'split-runtime-mod',
+          sourceVersion: '1.0.0',
+          remoteVersion: '1.1.0',
+          updateAvailable: true,
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'storage-mono' },
+          installedInByRuntime: { Mono: ['env-mono'] },
+          filesByRuntime: { Mono: ['SplitRuntimeMod-Mono.dll'] },
+          installedIn: ['env-mono'],
+        }),
+      ],
+    }, 'env-mono');
+
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates).toEqual([
+      {
+        modName: 'Split Runtime Mod',
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        source: 'nexusmods',
+        groupKey: 'nexusmods::split-runtime-mod',
+      },
+    ]);
   });
 });

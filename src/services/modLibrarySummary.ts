@@ -256,6 +256,31 @@ export function getGroupSourceLabel(group: DownloadedModGroup): string {
   return source;
 }
 
+function getEntryInstalledVersion(entry: ModLibraryEntry): string {
+  return entry.sourceVersion || entry.installedVersion || 'unknown';
+}
+
+function getEntryLatestVersion(entry: ModLibraryEntry): string {
+  const installedVersion = getEntryInstalledVersion(entry);
+  const remoteVersion = entry.remoteVersion;
+  const hasInstalledVersion = normalizeVersionToken(installedVersion).length > 0;
+  const hasRemoteVersion = normalizeVersionToken(remoteVersion).length > 0;
+
+  if (hasInstalledVersion && hasRemoteVersion) {
+    return compareVersionTokensDesc(remoteVersion, installedVersion) < 0
+      ? (remoteVersion || installedVersion)
+      : installedVersion;
+  }
+
+  return remoteVersion || installedVersion;
+}
+
+function compareEntriesForEnvironmentUpdateSummary(a: ModLibraryEntry, b: ModLibraryEntry): number {
+  return compareVersionTokensDesc(getEntryLatestVersion(a), getEntryLatestVersion(b))
+    || compareVersionTokensDesc(getEntryInstalledVersion(a), getEntryInstalledVersion(b))
+    || a.displayName.localeCompare(b.displayName);
+}
+
 export function isCoreToolGroup(group: DownloadedModGroup): boolean {
   return group.entries.some((entry) => {
     const sourceId = (entry.sourceId || '').trim().toLowerCase();
@@ -268,14 +293,26 @@ export function buildEnvironmentModSnapshot(library: ModLibraryResult | null | u
   const groups = buildDownloadedGroups(downloaded).filter((group) => group.installedIn.includes(environmentId));
   const userGroups = groups.filter((group) => !isCoreToolGroup(group));
   const updates = userGroups
-    .filter((group) => Boolean(group.updateAvailable))
-    .map((group) => ({
-      modName: group.displayName,
-      currentVersion: getGroupInstalledVersion(group),
-      latestVersion: group.remoteVersion || getGroupInstalledVersion(group),
-      source: getGroupSourceLabel(group),
-      groupKey: group.key,
-    }));
+    .map((group) => {
+      const installedEntries = group.entries.filter((entry) => entry.installedIn.includes(environmentId));
+      const updateEntries = installedEntries
+        .filter((entry) => Boolean(entry.updateAvailable))
+        .sort(compareEntriesForEnvironmentUpdateSummary);
+
+      if (updateEntries.length === 0) {
+        return null;
+      }
+
+      const selectedEntry = updateEntries[0];
+      return {
+        modName: group.displayName,
+        currentVersion: getEntryInstalledVersion(selectedEntry),
+        latestVersion: getEntryLatestVersion(selectedEntry),
+        source: selectedEntry.source || getGroupSourceLabel(group),
+        groupKey: group.key,
+      };
+    })
+    .filter((entry): entry is ModUpdateSummaryEntry => Boolean(entry));
 
   return {
     userMods: userGroups.length,
