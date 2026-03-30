@@ -345,7 +345,7 @@ export class ApiService {
   static async installDownloadedMod(
     storageId: string,
     environmentIds: string[]
-  ): Promise<{ results: Array<{ environmentId: string; installedFiles: string[] }> }> {
+  ): Promise<{ results: Array<{ environmentId: string; installedFiles: string[]; warnings?: string[] }> }> {
     return invoke('install_downloaded_mod', { storageId, environmentIds });
   }
 
@@ -1324,14 +1324,17 @@ export class ApiService {
     const versions = Array.isArray(packageInfo.versions) ? packageInfo.versions : [];
     const selectedVersion = versionUuid
       ? versions.find((version: any) => version?.uuid4 === versionUuid)
-      : versions[0];
+      : versions[0] ?? packageInfo.latest;
     if (versionUuid && !selectedVersion) {
       throw new Error(`Thunderstore version ${versionUuid} was not found for package ${packageUuid}`);
+    }
+    if (!selectedVersion?.version_number) {
+      throw new Error(`No version metadata available for package ${packageUuid}`);
     }
     const packageUrl = packageInfo.package_url || '';
     const modName = packageInfo.name || '';
     const owner = packageInfo.owner || '';
-    const versionNumber = selectedVersion?.version_number || '';
+    const versionNumber = selectedVersion.version_number;
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
     const description = selectedVersion?.description || packageInfo.latest?.description || '';
     const iconUrl = selectedVersion?.icon || packageInfo.latest?.icon || packageInfo.icon || packageInfo.icon_url || '';

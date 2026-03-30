@@ -811,6 +811,8 @@ mod tests {
             current_game_version: None,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: None,
         }
     }

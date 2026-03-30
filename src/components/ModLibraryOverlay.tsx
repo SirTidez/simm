@@ -1913,6 +1913,7 @@ export function ModLibraryOverlay({
 
       setActivatingGroup(group.key);
       try {
+        const warningMessages: string[] = [];
         const allStorageIds = Array.from(
           new Set(
             group.entries.flatMap(
@@ -1959,9 +1960,12 @@ export function ModLibraryOverlay({
             );
           }
 
-          await ApiService.installDownloadedMod(
+          const installResult = await ApiService.installDownloadedMod(
             selectedStorageId,
             target.envIds,
+          );
+          warningMessages.push(
+            ...installResult.results.flatMap((result) => result.warnings || []),
           );
         }
 
@@ -1980,13 +1984,23 @@ export function ModLibraryOverlay({
                 remainingEnvIds,
               );
             }
-            await ApiService.installDownloadedMod(
+            const installResult = await ApiService.installDownloadedMod(
               fallbackStorageId,
               remainingEnvIds,
+            );
+            warningMessages.push(
+              ...installResult.results.flatMap((result) => result.warnings || []),
             );
           }
         }
 
+        if (warningMessages.length > 0) {
+          showToast(
+            warningMessages.length === 1
+              ? warningMessages[0]
+              : `${warningMessages[0]} (+${warningMessages.length - 1} more warning${warningMessages.length > 2 ? "s" : ""})`,
+          );
+        }
         await refreshLibrary();
         setSelectedStorageByGroup((prev) => ({
           ...prev,
@@ -1997,7 +2011,7 @@ export function ModLibraryOverlay({
         setActivatingGroup(null);
       }
     },
-    [refreshLibrary, notifyModUpdateStateChanged],
+    [refreshLibrary, notifyModUpdateStateChanged, showToast],
   );
 
   const findThunderstorePackageForRuntime = useCallback(
@@ -2578,6 +2592,7 @@ export function ModLibraryOverlay({
       };
       const installedIn = new Set(entry.installedIn || []);
       const attachedUserLibs = new Set(entry.attachedUserLibs || []);
+      const attachedUserData = new Set(entry.attachedUserData || []);
 
       for (const candidate of matchingEntries) {
         const candidateRuntimes = candidate.availableRuntimes || [];
@@ -2619,12 +2634,16 @@ export function ModLibraryOverlay({
         for (const userLib of candidate.attachedUserLibs || []) {
           attachedUserLibs.add(userLib);
         }
+        for (const userDataPath of candidate.attachedUserData || []) {
+          attachedUserData.add(userDataPath);
+        }
       }
 
       return {
         ...entry,
         installedIn: Array.from(installedIn),
         attachedUserLibs: Array.from(attachedUserLibs),
+        attachedUserData: Array.from(attachedUserData),
         availableRuntimes,
         storageIdsByRuntime,
         installedInByRuntime,
@@ -2681,6 +2700,7 @@ export function ModLibraryOverlay({
         environmentIds.includes(environment.id),
       );
       const runtimeGroups = new Map<"IL2CPP" | "Mono", string[]>();
+      const warningMessages: string[] = [];
 
       for (const environment of selectedTargets) {
         const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
@@ -2701,13 +2721,25 @@ export function ModLibraryOverlay({
         if (!storageId || targetIds.length === 0) {
           continue;
         }
-        await ApiService.installDownloadedMod(storageId, targetIds);
+        const installResult = await ApiService.installDownloadedMod(storageId, targetIds);
+        warningMessages.push(
+          ...installResult.results.flatMap((result) => result.warnings || []),
+        );
+      }
+
+      if (warningMessages.length > 0) {
+        showToast(
+          warningMessages.length === 1
+            ? warningMessages[0]
+            : `${warningMessages[0]} (+${warningMessages.length - 1} more warning${warningMessages.length > 2 ? "s" : ""})`,
+        );
       }
     },
     [
       entrySupportsRuntime,
       environments,
       hasSiblingVersionInstalledInEnvironment,
+      showToast,
     ],
   );
 

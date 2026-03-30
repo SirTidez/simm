@@ -44,12 +44,14 @@ enum FomodDestinationKind {
     Mods,
     Plugins,
     UserLibs,
+    UserData,
 }
 
 #[derive(Default)]
 struct StoragePayloadSummary {
     primary_files: Vec<String>,
     attached_userlibs: Vec<String>,
+    attached_userdata: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2240,6 +2242,12 @@ impl ModsService {
                 .await?;
         }
 
+        let userdata_dir = storage_path.join("UserData");
+        if userdata_dir.exists() {
+            self.collect_storage_files_recursive(&userdata_dir, false, &mut files)
+                .await?;
+        }
+
         Ok(files)
     }
 
@@ -2267,6 +2275,16 @@ impl ModsService {
                 &userlibs_dir,
                 &userlibs_dir,
                 &mut summary.attached_userlibs,
+            )
+            .await?;
+        }
+
+        let userdata_dir = storage_path.join("UserData");
+        if userdata_dir.exists() {
+            self.collect_storage_relative_entries_recursive(
+                &userdata_dir,
+                &userdata_dir,
+                &mut summary.attached_userdata,
             )
             .await?;
         }
@@ -3491,6 +3509,7 @@ impl ModsService {
             "mods" => Some(self.get_mods_directory(game_dir)),
             "plugins" => Some(self.get_plugins_directory(game_dir)),
             "userlibs" => Some(Path::new(game_dir).join("UserLibs")),
+            "userdata" => Some(Path::new(game_dir).join("UserData")),
             _ => None,
         }
     }
@@ -3633,6 +3652,15 @@ impl ModsService {
         self.collect_local_link_candidates_from_bucket(
             "userlibs",
             &Path::new(game_dir).join("UserLibs"),
+            file_name,
+            &seeds,
+            &metadata_map,
+            &mut candidates,
+        )
+        .await?;
+        self.collect_local_link_candidates_from_bucket(
+            "userdata",
+            &Path::new(game_dir).join("UserData"),
             file_name,
             &seeds,
             &metadata_map,
@@ -3834,6 +3862,7 @@ impl ModsService {
             let payload_summary = self.collect_storage_payload_summary(&entry_path).await?;
             if payload_summary.primary_files.is_empty()
                 && payload_summary.attached_userlibs.is_empty()
+                && payload_summary.attached_userdata.is_empty()
             {
                 continue;
             }
@@ -3882,6 +3911,7 @@ impl ModsService {
                     .primary_files
                     .get(0)
                     .or_else(|| payload_summary.attached_userlibs.get(0))
+                    .or_else(|| payload_summary.attached_userdata.get(0))
                     .cloned()
                     .unwrap_or_else(|| storage_id.clone())
                     .replace(".dll", "")
@@ -3951,6 +3981,7 @@ impl ModsService {
                 display_name: display_name.clone(),
                 files: payload_summary.primary_files.clone(),
                 attached_userlibs: payload_summary.attached_userlibs.clone(),
+                attached_userdata: payload_summary.attached_userdata.clone(),
                 source: template_meta.source.clone(),
                 source_id: template_meta.source_id.clone(),
                 source_version: template_meta.source_version.clone(),
@@ -4021,6 +4052,13 @@ impl ModsService {
                 userlib_set.insert(path);
             }
             entry.attached_userlibs = userlib_set.into_iter().collect();
+
+            let mut userdata_set: HashSet<String> =
+                entry.attached_userdata.iter().cloned().collect();
+            for path in payload_summary.attached_userdata {
+                userdata_set.insert(path);
+            }
+            entry.attached_userdata = userdata_set.into_iter().collect();
 
             let mut installed_set: HashSet<String> = entry.installed_in.iter().cloned().collect();
             for env_id in installed_in {
@@ -4126,6 +4164,7 @@ impl ModsService {
         let mod_storage_mods = mod_storage_base.join("Mods");
         let mod_storage_plugins = mod_storage_base.join("Plugins");
         let mod_storage_userlibs = mod_storage_base.join("UserLibs");
+        let mod_storage_userdata = mod_storage_base.join("UserData");
 
         fs::create_dir_all(&mod_storage_mods)
             .await
@@ -4136,6 +4175,9 @@ impl ModsService {
         fs::create_dir_all(&mod_storage_userlibs)
             .await
             .context("Failed to create mod storage UserLibs directory")?;
+        fs::create_dir_all(&mod_storage_userdata)
+            .await
+            .context("Failed to create mod storage UserData directory")?;
 
         let file_ext = archive_path
             .extension()
@@ -4278,6 +4320,7 @@ impl ModsService {
         storage_id: &str,
         metadata_map: &mut HashMap<String, ModMetadata>,
         installed_files: &mut Vec<String>,
+        warnings: &mut Vec<String>,
         env_runtime: &crate::types::Runtime,
     ) -> Result<()> {
         if !source_dir.exists() {
@@ -4326,6 +4369,7 @@ impl ModsService {
                     storage_id,
                     metadata_map,
                     installed_files,
+                    warnings,
                     env_runtime,
                 ))
                 .await?;
@@ -4334,13 +4378,26 @@ impl ModsService {
 
             let dest_path = dest_dir.join(file_name);
             if self.path_exists_or_symlink(&dest_path).await {
-                let meta = fs::symlink_metadata(&dest_path).await?;
-                if meta.file_type().is_symlink() {
-                    self.remove_symlink(&dest_path).await?;
-                } else if meta.is_file() {
-                    fs::remove_file(&dest_path).await?;
-                } else if meta.is_dir() {
-                    fs::remove_dir_all(&dest_path).await?;
+                let remove_result: Result<()> = async {
+                    let meta = fs::symlink_metadata(&dest_path).await?;
+                    if meta.file_type().is_symlink() {
+                        self.remove_symlink(&dest_path).await?;
+                    } else if meta.is_file() {
+                        fs::remove_file(&dest_path).await?;
+                    } else if meta.is_dir() {
+                        fs::remove_dir_all(&dest_path).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+
+                if let Err(err) = remove_result {
+                    warnings.push(format!(
+                        "Skipped {}: failed to replace existing destination ({})",
+                        dest_path.display(),
+                        err
+                    ));
+                    continue;
                 }
             }
 
@@ -4350,14 +4407,19 @@ impl ModsService {
                     path.display(),
                     dest_path.display()
                 );
-                self.create_symlink_dir(&path, &dest_path)
+                if let Err(err) = self
+                    .create_symlink_dir(&path, &dest_path)
                     .await
                     .with_context(|| {
                         format!(
                             "Failed to create directory symlink for storage entry {}",
                             file_name
                         )
-                    })?;
+                    })
+                {
+                    warnings.push(format!("Skipped {}: {}", dest_path.display(), err));
+                    continue;
+                }
                 installed_files.push(file_name.to_string());
                 eprintln!("[install_storage_entries] Successfully created directory symlink and added {} to installed_files", file_name);
             } else {
@@ -4366,14 +4428,19 @@ impl ModsService {
                     path.display(),
                     dest_path.display()
                 );
-                self.create_symlink_file(&path, &dest_path)
+                if let Err(err) = self
+                    .create_symlink_file(&path, &dest_path)
                     .await
                     .with_context(|| {
                         format!(
                             "Failed to create file symlink for storage entry {}",
                             file_name
                         )
-                    })?;
+                    })
+                {
+                    warnings.push(format!("Skipped {}: {}", dest_path.display(), err));
+                    continue;
+                }
                 installed_files.push(file_name.to_string());
                 eprintln!("[install_storage_entries] Successfully created file symlink and added {} to installed_files", file_name);
             }
@@ -4572,6 +4639,7 @@ impl ModsService {
         let storage_mods = storage_base.join("Mods");
         let storage_plugins = storage_base.join("Plugins");
         let storage_userlibs = storage_base.join("UserLibs");
+        let storage_userdata = storage_base.join("UserData");
 
         // Debug logging to help diagnose issues
         eprintln!(
@@ -4592,6 +4660,11 @@ impl ModsService {
             "[install_storage_mod_to_envs] UserLibs dir exists: {}, path: {}",
             storage_userlibs.exists(),
             storage_userlibs.display()
+        );
+        eprintln!(
+            "[install_storage_mod_to_envs] UserData dir exists: {}, path: {}",
+            storage_userdata.exists(),
+            storage_userdata.display()
         );
 
         let template_meta = self
@@ -4621,6 +4694,7 @@ impl ModsService {
             let mods_dir = self.get_mods_directory(&env.output_dir);
             let plugins_dir = self.get_plugins_directory(&env.output_dir);
             let userlibs_dir = Path::new(&env.output_dir).join("UserLibs");
+            let userdata_dir = Path::new(&env.output_dir).join("UserData");
 
             fs::create_dir_all(&mods_dir)
                 .await
@@ -4631,12 +4705,16 @@ impl ModsService {
             fs::create_dir_all(&userlibs_dir)
                 .await
                 .context("Failed to create userlibs directory")?;
+            fs::create_dir_all(&userdata_dir)
+                .await
+                .context("Failed to create userdata directory")?;
 
             let mut metadata_map = self
                 .load_mod_metadata(&mods_dir)
                 .await
                 .unwrap_or_else(|_| HashMap::new());
             let mut installed_files = Vec::new();
+            let mut warnings = Vec::new();
 
             self.install_storage_entries(
                 &storage_mods,
@@ -4647,6 +4725,7 @@ impl ModsService {
                 storage_id,
                 &mut metadata_map,
                 &mut installed_files,
+                &mut warnings,
                 &env_runtime,
             )
             .await?;
@@ -4659,6 +4738,7 @@ impl ModsService {
                 storage_id,
                 &mut metadata_map,
                 &mut installed_files,
+                &mut warnings,
                 &env_runtime,
             )
             .await?;
@@ -4671,17 +4751,32 @@ impl ModsService {
                 storage_id,
                 &mut metadata_map,
                 &mut installed_files,
+                &mut warnings,
+                &env_runtime,
+            )
+            .await?;
+            self.install_storage_entries(
+                &storage_userdata,
+                &userdata_dir,
+                true,
+                runtime_label,
+                &template_meta,
+                storage_id,
+                &mut metadata_map,
+                &mut installed_files,
+                &mut warnings,
                 &env_runtime,
             )
             .await?;
 
             if installed_files.is_empty() {
                 return Err(anyhow::anyhow!(
-                    "No mod files found in storage {}. Checked: Mods(exists={}), Plugins(exists={}), UserLibs(exists={}). This usually means the mod archive was empty or contained no .dll files.",
+                    "No mod files found in storage {}. Checked: Mods(exists={}), Plugins(exists={}), UserLibs(exists={}), UserData(exists={}). This usually means the mod archive was empty or contained no .dll files.",
                     storage_id,
                     storage_mods.exists(),
                     storage_plugins.exists(),
-                    storage_userlibs.exists()
+                    storage_userlibs.exists(),
+                    storage_userdata.exists()
                 ));
             }
 
@@ -4695,6 +4790,7 @@ impl ModsService {
             results.push(serde_json::json!({
                 "environmentId": env_id,
                 "installedFiles": installed_files,
+                "warnings": warnings,
             }));
         }
 
@@ -4715,6 +4811,7 @@ impl ModsService {
             let mods_dir = self.get_mods_directory(&env.output_dir);
             let plugins_dir = self.get_plugins_directory(&env.output_dir);
             let userlibs_dir = Path::new(&env.output_dir).join("UserLibs");
+            let userdata_dir = Path::new(&env.output_dir).join("UserData");
             let mut metadata_map = self
                 .load_mod_metadata(&mods_dir)
                 .await
@@ -4780,6 +4877,10 @@ impl ModsService {
                             userlibs_dir.join(&file_name),
                             storage_base.join("UserLibs").join(&file_name),
                         ),
+                        (
+                            userdata_dir.join(&file_name),
+                            storage_base.join("UserData").join(&file_name),
+                        ),
                     ];
 
                     for (path, source_path) in candidate_paths {
@@ -4831,6 +4932,12 @@ impl ModsService {
             self.remove_storage_payload_entries(
                 &storage_base.join("UserLibs"),
                 &userlibs_dir,
+                &mut removed_files,
+            )
+            .await?;
+            self.remove_storage_payload_entries(
+                &storage_base.join("UserData"),
+                &userdata_dir,
                 &mut removed_files,
             )
             .await?;
@@ -5025,10 +5132,12 @@ impl ModsService {
         let mods_directory = self.get_mods_directory(game_dir);
         let plugins_directory = self.get_plugins_directory(game_dir);
         let userlibs_directory = Path::new(game_dir).join("UserLibs");
+        let userdata_directory = Path::new(game_dir).join("UserData");
 
         fs::create_dir_all(&mods_directory).await?;
         fs::create_dir_all(&plugins_directory).await?;
         fs::create_dir_all(&userlibs_directory).await?;
+        fs::create_dir_all(&userdata_directory).await?;
 
         // Create temp directory for extraction
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5277,6 +5386,7 @@ impl ModsService {
         let mod_storage_mods = mod_storage_base.join("Mods");
         let mod_storage_plugins = mod_storage_base.join("Plugins");
         let mod_storage_userlibs = mod_storage_base.join("UserLibs");
+        let mod_storage_userdata = mod_storage_base.join("UserData");
 
         // Create mod storage directories
         fs::create_dir_all(&mod_storage_mods)
@@ -5288,6 +5398,9 @@ impl ModsService {
         fs::create_dir_all(&mod_storage_userlibs)
             .await
             .context("Failed to create mod storage UserLibs directory")?;
+        fs::create_dir_all(&mod_storage_userdata)
+            .await
+            .context("Failed to create mod storage UserData directory")?;
 
         // Detect file type and call appropriate extraction function
         let file_ext = archive_path
@@ -5712,7 +5825,17 @@ impl ModsService {
         let content_root = self.resolve_archive_content_root(temp_dir).await?;
 
         if let Some(fomod_files) = self
-            .try_extract_fomod_content(&content_root, mods_dir, plugins_dir, userlibs_dir, runtime)
+            .try_extract_fomod_content(
+                &content_root,
+                mods_dir,
+                plugins_dir,
+                userlibs_dir,
+                &mods_dir
+                    .parent()
+                    .map(|path| path.join("UserData"))
+                    .unwrap_or_else(|| PathBuf::from("UserData")),
+                runtime,
+            )
             .await?
         {
             eprintln!(
@@ -5817,6 +5940,12 @@ impl ModsService {
                     .await?;
                 } else if dir_name == "userlibs" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
+                } else if dir_name == "userdata" {
+                    let userdata_dir = mods_dir
+                        .parent()
+                        .map(|path| path.join("UserData"))
+                        .unwrap_or_else(|| PathBuf::from("UserData"));
+                    Box::pin(self.copy_directory_recursive(&entry_path, &userdata_dir)).await?;
                 }
             } else if file_name.to_lowercase().ends_with(".dll") {
                 // Check runtime match
@@ -5881,7 +6010,17 @@ impl ModsService {
         let content_root = self.resolve_archive_content_root(temp_dir).await?;
 
         if let Some(fomod_files) = self
-            .try_extract_fomod_content(&content_root, mods_dir, plugins_dir, userlibs_dir, runtime)
+            .try_extract_fomod_content(
+                &content_root,
+                mods_dir,
+                plugins_dir,
+                userlibs_dir,
+                &mods_dir
+                    .parent()
+                    .map(|path| path.join("UserData"))
+                    .unwrap_or_else(|| PathBuf::from("UserData")),
+                runtime,
+            )
             .await?
         {
             return Ok(fomod_files);
@@ -6007,6 +6146,7 @@ impl ModsService {
         mods_dir: &Path,
         plugins_dir: &Path,
         userlibs_dir: &Path,
+        userdata_dir: &Path,
         runtime: Option<&str>,
     ) -> Result<Option<Vec<String>>> {
         let Some(config_path) = Self::find_fomod_config_path(content_root) else {
@@ -6035,6 +6175,7 @@ impl ModsService {
                 mods_dir,
                 plugins_dir,
                 userlibs_dir,
+                userdata_dir,
                 entry,
                 runtime,
                 &mut installed_files,
@@ -6067,6 +6208,7 @@ impl ModsService {
         mods_dir: &Path,
         plugins_dir: &Path,
         userlibs_dir: &Path,
+        userdata_dir: &Path,
         entry: &FomodInstallEntry,
         runtime: Option<&str>,
         installed_files: &mut Vec<String>,
@@ -6088,6 +6230,7 @@ impl ModsService {
             FomodDestinationKind::Mods => mods_dir,
             FomodDestinationKind::Plugins => plugins_dir,
             FomodDestinationKind::UserLibs => userlibs_dir,
+            FomodDestinationKind::UserData => userdata_dir,
         };
 
         if entry.is_folder {
@@ -6215,6 +6358,11 @@ impl ModsService {
                     FomodDestinationKind::UserLibs,
                     Self::strip_bucket_prefix(&destination, "userlibs"),
                 )
+            } else if Self::path_targets_bucket(&destination, "userdata") {
+                (
+                    FomodDestinationKind::UserData,
+                    Self::strip_bucket_prefix(&destination, "userdata"),
+                )
             } else if Self::path_targets_bucket(&destination, "mods") {
                 (
                     FomodDestinationKind::Mods,
@@ -6235,6 +6383,11 @@ impl ModsService {
             (
                 FomodDestinationKind::UserLibs,
                 Self::strip_bucket_prefix(&source, "userlibs"),
+            )
+        } else if Self::path_targets_bucket(&source, "userdata") {
+            (
+                FomodDestinationKind::UserData,
+                Self::strip_bucket_prefix(&source, "userdata"),
             )
         } else {
             (
@@ -6263,7 +6416,10 @@ impl ModsService {
         file_name: &str,
         installed_files: &mut Vec<String>,
     ) {
-        if destination_kind == FomodDestinationKind::UserLibs {
+        if matches!(
+            destination_kind,
+            FomodDestinationKind::UserLibs | FomodDestinationKind::UserData
+        ) {
             return;
         }
 
@@ -7075,6 +7231,13 @@ mod tests {
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
         let service = ModsService::new(pool);
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(service.pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let outside_file = temp.path().join("outside-icon.png");
         fs::write(&outside_file, b"icon-bytes").await?;
@@ -7141,16 +7304,24 @@ mod tests {
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
-        let service = ModsService::new(pool);
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let game_dir = temp.path().join("game");
         let mods_dir = game_dir.join("Mods");
         fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("Example.dll"), b"data").await?;
 
         let mut metadata = HashMap::new();
         metadata.insert(
             "Example.dll".to_string(),
-            sample_metadata(Some("storage-1"), Some("local"), Some("1.0.0")),
+            sample_metadata(None, Some("local"), Some("1.0.0")),
         );
         fs::write(
             mods_dir.join(".mods-metadata.json"),
@@ -7466,6 +7637,13 @@ mod tests {
         let pool = initialize_pool().await?;
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let output_dir = temp.path().join("envs").join("env-stale");
         let env = env_service
@@ -7916,7 +8094,14 @@ mod tests {
         let _home_guard =
             EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
-        let service = ModsService::new(pool);
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let game_dir = temp.path().join("game");
         fs::create_dir_all(&game_dir).await?;
@@ -8626,11 +8811,8 @@ mod tests {
 
         let storage_dir = download_dir.join("Mods").join(storage_id);
         fs::create_dir_all(storage_dir.join("Mods")).await?;
-        fs::write(
-            storage_dir.join("Mods").join("DispositionWins.dll"),
-            b"data",
-        )
-        .await?;
+        let storage_file = storage_dir.join("Mods").join("DispositionWins.dll");
+        fs::write(&storage_file, b"data").await?;
         fs::write(
             storage_dir.join(STORAGE_METADATA_FILE),
             serde_json::json!({
@@ -8641,6 +8823,10 @@ mod tests {
             .to_string(),
         )
         .await?;
+        tokio::fs::remove_file(mods_dir.join("DispositionWins.dll")).await?;
+        service
+            .create_symlink_file(&storage_file, &mods_dir.join("DispositionWins.dll"))
+            .await?;
 
         service
             .save_security_scan_report(
@@ -8821,6 +9007,18 @@ mod tests {
         fs::create_dir_all(&storage_v2).await?;
         fs::write(storage_v1.join("Example-v1.dll"), b"data-v1").await?;
         fs::write(storage_v2.join("Example-v2.dll"), b"data-v2").await?;
+        service
+            .save_storage_metadata(
+                &download_dir.join("Mods").join("storage-v1"),
+                &metadata_v1,
+            )
+            .await?;
+        service
+            .save_storage_metadata(
+                &download_dir.join("Mods").join("storage-v2"),
+                &metadata_v2,
+            )
+            .await?;
 
         let library = service.get_mod_library().await?;
         let matching: Vec<_> = library
@@ -8879,8 +9077,6 @@ mod tests {
         let mono_mods_dir = mono_output_dir.join("Mods");
         fs::create_dir_all(&il2cpp_mods_dir).await?;
         fs::create_dir_all(&mono_mods_dir).await?;
-        fs::write(il2cpp_mods_dir.join("S1FuelMod.IL2CPP.dll"), b"il2cpp").await?;
-        fs::write(mono_mods_dir.join("S1FuelMod.Mono.dll"), b"mono").await?;
 
         let mut il2cpp_meta = sample_metadata(
             Some("storage-s1fuel-il2cpp"),
@@ -8960,8 +9156,31 @@ mod tests {
             .join("Mods");
         fs::create_dir_all(&storage_il2cpp).await?;
         fs::create_dir_all(&storage_mono).await?;
-        fs::write(storage_il2cpp.join("S1FuelMod.IL2CPP.dll"), b"il2cpp").await?;
-        fs::write(storage_mono.join("S1FuelMod.Mono.dll"), b"mono").await?;
+        let il2cpp_storage_file = storage_il2cpp.join("S1FuelMod.IL2CPP.dll");
+        let mono_storage_file = storage_mono.join("S1FuelMod.Mono.dll");
+        fs::write(&il2cpp_storage_file, b"il2cpp").await?;
+        fs::write(&mono_storage_file, b"mono").await?;
+        service
+            .save_storage_metadata(
+                &download_dir.join("Mods").join("storage-s1fuel-il2cpp"),
+                &il2cpp_metadata["S1FuelMod.IL2CPP.dll"],
+            )
+            .await?;
+        service
+            .save_storage_metadata(
+                &download_dir.join("Mods").join("storage-s1fuel-mono"),
+                &mono_metadata["S1FuelMod.Mono.dll"],
+            )
+            .await?;
+        service
+            .create_symlink_file(
+                &il2cpp_storage_file,
+                &il2cpp_mods_dir.join("S1FuelMod.IL2CPP.dll"),
+            )
+            .await?;
+        service
+            .create_symlink_file(&mono_storage_file, &mono_mods_dir.join("S1FuelMod.Mono.dll"))
+            .await?;
 
         let library = service.get_mod_library().await?;
         let matching: Vec<_> = library
@@ -9024,6 +9243,13 @@ mod tests {
         let pool = initialize_pool().await?;
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let output_dir = temp.path().join("envs").join("env-5");
         let env = env_service
@@ -9090,6 +9316,13 @@ mod tests {
         let pool = initialize_pool().await?;
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let output_dir = temp.path().join("envs").join("env-shared");
         let env = env_service
@@ -9216,6 +9449,13 @@ mod tests {
         let pool = initialize_pool().await?;
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
 
         let output_dir = temp.path().join("envs").join("env-6");
         let env = env_service
@@ -9328,6 +9568,7 @@ mod tests {
         let dest_dir = temp.path().join("missing").join("Mods");
         let mut metadata_map = HashMap::new();
         let mut installed_files = Vec::new();
+        let mut warnings = Vec::new();
 
         service
             .install_storage_entries(
@@ -9339,6 +9580,7 @@ mod tests {
                 "storage-1",
                 &mut metadata_map,
                 &mut installed_files,
+                &mut warnings,
                 &Runtime::Il2cpp,
             )
             .await?;
@@ -9354,6 +9596,7 @@ mod tests {
         assert_eq!(fs::read(&installed_path).await?, b"data");
         assert_eq!(installed_files, vec!["Example.dll".to_string()]);
         assert!(metadata_map.contains_key("Example.dll"));
+        assert!(warnings.is_empty());
 
         Ok(())
     }
@@ -9559,12 +9802,21 @@ mod tests {
         let mods_dir = temp.path().join("mods");
         let plugins_dir = temp.path().join("plugins");
         let userlibs_dir = temp.path().join("userlibs");
+        let userdata_dir = temp.path().join("userdata");
         fs::create_dir_all(&mods_dir).await?;
         fs::create_dir_all(&plugins_dir).await?;
         fs::create_dir_all(&userlibs_dir).await?;
+        fs::create_dir_all(&userdata_dir).await?;
 
         let result = service
-            .try_extract_fomod_content(&content_root, &mods_dir, &plugins_dir, &userlibs_dir, None)
+            .try_extract_fomod_content(
+                &content_root,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                None,
+            )
             .await?;
 
         assert!(result.is_none());
@@ -9718,12 +9970,21 @@ mod tests {
         let mods_dir = temp.path().join("mods");
         let plugins_dir = temp.path().join("plugins");
         let userlibs_dir = temp.path().join("userlibs");
+        let userdata_dir = temp.path().join("userdata");
         fs::create_dir_all(&mods_dir).await?;
         fs::create_dir_all(&plugins_dir).await?;
         fs::create_dir_all(&userlibs_dir).await?;
+        fs::create_dir_all(&userdata_dir).await?;
 
         let installed_files = service
-            .try_extract_fomod_content(&content_root, &mods_dir, &plugins_dir, &userlibs_dir, None)
+            .try_extract_fomod_content(
+                &content_root,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                None,
+            )
             .await?
             .expect("fomod extraction should materialize files");
 

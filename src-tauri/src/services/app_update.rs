@@ -282,12 +282,7 @@ pub async fn fetch_app_update_status(
     settings: &Settings,
     current_version_raw: &str,
 ) -> Result<AppUpdateStatus> {
-    let game_id = settings
-        .nexus_mods_game_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_GAME_ID);
+    let game_id = DEFAULT_GAME_ID;
 
     let app_mod = resolve_app_mod(nexus_service, settings, game_id).await?;
     let mod_id = parse_mod_id(&app_mod)

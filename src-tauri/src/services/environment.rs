@@ -82,9 +82,19 @@ impl EnvironmentService {
         let steam_service = crate::services::steam::SteamService::new();
         let output_path = Path::new(&env.output_dir);
         let runtime_from_files = Self::infer_runtime_from_installation_path(output_path);
+        let installation = crate::services::steam::SteamInstallation {
+            path: env.output_dir.clone(),
+            executable_path: output_path
+                .join("Schedule I.exe")
+                .to_string_lossy()
+                .to_string(),
+            app_id: crate::services::steam::SteamService::get_steam_app_id(),
+            steamapps_dir: env.steamapps_dir.clone(),
+            manifest_path: env.steam_manifest_path.clone(),
+        };
 
         let detected_branch = steam_service
-            .detect_installed_branch(output_path)
+            .detect_installed_branch_for_installation(&installation)
             .await
             .ok()
             .flatten()
@@ -387,6 +397,8 @@ impl EnvironmentService {
             current_game_version: None,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(crate::types::EnvironmentType::DepotDownloader),
         };
 
@@ -424,12 +436,29 @@ impl EnvironmentService {
             .await?;
 
         let steam_service = crate::services::steam::SteamService::new();
-        let runtime_from_files = Self::infer_runtime_from_installation_path(path);
-        let detected_branch = steam_service
-            .detect_installed_branch(path)
+        let detected_installation = steam_service
+            .detect_steam_installations()
             .await
             .ok()
-            .flatten();
+            .and_then(|installations| {
+                installations.into_iter().find(|installation| {
+                    Self::normalize_path(&installation.path) == Self::normalize_path(&steam_path)
+                })
+            });
+        let runtime_from_files = Self::infer_runtime_from_installation_path(path);
+        let detected_branch = if let Some(installation) = detected_installation.as_ref() {
+            steam_service
+                .detect_installed_branch_for_installation(installation)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            steam_service
+                .detect_installed_branch(path)
+                .await
+                .ok()
+                .flatten()
+        };
         let branch =
             detected_branch.unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
         let runtime = Self::runtime_for_branch(&branch).unwrap_or(runtime_from_files);
@@ -455,6 +484,12 @@ impl EnvironmentService {
             current_game_version,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: detected_installation
+                .as_ref()
+                .and_then(|installation| installation.steamapps_dir.clone()),
+            steam_manifest_path: detected_installation
+                .as_ref()
+                .and_then(|installation| installation.manifest_path.clone()),
             environment_type: Some(crate::types::EnvironmentType::Steam),
         };
 
@@ -532,6 +567,8 @@ impl EnvironmentService {
             current_game_version,
             update_game_version: None,
             melon_loader_version,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(crate::types::EnvironmentType::Local),
         };
 
@@ -1038,6 +1075,8 @@ mod tests {
             current_game_version: None,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::Steam),
         };
 

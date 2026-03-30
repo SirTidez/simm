@@ -618,22 +618,24 @@ export function ModsOverlay({
           ...Object.values(matchingEntry?.storageIdsByRuntime || {}),
         ].filter((value): value is string => Boolean(value))),
       );
-      const reports = await Promise.all(
+      const reports = await Promise.allSettled(
         storageIds.map(async (id) => ({
           storageId: id,
           report: await ApiService.getModSecurityScanReport(id),
         })),
       );
-      const reportOptions = reports
-        .filter(
-          (
-            candidate,
-          ): candidate is { storageId: string; report: SecurityScanReport } =>
-            Boolean(candidate.report),
-        )
-        .map(({ storageId: optionStorageId, report: optionReport }) =>
-          buildStoredSecurityReportOption(matchingEntry, optionStorageId, optionReport),
-        );
+      const reportOptions = reports.flatMap((result) => {
+        if (result.status !== 'fulfilled' || !result.value.report) {
+          return [];
+        }
+        return [
+          buildStoredSecurityReportOption(
+            matchingEntry,
+            result.value.storageId,
+            result.value.report,
+          ),
+        ];
+      });
 
       if (reportOptions.length > 0) {
         openSecurityReport({
@@ -1004,7 +1006,7 @@ export function ModsOverlay({
             title: 'Manual Download Required',
             message: result.error || 'Open the mod page to complete this update manually.',
             confirmText: 'Open Source Page',
-            cancelText: onOpenAccounts ? 'Accounts' : 'Dismiss',
+            cancelText: 'Dismiss',
             onConfirm: () => openExternalSourceUrl(result.recoveryUrl),
           });
           return;
@@ -1138,10 +1140,18 @@ export function ModsOverlay({
 
     setInstallingDownloaded(storageId);
     try {
-      await ApiService.installDownloadedMod(storageId, [environmentId]);
+      const result = await ApiService.installDownloadedMod(storageId, [environmentId]);
       await loadInstalledMods(false, true);
       await loadDownloadedLibrary();
       await loadCachedModUpdates();
+      const warnings = result.results.flatMap((entry) => entry.warnings || []);
+      if (warnings.length > 0) {
+        showToast(
+          warnings.length === 1
+            ? warnings[0]
+            : `${warnings[0]} (+${warnings.length - 1} more warning${warnings.length > 2 ? 's' : ''})`,
+        );
+      }
       if (onModsChanged) {
         onModsChanged();
       }
@@ -2046,7 +2056,7 @@ export function ModsOverlay({
         selectedVersion,
         selectedOwnershipIds,
       );
-      setToastMessage('Mod linked and added to Mod Library.');
+      showToast('Mod linked and added to Mod Library.');
       closeLocalSourceLink();
       await loadInstalledMods(false, true);
       await loadDownloadedLibrary();
@@ -2059,7 +2069,7 @@ export function ModsOverlay({
         error: err instanceof Error ? err.message : 'Failed to link local mod source.',
       } : current);
     }
-  }, [closeLocalSourceLink, environmentId, onModsChanged]);
+  }, [closeLocalSourceLink, environmentId, onModsChanged, showToast]);
 
   const prepareLocalOwnershipStep = useCallback(async (
     mod: ModInfo,

@@ -65,6 +65,8 @@ export interface Environment {
   currentGameVersion?: string;
   updateGameVersion?: string;
   melonLoaderVersion?: string;
+  steamappsDir?: string;
+  steamManifestPath?: string;
   environmentType?: 'Steam' | 'DepotDownloader' | 'steam' | 'depotDownloader' | 'local';
 }
 
@@ -238,6 +240,7 @@ export interface ModLibraryEntry {
   displayName: string;
   files: string[];
   attachedUserLibs: string[];
+  attachedUserData?: string[];
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown';
   sourceId?: string;
   sourceVersion?: string;

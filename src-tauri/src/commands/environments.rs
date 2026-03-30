@@ -154,11 +154,11 @@ pub async fn get_environments(
         .map_err(|e| e.to_string())?;
 
     let steam_service = crate::services::steam::SteamService::new();
-    let detected_steam_path = steam_service
+    let detected_steam_installation = steam_service
         .detect_steam_installations()
         .await
         .ok()
-        .and_then(|installations| installations.into_iter().next().map(|i| i.path));
+        .and_then(|installations| installations.into_iter().next());
 
     // De-duplicate any environments that point to the same install path before
     // attempting status reconciliation/upserts to avoid unique-path write conflicts.
@@ -213,8 +213,18 @@ pub async fn get_environments(
                 crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
                     output_path,
                 );
+            let installation = crate::services::steam::SteamInstallation {
+                path: env.output_dir.clone(),
+                executable_path: output_path
+                    .join("Schedule I.exe")
+                    .to_string_lossy()
+                    .to_string(),
+                app_id: crate::services::steam::SteamService::get_steam_app_id(),
+                steamapps_dir: env.steamapps_dir.clone(),
+                manifest_path: env.steam_manifest_path.clone(),
+            };
             let detected_branch = steam_service
-                .detect_installed_branch(output_path)
+                .detect_installed_branch_for_installation(&installation)
                 .await
                 .ok()
                 .flatten()
@@ -273,16 +283,18 @@ pub async fn get_environments(
             continue;
         }
 
-        if let Some(path) = &detected_steam_path {
-            if normalize_path(&env.output_dir) != normalize_path(path)
+        if let Some(installation) = &detected_steam_installation {
+            if normalize_path(&env.output_dir) != normalize_path(&installation.path)
                 || !matches!(env.status, crate::types::EnvironmentStatus::Completed)
             {
-                env.output_dir = path.clone();
+                env.output_dir = installation.path.clone();
+                env.steamapps_dir = installation.steamapps_dir.clone();
+                env.steam_manifest_path = installation.manifest_path.clone();
                 let runtime_from_files = crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
-                    std::path::Path::new(path),
+                    std::path::Path::new(&installation.path),
                 );
                 let detected_branch = steam_service
-                    .detect_installed_branch(std::path::Path::new(path))
+                    .detect_installed_branch_for_installation(installation)
                     .await
                     .ok()
                     .flatten()
@@ -326,8 +338,10 @@ pub async fn get_environments(
 
     // Auto-detect and create Steam environment only if none exists
     if !has_steam_env {
-        if let Some(path) = detected_steam_path {
-            let steam_env = service.create_steam_environment(path, None, None).await;
+        if let Some(installation) = detected_steam_installation {
+            let steam_env = service
+                .create_steam_environment(installation.path, None, None)
+                .await;
             if let Ok(env) = steam_env {
                 let watcher_guard = watcher.lock().await;
                 start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;

@@ -13,6 +13,8 @@ pub struct SteamInstallation {
     pub path: String,
     pub executable_path: String,
     pub app_id: String,
+    pub steamapps_dir: Option<String>,
+    pub manifest_path: Option<String>,
 }
 
 impl SteamService {
@@ -165,14 +167,22 @@ impl SteamService {
                     steamapps_dir.join("common").join(install_dir)
                 };
 
-                if let Some(installation) = Self::build_steam_installation(&game_path) {
+                if let Some(installation) = Self::build_steam_installation(
+                    &game_path,
+                    Some(&steamapps_dir),
+                    Some(&manifest_path),
+                ) {
                     return Ok(Some(installation));
                 }
             }
         }
 
         let fallback_game_path = steamapps_dir.join("common").join("Schedule I");
-        Ok(Self::build_steam_installation(&fallback_game_path))
+        Ok(Self::build_steam_installation(
+            &fallback_game_path,
+            Some(&steamapps_dir),
+            Some(&manifest_path),
+        ))
     }
 
     fn find_steamapps_dir(game_path: &Path) -> Option<PathBuf> {
@@ -191,13 +201,27 @@ impl SteamService {
 
     /// Detect currently selected Steam branch from appmanifest (betakey).
     /// Returns "main" when no betakey is set.
-    pub async fn detect_installed_branch(&self, game_path: &Path) -> Result<Option<String>> {
-        let Some(steamapps_dir) = Self::find_steamapps_dir(game_path) else {
-            return Ok(None);
+    async fn detect_installed_branch_with_context(
+        &self,
+        game_path: &Path,
+        steamapps_dir: Option<&Path>,
+        manifest_path: Option<&Path>,
+    ) -> Result<Option<String>> {
+        let discovered_steamapps_dir = if manifest_path.is_none() && steamapps_dir.is_none() {
+            Self::find_steamapps_dir(game_path)
+        } else {
+            None
+        };
+        let resolved_manifest_path = if let Some(manifest_path) = manifest_path {
+            manifest_path.to_path_buf()
+        } else {
+            let Some(steamapps_dir) = steamapps_dir.or(discovered_steamapps_dir.as_deref()) else {
+                return Ok(None);
+            };
+            steamapps_dir.join(format!("appmanifest_{}.acf", Self::get_steam_app_id()))
         };
 
-        let manifest_path =
-            steamapps_dir.join(format!("appmanifest_{}.acf", Self::get_steam_app_id()));
+        let manifest_path = resolved_manifest_path;
         if !manifest_path.exists() {
             return Ok(None);
         }
@@ -218,7 +242,30 @@ impl SteamService {
         Ok(Some("main".to_string()))
     }
 
-    fn build_steam_installation(game_path: &Path) -> Option<SteamInstallation> {
+    pub async fn detect_installed_branch(&self, game_path: &Path) -> Result<Option<String>> {
+        self.detect_installed_branch_with_context(game_path, None, None)
+            .await
+    }
+
+    pub async fn detect_installed_branch_for_installation(
+        &self,
+        installation: &SteamInstallation,
+    ) -> Result<Option<String>> {
+        let steamapps_dir = installation.steamapps_dir.as_deref().map(Path::new);
+        let manifest_path = installation.manifest_path.as_deref().map(Path::new);
+        self.detect_installed_branch_with_context(
+            Path::new(&installation.path),
+            steamapps_dir,
+            manifest_path,
+        )
+        .await
+    }
+
+    fn build_steam_installation(
+        game_path: &Path,
+        steamapps_dir: Option<&Path>,
+        manifest_path: Option<&Path>,
+    ) -> Option<SteamInstallation> {
         let executable_path = game_path.join("Schedule I.exe");
         if !executable_path.exists() {
             return None;
@@ -228,6 +275,8 @@ impl SteamService {
             path: game_path.to_string_lossy().to_string(),
             executable_path: executable_path.to_string_lossy().to_string(),
             app_id: Self::get_steam_app_id(),
+            steamapps_dir: steamapps_dir.map(|path| path.to_string_lossy().to_string()),
+            manifest_path: manifest_path.map(|path| path.to_string_lossy().to_string()),
         })
     }
 
@@ -526,6 +575,84 @@ mod tests {
                 .to_string_lossy()
                 .to_string()
         );
+        assert_eq!(
+            installations[0].steamapps_dir.as_deref(),
+            Some(
+                secondary_library
+                    .path()
+                    .join("steamapps")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            installations[0].manifest_path.as_deref(),
+            Some(
+                secondary_library
+                    .path()
+                    .join("steamapps")
+                    .join("appmanifest_3164500.acf")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn detect_installed_branch_uses_manifest_context_for_absolute_installdir() -> Result<()> {
+        let steam_root = TempDir::new()?;
+        let secondary_library = TempDir::new()?;
+        let external_install = TempDir::new()?;
+
+        fs::create_dir_all(steam_root.path().join("steamapps")).await?;
+        fs::create_dir_all(secondary_library.path().join("steamapps")).await?;
+
+        let encoded_secondary_path = secondary_library
+            .path()
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let library_folders = format!(
+            "\"libraryfolders\"\n{{\n    \"1\"\n    {{\n        \"path\"    \"{}\"\n    }}\n}}\n",
+            encoded_secondary_path
+        );
+        fs::write(
+            steam_root
+                .path()
+                .join("steamapps")
+                .join("libraryfolders.vdf"),
+            library_folders,
+        )
+        .await?;
+
+        let game_path = external_install.path().join("Custom Schedule I");
+        fs::create_dir_all(&game_path).await?;
+        fs::write(game_path.join("Schedule I.exe"), b"").await?;
+
+        let encoded_game_path = game_path.to_string_lossy().replace('\\', "\\\\");
+        fs::write(
+            secondary_library
+                .path()
+                .join("steamapps")
+                .join("appmanifest_3164500.acf"),
+            format!(
+                "\"AppState\"\n{{\n    \"installdir\" \"{}\"\n    \"UserConfig\"\n    {{\n        \"betakey\" \"beta\"\n    }}\n}}\n",
+                encoded_game_path
+            ),
+        )
+        .await?;
+
+        let service = SteamService::new();
+        let installations = service
+            .detect_steam_installations_from_root(steam_root.path())
+            .await?;
+
+        assert_eq!(installations.len(), 1);
+        let branch = service
+            .detect_installed_branch_for_installation(&installations[0])
+            .await?;
+        assert_eq!(branch.as_deref(), Some("beta"));
 
         Ok(())
     }

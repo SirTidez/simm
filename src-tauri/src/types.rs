@@ -102,6 +102,10 @@ pub struct Environment {
     pub update_game_version: Option<String>,
     pub melon_loader_version: Option<String>,
     #[serde(default)]
+    pub steamapps_dir: Option<String>,
+    #[serde(default)]
+    pub steam_manifest_path: Option<String>,
+    #[serde(default)]
     pub environment_type: Option<EnvironmentType>,
 }
 
@@ -483,8 +487,10 @@ pub struct ModLibraryEntry {
     pub storage_id: String,
     pub display_name: String,
     pub files: Vec<String>,
-    #[serde(rename = "attachedUserLibs")]
+    #[serde(default, rename = "attachedUserLibs")]
     pub attached_userlibs: Vec<String>,
+    #[serde(default, rename = "attachedUserData")]
+    pub attached_userdata: Vec<String>,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
     pub source_version: Option<String>,
@@ -646,6 +652,7 @@ mod tests {
             display_name: "Example".to_string(),
             files: vec!["Example.dll".to_string()],
             attached_userlibs: vec!["Config/Example.json".to_string()],
+            attached_userdata: vec!["Profile/save.dat".to_string()],
             source: Some(ModSource::Github),
             source_id: Some("owner/repo".to_string()),
             source_version: Some("v1.0.0".to_string()),
@@ -676,6 +683,7 @@ mod tests {
         assert!(json.get("storageId").is_some());
         assert!(json.get("displayName").is_some());
         assert!(json.get("attachedUserLibs").is_some());
+        assert!(json.get("attachedUserData").is_some());
         assert!(json.get("sourceId").is_some());
         assert!(json.get("availableRuntimes").is_some());
         assert!(json.get("attachedUserlibs").is_none());

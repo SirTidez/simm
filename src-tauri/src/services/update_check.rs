@@ -789,6 +789,8 @@ mod tests {
             current_game_version: None,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::Steam),
         };
 
@@ -846,6 +848,8 @@ mod tests {
             current_game_version: None,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -881,6 +885,8 @@ mod tests {
             current_game_version: None,
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::Steam),
         };
 
@@ -917,6 +923,8 @@ mod tests {
             current_game_version: Some("0.4.3f3".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -992,6 +1000,8 @@ mod tests {
             current_game_version: Some("0.4.3f3".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -1068,6 +1078,8 @@ mod tests {
             current_game_version: Some("0.4.4f6".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -1146,6 +1158,8 @@ mod tests {
             current_game_version: Some("0.4.4f6".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -1224,6 +1238,8 @@ mod tests {
             current_game_version: Some("0.4.4f6".to_string()),
             update_game_version: Some("0.4.5f1".to_string()),
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::Steam),
         };
 
@@ -1268,6 +1284,8 @@ mod tests {
             current_game_version: Some("0.4.5f1".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::Steam),
         };
 
@@ -1290,6 +1308,8 @@ mod tests {
             current_game_version: Some("0.4.4f10".to_string()),
             update_game_version: Some("0.4.4f6".to_string()),
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -1365,6 +1385,8 @@ mod tests {
             current_game_version: Some("0.4.5f1".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
@@ -1387,6 +1409,8 @@ mod tests {
             current_game_version: Some("0.4.4f10".to_string()),
             update_game_version: None,
             melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
