@@ -811,6 +811,9 @@ export class ApiService {
     storageId?: string;
     modId?: number;
     fileId?: number;
+    downloadedToLibraryOnly?: boolean;
+    installedEnvironmentIds?: string[];
+    installedEnvironmentNames?: string[];
     requestedKind?: 'library' | 'install';
     usedFallback?: boolean;
     runtimeSelectionRequired?: boolean;

@@ -1393,7 +1393,7 @@ describe('ModLibraryOverlay', () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        'Installed successfully. It may take a couple seconds before it shows in Mods.',
+        'Installed to Alternate Beta. It may take a couple seconds before it shows in Mods.',
       ),
     ).toBeTruthy();
 
@@ -1422,7 +1422,7 @@ describe('ModLibraryOverlay', () => {
     });
   });
 
-  it('shows already-installed compatible environments in a read-only install dialog', async () => {
+  it('disables install-to-more when no compatible environments remain', async () => {
     apiMocks.getEnvironments.mockResolvedValue([
       {
         id: 'env-mono',
@@ -1453,13 +1453,11 @@ describe('ModLibraryOverlay', () => {
 
     renderLibraryOverlay({ libraryTab: 'library' });
 
-    expect(await screen.findByRole('button', { name: 'Install to more…' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Install to more…' }));
-
-    expect(await screen.findByText('This version is already installed in every compatible environment.')).toBeTruthy();
-    expect(screen.getByText('Alternate')).toBeTruthy();
-    expect(screen.getByText('Mono • alternate • already installed')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Already installed' })).toBeDisabled();
+    const button = await screen.findByRole('button', { name: 'Install to more…' });
+    expect(button).toBeDisabled();
+    expect(button.getAttribute('title')).toBe(
+      'No compatible branches found. Add a matching environment to install this runtime.',
+    );
   });
 
   it('switches versions from the dropdown menu', async () => {

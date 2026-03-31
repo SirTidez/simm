@@ -2706,6 +2706,65 @@ export function ModLibraryOverlay({
     [getContainingDownloadedGroup, getEntryStorageIds],
   );
 
+  const getCompatibleInstallSummary = useCallback(
+    (entry: ModLibraryEntry, installMoreOnly: boolean) => {
+      const installEntry = getInstallableEntry(entry);
+      const installedCompatible = environments.filter((environment) => {
+        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
+        if (!entrySupportsRuntime(installEntry, environmentRuntime)) {
+          return false;
+        }
+        if (hasSiblingVersionInstalledInEnvironment(installEntry, environment)) {
+          return false;
+        }
+        const installedIds =
+          installEntry.installedInByRuntime?.[environmentRuntime] ||
+          installEntry.installedIn ||
+          [];
+        return installedIds.includes(environment.id);
+      });
+
+      const compatible = environments.filter((environment) => {
+        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
+        if (!entrySupportsRuntime(installEntry, environmentRuntime)) {
+          return false;
+        }
+        if (hasSiblingVersionInstalledInEnvironment(installEntry, environment)) {
+          return false;
+        }
+        if (!installMoreOnly) {
+          return true;
+        }
+        const installedIds =
+          installEntry.installedInByRuntime?.[environmentRuntime] ||
+          installEntry.installedIn ||
+          [];
+        return !installedIds.includes(environment.id);
+      });
+
+      const excluded = environments.filter(
+        (environment) =>
+          !entrySupportsRuntime(
+            installEntry,
+            getEffectiveEnvironmentRuntime(environment),
+          ),
+      );
+
+      return {
+        installEntry,
+        installedCompatible,
+        compatible,
+        excluded,
+      };
+    },
+    [
+      entrySupportsRuntime,
+      environments,
+      getInstallableEntry,
+      hasSiblingVersionInstalledInEnvironment,
+    ],
+  );
+
   const closeInstallDialog = useCallback(() => {
     setInstallDialog({
       isOpen: false,
@@ -2726,6 +2785,7 @@ export function ModLibraryOverlay({
       );
       const runtimeGroups = new Map<"IL2CPP" | "Mono", string[]>();
       const warningMessages: string[] = [];
+      const installedEnvironmentNames: string[] = [];
 
       logger.debug("Mod library install requested", {
         displayName: entry.displayName,
@@ -2805,6 +2865,11 @@ export function ModLibraryOverlay({
           targetIds,
           installResult,
         });
+        installedEnvironmentNames.push(
+          ...selectedTargets
+            .filter((environment) => targetIds.includes(environment.id))
+            .map((environment) => environment.name),
+        );
         warningMessages.push(
           ...installResult.results.flatMap((result) => result.warnings || []),
         );
@@ -2817,6 +2882,10 @@ export function ModLibraryOverlay({
             : `${warningMessages[0]} (+${warningMessages.length - 1} more warning${warningMessages.length > 2 ? "s" : ""})`,
         );
       }
+
+      return {
+        installedEnvironmentNames: Array.from(new Set(installedEnvironmentNames)),
+      };
     },
     [
       entrySupportsRuntime,
@@ -2826,55 +2895,20 @@ export function ModLibraryOverlay({
     ],
   );
 
-  const showInstallSuccessNotice = useCallback(() => {
+  const showInstallSuccessNotice = useCallback((installedEnvironmentNames: string[]) => {
+    const uniqueNames = Array.from(new Set(installedEnvironmentNames.filter(Boolean)));
     showLibraryNotice(
       "Installed",
-      "Installed successfully. It may take a couple seconds before it shows in Mods.",
+      uniqueNames.length > 0
+        ? `Installed to ${uniqueNames.join(", ")}. It may take a couple seconds before it shows in Mods.`
+        : "Installed successfully. It may take a couple seconds before it shows in Mods.",
     );
   }, [showLibraryNotice]);
 
   const promptInstallTargets = useCallback(
     async (entry: ModLibraryEntry, title: string, installMoreOnly: boolean) => {
-      const installEntry = getInstallableEntry(entry);
-      const installedCompatible = environments.filter((environment) => {
-        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
-        if (!entrySupportsRuntime(installEntry, environmentRuntime)) {
-          return false;
-        }
-        if (hasSiblingVersionInstalledInEnvironment(installEntry, environment)) {
-          return false;
-        }
-        const installedIds =
-          installEntry.installedInByRuntime?.[environmentRuntime] ||
-          installEntry.installedIn ||
-          [];
-        return installedIds.includes(environment.id);
-      });
-
-      const compatible = environments.filter((environment) => {
-        const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
-        if (!entrySupportsRuntime(installEntry, environmentRuntime)) {
-          return false;
-        }
-        if (hasSiblingVersionInstalledInEnvironment(installEntry, environment)) {
-          return false;
-        }
-        if (!installMoreOnly) {
-          return true;
-        }
-        const installedIds =
-          installEntry.installedInByRuntime?.[environmentRuntime] ||
-          installEntry.installedIn ||
-          [];
-        return !installedIds.includes(environment.id);
-      });
-      const excluded = environments.filter(
-        (environment) =>
-          !entrySupportsRuntime(
-            installEntry,
-            getEffectiveEnvironmentRuntime(environment),
-          ),
-      );
+      const { installEntry, installedCompatible, compatible, excluded } =
+        getCompatibleInstallSummary(entry, installMoreOnly);
 
       if (compatible.length === 0) {
         if (installMoreOnly && installedCompatible.length > 0) {
@@ -2904,8 +2938,8 @@ export function ModLibraryOverlay({
       if (compatible.length === 1) {
         setInstallingTargets(true);
         try {
-          await installEntryToEnvironmentIds(installEntry, [compatible[0].id]);
-          showInstallSuccessNotice();
+          const result = await installEntryToEnvironmentIds(installEntry, [compatible[0].id]);
+          showInstallSuccessNotice(result.installedEnvironmentNames);
           await refreshLibrary();
           notifyLibraryUpdated();
           notifyModUpdateStateChanged();
@@ -2934,11 +2968,7 @@ export function ModLibraryOverlay({
       });
     },
     [
-      downloadedGroups,
-      entrySupportsRuntime,
-      environments,
-      getInstallableEntry,
-      hasSiblingVersionInstalledInEnvironment,
+      getCompatibleInstallSummary,
       installEntryToEnvironmentIds,
       notifyLibraryUpdated,
       notifyModUpdateStateChanged,
@@ -2955,12 +2985,12 @@ export function ModLibraryOverlay({
 
     setInstallingTargets(true);
     try {
-      await installEntryToEnvironmentIds(
+      const result = await installEntryToEnvironmentIds(
         installDialog.entry,
         Array.from(selectedInstallEnvironmentIds),
       );
       closeInstallDialog();
-      showInstallSuccessNotice();
+      showInstallSuccessNotice(result.installedEnvironmentNames);
       await refreshLibrary();
       notifyLibraryUpdated();
       notifyModUpdateStateChanged();
@@ -7046,20 +7076,35 @@ export function ModLibraryOverlay({
                         Security Report
                       </button>
                     )}
-                  <button
-                    className="btn btn-primary"
-                    onClick={() =>
-                      void promptInstallTargets(
-                        selectedDownloadedEntry,
-                        `Install ${selectedDownloadedEntry.displayName}`,
-                        selectedDownloadedGroup.installedIn.length > 0,
-                      )
-                    }
-                  >
-                    {selectedDownloadedGroup.installedIn.length > 0
-                      ? "Install to more…"
-                      : "Install…"}
-                  </button>
+                  {(() => {
+                    const installMoreOnly =
+                      selectedDownloadedGroup.installedIn.length > 0;
+                    const { compatible } = getCompatibleInstallSummary(
+                      selectedDownloadedEntry,
+                      installMoreOnly,
+                    );
+                    const installDisabled = compatible.length === 0;
+                    return (
+                      <button
+                        className="btn btn-primary"
+                        onClick={() =>
+                          void promptInstallTargets(
+                            selectedDownloadedEntry,
+                            `Install ${selectedDownloadedEntry.displayName}`,
+                            installMoreOnly,
+                          )
+                        }
+                        disabled={installDisabled}
+                        title={
+                          installDisabled
+                            ? "No compatible branches found. Add a matching environment to install this runtime."
+                            : undefined
+                        }
+                      >
+                        {installMoreOnly ? "Install to more…" : "Install…"}
+                      </button>
+                    );
+                  })()}
                   <button
                     className="btn btn-secondary"
                     onClick={() =>
@@ -7454,21 +7499,37 @@ export function ModLibraryOverlay({
                   </button>
                   {downloadedGroupForSelectedNexus &&
                     selectedNexusDownloadedEntry && (
-                      <button
-                        className="btn btn-secondary"
-                        onClick={() =>
-                          void promptInstallTargets(
-                            selectedNexusDownloadedEntry,
-                            `Install ${selectedNexusDownloadedEntry.displayName}`,
-                            downloadedGroupForSelectedNexus.installedIn.length >
-                              0,
-                          )
-                        }
-                      >
-                        {downloadedGroupForSelectedNexus.installedIn.length > 0
-                          ? "Install library version…"
-                          : "Install library version"}
-                      </button>
+                      (() => {
+                        const installMoreOnly =
+                          downloadedGroupForSelectedNexus.installedIn.length > 0;
+                        const { compatible } = getCompatibleInstallSummary(
+                          selectedNexusDownloadedEntry,
+                          installMoreOnly,
+                        );
+                        const installDisabled = compatible.length === 0;
+                        return (
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() =>
+                              void promptInstallTargets(
+                                selectedNexusDownloadedEntry,
+                                `Install ${selectedNexusDownloadedEntry.displayName}`,
+                                installMoreOnly,
+                              )
+                            }
+                            disabled={installDisabled}
+                            title={
+                              installDisabled
+                                ? "No compatible branches found. Add a matching environment to install this runtime."
+                                : undefined
+                            }
+                          >
+                            {installMoreOnly
+                              ? "Install library version…"
+                              : "Install library version"}
+                          </button>
+                        );
+                      })()
                     )}
                   <a
                     className="btn btn-secondary"

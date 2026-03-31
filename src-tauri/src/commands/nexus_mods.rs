@@ -1284,6 +1284,7 @@ async fn complete_pending_nxm_download(
                 "storageId": existing_mod_id,
                 "fromStorage": true,
                 "result": install_result,
+                "installedEnvironmentIds": [environment_id.clone()],
                 "requestedKind": pending.map(|value| value.kind.clone()),
                 "usedFallback": false,
             }));
@@ -1428,7 +1429,7 @@ async fn complete_pending_nxm_download(
 
     let env_service = EnvironmentService::new(db.clone())
         .map_err(|e| nexus_error(format!("Failed to create environment service: {}", e)))?;
-    env_service
+    let environment = env_service
         .get_environment(&environment_id)
         .await
         .map_err(|e| {
@@ -1438,6 +1439,27 @@ async fn complete_pending_nxm_download(
             ))
         })?
         .ok_or_else(|| nexus_warn("Environment not found for manual Nexus install"))?;
+
+    if runtime.as_ref().is_some_and(|requested| requested != &environment.runtime) {
+        return Ok(json!({
+            "success": true,
+            "kind": "install",
+            "environmentId": environment_id,
+            "storageId": storage_id,
+            "storage": store_result,
+            "result": { "results": [] },
+            "modId": nxm.mod_id,
+            "fileId": nxm.file_id,
+            "requestedKind": pending.map(|value| value.kind.clone()),
+            "usedFallback": false,
+            "downloadedToLibraryOnly": true,
+            "installedEnvironmentIds": [],
+            "installedEnvironmentNames": [],
+            "skippedEnvironmentIds": [environment.id.clone()],
+            "skippedEnvironmentNames": [environment.name.clone()],
+            "skipReason": "no-compatible-environments",
+        }));
+    }
 
     let install_result = mods_service
         .install_storage_mod_to_envs(&storage_id, vec![environment_id.clone()])
@@ -1458,6 +1480,8 @@ async fn complete_pending_nxm_download(
         "result": install_result,
         "modId": nxm.mod_id,
         "fileId": nxm.file_id,
+        "installedEnvironmentIds": [environment.id.clone()],
+        "installedEnvironmentNames": [environment.name.clone()],
         "requestedKind": pending.map(|value| value.kind.clone()),
         "usedFallback": false,
     }))

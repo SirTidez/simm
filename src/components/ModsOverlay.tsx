@@ -873,6 +873,8 @@ export function ModsOverlay({
           kind?: 'library' | 'install';
           requestedKind?: 'library' | 'install';
           environmentId?: string;
+          downloadedToLibraryOnly?: boolean;
+          installedEnvironmentNames?: string[];
         };
         requestedKind?: 'library' | 'install';
         error?: string;
@@ -900,6 +902,17 @@ export function ModsOverlay({
         await loadDownloadedLibrary();
         await loadCachedModUpdates();
         onModsChanged?.();
+        const installedEnvironmentNames =
+          detail.result?.installedEnvironmentNames?.filter(Boolean) || [];
+        if (detail.result?.downloadedToLibraryOnly) {
+          showToast('Downloaded to library only. No compatible branches found.');
+        } else if (installedEnvironmentNames.length > 0) {
+          showToast(
+            `Installed to ${installedEnvironmentNames.join(', ')}.`,
+          );
+        } else if (detail.result?.environmentId === environmentId && environment?.name) {
+          showToast(`Installed to ${environment.name}.`);
+        }
         setShowNexusModsResults(false);
         setNexusModsSearchQuery('');
         return;
@@ -915,7 +928,7 @@ export function ModsOverlay({
       clearNexusManualTimeout();
       window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
     };
-  }, [environmentId, installingNexusMod, onModsChanged]);
+  }, [environment?.name, environmentId, installingNexusMod, onModsChanged, showToast]);
 
   // Auto-load files for NexusMods search results
   useEffect(() => {
