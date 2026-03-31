@@ -2087,11 +2087,6 @@ pub async fn install_nexus_mods_mod(
         return Err(nexus_warn("Output directory not set"));
     }
 
-    let runtime_str = match env.runtime {
-        crate::types::Runtime::Il2cpp => "IL2CPP",
-        crate::types::Runtime::Mono => "Mono",
-    };
-
     let nexus_service = get_nexus_mods_service().await?;
     let mod_info = nexus_service.get_mod(&game_id, mod_id).await.map_err(|e| {
         nexus_error(format!(
@@ -2324,28 +2319,65 @@ pub async fn install_nexus_mods_mod(
         }
     };
 
-    let result = mods_service
-        .install_zip_mod(
-            &env.output_dir,
+    let store_result = mods_service
+        .store_mod_archive(
             &zip_path_str,
             original_filename,
-            runtime_str,
-            &env.branch,
+            Some(env.runtime.clone()),
             metadata,
+            None,
         )
         .await
         .map_err(|e| {
             nexus_error(format!(
-                "Failed to install mod {} file {}: {}",
+                "Failed to store mod {} file {} before install: {}",
                 mod_id, file_id, e
+            ))
+        })?;
+
+    let storage_id = store_result
+        .get("storageId")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| nexus_error("Stored Nexus archive did not return a storage ID"))?
+        .to_string();
+
+    let install_result = mods_service
+        .install_storage_mod_to_envs(&storage_id, vec![environment_id.clone()])
+        .await
+        .map_err(|e| {
+            nexus_error(format!(
+                "Failed to install stored Nexus archive {} into environment {}: {}",
+                storage_id, environment_id, e
             ))
         })?;
 
     let _ = tokio::fs::remove_file(&archive_path).await;
 
+    let installed_files = install_result
+        .get("results")
+        .and_then(|value| value.as_array())
+        .and_then(|results| results.first())
+        .and_then(|result| result.get("installedFiles"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    let mut response = serde_json::Map::new();
+    response.insert("success".to_string(), serde_json::json!(true));
+    response.insert("source".to_string(), serde_json::json!("nexusmods"));
+    response.insert("storageId".to_string(), serde_json::json!(storage_id));
+    response.insert("installedFiles".to_string(), installed_files);
+    response.insert("result".to_string(), install_result);
+    if let Some(already_stored) = store_result
+        .get("alreadyStored")
+        .and_then(|value| value.as_bool())
+    {
+        response.insert("alreadyStored".to_string(), serde_json::json!(already_stored));
+        response.insert("fromStorage".to_string(), serde_json::json!(already_stored));
+    }
+
     Ok(crate::commands::mods::finalize_security_scan_response(
         &mods_service,
-        result,
+        serde_json::Value::Object(response),
         security_report.as_ref(),
         "installing a Nexus mod archive",
     )

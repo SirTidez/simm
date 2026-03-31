@@ -615,7 +615,7 @@ pub async fn check_mod_installed(
 
     let mods_service = ModsService::new(db.inner().clone());
     match mods_service
-        .find_existing_mod_installation(&env.output_dir, &source_id, &source_version)
+        .find_existing_mod_installation(&env.output_dir, &source_id, &source_version, None)
         .await
     {
         Ok(Some(mod_storage_id)) => Ok(serde_json::json!({

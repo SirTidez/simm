@@ -7,6 +7,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { ApiService } from "../services/api";
+import { logger } from "../services/logger";
 import { ConfirmOverlay } from "./ConfirmOverlay";
 import {
   handleCardActivationKeyDown,
@@ -715,6 +716,30 @@ interface RuntimePromptState {
   title: string;
   message: string;
   onSelect: (runtime: "IL2CPP" | "Mono" | "Both") => void;
+}
+
+function summarizeDownloadedGroupForDebug(
+  group: DownloadedModGroup | null | undefined,
+) {
+  if (!group) {
+    return null;
+  }
+
+  return {
+    key: group.key,
+    displayName: group.displayName,
+    availableRuntimes: group.availableRuntimes,
+    installedIn: group.installedIn,
+    installedInByRuntime: group.installedInByRuntime,
+    entries: group.entries.map((entry) => ({
+      storageId: entry.storageId,
+      sourceVersion: entry.sourceVersion || entry.installedVersion || null,
+      availableRuntimes: entry.availableRuntimes,
+      storageIdsByRuntime: entry.storageIdsByRuntime,
+      installedInByRuntime: entry.installedInByRuntime,
+      filesByRuntime: entry.filesByRuntime,
+    })),
+  };
 }
 
 export function ModLibraryOverlay({
@@ -2702,12 +2727,43 @@ export function ModLibraryOverlay({
       const runtimeGroups = new Map<"IL2CPP" | "Mono", string[]>();
       const warningMessages: string[] = [];
 
+      logger.debug("Mod library install requested", {
+        displayName: entry.displayName,
+        storageId: entry.storageId,
+        requestedEnvironmentIds: environmentIds,
+        entryAvailableRuntimes: entry.availableRuntimes,
+        entryStorageIdsByRuntime: entry.storageIdsByRuntime,
+        entryInstalledInByRuntime: entry.installedInByRuntime,
+        selectedTargets: selectedTargets.map((environment) => ({
+          id: environment.id,
+          name: environment.name,
+          branch: environment.branch,
+          runtime: getEffectiveEnvironmentRuntime(environment),
+        })),
+      });
+
       for (const environment of selectedTargets) {
         const environmentRuntime = getEffectiveEnvironmentRuntime(environment);
         if (!entrySupportsRuntime(entry, environmentRuntime)) {
+          logger.debug("Skipping install target due to runtime mismatch", {
+            displayName: entry.displayName,
+            storageId: entry.storageId,
+            environmentId: environment.id,
+            environmentName: environment.name,
+            environmentRuntime,
+            entryAvailableRuntimes: entry.availableRuntimes,
+            entryStorageIdsByRuntime: entry.storageIdsByRuntime,
+          });
           continue;
         }
         if (hasSiblingVersionInstalledInEnvironment(entry, environment)) {
+          logger.debug("Skipping install target because sibling version is already installed", {
+            displayName: entry.displayName,
+            storageId: entry.storageId,
+            environmentId: environment.id,
+            environmentName: environment.name,
+            environmentRuntime,
+          });
           continue;
         }
         const existing = runtimeGroups.get(environmentRuntime) || [];
@@ -2715,13 +2771,40 @@ export function ModLibraryOverlay({
         runtimeGroups.set(environmentRuntime, existing);
       }
 
+      logger.debug("Resolved runtime groups for install", {
+        displayName: entry.displayName,
+        storageId: entry.storageId,
+        runtimeGroups: Array.from(runtimeGroups.entries()).map(
+          ([runtime, targetIds]) => ({
+            runtime,
+            targetIds,
+            storageId:
+              entry.storageIdsByRuntime?.[runtime] || entry.storageId || null,
+          }),
+        ),
+      });
+
       for (const [runtime, targetIds] of runtimeGroups.entries()) {
         const storageId =
           entry.storageIdsByRuntime?.[runtime] || entry.storageId;
         if (!storageId || targetIds.length === 0) {
+          logger.debug("Skipping runtime install because storage mapping is missing or empty", {
+            displayName: entry.displayName,
+            requestedRuntime: runtime,
+            resolvedStorageId: storageId || null,
+            targetIds,
+            entryStorageIdsByRuntime: entry.storageIdsByRuntime,
+          });
           continue;
         }
         const installResult = await ApiService.installDownloadedMod(storageId, targetIds);
+        logger.debug("Completed runtime install for library entry", {
+          displayName: entry.displayName,
+          requestedRuntime: runtime,
+          storageId,
+          targetIds,
+          installResult,
+        });
         warningMessages.push(
           ...installResult.results.flatMap((result) => result.warnings || []),
         );
@@ -3284,6 +3367,19 @@ export function ModLibraryOverlay({
           storageId?: string;
           alreadyStored?: boolean;
         }> = [];
+        logger.debug("Starting Nexus library download flow", {
+          modId,
+          requestedRuntime: runtime,
+          selectedFileId: selectedFile?.file_id ?? null,
+          selectedFileName: selectedFile?.file_name || selectedFile?.name || null,
+          availableFiles: files.map((file) => ({
+            fileId: file.file_id,
+            fileName: file.file_name || file.name || null,
+            version: file.version || file.mod_version || null,
+            inferredRuntime: inferNexusFileRuntime(file),
+            uploadedAt: getNexusFileUpdatedAt(file) || null,
+          })),
+        });
         if (!access.canDirectDownload && access.requiresSiteConfirmation) {
           if (selectedFile?.file_id) {
             const inferredRuntime = inferNexusFileRuntime(selectedFile);
@@ -3338,6 +3434,13 @@ export function ModLibraryOverlay({
             return;
           }
           results.push(result);
+          logger.debug("Downloaded selected Nexus file to library", {
+            modId,
+            fileId: selectedFile.file_id,
+            requestedRuntime:
+              inferredRuntime === "Unknown" ? null : inferredRuntime,
+            result,
+          });
         } else if (runtime === "Both") {
           const il2cppFile = selectNexusFileForRuntime(files, "IL2CPP");
           const monoFile = selectNexusFileForRuntime(files, "Mono");
@@ -3351,6 +3454,12 @@ export function ModLibraryOverlay({
               return;
             }
             results.push(result);
+            logger.debug("Downloaded Nexus IL2CPP runtime to library", {
+              modId,
+              fileId: il2cppFile.file_id,
+              requestedRuntime: "IL2CPP",
+              result,
+            });
           }
           if (monoFile?.file_id && monoFile?.file_id !== il2cppFile?.file_id) {
             const { result, manualConfirmationPrompted } =
@@ -3362,6 +3471,12 @@ export function ModLibraryOverlay({
               return;
             }
             results.push(result);
+            logger.debug("Downloaded Nexus Mono runtime to library", {
+              modId,
+              fileId: monoFile.file_id,
+              requestedRuntime: "Mono",
+              result,
+            });
           }
         } else {
           const targetFile = selectNexusFileForRuntime(files, runtime);
@@ -3375,6 +3490,12 @@ export function ModLibraryOverlay({
             return;
           }
           results.push(result);
+          logger.debug("Downloaded Nexus runtime to library", {
+            modId,
+            fileId: targetFile.file_id,
+            requestedRuntime: runtime,
+            result,
+          });
         }
         const nextLibrary = await ApiService.getModLibrary();
         setLibrary(nextLibrary);
@@ -3383,6 +3504,11 @@ export function ModLibraryOverlay({
           modId,
           nextLibrary,
         );
+        logger.debug("Refreshed Nexus library group after download", {
+          modId,
+          downloadResults: results,
+          refreshedGroup: summarizeDownloadedGroupForDebug(refreshedGroup),
+        });
         const downloadedLabel =
           selectedFile?.version ||
           selectedFile?.mod_version ||

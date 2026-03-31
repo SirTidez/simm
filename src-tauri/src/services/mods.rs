@@ -2453,6 +2453,35 @@ impl ModsService {
         Uuid::new_v4().to_string()
     }
 
+    async fn storage_supports_runtime(
+        &self,
+        storage_root: &Path,
+        storage_id: &str,
+        metadata: &ModMetadata,
+        requested_runtime: Option<&crate::types::Runtime>,
+    ) -> Result<bool> {
+        let Some(requested_runtime) = requested_runtime else {
+            return Ok(true);
+        };
+
+        if let Some(detected_runtime) = metadata.detected_runtime.as_ref() {
+            return Ok(detected_runtime == requested_runtime);
+        }
+
+        let storage_path = Self::validated_storage_path(storage_root, storage_id)?;
+        if !storage_path.exists() {
+            return Ok(false);
+        }
+
+        let files = self.collect_storage_files(&storage_path).await?;
+        let available_runtimes =
+            self.detect_available_runtimes(&files, metadata.detected_runtime.clone());
+
+        Ok(available_runtimes
+            .iter()
+            .any(|runtime| runtime == Self::runtime_label(requested_runtime)))
+    }
+
     /// Find existing mod installation by source_id and source_version
     /// Returns the mod_storage_id if found, None otherwise
     pub async fn find_existing_mod_installation(
@@ -2460,6 +2489,7 @@ impl ModsService {
         game_dir: &str,
         source_id: &Option<String>,
         source_version: &Option<String>,
+        runtime: Option<crate::types::Runtime>,
     ) -> Result<Option<String>> {
         if source_id.is_none() || source_version.is_none() {
             // Can't match without source_id and source_version
@@ -2470,6 +2500,7 @@ impl ModsService {
 
         let mods_directory = self.get_mods_directory(game_dir);
         let mod_metadata = self.load_mod_metadata(&mods_directory).await?;
+        let storage_root = self.get_mods_storage_dir().await?;
 
         // Search through metadata to find a matching mod
         for (_, meta) in mod_metadata.iter() {
@@ -2482,6 +2513,26 @@ impl ModsService {
                 if existing_source_id == source_id.as_ref().unwrap()
                     && existing_source_version == source_version.as_ref().unwrap()
                 {
+                    let supports_runtime = self
+                        .storage_supports_runtime(
+                            &storage_root,
+                            existing_storage_id,
+                            meta,
+                            runtime.as_ref(),
+                        )
+                        .await?;
+                    log::debug!(
+                        "Found installed source/version candidate: storage_id={}, source_id={}, source_version={}, requested_runtime={:?}, detected_runtime={:?}, supports_runtime={}",
+                        existing_storage_id,
+                        existing_source_id,
+                        existing_source_version,
+                        runtime,
+                        meta.detected_runtime,
+                        supports_runtime
+                    );
+                    if !supports_runtime {
+                        continue;
+                    }
                     eprintln!(
                         "[DEBUG] Found existing installation of {} version {} with storage_id: {}",
                         existing_source_id, existing_source_version, existing_storage_id
@@ -2501,6 +2552,12 @@ impl ModsService {
         source_version: &str,
         runtime: Option<crate::types::Runtime>,
     ) -> Result<Option<String>> {
+        log::debug!(
+            "Checking existing mod storage by source/version: source_id={}, source_version={}, requested_runtime={:?}",
+            source_id,
+            source_version,
+            runtime
+        );
         let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT environment_id, data FROM mod_metadata WHERE kind = 'mods'",
         )
@@ -2598,11 +2655,33 @@ impl ModsService {
                 }
             };
 
+            log::debug!(
+                "Candidate storage match for source/version: storage_id={}, detected_runtime={:?}, available_runtimes={:?}, supports_runtime={}, files={:?}",
+                storage_id,
+                template_meta.detected_runtime,
+                available_runtimes,
+                supports_runtime,
+                files
+            );
+
             if supports_runtime {
+                log::debug!(
+                    "Reusing existing storage for source/version/runtime: storage_id={}, source_id={}, source_version={}, requested_runtime={:?}",
+                    storage_id,
+                    source_id,
+                    source_version,
+                    runtime
+                );
                 return Ok(Some(storage_id));
             }
         }
 
+        log::debug!(
+            "No existing storage found for source/version/runtime: source_id={}, source_version={}, requested_runtime={:?}",
+            source_id,
+            source_version,
+            runtime
+        );
         Ok(None)
     }
 
@@ -4012,6 +4091,12 @@ impl ModsService {
             }
 
             let key = format!("{}::{}::{}", key_name, source_id_key, version_key);
+            let merged_into_existing = grouped.contains_key(&key);
+            let key_for_debug = if merged_into_existing {
+                Some(key.clone())
+            } else {
+                None
+            };
 
             let entry = grouped.entry(key).or_insert_with(|| ModLibraryEntry {
                 storage_id: storage_id.clone(),
@@ -4044,6 +4129,19 @@ impl ModsService {
                 files_by_runtime: files_by_runtime.clone(),
                 security_scan: template_meta.security_scan.clone(),
             });
+
+            if merged_into_existing {
+                log::debug!(
+                    "Merging storage into existing library entry: key={}, storage_id={}, display_name={}, source_id={:?}, source_version={:?}, available_runtimes={:?}, storage_ids_by_runtime={:?}",
+                    key_for_debug.as_deref().unwrap_or_default(),
+                    storage_id,
+                    display_name,
+                    template_meta.source_id,
+                    template_meta.source_version,
+                    available_runtimes,
+                    storage_ids_by_runtime
+                );
+            }
 
             if entry.summary.is_none() {
                 entry.summary = template_meta.summary.clone();
@@ -4179,6 +4277,14 @@ impl ModsService {
         if let (Some(ref source_id), Some(ref source_version)) =
             (source_id.as_ref(), source_version.as_ref())
         {
+            log::debug!(
+                "Storing mod archive: original_file_name={}, source_id={}, source_version={}, requested_runtime={:?}, target={:?}",
+                original_file_name,
+                source_id,
+                source_version,
+                runtime,
+                target
+            );
             if let Ok(Some(existing_id)) = self
                 .find_existing_mod_storage_by_source_version(
                     source_id,
@@ -4187,6 +4293,14 @@ impl ModsService {
                 )
                 .await
             {
+                log::debug!(
+                    "Store mod archive resolved to existing storage: original_file_name={}, source_id={}, source_version={}, requested_runtime={:?}, storage_id={}",
+                    original_file_name,
+                    source_id,
+                    source_version,
+                    runtime,
+                    existing_id
+                );
                 return Ok(serde_json::json!({
                     "success": true,
                     "storageId": existing_id,
@@ -4339,6 +4453,16 @@ impl ModsService {
 
         self.save_storage_metadata(&mod_storage_base, &storage_metadata)
             .await?;
+
+        log::debug!(
+            "Stored new mod archive: original_file_name={}, storage_id={}, source_id={:?}, source_version={:?}, requested_runtime={:?}, installed_files={:?}",
+            original_file_name,
+            mod_id,
+            storage_metadata.source_id,
+            storage_metadata.source_version,
+            storage_metadata.detected_runtime,
+            installed_files
+        );
 
         Ok(serde_json::json!({
             "success": true,
@@ -4664,6 +4788,11 @@ impl ModsService {
         storage_id: &str,
         environment_ids: Vec<String>,
     ) -> Result<serde_json::Value> {
+        log::debug!(
+            "Installing storage mod to environments: storage_id={}, environment_ids={:?}",
+            storage_id,
+            environment_ids
+        );
         let storage_dir = self.get_mods_storage_dir().await?;
         let storage_base = Self::validated_storage_path(&storage_dir, storage_id)?;
         if !storage_base.exists() {
@@ -4727,6 +4856,16 @@ impl ModsService {
             })
             .unwrap_or(env.runtime.clone());
             let runtime_label = Self::runtime_label(&env_runtime);
+            log::debug!(
+                "Installing storage into environment: storage_id={}, environment_id={}, branch={}, resolved_runtime={}, template_detected_runtime={:?}",
+                storage_id,
+                env_id,
+                env.branch,
+                runtime_label,
+                template_meta
+                    .as_ref()
+                    .and_then(|meta| meta.detected_runtime.clone())
+            );
 
             let mods_dir = self.get_mods_directory(&env.output_dir);
             let plugins_dir = self.get_plugins_directory(&env.output_dir);
@@ -4821,6 +4960,14 @@ impl ModsService {
                 "[install_storage_mod_to_envs] Installed {} files for env {}",
                 installed_files.len(),
                 env_id
+            );
+            log::debug!(
+                "Completed storage install for environment: storage_id={}, environment_id={}, runtime={}, installed_files={:?}, warnings={:?}",
+                storage_id,
+                env_id,
+                runtime_label,
+                installed_files,
+                warnings
             );
 
             self.save_mod_metadata(&mods_dir, &metadata_map).await?;
@@ -5271,8 +5418,18 @@ impl ModsService {
         });
 
         // Check if we already have this mod/version installed
+        let requested_runtime = match runtime {
+            "IL2CPP" => Some(crate::types::Runtime::Il2cpp),
+            "Mono" => Some(crate::types::Runtime::Mono),
+            _ => None,
+        };
         let existing_mod_id = self
-            .find_existing_mod_installation(game_dir, &source_id, &source_version)
+            .find_existing_mod_installation(
+                game_dir,
+                &source_id,
+                &source_version,
+                requested_runtime.clone(),
+            )
             .await?;
 
         // If mod is already installed, skip extraction and just ensure symlinks exist
@@ -6694,8 +6851,18 @@ impl ModsService {
         });
 
         // Check if we already have this mod/version installed
+        let requested_runtime = match runtime {
+            "IL2CPP" => Some(crate::types::Runtime::Il2cpp),
+            "Mono" => Some(crate::types::Runtime::Mono),
+            _ => None,
+        };
         let existing_mod_id = self
-            .find_existing_mod_installation(game_dir, &source_id, &source_version)
+            .find_existing_mod_installation(
+                game_dir,
+                &source_id,
+                &source_version,
+                requested_runtime.clone(),
+            )
             .await?;
 
         // Use existing mod_id or generate a new one
@@ -8311,6 +8478,106 @@ mod tests {
 
         assert!(matches!(storage_meta.detected_runtime, Some(Runtime::Mono)));
         assert_eq!(storage_meta.runtime_match, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_keeps_distinct_storage_for_same_version_across_runtimes() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-runtime-collision");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let il2cpp_zip = temp.path().join("Example-IL2CPP.zip");
+        write_zip_fixture(
+            &il2cpp_zip,
+            &[("Example.IL2CPP.dll", b"il2cpp-runtime")],
+        )?;
+        let mono_zip = temp.path().join("Example-Mono.zip");
+        write_zip_fixture(&mono_zip, &[("Example.Mono.dll", b"mono-runtime")])?;
+
+        let shared_metadata = serde_json::json!({
+            "source": "nexusmods",
+            "sourceId": "runtime-collision",
+            "sourceVersion": "1.0.0"
+        });
+
+        let il2cpp_result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                il2cpp_zip.to_string_lossy().as_ref(),
+                "Example-IL2CPP.zip",
+                "IL2CPP",
+                "main",
+                Some(shared_metadata.clone()),
+            )
+            .await?;
+        let mono_result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                mono_zip.to_string_lossy().as_ref(),
+                "Example-Mono.zip",
+                "Mono",
+                "main",
+                Some(shared_metadata),
+            )
+            .await?;
+
+        let il2cpp_storage_id = il2cpp_result
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("IL2CPP storage id");
+        let mono_storage_id = mono_result
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("Mono storage id");
+
+        assert_ne!(il2cpp_storage_id, mono_storage_id);
+        assert_ne!(
+            mono_result
+                .get("alreadyInstalled")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(download_dir
+            .join("Mods")
+            .join(il2cpp_storage_id)
+            .join("Mods")
+            .join("Example.IL2CPP.dll")
+            .exists());
+        assert!(download_dir
+            .join("Mods")
+            .join(mono_storage_id)
+            .join("Mods")
+            .join("Example.Mono.dll")
+            .exists());
 
         Ok(())
     }
