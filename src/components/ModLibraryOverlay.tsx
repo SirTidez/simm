@@ -887,17 +887,14 @@ export function ModLibraryOverlay({
   const lastHandledFocusRequestIdRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
   const previousDiscoverSortRef = useRef(discoverSort);
+  const navigationChangeHandlerRef = useRef(onNavigationStateChange);
 
   useEffect(() => {
-    try {
-      localStorage.setItem("simm:last-library-search-source", searchSource);
-    } catch {
-      // Ignore localStorage failures in embedded/webview contexts.
-    }
-  }, [searchSource]);
+    navigationChangeHandlerRef.current = onNavigationStateChange;
+  }, [onNavigationStateChange]);
 
-  useEffect(() => {
-    onNavigationStateChange?.({
+  const reportedNavigationState = useMemo<ModLibraryNavigationState>(
+    () => ({
       libraryTab,
       searchSource,
       discoverSort,
@@ -911,23 +908,35 @@ export function ModLibraryOverlay({
       downloadedFilter,
       downloadedSearch,
       activeModView,
-    });
-  }, [
-    activeModView,
-    downloadedFilter,
-    discoverSort,
-    downloadedSearch,
-    libraryTab,
-    nexusModsSearchQuery,
-    nexusModsSearchResults,
-    onNavigationStateChange,
-    searchQuery,
-    searchResults,
-    searchSource,
-    showDiscovery,
-    showNexusModsResults,
-    showSearchResults,
-  ]);
+    }),
+    [
+      activeModView,
+      downloadedFilter,
+      discoverSort,
+      downloadedSearch,
+      libraryTab,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      searchQuery,
+      searchResults,
+      searchSource,
+      showDiscovery,
+      showNexusModsResults,
+      showSearchResults,
+    ],
+  );
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("simm:last-library-search-source", searchSource);
+    } catch {
+      // Ignore localStorage failures in embedded/webview contexts.
+    }
+  }, [searchSource]);
+
+  useEffect(() => {
+    navigationChangeHandlerRef.current?.(reportedNavigationState);
+  }, [reportedNavigationState]);
 
   const showToast = useCallback((message: string, duration = 6500) => {
     setToastMessage(message);
@@ -1200,6 +1209,18 @@ export function ModLibraryOverlay({
       });
     }
   }, []);
+
+  const selectedNexusModId = useMemo(() => {
+    if (activeModView?.kind !== "nexusmods") {
+      return null;
+    }
+
+    return (
+      nexusModsSearchResults.find(
+        (modItem) => String(modItem.mod_id) === activeModView.id,
+      )?.mod_id ?? null
+    );
+  }, [activeModView, nexusModsSearchResults]);
 
   const refreshLibrary = useCallback(async () => {
     const data = await ApiService.getModLibrary();
@@ -1609,16 +1630,78 @@ export function ModLibraryOverlay({
   }, [isOpen, refreshEnvironments, refreshLibrary]);
 
   useEffect(() => {
-    if (!showNexusModsResults || nexusModsSearchResults.length === 0) return;
-    const toLoad = nexusModsSearchResults.filter(
-      (modItem) =>
-        !nexusModsFiles.has(modItem.mod_id) &&
-        !nexusModsLoading.has(modItem.mod_id),
+    const activeModIds = new Set(
+      nexusModsSearchResults.map((modItem) => modItem.mod_id),
     );
-    toLoad.forEach((modItem) => handleLoadNexusModFiles(modItem.mod_id));
+
+    setNexusModsFiles((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+
+      let changed = false;
+      const next = new Map<number, NexusModFile[]>();
+      prev.forEach((files, modId) => {
+        if (activeModIds.has(modId)) {
+          next.set(modId, files);
+          return;
+        }
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+
+    setNexusModsLoading((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+
+      let changed = false;
+      const next = new Set<number>();
+      prev.forEach((modId) => {
+        if (activeModIds.has(modId)) {
+          next.add(modId);
+          return;
+        }
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+
+    setSelectedNexusFileByModId((prev) => {
+      const entries = Object.entries(prev);
+      if (entries.length === 0) {
+        return prev;
+      }
+
+      let changed = false;
+      const next: Record<number, number> = {};
+      entries.forEach(([modIdKey, fileId]) => {
+        const modId = Number(modIdKey);
+        if (activeModIds.has(modId)) {
+          next[modId] = fileId;
+          return;
+        }
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [nexusModsSearchResults]);
+
+  useEffect(() => {
+    if (
+      !showNexusModsResults ||
+      selectedNexusModId === null ||
+      nexusModsFiles.has(selectedNexusModId) ||
+      nexusModsLoading.has(selectedNexusModId)
+    ) {
+      return;
+    }
+
+    void handleLoadNexusModFiles(selectedNexusModId);
   }, [
     showNexusModsResults,
-    nexusModsSearchResults,
+    selectedNexusModId,
     nexusModsFiles,
     nexusModsLoading,
     handleLoadNexusModFiles,

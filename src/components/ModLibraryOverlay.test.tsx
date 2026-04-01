@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { ModLibraryOverlay } from './ModLibraryOverlay';
+import { ModLibraryOverlay, type ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModLibraryEntry } from '../types';
 
 const apiMocks = vi.hoisted(() => ({
@@ -61,7 +61,36 @@ function makeThunderstorePackage(
   version: string,
   runtime: 'IL2CPP' | 'Mono' = 'Mono',
   owner = 'ifBars',
-) {
+): {
+  uuid4: string;
+  name: string;
+  owner: string;
+  package_url: string;
+  date_created: string;
+  date_updated: string;
+  dateCreated?: string;
+  dateUpdated?: string;
+  rating_score: number;
+  is_pinned: boolean;
+  is_deprecated: boolean;
+  full_name: string;
+  versions: Array<{
+    name: string;
+    full_name: string;
+    date_created: string;
+    date_updated: string;
+    dateCreated?: string;
+    dateUpdated?: string;
+    uuid4: string;
+    version_number: string;
+    dependencies: string[];
+    download_url: string;
+    downloads: number;
+    file_size: number;
+    description?: string;
+    icon?: string;
+  }>;
+} {
   return {
     uuid4: `${name}-${runtime}-pkg`,
     name,
@@ -94,16 +123,19 @@ function renderLibraryOverlay({
   libraryTab,
   navigationState,
   onOpenSecurityReport,
+  onNavigationStateChange,
 }: {
   libraryTab?: 'discover' | 'library' | 'updates';
-  navigationState?: Record<string, unknown>;
+  navigationState?: ModLibraryNavigationState;
   onOpenSecurityReport?: (request: { title: string }) => void;
+  onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
 } = {}) {
   return render(
     <ModLibraryOverlay
       isOpen={true}
       onClose={() => {}}
       onOpenSecurityReport={onOpenSecurityReport}
+      onNavigationStateChange={onNavigationStateChange}
       navigationState={navigationState ?? (libraryTab ? { libraryTab } : undefined)}
     />,
   );
@@ -271,6 +303,118 @@ describe('ModLibraryOverlay', () => {
     expect(screen.getByText('Updated Jan 2, 2025')).toBeTruthy();
   });
 
+  it('does not re-publish navigation state when only the callback identity changes', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+
+    const firstHandler = vi.fn();
+    const secondHandler = vi.fn();
+    const thirdHandler = vi.fn();
+    const baseNavigationState: ModLibraryNavigationState = { libraryTab: 'discover' };
+
+    const { rerender } = renderLibraryOverlay({
+      navigationState: baseNavigationState,
+      onNavigationStateChange: firstHandler,
+    });
+
+    await waitFor(() => {
+      expect(firstHandler).toHaveBeenCalledTimes(1);
+    });
+
+    rerender(
+      <ModLibraryOverlay
+        isOpen={true}
+        onClose={() => {}}
+        navigationState={baseNavigationState}
+        onNavigationStateChange={secondHandler}
+      />,
+    );
+
+    expect(secondHandler).not.toHaveBeenCalled();
+
+    rerender(
+      <ModLibraryOverlay
+        isOpen={true}
+        onClose={() => {}}
+        navigationState={baseNavigationState}
+        onNavigationStateChange={thirdHandler}
+      />,
+    );
+
+    expect(firstHandler).toHaveBeenCalledTimes(1);
+    expect(secondHandler).not.toHaveBeenCalled();
+    expect(thirdHandler).not.toHaveBeenCalled();
+  });
+
+  it('loads Nexus file lists only for the selected discover result', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 301,
+        name: 'Pack Rat Mono 1.0.0',
+        file_name: 'PackRat-mono-1.0.0.zip',
+        version: '1.0.0',
+        mod_version: '1.0.0',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+    ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.0',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+          {
+            mod_id: 1701,
+            name: 'Warehouse Helper',
+            summary: 'Organize shelves.',
+            description: 'Organize shelves.',
+            picture_url: 'https://example.com/warehouse-helper.png',
+            version: '2.0.0',
+            author: 'AnotherAuthor',
+            uploaded_time: '2025-02-01',
+            updated_time: '2025-02-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 10,
+            unique_downloads: 55,
+            mod_downloads: 120,
+          },
+        ],
+      },
+    });
+
+    expect(await screen.findByText('Nexus Results')).toBeTruthy();
+    expect(apiMocks.getNexusModsModFiles).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Pack Rat/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledWith('schedule1', 1629);
+    });
+  });
+
   it('shows the Thunderstore updated date when package data uses camelCase fields', async () => {
     apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
 
@@ -297,8 +441,12 @@ describe('ModLibraryOverlay', () => {
                     date_updated: '',
                     date_created: '',
                     dateUpdated: '2025-01-10T12:00:00Z',
+                  } as ReturnType<typeof makeThunderstorePackage>['versions'][number] & {
+                    dateUpdated: string;
                   },
                 ],
+              } as ReturnType<typeof makeThunderstorePackage> & {
+                dateUpdated: string;
               },
             },
           },
@@ -651,6 +799,7 @@ describe('ModLibraryOverlay', () => {
             picture_url: 'https://example.com/packrat.png',
             version: '1.0.7r2',
             author: 'ExampleAuthor',
+            uploaded_time: '2026-03-22T12:00:00Z',
             updated_time: '2026-03-23T12:00:00Z',
             category_id: 1,
             contains_adult_content: false,

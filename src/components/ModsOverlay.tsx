@@ -390,9 +390,45 @@ export function ModsOverlay({
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
+  const navigationChangeHandlerRef = useRef(onNavigationStateChange);
   const [localSourceLinkState, setLocalSourceLinkState] = useState<LocalSourceLinkState | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
   const activeModViewSecurityBadge = getSecurityBadgeConfig(activeModView?.securityScan);
+
+  useEffect(() => {
+    navigationChangeHandlerRef.current = onNavigationStateChange;
+  }, [onNavigationStateChange]);
+
+  const reportedNavigationState = useMemo<ModsOverlayNavigationState>(
+    () => ({
+      modsTab,
+      searchSource,
+      searchQuery,
+      searchResults,
+      showSearchResults,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      showNexusModsResults,
+      showSearchInOverlay,
+      modListFilter,
+      installedSearchTerm,
+      activeModView,
+    }),
+    [
+      activeModView,
+      installedSearchTerm,
+      modListFilter,
+      modsTab,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      searchQuery,
+      searchResults,
+      searchSource,
+      showNexusModsResults,
+      showSearchInOverlay,
+      showSearchResults,
+    ],
+  );
   const openExternalSourceUrl = useCallback((url?: string) => {
     const safeUrl = safeExternalUrl(url);
     if (!safeUrl) {
@@ -419,35 +455,8 @@ export function ModsOverlay({
   }, [searchSource]);
 
   useEffect(() => {
-    onNavigationStateChange?.({
-      modsTab,
-      searchSource,
-      searchQuery,
-      searchResults,
-      showSearchResults,
-      nexusModsSearchQuery,
-      nexusModsSearchResults,
-      showNexusModsResults,
-      showSearchInOverlay,
-      modListFilter,
-      installedSearchTerm,
-      activeModView,
-    });
-  }, [
-    activeModView,
-    installedSearchTerm,
-    modListFilter,
-    modsTab,
-    nexusModsSearchQuery,
-    nexusModsSearchResults,
-    onNavigationStateChange,
-    searchQuery,
-    searchResults,
-    searchSource,
-    showNexusModsResults,
-    showSearchInOverlay,
-    showSearchResults,
-  ]);
+    navigationChangeHandlerRef.current?.(reportedNavigationState);
+  }, [reportedNavigationState]);
 
   const libraryVersionCountByName = useMemo(() => {
     const counts = new Map<string, number>();
