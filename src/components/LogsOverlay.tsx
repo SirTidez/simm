@@ -390,6 +390,34 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const isLiveFile = isLiveLogFile(selectedLogFile);
   const showCollapsedInspector = shouldCollapseInspector && isInspectorCollapsed;
 
+  useEffect(() => {
+    setLogFiles([]);
+    setSelectedLogPath(null);
+    setLogLines([]);
+    setSelectedLineKey(null);
+    setLoading(false);
+    setError(null);
+    setSelectedModTag(null);
+    setExporting(false);
+    setOpeningModView(false);
+    setAutoScroll(true);
+    setIsAtBottom(true);
+
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+    setToastMessage(null);
+
+    if (isWatching || watchedPath) {
+      void ApiService.stopWatchingLog().catch((err) => {
+        console.error('Failed to stop watching log file during environment switch:', err);
+      });
+    }
+    setIsWatching(false);
+    setWatchedPath(null);
+  }, [environmentId]);
+
   const reloadSelectedLogFile = async (logPath: string) => {
     try {
       setLoading(true);
