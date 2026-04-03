@@ -1,16 +1,16 @@
 # Changelog
 
-## [0.7.9]
+## [0.8.0]
 
-- Reworked workspace navigation into a persistent back/home stack, preserved Mod Library and Mods state across navigation, promoted security findings into a browsable page, and tightened the desktop shell with active toolbar states, refined environment tabs, and cleaner inspector/layout behavior.
-- Overhauled Mod Library and installed-mod flows with browser-style Discover behavior, inline version selection, consistent update counts, stronger Nexus recovery/manual-download handling, and richer security reporting across grouped downloads and stored files.
-- Added local-to-managed source linking for manual mods, including explicit source confirmation, runtime-aware version selection, optional ownership transfer for related files, and safer handling so copied local DLLs stay local until the user links them.
-- Hardened install and storage behavior across Thunderstore, Nexus, FOMOD, and local archives by tracking attached `UserLibs` / `UserData`, handling nested payloads and runtime splits correctly, preserving Steam manifest context, improving partial install failure handling, and tightening path-safety and ownership rules.
-- Improved update handling for both mods and SIMM itself with Nexus-backed app update notices, better prerelease/version comparison, runtime-aware environment update summaries, and consistent footer/home/library update surfaces.
-- Brought local verification back in line with GitHub CI by standardizing the frontend test flow, fixing timezone-sensitive expectations, and updating stale backend/frontend fixtures that had been passing locally but failing in Actions.
+- Added custom theme support with persisted user-defined palettes, expanded theme variable coverage across the desktop UI, and matching Settings/store/test updates so custom styling survives reloads and applies consistently.
+- Hardened environment persistence by healing stored environment payloads whose embedded IDs drifted from their database row IDs, and by reusing a canonical environment record when users point SIMM at the same installation path again.
+- Made mod storage and install flows more runtime-aware by keeping stored archives distinct per runtime, surfacing which environments a Nexus/library install actually targeted, and disabling install actions when no compatible environments remain.
+- Expanded manual mod installation so local uploads now accept `.rar` archives, support selecting multiple `.dll` / `.zip` / `.rar` files in one batch, keep each selected archive as its own install, and handle per-file runtime prompts, security confirmations, skips, and batch summaries without restarting the flow.
+- Improved large-overlay stability and usability by reducing WebView churn in Mods and Mod Library, adding debounced/windowed list behavior for heavy views, and fixing stale log-source state when switching environments in the log viewer.
+- Locked frontend dependencies with a committed `package-lock.json` so local validation and GitHub Actions install the same npm toolchain and produce reproducible builds.
 - Contributors:
-  - `SirTidez`: workspace/navigation overhaul, Mod Library and local-linking flows, install/update/runtime fixes, Steam/storage/FOMOD hardening, release/versioning work, and CI/test stabilization.
-  - `ESTONlA`: Nexus/game-launch integration work and supporting branch changes merged into this release line.
+  - `SirTidez`: runtime-aware mod storage/install hardening, installed-environment reporting, `.rar` support, multi-file manual mod uploads, log-viewer environment-switch fixes, CI lockfile stabilization, and release/versioning work.
+  - `ESTONlA`: custom theme support, environment identity healing/canonicalization for reused install paths, and performance-oriented Mods/Mod Library overlay improvements to reduce WebView memory pressure.
 
 ## [0.7.8]
 
