@@ -1,4 +1,4 @@
-import type { Settings } from '../types';
+import type { CustomThemeDefinition, Settings } from '../types';
 
 interface SharedThemeTokens {
   appTextColorSecondary: string;
@@ -17,12 +17,53 @@ interface SharedThemeTokens {
 }
 
 export type BuiltInTheme = 'light' | 'dark' | 'modern-blue';
+export type ThemeId = string;
 
 export const THEME_STORAGE_KEY = 'simm-theme';
 
-export const normalizeThemeSelection = (theme: Settings['theme'] | string | undefined): BuiltInTheme => {
-  return theme === 'light' || theme === 'dark' || theme === 'modern-blue'
-    ? theme
+export const isBuiltInTheme = (theme: string | undefined | null): theme is BuiltInTheme => {
+  return theme === 'light' || theme === 'dark' || theme === 'modern-blue';
+};
+
+export const normalizeBuiltInTheme = (theme: Settings['theme'] | string | undefined): BuiltInTheme => {
+  if (theme === 'light' || theme === 'dark' || theme === 'modern-blue') {
+    return theme;
+  }
+
+  if (typeof theme === 'string') {
+    const trimmed = theme.trim().toLowerCase();
+    if (trimmed === 'light' || trimmed === 'dark' || trimmed === 'modern-blue' || trimmed === 'custom') {
+      return trimmed === 'custom' ? 'modern-blue' : trimmed;
+    }
+  }
+
+  return 'modern-blue';
+};
+
+export const normalizeThemeSelection = (theme: Settings['theme'] | string | undefined): ThemeId => {
+  if (typeof theme !== 'string') {
+    return 'modern-blue';
+  }
+
+  const trimmed = theme.trim();
+  if (!trimmed) {
+    return 'modern-blue';
+  }
+
+  return isBuiltInTheme(trimmed) ? trimmed : trimmed;
+};
+
+export const resolveThemeSelection = (
+  theme: Settings['theme'] | string | undefined,
+  customThemes: CustomThemeDefinition[],
+): ThemeId => {
+  const normalized = normalizeThemeSelection(theme);
+  if (isBuiltInTheme(normalized)) {
+    return normalized;
+  }
+
+  return customThemes.some((candidate) => candidate.id === normalized)
+    ? normalized
     : 'modern-blue';
 };
 
@@ -42,7 +83,7 @@ const applySharedThemeTokens = (root: HTMLElement, tokens: SharedThemeTokens) =>
   root.style.setProperty('--theme-workspace-icon-surface', tokens.workspaceIconSurface);
 };
 
-export const persistThemeSelection = (theme: BuiltInTheme) => {
+export const persistThemeSelection = (theme: ThemeId) => {
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   } catch {
@@ -50,7 +91,7 @@ export const persistThemeSelection = (theme: BuiltInTheme) => {
   }
 };
 
-export const readCachedThemeSelection = (): BuiltInTheme => {
+export const readCachedThemeSelection = (): ThemeId => {
   try {
     const cachedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
     return normalizeThemeSelection(cachedTheme ?? undefined);
@@ -224,6 +265,44 @@ export const applyBuiltInTheme = (theme: BuiltInTheme) => {
     });
   }
 
-  document.body.style.backgroundColor = theme === 'light' ? '#e8eef6' : theme === 'modern-blue' ? '#0f141d' : '#11161d';
-  document.body.style.color = theme === 'light' ? '#1f2835' : theme === 'modern-blue' ? '#edf4ff' : '#e9eef6';
+  document.body.style.backgroundColor = 'var(--app-bg-color)';
+  document.body.style.color = 'var(--app-text-color)';
+};
+
+const appliedCustomThemeVariables = new Set<string>();
+
+const clearCustomThemeVariables = (root: HTMLElement) => {
+  for (const variable of appliedCustomThemeVariables) {
+    root.style.removeProperty(variable);
+  }
+  appliedCustomThemeVariables.clear();
+  root.removeAttribute('data-custom-theme');
+};
+
+export const applyThemeSelection = (
+  themeId: ThemeId,
+  customThemes: CustomThemeDefinition[],
+): ThemeId => {
+  const resolvedThemeId = resolveThemeSelection(themeId, customThemes);
+  const customTheme = customThemes.find((candidate) => candidate.id === resolvedThemeId);
+  const builtInTheme = customTheme
+    ? normalizeBuiltInTheme(customTheme.baseTheme)
+    : normalizeBuiltInTheme(resolvedThemeId);
+
+  const root = document.documentElement;
+  clearCustomThemeVariables(root);
+  applyBuiltInTheme(builtInTheme);
+
+  if (customTheme) {
+    root.setAttribute('data-custom-theme', customTheme.id);
+    Object.entries(customTheme.variables).forEach(([key, value]) => {
+      root.style.setProperty(key, value);
+      appliedCustomThemeVariables.add(key);
+    });
+  }
+
+  document.body.style.backgroundColor = 'var(--app-bg-color)';
+  document.body.style.color = 'var(--app-text-color)';
+
+  return resolvedThemeId;
 };

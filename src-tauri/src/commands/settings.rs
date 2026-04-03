@@ -1,6 +1,6 @@
 use crate::services::logger::LoggerService;
 use crate::services::settings::SettingsService;
-use crate::types::Settings;
+use crate::types::{CustomThemeDefinition, Settings};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::State;
@@ -36,6 +36,21 @@ pub async fn backup_database(db: State<'_, Arc<SqlitePool>>) -> Result<String, S
         .await
         .map_err(|e| e.to_string())?;
     Ok(backup_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn get_custom_themes(
+    db: State<'_, Arc<SqlitePool>>,
+) -> Result<Vec<CustomThemeDefinition>, String> {
+    let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    service.list_custom_themes().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_themes_directory(db: State<'_, Arc<SqlitePool>>) -> Result<String, String> {
+    let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let dir = service.get_themes_directory().map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]

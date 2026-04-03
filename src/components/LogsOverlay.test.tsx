@@ -76,6 +76,16 @@ function makeLogLine(overrides: Partial<{
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('LogsOverlay', () => {
   const originalInnerWidth = window.innerWidth;
 
@@ -143,6 +153,79 @@ describe('LogsOverlay', () => {
     const viewerHeader = container.querySelector('.logs-panel__viewer-header');
     expect(viewerHeader).toBeTruthy();
     expect(within(viewerHeader as HTMLElement).getByRole('heading', { name: 'Session-latest.log' })).toBeTruthy();
+  });
+
+  it('clears stale log sources before loading the next environment', async () => {
+    const nextEnvironment = {
+      ...environment,
+      id: 'env-2',
+      name: 'Depot Installation',
+      outputDir: 'C:/Games/Schedule I Depot',
+    };
+    const env2Files = createDeferred<Array<ReturnType<typeof makeLogFile>>>();
+
+    apiMocks.getLogFiles
+      .mockResolvedValueOnce([
+        makeLogFile({
+          name: 'Env1-latest.log',
+          path: 'C:/Games/Schedule I/Logs/Env1-latest.log',
+          isLatest: true,
+        }),
+        makeLogFile({
+          name: 'Env1-archived.log',
+          path: 'C:/Games/Schedule I/Logs/Env1-archived.log',
+          isLatest: false,
+        }),
+      ])
+      .mockImplementationOnce(() => env2Files.promise);
+    apiMocks.readLogFile.mockResolvedValue([makeLogLine()]);
+
+    const { rerender } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByRole('heading', { name: 'Env1-latest.log' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Env1-archived\.log/i })).toBeTruthy();
+
+    rerender(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-2"
+        environment={nextEnvironment}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Env1-latest\.log/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /Env1-archived\.log/i })).toBeNull();
+    });
+
+    env2Files.resolve([
+      makeLogFile({
+        name: 'Env2-latest.log',
+        path: 'C:/Games/Schedule I Depot/Logs/Env2-latest.log',
+        isLatest: true,
+      }),
+      makeLogFile({
+        name: 'Env2-archived.log',
+        path: 'C:/Games/Schedule I Depot/Logs/Env2-archived.log',
+        isLatest: false,
+      }),
+    ]);
+
+    expect(await screen.findByRole('heading', { name: 'Env2-latest.log' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Env2-archived\.log/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I Depot/Logs/Env2-archived.log');
+    });
   });
 
   it('filters by mod activity and resets back to the full visible set', async () => {

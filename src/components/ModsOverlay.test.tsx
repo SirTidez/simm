@@ -316,6 +316,129 @@ describe('ModsOverlay', () => {
     });
   });
 
+  it('uploads multiple selected files in order and refreshes collections once after the batch completes', async () => {
+    openMock.mockResolvedValueOnce([
+      'C:/mods/Alpha-Mono.zip',
+      { path: 'C:/mods/Beta-IL2CPP.rar', name: 'Beta-IL2CPP.rar' },
+    ]);
+    apiMocks.uploadMod.mockResolvedValue({ success: true });
+    const onModsChanged = vi.fn();
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        onModsChanged={onModsChanged}
+      />
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalled();
+      expect(apiMocks.getModLibrary).toHaveBeenCalled();
+      expect(apiMocks.getModUpdatesSummary).toHaveBeenCalled();
+    });
+
+    const initialModsCalls = apiMocks.getMods.mock.calls.length;
+    const initialLibraryCalls = apiMocks.getModLibrary.mock.calls.length;
+    const initialUpdateSummaryCalls = apiMocks.getModUpdatesSummary.mock.calls.length;
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+
+    await waitFor(() => {
+      expect(apiMocks.uploadMod).toHaveBeenNthCalledWith(
+        1,
+        'env-1',
+        'C:/mods/Alpha-Mono.zip',
+        'Alpha-Mono.zip',
+        'IL2CPP',
+        expect.objectContaining({ detectedRuntime: 'Mono', source: 'unknown' }),
+        false,
+      );
+      expect(apiMocks.uploadMod).toHaveBeenNthCalledWith(
+        2,
+        'env-1',
+        'C:/mods/Beta-IL2CPP.rar',
+        'Beta-IL2CPP.rar',
+        'IL2CPP',
+        expect.objectContaining({ detectedRuntime: 'IL2CPP', source: 'unknown' }),
+        false,
+      );
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getMods.mock.calls.length).toBe(initialModsCalls + 1);
+      expect(apiMocks.getModLibrary.mock.calls.length).toBe(initialLibraryCalls + 1);
+      expect(apiMocks.getModUpdatesSummary.mock.calls.length).toBe(initialUpdateSummaryCalls + 1);
+      expect(onModsChanged).toHaveBeenCalledTimes(1);
+    });
+
+    expect((await screen.findAllByText(/Upload batch finished: 2 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+  });
+
+  it('skips an unresolved file when runtime selection is canceled and continues with the remaining uploads', async () => {
+    openMock.mockResolvedValueOnce([
+      'C:/mods/UnknownArchive.zip',
+      'C:/mods/Known-Mono.dll',
+    ]);
+    apiMocks.uploadMod.mockResolvedValue({ success: true });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+
+    expect(await screen.findByText('Select Mod Runtime')).toBeTruthy();
+    fireEvent.click(document.querySelector('.modal-close') as HTMLElement);
+
+    await waitFor(() => {
+      expect(apiMocks.uploadMod).toHaveBeenCalledTimes(1);
+      expect(apiMocks.uploadMod).toHaveBeenCalledWith(
+        'env-1',
+        'C:/mods/Known-Mono.dll',
+        'Known-Mono.dll',
+        'IL2CPP',
+        expect.objectContaining({ detectedRuntime: 'Mono', source: 'unknown' }),
+        false,
+      );
+    });
+
+    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 0 failed, 1 skipped\./i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Skipped: UnknownArchive\.zip \(Runtime selection canceled\.\)/i).length).toBeGreaterThan(0);
+  });
+
+  it('continues after an upload failure and reports the failed file in the batch summary', async () => {
+    openMock.mockResolvedValueOnce([
+      'C:/mods/First-Mono.dll',
+      'C:/mods/Second-IL2CPP.zip',
+    ]);
+    apiMocks.uploadMod
+      .mockResolvedValueOnce({ success: false, error: 'broken archive' })
+      .mockResolvedValueOnce({ success: true });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+
+    await waitFor(() => {
+      expect(apiMocks.uploadMod).toHaveBeenCalledTimes(2);
+    });
+
+    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 1 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Failed: First-Mono\.dll \(broken archive\)/i).length).toBeGreaterThan(0);
+  });
+
   it('renders the environment grid layout and no list-mode container', async () => {
     render(
       <ModsOverlay

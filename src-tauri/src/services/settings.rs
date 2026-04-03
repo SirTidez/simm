@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json;
 use sqlx::SqlitePool;
+use tokio::fs;
 
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
@@ -10,7 +14,7 @@ use aes_gcm::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::types::Settings;
+use crate::types::{CustomThemeDefinition, Settings};
 
 pub struct SettingsService {
     pool: Arc<SqlitePool>,
@@ -24,6 +28,18 @@ const NEXUS_OAUTH_PENDING_KEY: &str = "nexus_oauth_pending";
 const NEXUS_OAUTH_LAST_CALLBACK_KEY: &str = "nexus_oauth_last_callback";
 const NEXUS_NXM_PENDING_DOWNLOAD_KEY: &str = "nexus_nxm_pending_download";
 const NEXUS_NXM_PROTOCOL_BACKUP_KEY: &str = "nexus_nxm_protocol_backup";
+const THEMES_DIR_NAME: &str = "themes";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CustomThemeFile {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(default, alias = "extends", alias = "base")]
+    base_theme: Option<String>,
+    #[serde(default, alias = "tokens")]
+    variables: HashMap<String, String>,
+}
 
 impl SettingsService {
     pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
@@ -93,6 +109,261 @@ impl SettingsService {
         value
     }
 
+    fn normalize_builtin_theme_id(theme: &str) -> Option<&'static str> {
+        if theme.eq_ignore_ascii_case("modern-blue") || theme.eq_ignore_ascii_case("custom") {
+            Some("modern-blue")
+        } else if theme.eq_ignore_ascii_case("dark") {
+            Some("dark")
+        } else if theme.eq_ignore_ascii_case("light") {
+            Some("light")
+        } else {
+            None
+        }
+    }
+
+    fn normalize_theme_selection(theme: &str) -> String {
+        let trimmed = theme.trim();
+        if trimmed.is_empty() {
+            return "modern-blue".to_string();
+        }
+
+        Self::normalize_builtin_theme_id(trimmed)
+            .unwrap_or(trimmed)
+            .to_string()
+    }
+
+    fn themes_dir_path() -> Result<PathBuf> {
+        let dir = crate::db::get_data_dir()?.join(THEMES_DIR_NAME);
+        std::fs::create_dir_all(&dir).context("Failed to create themes directory")?;
+        Ok(dir)
+    }
+
+    fn sanitize_theme_id(value: &str) -> String {
+        let mut sanitized = String::with_capacity(value.len());
+        let mut last_was_separator = false;
+
+        for ch in value.chars() {
+            if ch.is_ascii_alphanumeric() {
+                sanitized.push(ch.to_ascii_lowercase());
+                last_was_separator = false;
+            } else if !last_was_separator {
+                sanitized.push('-');
+                last_was_separator = true;
+            }
+        }
+
+        sanitized.trim_matches('-').to_string()
+    }
+
+    fn display_name_from_file_stem(value: &str) -> String {
+        let words: Vec<String> = value
+            .split(['-', '_', ' '])
+            .filter(|segment| !segment.trim().is_empty())
+            .map(|segment| {
+                let mut chars = segment.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut word = String::new();
+                        word.extend(first.to_uppercase());
+                        word.push_str(chars.as_str());
+                        word
+                    }
+                    None => String::new(),
+                }
+            })
+            .filter(|segment| !segment.is_empty())
+            .collect();
+
+        if words.is_empty() {
+            "Custom Theme".to_string()
+        } else {
+            words.join(" ")
+        }
+    }
+
+    fn normalize_theme_file_content<'a>(content: &'a str) -> Cow<'a, str> {
+        let trimmed = content.trim_start_matches('\u{feff}').trim();
+
+        let unwrapped = if !trimmed.starts_with("```") {
+            Cow::Borrowed(trimmed)
+        } else {
+            let mut lines = trimmed.lines();
+            let first_line = lines.next().unwrap_or_default().trim();
+            if !first_line.starts_with("```") {
+                Cow::Borrowed(trimmed)
+            } else {
+                let mut inner = String::new();
+                for line in lines {
+                    if line.trim_start().starts_with("```") {
+                        break;
+                    }
+
+                    if !inner.is_empty() {
+                        inner.push('\n');
+                    }
+                    inner.push_str(line);
+                }
+
+                Cow::Owned(inner)
+            }
+        };
+
+        let mut normalized = String::with_capacity(unwrapped.len());
+        let mut inside_string = false;
+        let mut escaped = false;
+        let mut modified = false;
+
+        for ch in unwrapped.chars() {
+            if !inside_string {
+                if ch == '"' {
+                    inside_string = true;
+                }
+                normalized.push(ch);
+                continue;
+            }
+
+            if escaped {
+                normalized.push(ch);
+                escaped = false;
+                continue;
+            }
+
+            match ch {
+                '\\' => {
+                    normalized.push(ch);
+                    escaped = true;
+                }
+                '"' => {
+                    normalized.push(ch);
+                    inside_string = false;
+                }
+                '\n' => {
+                    normalized.push_str("\\n");
+                    modified = true;
+                }
+                '\r' => {
+                    normalized.push_str("\\r");
+                    modified = true;
+                }
+                '\t' => {
+                    normalized.push_str("\\t");
+                    modified = true;
+                }
+                '\u{08}' => {
+                    normalized.push_str("\\b");
+                    modified = true;
+                }
+                '\u{0c}' => {
+                    normalized.push_str("\\f");
+                    modified = true;
+                }
+                control if control.is_control() => {
+                    normalized.push_str(&format!("\\u{:04x}", control as u32));
+                    modified = true;
+                }
+                _ => normalized.push(ch),
+            }
+        }
+
+        if modified {
+            Cow::Owned(normalized)
+        } else {
+            unwrapped
+        }
+    }
+
+    async fn parse_custom_theme_file(path: &Path) -> Result<Option<CustomThemeDefinition>> {
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if !extension.eq_ignore_ascii_case("json") {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read custom theme {}", path.display()))?;
+        let normalized_content = Self::normalize_theme_file_content(&content);
+        let parsed: CustomThemeFile = serde_json::from_str(normalized_content.as_ref())
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "Failed to parse custom theme {} at line {}, column {}: {}",
+                    path.display(),
+                    err.line(),
+                    err.column(),
+                    err
+                )
+            })?;
+
+        let file_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("custom-theme");
+        let id = parsed
+            .id
+            .as_deref()
+            .map(Self::sanitize_theme_id)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| Self::sanitize_theme_id(file_stem));
+
+        if id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Custom theme {} did not provide a usable id or filename",
+                path.display()
+            ));
+        }
+
+        let variables = parsed
+            .variables
+            .into_iter()
+            .filter(|(key, value)| key.starts_with("--") && !value.trim().is_empty())
+            .collect();
+
+        let base_theme = parsed
+            .base_theme
+            .as_deref()
+            .and_then(Self::normalize_builtin_theme_id)
+            .unwrap_or("modern-blue")
+            .to_string();
+
+        Ok(Some(CustomThemeDefinition {
+            id,
+            name: parsed
+                .name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| Self::display_name_from_file_stem(file_stem)),
+            base_theme,
+            file_path: path.to_string_lossy().to_string(),
+            variables,
+        }))
+    }
+
+    pub fn get_themes_directory(&self) -> Result<PathBuf> {
+        Self::themes_dir_path()
+    }
+
+    pub async fn list_custom_themes(&self) -> Result<Vec<CustomThemeDefinition>> {
+        let dir = Self::themes_dir_path()?;
+        let mut reader = fs::read_dir(&dir)
+            .await
+            .with_context(|| format!("Failed to read themes directory {}", dir.display()))?;
+        let mut themes = Vec::new();
+
+        while let Some(entry) = reader
+            .next_entry()
+            .await
+            .context("Failed to iterate theme directory entries")?
+        {
+            let path = entry.path();
+            match Self::parse_custom_theme_file(&path).await {
+                Ok(Some(theme)) => themes.push(theme),
+                Ok(None) => {}
+                Err(err) => log::warn!("Skipping invalid custom theme {}: {}", path.display(), err),
+            }
+        }
+
+        themes.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        Ok(themes)
+    }
+
     pub async fn load_settings(&mut self) -> Result<Settings> {
         let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
             .bind(SETTINGS_ID)
@@ -101,13 +372,15 @@ impl SettingsService {
             .context("Failed to load settings")?;
 
         if let Some(data) = stored {
-            if let Ok(settings) = serde_json::from_str::<Settings>(&data) {
+            if let Ok(mut settings) = serde_json::from_str::<Settings>(&data) {
+                settings.theme = Self::normalize_theme_selection(&settings.theme);
                 return Ok(settings);
             }
 
             if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&data) {
                 let sanitized = Self::sanitize_legacy_settings_value(raw_value);
-                if let Ok(settings) = serde_json::from_value::<Settings>(sanitized) {
+                if let Ok(mut settings) = serde_json::from_value::<Settings>(sanitized) {
+                    settings.theme = Self::normalize_theme_selection(&settings.theme);
                     log::warn!("Recovered persisted settings through legacy sanitization");
                     return Ok(settings);
                 }
@@ -137,7 +410,7 @@ impl SettingsService {
             max_concurrent_downloads: 2,
             platform,
             language: "english".to_string(),
-            theme: crate::types::Theme::ModernBlue,
+            theme: "modern-blue".to_string(),
             melon_loader_version: None,
             auto_install_melon_loader: Some(false),
             enable_security_scanner: Some(true),
@@ -170,7 +443,8 @@ impl SettingsService {
         let current_json = serde_json::to_value(&current)?;
         let merged =
             Self::sanitize_legacy_settings_value(Self::merge_json(&current_json, &updates));
-        let updated: Settings = serde_json::from_value(merged)?;
+        let mut updated: Settings = serde_json::from_value(merged)?;
+        updated.theme = Self::normalize_theme_selection(&updated.theme);
 
         let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
         sqlx::query(
@@ -441,7 +715,6 @@ impl Clone for SettingsService {
 mod tests {
     use super::*;
     use crate::db::initialize_pool;
-    use crate::types::Theme;
     use serial_test::serial;
     use sqlx::Row;
     use tempfile::tempdir;
@@ -493,10 +766,145 @@ mod tests {
         let loaded = service.load_settings().await?;
 
         assert_eq!(loaded.max_concurrent_downloads, 5);
-        assert!(matches!(loaded.theme, Theme::Dark));
+        assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.database_backup_count, Some(12));
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn save_and_load_settings_preserves_custom_theme_ids() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool)?;
+
+        let updates = serde_json::json!({
+            "theme": "sunset-glow"
+        });
+
+        service.save_settings(updates).await?;
+        let loaded = service.load_settings().await?;
+
+        assert_eq!(loaded.theme, "sunset-glow");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_custom_themes_reads_theme_files_from_disk() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool)?;
+        let themes_dir = service.get_themes_directory()?;
+
+        std::fs::write(
+            themes_dir.join("sunset-glow.json"),
+            r##"{
+  "name": "Sunset Glow",
+  "baseTheme": "dark",
+  "variables": {
+    "--app-bg-color": "#1b120f",
+    "--primary-btn-color": "#d96b3a"
+  }
+}"##,
+        )?;
+        std::fs::write(themes_dir.join("ignore.txt"), "not a theme")?;
+
+        let themes = service.list_custom_themes().await?;
+
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].id, "sunset-glow");
+        assert_eq!(themes[0].name, "Sunset Glow");
+        assert_eq!(themes[0].base_theme, "dark");
+        assert_eq!(
+            themes[0].variables.get("--app-bg-color").map(String::as_str),
+            Some("#1b120f")
+        );
+        assert_eq!(
+            themes[0]
+                .variables
+                .get("--primary-btn-color")
+                .map(String::as_str),
+            Some("#d96b3a")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_custom_themes_accepts_bom_and_markdown_fences() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool)?;
+        let themes_dir = service.get_themes_directory()?;
+
+        std::fs::write(
+            themes_dir.join("copy-paste.json"),
+            "\u{feff}```json\n{\n  \"name\": \"Copy Paste\",\n  \"baseTheme\": \"light\",\n  \"variables\": {\n    \"--app-bg-color\": \"#fff7f4\"\n  }\n}\n```\n",
+        )?;
+
+        let themes = service.list_custom_themes().await?;
+
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].id, "copy-paste");
+        assert_eq!(themes[0].base_theme, "light");
+        assert_eq!(
+            themes[0].variables.get("--app-bg-color").map(String::as_str),
+            Some("#fff7f4")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_custom_themes_recovers_control_characters_inside_strings() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool)?;
+        let themes_dir = service.get_themes_directory()?;
+
+        std::fs::write(
+            themes_dir.join("broken-paste.json"),
+            "{\n  \"name\": \"Broken Paste\",\n  \"baseTheme\": \"light\",\n  \"variables\": {\n    \"--bg-pattern\": \"radial-gradient(circle at 16% -8%, rgba(255, 214, 220, 0.46),\ntransparent 36%)\"\n  }\n}\n",
+        )?;
+
+        let themes = service.list_custom_themes().await?;
+
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].id, "broken-paste");
+        assert_eq!(themes[0].base_theme, "light");
+        assert!(
+            themes[0]
+                .variables
+                .get("--bg-pattern")
+                .is_some_and(|value| value.contains("transparent 36%"))
+        );
 
         Ok(())
     }

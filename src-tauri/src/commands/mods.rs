@@ -22,7 +22,7 @@ static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadKind {
-    Zip,
+    Archive,
     Dll,
     Unsupported,
 }
@@ -37,13 +37,78 @@ pub(crate) enum SecurityGateResult {
 
 fn detect_upload_kind(file_path: &str) -> UploadKind {
     let file_path_lower = file_path.to_lowercase();
-    if file_path_lower.ends_with(".zip") {
-        UploadKind::Zip
+    if file_path_lower.ends_with(".zip") || file_path_lower.ends_with(".rar") {
+        UploadKind::Archive
     } else if file_path_lower.ends_with(".dll") {
         UploadKind::Dll
     } else {
         UploadKind::Unsupported
     }
+}
+
+async fn upload_mod_impl(
+    db: Arc<SqlitePool>,
+    environment_id: String,
+    file_path: String,
+    original_file_name: String,
+    runtime: String,
+    branch: String,
+    metadata: Option<serde_json::Value>,
+    security_override: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let env_service = EnvironmentService::new(db.clone()).map_err(|e| e.to_string())?;
+    let env = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Environment not found".to_string())?;
+
+    if env.output_dir.is_empty() {
+        return Err("Output directory not set".to_string());
+    }
+
+    let mods_service = ModsService::new(db.clone());
+
+    let (metadata, security_report) = match prepare_security_scan(
+        db,
+        &file_path,
+        metadata,
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => return Ok(response),
+    };
+
+    let response = match detect_upload_kind(&file_path) {
+        UploadKind::Archive => mods_service
+            .install_zip_mod(
+                &env.output_dir,
+                &file_path,
+                &original_file_name,
+                &runtime,
+                &branch,
+                metadata,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+        UploadKind::Dll => mods_service
+            .install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
+            .await
+            .map_err(|e| e.to_string())?,
+        UploadKind::Unsupported => {
+            return Err("Only .zip, .rar, and .dll files are supported".to_string())
+        }
+    };
+
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        response,
+        security_report.as_ref(),
+        "installing a local mod upload",
+    )
+    .await)
 }
 
 fn parse_runtime_label(runtime: Option<&str>) -> Option<crate::types::Runtime> {
@@ -615,7 +680,7 @@ pub async fn check_mod_installed(
 
     let mods_service = ModsService::new(db.inner().clone());
     match mods_service
-        .find_existing_mod_installation(&env.output_dir, &source_id, &source_version)
+        .find_existing_mod_installation(&env.output_dir, &source_id, &source_version, None)
         .await
     {
         Ok(Some(mod_storage_id)) => Ok(serde_json::json!({
@@ -710,57 +775,17 @@ pub async fn upload_mod(
     metadata: Option<serde_json::Value>,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service
-        .get_environment(&environment_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
-
-    if env.output_dir.is_empty() {
-        return Err("Output directory not set".to_string());
-    }
-
-    let mods_service = ModsService::new(db.inner().clone());
-
-    let (metadata, security_report) = match prepare_security_scan(
+    upload_mod_impl(
         db.inner().clone(),
-        &file_path,
+        environment_id,
+        file_path,
+        original_file_name,
+        runtime,
+        branch,
         metadata,
-        security_override.unwrap_or(false),
+        security_override,
     )
-    .await?
-    {
-        SecurityGateResult::Continue { metadata, report } => (metadata, report),
-        SecurityGateResult::EarlyResponse(response) => return Ok(response),
-    };
-
-    let response = match detect_upload_kind(&file_path) {
-        UploadKind::Zip => mods_service
-            .install_zip_mod(
-                &env.output_dir,
-                &file_path,
-                &original_file_name,
-                &runtime,
-                &branch,
-                metadata,
-            )
-            .await
-            .map_err(|e| e.to_string())?,
-        UploadKind::Dll => mods_service
-            .install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
-            .await
-            .map_err(|e| e.to_string())?,
-        UploadKind::Unsupported => return Err("Only .zip and .dll files are supported".to_string()),
-    };
-
-    Ok(finalize_security_scan_response(
-        &mods_service,
-        response,
-        security_report.as_ref(),
-        "installing a local mod upload",
-    )
-    .await)
+    .await
 }
 
 #[tauri::command]
@@ -1346,17 +1371,19 @@ pub async fn uninstall_s1api(
 mod tests {
     use super::{
         build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
-        parse_runtime_label, persist_security_scan_report, UploadKind,
+        parse_runtime_label, persist_security_scan_report, upload_mod_impl, UploadKind,
     };
     use crate::db::initialize_pool;
+    use crate::services::environment::EnvironmentService;
     use crate::services::mods::ModsService;
     use crate::services::settings::SettingsService;
     use crate::types::{
-        SecurityScanDisposition, SecurityScanDispositionClassification, SecurityScanPolicy,
-        SecurityScanReport, SecurityScanState, SecurityScanSummary,
+        schedule_i_config, SecurityScanDisposition, SecurityScanDispositionClassification,
+        SecurityScanPolicy, SecurityScanReport, SecurityScanState, SecurityScanSummary,
     };
     use serial_test::serial;
     use tempfile::tempdir;
+    use tokio::fs;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -1383,8 +1410,10 @@ mod tests {
 
     #[test]
     fn detect_upload_kind_matches_supported_extensions() {
-        assert_eq!(detect_upload_kind("C:/mods/a.zip"), UploadKind::Zip);
-        assert_eq!(detect_upload_kind("C:/mods/a.ZIP"), UploadKind::Zip);
+        assert_eq!(detect_upload_kind("C:/mods/a.zip"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.ZIP"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.rar"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.RAR"), UploadKind::Archive);
         assert_eq!(detect_upload_kind("C:/mods/a.dll"), UploadKind::Dll);
         assert_eq!(detect_upload_kind("C:/mods/a.DLL"), UploadKind::Dll);
         assert_eq!(
@@ -1547,6 +1576,67 @@ mod tests {
                 .map(|value| value.classification),
             Some(SecurityScanDispositionClassification::Clean)
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn upload_mod_impl_routes_rar_files_through_archive_handling() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-rar-upload");
+        fs::create_dir_all(&output_dir).await?;
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                Some("RAR Upload Test".to_string()),
+                None,
+            )
+            .await?;
+
+        let rar_path = temp.path().join("invalid-upload.rar");
+        fs::write(&rar_path, b"not-a-real-rar").await?;
+
+        let response = upload_mod_impl(
+            pool.clone(),
+            env.id,
+            rar_path.to_string_lossy().to_string(),
+            "invalid-upload.rar".to_string(),
+            "Mono".to_string(),
+            String::new(),
+            Some(serde_json::json!({
+                "sourceId": "ifBars/MLVScan"
+            })),
+            Some(false),
+        )
+        .await
+        .expect("rar uploads should reach archive handling");
+
+        assert_eq!(
+            response.get("success").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        let error = response
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(error.contains("RAR"));
+        assert_ne!(error, "Only .zip, .rar, and .dll files are supported");
 
         Ok(())
     }

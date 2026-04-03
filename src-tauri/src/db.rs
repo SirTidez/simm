@@ -723,7 +723,7 @@ async fn migrate_mod_metadata_for_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{EnvironmentStatus, LogLevel, ModSource, Platform, Runtime, Theme};
+    use crate::types::{EnvironmentStatus, LogLevel, ModSource, Platform, Runtime};
     use serial_test::serial;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -766,7 +766,7 @@ mod tests {
             max_concurrent_downloads: 3,
             platform: Platform::Windows,
             language: "en".to_string(),
-            theme: Theme::Light,
+            theme: "light".to_string(),
             melon_loader_version: Some("0.6.0".to_string()),
             auto_install_melon_loader: Some(true),
             enable_security_scanner: Some(true),

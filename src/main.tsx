@@ -4,11 +4,11 @@ import '@fortawesome/fontawesome-free/css/all.min.css'
 import { App } from './components/App'
 import { logger } from './services/logger'
 import { interceptConsole } from './utils/logger'
-import { applyBuiltInTheme, readCachedThemeSelection } from './utils/theme'
+import { applyBuiltInTheme, normalizeBuiltInTheme, readCachedThemeSelection } from './utils/theme'
 import './style.css'
 
 interceptConsole();
-applyBuiltInTheme(readCachedThemeSelection());
+applyBuiltInTheme(normalizeBuiltInTheme(readCachedThemeSelection()));
 
 // Error boundary for catching render errors
 window.addEventListener('error', (event) => {

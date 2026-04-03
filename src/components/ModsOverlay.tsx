@@ -127,6 +127,41 @@ interface LocalSourceLinkState {
   selectedOwnershipIds: string[];
 }
 
+interface ManualUploadSourceInfo {
+  source: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
+  sourceUrl?: string;
+  modName?: string;
+  author?: string;
+  sourceId?: string;
+  sourceVersion?: string;
+}
+
+interface ManualUploadItem {
+  filePath: string;
+  fileName: string;
+}
+
+interface ManualUploadBatchResult {
+  fileName: string;
+  status: 'success' | 'failed' | 'skipped';
+  message: string;
+}
+
+interface PendingRuntimeSelectionState extends ManualUploadItem {
+  sourceInfo: ManualUploadSourceInfo;
+  remainingQueue: ManualUploadItem[];
+}
+
+interface RuntimeMismatchWarningState {
+  fileName: string;
+  remainingQueue: ManualUploadItem[];
+  runtimeMismatch: {
+    detected: 'IL2CPP' | 'Mono' | 'unknown';
+    environment: 'IL2CPP' | 'Mono';
+    warning: string;
+  };
+}
+
 const isSecurityScanReport = (value: unknown): value is SecurityScanReport => {
   return !!value && typeof value === 'object' && 'summary' in (value as Record<string, unknown>) && Array.isArray((value as { files?: unknown[] }).files);
 };
@@ -343,8 +378,13 @@ export function ModsOverlay({
   const [enablingMod, setEnablingMod] = useState<string | null>(null);
   const [disablingMod, setDisablingMod] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<{ file: null; runtimeMismatch: { detected: 'IL2CPP' | 'Mono' | 'unknown'; environment: 'IL2CPP' | 'Mono'; warning: string } } | null>(null);
-  const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<{ filePath: string; fileName: string; sourceInfo: any } | null>(null);
+  const [uploadQueue, setUploadQueue] = useState<ManualUploadItem[]>([]);
+  const [currentUploadItem, setCurrentUploadItem] = useState<ManualUploadItem | null>(null);
+  const [uploadBatchTotal, setUploadBatchTotal] = useState(0);
+  const [uploadBatchResults, setUploadBatchResults] = useState<ManualUploadBatchResult[]>([]);
+  const [uploadBatchSummary, setUploadBatchSummary] = useState<{ message: string; variant: 'success' | 'mixed' } | null>(null);
+  const [pendingUpload, setPendingUpload] = useState<RuntimeMismatchWarningState | null>(null);
+  const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<PendingRuntimeSelectionState | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [installingDownloaded, setInstallingDownloaded] = useState<string | null>(null);
   const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
@@ -390,9 +430,46 @@ export function ModsOverlay({
   const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
+  const uploadBatchResultsRef = useRef<ManualUploadBatchResult[]>([]);
+  const navigationChangeHandlerRef = useRef(onNavigationStateChange);
   const [localSourceLinkState, setLocalSourceLinkState] = useState<LocalSourceLinkState | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
   const activeModViewSecurityBadge = getSecurityBadgeConfig(activeModView?.securityScan);
+
+  useEffect(() => {
+    navigationChangeHandlerRef.current = onNavigationStateChange;
+  }, [onNavigationStateChange]);
+
+  const reportedNavigationState = useMemo<ModsOverlayNavigationState>(
+    () => ({
+      modsTab,
+      searchSource,
+      searchQuery,
+      searchResults,
+      showSearchResults,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      showNexusModsResults,
+      showSearchInOverlay,
+      modListFilter,
+      installedSearchTerm,
+      activeModView,
+    }),
+    [
+      activeModView,
+      installedSearchTerm,
+      modListFilter,
+      modsTab,
+      nexusModsSearchQuery,
+      nexusModsSearchResults,
+      searchQuery,
+      searchResults,
+      searchSource,
+      showNexusModsResults,
+      showSearchInOverlay,
+      showSearchResults,
+    ],
+  );
   const openExternalSourceUrl = useCallback((url?: string) => {
     const safeUrl = safeExternalUrl(url);
     if (!safeUrl) {
@@ -419,35 +496,8 @@ export function ModsOverlay({
   }, [searchSource]);
 
   useEffect(() => {
-    onNavigationStateChange?.({
-      modsTab,
-      searchSource,
-      searchQuery,
-      searchResults,
-      showSearchResults,
-      nexusModsSearchQuery,
-      nexusModsSearchResults,
-      showNexusModsResults,
-      showSearchInOverlay,
-      modListFilter,
-      installedSearchTerm,
-      activeModView,
-    });
-  }, [
-    activeModView,
-    installedSearchTerm,
-    modListFilter,
-    modsTab,
-    nexusModsSearchQuery,
-    nexusModsSearchResults,
-    onNavigationStateChange,
-    searchQuery,
-    searchResults,
-    searchSource,
-    showNexusModsResults,
-    showSearchInOverlay,
-    showSearchResults,
-  ]);
+    navigationChangeHandlerRef.current?.(reportedNavigationState);
+  }, [reportedNavigationState]);
 
   const libraryVersionCountByName = useMemo(() => {
     const counts = new Map<string, number>();
@@ -513,6 +563,18 @@ export function ModsOverlay({
     };
   }, []);
 
+  const currentUploadProgress = uploading && uploadBatchTotal > 0
+    && uploadQueue.length >= 0
+    ? Math.min(
+        uploadBatchResults.length + (currentUploadItem || pendingRuntimeSelection || pendingUpload ? 1 : 0),
+        uploadBatchTotal,
+      )
+    : 0;
+
+  const uploadButtonBusyLabel = uploadBatchTotal > 1
+    ? `Uploading ${Math.max(currentUploadProgress, 1)}/${uploadBatchTotal}...`
+    : 'Uploading...';
+
   const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
     if (onOpenSecurityReport) {
       onOpenSecurityReport(request);
@@ -551,13 +613,14 @@ export function ModsOverlay({
     title: string,
     result: { securityScan?: SecurityScanReport | SecurityScanSummary; securityScanBlocked?: boolean; securityScanConfirmationRequired?: boolean },
     onConfirm: () => Promise<void>,
+    onDismiss?: (() => void) | null,
   ): boolean => {
     if (!result.securityScan || !isSecurityScanReport(result.securityScan)) {
       return false;
     }
 
     if (result.securityScanBlocked) {
-      openSecurityReport({ title, report: result.securityScan, onConfirm: null });
+      openSecurityReport({ title, report: result.securityScan, onConfirm: null, onDismiss });
       return true;
     }
 
@@ -567,6 +630,7 @@ export function ModsOverlay({
         report: result.securityScan,
         confirmLabel: 'Continue Install',
         onConfirm,
+        onDismiss,
       });
       return true;
     }
@@ -873,6 +937,8 @@ export function ModsOverlay({
           kind?: 'library' | 'install';
           requestedKind?: 'library' | 'install';
           environmentId?: string;
+          downloadedToLibraryOnly?: boolean;
+          installedEnvironmentNames?: string[];
         };
         requestedKind?: 'library' | 'install';
         error?: string;
@@ -900,6 +966,17 @@ export function ModsOverlay({
         await loadDownloadedLibrary();
         await loadCachedModUpdates();
         onModsChanged?.();
+        const installedEnvironmentNames =
+          detail.result?.installedEnvironmentNames?.filter(Boolean) || [];
+        if (detail.result?.downloadedToLibraryOnly) {
+          showToast('Downloaded to library only. No compatible branches found.');
+        } else if (installedEnvironmentNames.length > 0) {
+          showToast(
+            `Installed to ${installedEnvironmentNames.join(', ')}.`,
+          );
+        } else if (detail.result?.environmentId === environmentId && environment?.name) {
+          showToast(`Installed to ${environment.name}.`);
+        }
         setShowNexusModsResults(false);
         setNexusModsSearchQuery('');
         return;
@@ -915,7 +992,7 @@ export function ModsOverlay({
       clearNexusManualTimeout();
       window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
     };
-  }, [environmentId, installingNexusMod, onModsChanged]);
+  }, [environment?.name, environmentId, installingNexusMod, onModsChanged, showToast]);
 
   // Auto-load files for NexusMods search results
   useEffect(() => {
@@ -1240,14 +1317,7 @@ export function ModsOverlay({
     return 0;
   };
 
-  const detectModSource = async (fileName: string): Promise<{
-    source: 'thunderstore' | 'nexusmods' | 'github' | 'local' | 'unknown';
-    sourceUrl?: string;
-    modName?: string;
-    author?: string;
-    sourceId?: string;
-    sourceVersion?: string;
-  }> => {
+  const detectModSource = async (fileName: string): Promise<ManualUploadSourceInfo> => {
     const fileNameLower = fileName.toLowerCase();
 
     // Check for Thunderstore indicators
@@ -1328,6 +1398,241 @@ export function ModsOverlay({
     return { source: 'unknown' };
   };
 
+  const normalizeSelectedUploadItems = (
+    selected: string | { path: string; name?: string } | Array<string | { path: string; name?: string }> | null,
+  ): ManualUploadItem[] => {
+    if (!selected) {
+      return [];
+    }
+
+    const entries = Array.isArray(selected) ? selected : [selected];
+    return entries.map((entry) => {
+      if (typeof entry === 'string') {
+        return {
+          filePath: entry,
+          fileName: entry.split(/[/\\]/).pop() || 'unknown',
+        };
+      }
+
+      return {
+        filePath: entry.path,
+        fileName: entry.name || entry.path.split(/[/\\]/).pop() || 'unknown',
+      };
+    });
+  };
+
+  const recordUploadBatchResult = (result: ManualUploadBatchResult): ManualUploadBatchResult[] => {
+    const nextResults = [...uploadBatchResultsRef.current, result];
+    uploadBatchResultsRef.current = nextResults;
+    setUploadBatchResults(nextResults);
+    return nextResults;
+  };
+
+  const buildUploadBatchSummary = (results: ManualUploadBatchResult[]): string | null => {
+    if (results.length === 0) {
+      return null;
+    }
+
+    const successCount = results.filter((result) => result.status === 'success').length;
+    const failed = results.filter((result) => result.status === 'failed');
+    const skipped = results.filter((result) => result.status === 'skipped');
+
+    const counts = [
+      `${successCount} succeeded`,
+      `${failed.length} failed`,
+      `${skipped.length} skipped`,
+    ].join(', ');
+
+    const details: string[] = [];
+    if (failed.length > 0) {
+      details.push(`Failed: ${failed.map((result) => `${result.fileName} (${result.message})`).join('; ')}`);
+    }
+    if (skipped.length > 0) {
+      details.push(`Skipped: ${skipped.map((result) => `${result.fileName} (${result.message})`).join('; ')}`);
+    }
+
+    return [`Upload batch finished: ${counts}.`, details.join(' ')].filter(Boolean).join(' ');
+  };
+
+  const finalizeUploadBatch = async (results: ManualUploadBatchResult[]) => {
+    const successCount = results.filter((result) => result.status === 'success').length;
+
+    if (successCount > 0) {
+      await loadInstalledMods(false, true);
+      await loadDownloadedLibrary();
+      await loadCachedModUpdates();
+      if (onModsChanged) {
+        onModsChanged();
+      }
+    }
+
+    const summary = buildUploadBatchSummary(results);
+    if (summary) {
+      setUploadBatchSummary({
+        message: summary,
+        variant: results.some((result) => result.status !== 'success') ? 'mixed' : 'success',
+      });
+      showToast(summary, 9000);
+      if (results.some((result) => result.status !== 'success')) {
+        setError(summary);
+      } else {
+        setError(null);
+      }
+    }
+
+    setUploading(false);
+    setUploadQueue([]);
+    setCurrentUploadItem(null);
+    setPendingUpload(null);
+    setPendingRuntimeSelection(null);
+    setUploadBatchTotal(0);
+  };
+
+  const continueUploadBatch = async (remainingQueue: ManualUploadItem[]) => {
+    setUploadQueue(remainingQueue);
+
+    if (remainingQueue.length === 0) {
+      await finalizeUploadBatch(uploadBatchResultsRef.current);
+      return;
+    }
+
+    const [nextItem, ...rest] = remainingQueue;
+    setCurrentUploadItem(nextItem);
+    setUploadQueue(rest);
+
+    try {
+      const sourceInfo = await detectModSource(nextItem.fileName);
+      const detectedRuntime = detectRuntimeFromFileName(nextItem.fileName);
+
+      if (!detectedRuntime) {
+        setPendingRuntimeSelection({
+          ...nextItem,
+          sourceInfo,
+          remainingQueue: rest,
+        });
+        return;
+      }
+
+      await performUpload(nextItem, detectedRuntime, sourceInfo, rest);
+    } catch (err) {
+      const results = recordUploadBatchResult({
+        fileName: nextItem.fileName,
+        status: 'failed',
+        message: err instanceof Error ? err.message : 'Failed to prepare upload',
+      });
+      if (rest.length === 0) {
+        await finalizeUploadBatch(results);
+        return;
+      }
+
+      await continueUploadBatch(rest);
+    }
+  };
+
+  const completeUploadItem = async (
+    result: ManualUploadBatchResult,
+    remainingQueue: ManualUploadItem[],
+  ) => {
+    setPendingRuntimeSelection(null);
+    setPendingUpload(null);
+    setCurrentUploadItem(null);
+
+    const results = recordUploadBatchResult(result);
+
+    if (remainingQueue.length === 0) {
+      await finalizeUploadBatch(results);
+      return;
+    }
+
+    await continueUploadBatch(remainingQueue);
+  };
+
+  const performUpload = async (
+    item: ManualUploadItem,
+    runtime: 'IL2CPP' | 'Mono',
+    sourceInfo: ManualUploadSourceInfo,
+    remainingQueue: ManualUploadItem[],
+    securityOverride = false,
+  ) => {
+    setUploading(true);
+
+    try {
+      const metadataWithRuntime = {
+        ...sourceInfo,
+        detectedRuntime: runtime,
+      };
+
+      const result = await ApiService.uploadMod(
+        environmentId,
+        item.filePath,
+        item.fileName,
+        environment!.runtime,
+        metadataWithRuntime,
+        securityOverride,
+      );
+
+      if (!result.success) {
+        const handled = handleSecurityGateResponse(
+          `Security Findings - ${item.fileName}`,
+          result,
+          async () => {
+            await performUpload(item, runtime, sourceInfo, remainingQueue, true);
+          },
+          () => {
+            void completeUploadItem(
+              {
+                fileName: item.fileName,
+                status: 'skipped',
+                message: 'Security review dismissed.',
+              },
+              remainingQueue,
+            );
+          },
+        );
+        if (handled) {
+          return;
+        }
+
+        await completeUploadItem(
+          {
+            fileName: item.fileName,
+            status: 'failed',
+            message: result.error || 'Failed to upload mod',
+          },
+          remainingQueue,
+        );
+        return;
+      }
+
+      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
+        setPendingUpload({
+          fileName: item.fileName,
+          remainingQueue,
+          runtimeMismatch: result.runtimeMismatch,
+        });
+        return;
+      }
+
+      await completeUploadItem(
+        {
+          fileName: item.fileName,
+          status: 'success',
+          message: 'Installed successfully.',
+        },
+        remainingQueue,
+      );
+    } catch (err) {
+      await completeUploadItem(
+        {
+          fileName: item.fileName,
+          status: 'failed',
+          message: err instanceof Error ? err.message : 'Failed to upload mod',
+        },
+        remainingQueue,
+      );
+    }
+  };
+
   const handleUploadClick = async () => {
     if (!environment) {
       setError('Environment not loaded');
@@ -1336,51 +1641,33 @@ export function ModsOverlay({
 
     setUploading(true);
     setError(null);
+    setUploadBatchSummary(null);
 
     try {
-      // Use Tauri dialog to select file
       const selected = await open({
-        multiple: false,
+        multiple: true,
         filters: [{
           name: 'Mod Files',
           extensions: ['dll', 'zip', 'rar']
         }],
-        title: 'Select Mod File',
-      }) as string | { path: string; name?: string } | null;
+        title: 'Select Mod Files',
+      }) as string | { path: string; name?: string } | Array<string | { path: string; name?: string }> | null;
 
-      if (!selected) {
-        // User cancelled
+      const selectedItems = normalizeSelectedUploadItems(selected);
+
+      if (selectedItems.length === 0) {
         setUploading(false);
         return;
       }
 
-      // Handle both string path and FileEntry object
-      let filePath: string;
-      let fileName: string;
-
-      if (typeof selected === 'string') {
-        filePath = selected;
-        fileName = selected.split(/[/\\]/).pop() || 'unknown';
-      } else {
-        filePath = selected.path;
-        fileName = selected.name || filePath.split(/[/\\]/).pop() || 'unknown';
-      }
-
-      // Detect source
-      const sourceInfo = await detectModSource(fileName);
-
-      // Detect runtime from filename
-      const detectedRuntime = detectRuntimeFromFileName(fileName);
-
-      if (!detectedRuntime) {
-        // Couldn't detect runtime - ask user to select
-        setPendingRuntimeSelection({ filePath, fileName, sourceInfo });
-        setUploading(false);
-        return;
-      }
-
-      // Proceed with upload using detected runtime
-      await performUpload(filePath, fileName, detectedRuntime, sourceInfo);
+      uploadBatchResultsRef.current = [];
+      setUploadBatchResults([]);
+      setUploadBatchTotal(selectedItems.length);
+      setUploadQueue(selectedItems);
+      setCurrentUploadItem(null);
+      setPendingUpload(null);
+      setPendingRuntimeSelection(null);
+      await continueUploadBatch(selectedItems);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload mod');
       setUploading(false);
@@ -1394,100 +1681,62 @@ export function ModsOverlay({
     return null;
   };
 
-  const performUpload = async (
-    filePath: string,
-    fileName: string,
-    runtime: 'IL2CPP' | 'Mono',
-    sourceInfo: any,
-    securityOverride = false,
-  ) => {
-    setUploading(true);
-    setError(null);
-
-    try {
-      // Include detected runtime in metadata so backend knows
-      const metadataWithRuntime = {
-        ...sourceInfo,
-        detectedRuntime: runtime,
-      };
-
-      // Call upload with file path and metadata
-      const result = await ApiService.uploadMod(
-        environmentId,
-        filePath,
-        fileName,
-        environment!.runtime,
-        metadataWithRuntime,
-        securityOverride,
-      );
-
-      if (!result.success) {
-        const handled = handleSecurityGateResponse(`Security Findings - ${fileName}`, result, async () => {
-          await performUpload(filePath, fileName, runtime, sourceInfo, true);
-        });
-        if (handled) {
-          setUploading(false);
-          return;
-        }
-
-        setError(result.error || 'Failed to upload mod');
-        setUploading(false);
-        return;
-      }
-
-      // Check for runtime mismatch
-      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-        // Store the mismatch info to show confirmation dialog
-        setPendingUpload({
-          file: null as any,
-          runtimeMismatch: result.runtimeMismatch,
-        });
-      } else {
-        // No mismatch - proceed with success handling
-        await handleUploadSuccess();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload mod');
-      setUploading(false);
-    }
-  };
-
   const handleRuntimeSelectionConfirm = async (selectedRuntime: 'IL2CPP' | 'Mono') => {
     if (!pendingRuntimeSelection) return;
-    const { filePath, fileName, sourceInfo } = pendingRuntimeSelection;
+    const { sourceInfo, remainingQueue, ...item } = pendingRuntimeSelection;
     setPendingRuntimeSelection(null);
-    await performUpload(filePath, fileName, selectedRuntime, sourceInfo);
+    await performUpload(item, selectedRuntime, sourceInfo, remainingQueue);
   };
 
   const handleRuntimeSelectionCancel = () => {
-    setPendingRuntimeSelection(null);
-    setUploading(false);
-  };
-
-  const handleUploadSuccess = async () => {
-    // Reload mods list after successful upload
-    await loadInstalledMods(false, true);
-    await loadDownloadedLibrary();
-    await loadCachedModUpdates();
-    // Notify parent that mods changed
-    if (onModsChanged) {
-      onModsChanged();
+    if (!pendingRuntimeSelection) {
+      return;
     }
-    setUploading(false);
-    setPendingUpload(null);
+
+    const { fileName, remainingQueue } = pendingRuntimeSelection;
+    setPendingRuntimeSelection(null);
+    void completeUploadItem(
+      {
+        fileName,
+        status: 'skipped',
+        message: 'Runtime selection canceled.',
+      },
+      remainingQueue,
+    );
   };
 
   const handleRuntimeMismatchConfirm = async () => {
-    // Mod is already installed, just acknowledge and continue
+    if (!pendingUpload) {
+      return;
+    }
+
+    const { fileName, remainingQueue } = pendingUpload;
     setPendingUpload(null);
-    await handleUploadSuccess();
+    await completeUploadItem(
+      {
+        fileName,
+        status: 'success',
+        message: 'Installed after acknowledging runtime mismatch.',
+      },
+      remainingQueue,
+    );
   };
 
   const handleRuntimeMismatchCancel = () => {
-    // Mod is already installed, but user canceled acknowledgment
-    // Still reload mods since it was installed
+    if (!pendingUpload) {
+      return;
+    }
+
+    const { fileName, remainingQueue } = pendingUpload;
     setPendingUpload(null);
-    handleUploadSuccess();
+    void completeUploadItem(
+      {
+        fileName,
+        status: 'success',
+        message: 'Installed with runtime mismatch warning dismissed.',
+      },
+      remainingQueue,
+    );
   };
 
   // Filter mods to ensure they are for Schedule I, match the runtime, and match the search query
@@ -2516,12 +2765,12 @@ export function ModsOverlay({
               onClick={handleUploadClick}
               className="btn btn-primary btn-small"
               disabled={uploading}
-              title="Upload a mod file (.dll, .zip, or .rar)"
+              title="Upload one or more mod files (.dll, .zip, or .rar)"
             >
               {uploading ? (
                 <>
                   <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }}></i>
-                  Uploading...
+                  {uploadButtonBusyLabel}
                 </>
               ) : (
                 <>
@@ -3687,7 +3936,7 @@ export function ModsOverlay({
                     {checkingModUpdates ? 'Checking...' : 'Check Updates'}
                   </button>
                   <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
-                    {uploading ? 'Uploading...' : 'Upload Mod'}
+                    {uploading ? uploadButtonBusyLabel : 'Upload Mod'}
                   </button>
                   <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
                     Open Folder
@@ -3700,6 +3949,22 @@ export function ModsOverlay({
             </div>
 
             <div className="workspace-collection__content" ref={modsScrollContainerRef}>
+              {uploadBatchSummary && (
+                <div
+                  style={{
+                    marginBottom: '0.85rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '0.9rem',
+                    border: uploadBatchSummary.variant === 'success' ? '1px solid rgba(109, 211, 154, 0.35)' : '1px solid rgba(240, 196, 96, 0.35)',
+                    background: uploadBatchSummary.variant === 'success' ? 'rgba(21, 53, 40, 0.68)' : 'rgba(74, 53, 17, 0.58)',
+                    color: uploadBatchSummary.variant === 'success' ? '#d9f8e6' : '#ffe7b0',
+                    boxShadow: '0 14px 28px rgba(0, 0, 0, 0.18)',
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {uploadBatchSummary.message}
+                </div>
+              )}
               {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
               {!loading && !error && filteredMods.length === 0 && (
                 <div className="workspace-collection__empty">

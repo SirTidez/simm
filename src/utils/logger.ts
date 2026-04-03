@@ -13,7 +13,7 @@ const originalConsole = {
 let consoleIntercepted = false;
 
 function shouldForwardToBackend(level: string): boolean {
-  return level === 'warn' || level === 'error';
+  return level === 'debug' || level === 'warn' || level === 'error';
 }
 
 /**
