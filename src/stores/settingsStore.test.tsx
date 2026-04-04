@@ -135,6 +135,51 @@ describe('SettingsStore', () => {
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
   });
 
+  it('merges nested app update settings without dropping existing fields', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({
+      ...baseSettings,
+      appUpdate: {
+        skippedVersionNormalized: '0.8.0',
+        channel: 'stable',
+      },
+    });
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+    apiMocks.saveSettings.mockResolvedValueOnce({ success: true });
+
+    function NestedConsumer() {
+      const { settings, updateSettings } = useSettingsStore();
+      return (
+        <div>
+          <div data-testid="update-channel">{settings?.appUpdate?.channel ?? 'none'}</div>
+          <div data-testid="skipped-version">{settings?.appUpdate?.skippedVersionNormalized ?? 'none'}</div>
+          <button
+            data-testid="update-channel-button"
+            onClick={() => updateSettings({ appUpdate: { channel: 'beta' } })}
+          >
+            Switch Channel
+          </button>
+        </div>
+      );
+    }
+
+    render(
+      <SettingsStoreProvider>
+        <NestedConsumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('update-channel').textContent).toBe('stable');
+    });
+
+    fireEvent.click(screen.getByTestId('update-channel-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('update-channel').textContent).toBe('beta');
+      expect(screen.getByTestId('skipped-version').textContent).toBe('0.8.0');
+    });
+  });
+
   it('surfaces load errors', async () => {
     apiMocks.getSettings.mockRejectedValueOnce(new Error('boom'));
     apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: false });

@@ -103,7 +103,10 @@ export interface AppUpdatePreferences {
   lastResolvedUrl?: string | null;
   snoozedUntil?: string | null;
   skippedVersionNormalized?: string | null;
+  channel?: AppUpdateChannel | null;
 }
+
+export type AppUpdateChannel = 'stable' | 'beta';
 
 export interface Settings {
   defaultDownloadDir: string;
@@ -144,14 +147,21 @@ export interface CustomThemeDefinition {
 }
 
 export interface AppUpdateStatus {
-  currentVersionRaw: string;
-  currentVersionNormalized: string;
-  latestVersionRaw: string;
-  latestVersionNormalized: string;
+  currentVersion: string;
+  version: string;
+  versionNormalized: string;
   updateAvailable: boolean;
-  targetUrl: string;
-  fallbackFilesUrl: string;
+  notes?: string | null;
+  pubDate?: string | null;
+  channel: AppUpdateChannel;
+  manifestUrl: string;
   checkedAt: string;
+}
+
+export interface AppUpdateInstallResult {
+  installed: boolean;
+  version: string;
+  channel: AppUpdateChannel;
 }
 
 export interface NexusRateLimits {

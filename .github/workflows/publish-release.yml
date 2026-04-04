@@ -49,10 +49,25 @@ jobs:
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Enable updater artifacts for release build
+        shell: pwsh
+        run: |
+          $configPath = 'src-tauri/tauri.conf.json'
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json
+          if (-not $config.bundle) {
+            $config | Add-Member -NotePropertyName bundle -NotePropertyValue ([ordered]@{}) -Force
+          }
+          $config.bundle.createUpdaterArtifacts = $true
+          $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+
       - name: Build Windows installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
         run: npm run tauri build -- --bundles nsis
 
-      - name: Prepare installer asset
+      - name: Prepare release assets
         id: asset
         shell: pwsh
         run: |
@@ -63,16 +78,37 @@ jobs:
             throw 'Setup executable not found in target/release/bundle/nsis.'
           }
 
+          $updaterZip = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip' | Select-Object -First 1
+          if (-not $updaterZip) {
+            throw 'Updater archive not found in target/release/bundle/nsis.'
+          }
+
+          $signatureSource = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip.sig' | Select-Object -First 1
+          if (-not $signatureSource) {
+            throw 'Updater archive signature not found in target/release/bundle/nsis.'
+          }
+
           $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
 
+          $updaterTarget = Join-Path 'artifacts' $updaterZip.Name
+          Copy-Item -LiteralPath $updaterZip.FullName -Destination $updaterTarget -Force
+
+          $signatureTarget = Join-Path 'artifacts' $signatureSource.Name
+          Copy-Item -LiteralPath $signatureSource.FullName -Destination $signatureTarget -Force
+
           "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "updater_file=$updaterTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "signature_file=$signatureTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SIMM_${{ steps.version.outputs.version }}_Setup
-          path: ${{ steps.asset.outputs.setup_file }}
+          name: SIMM_${{ steps.version.outputs.version }}_ReleaseAssets
+          path: |
+            ${{ steps.asset.outputs.setup_file }}
+            ${{ steps.asset.outputs.updater_file }}
+            ${{ steps.asset.outputs.signature_file }}
           if-no-files-found: error
           retention-days: 14
 
@@ -83,11 +119,55 @@ jobs:
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
           $assetPath = '${{ steps.asset.outputs.setup_file }}'
+          $updaterAssetPath = '${{ steps.asset.outputs.updater_file }}'
           $assetName = '${{ steps.version.outputs.asset_name }}'
+          $updaterAssetName = Split-Path -Path $updaterAssetPath -Leaf
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "$assetPath#$assetName" --clobber
+            gh release upload $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" --clobber
           } else {
-            gh release create $tag "$assetPath#$assetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
+            gh release create $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
           }
+
+      - name: Generate stable updater manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $updaterAssetPath = '${{ steps.asset.outputs.updater_file }}'
+          $signaturePath = '${{ steps.asset.outputs.signature_file }}'
+          $updaterAssetName = Split-Path -Path $updaterAssetPath -Leaf
+          $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
+          $assetUrl = "https://github.com/SirTidez/simm/releases/download/$tag/$updaterAssetName"
+
+          .\scripts\generate-updater-manifest.ps1 `
+            -Version '${{ steps.version.outputs.version }}' `
+            -AssetUrl $assetUrl `
+            -SignaturePath $signaturePath `
+            -OutputPath 'updater/stable/latest.json' `
+            -Notes ($release.body ?? '') `
+            -PubDate ($release.publishedAt ?? '')
+
+      - name: Upload stable updater manifest to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          gh release upload $tag "updater/stable/latest.json#latest.json" --clobber
+
+      - name: Commit stable updater manifest
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add updater/stable/latest.json
+          if (git diff --cached --quiet) {
+            Write-Host 'No manifest changes to commit.'
+            exit 0
+          }
+
+          git commit -m "chore(release): update stable updater manifest for ${{ steps.version.outputs.version }}"
+          git push origin HEAD:${{ github.event.repository.default_branch }}

@@ -14,7 +14,7 @@ use aes_gcm::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::types::{CustomThemeDefinition, Settings};
+use crate::types::{AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings};
 
 pub struct SettingsService {
     pool: Arc<SqlitePool>,
@@ -431,7 +431,15 @@ impl SettingsService {
             mod_icon_cache_limit_mb: Some(500),
             database_backup_count: Some(10),
             log_retention_days: Some(7),
-            app_update: None,
+            app_update: Some(AppUpdateSettings {
+                last_checked_at: None,
+                last_seen_version_raw: None,
+                last_seen_version_normalized: None,
+                last_resolved_url: None,
+                snoozed_until: None,
+                skipped_version_normalized: None,
+                channel: Some(AppUpdateChannel::Stable),
+            }),
         };
 
         Ok(default_settings)

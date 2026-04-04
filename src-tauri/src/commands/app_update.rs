@@ -1,33 +1,169 @@
-use crate::services::app_update::fetch_app_update_status;
-use crate::services::nexus_mods::NexusModsService;
-use crate::services::settings::SettingsService;
-use sqlx::SqlitePool;
-use std::sync::Arc;
-use tauri::State;
+use anyhow::{anyhow, Result};
+use chrono::Utc;
+use once_cell::sync::Lazy;
+use regex::Regex;
+use reqwest::Url;
+use serde::Serialize;
+use tauri::AppHandle;
+use tauri_plugin_updater::UpdaterExt;
 
-#[tauri::command]
-pub async fn get_app_update_status(
-    db: State<'_, Arc<SqlitePool>>,
+use crate::types::AppUpdateChannel;
+
+const STABLE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/SirTidez/simm/main/updater/stable/latest.json";
+const BETA_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/SirTidez/simm/main/updater/beta/latest-beta.json";
+const PLACEHOLDER_UPDATER_PUBKEY: &str = "REPLACE_WITH_SIMM_UPDATER_PUBLIC_KEY";
+
+static VERSION_CORE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\d+(?:\.\d+)*").expect("version normalization regex should compile")
+});
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateStatus {
     current_version: String,
-) -> Result<serde_json::Value, String> {
-    let mut settings_service =
-        SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let settings = settings_service
-        .load_settings()
-        .await
-        .map_err(|e| e.to_string())?;
+    version: String,
+    version_normalized: String,
+    update_available: bool,
+    notes: Option<String>,
+    pub_date: Option<String>,
+    channel: AppUpdateChannel,
+    manifest_url: String,
+    checked_at: String,
+}
 
-    let nexus_service = NexusModsService::new();
-    let persisted_api_key = settings_service
-        .get_nexus_mods_api_key()
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(api_key) = persisted_api_key.or(settings.nexus_mods_api_key.clone()) {
-        nexus_service.set_api_key(api_key).await;
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInstallResult {
+    installed: bool,
+    version: String,
+    channel: AppUpdateChannel,
+}
+
+fn normalize_release_version(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
     }
 
-    let status = fetch_app_update_status(&nexus_service, &settings, &current_version)
+    VERSION_CORE_REGEX
+        .find(trimmed)
+        .map(|m| m.as_str().trim_matches('.').to_string())
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn parse_channel(value: Option<String>) -> AppUpdateChannel {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("beta") => AppUpdateChannel::Beta,
+        _ => AppUpdateChannel::Stable,
+    }
+}
+
+fn manifest_url_for_channel(channel: &AppUpdateChannel) -> &'static str {
+    match channel {
+        AppUpdateChannel::Stable => STABLE_MANIFEST_URL,
+        AppUpdateChannel::Beta => BETA_MANIFEST_URL,
+    }
+}
+
+fn updater_pubkey() -> Result<String> {
+    let configured = option_env!("SIMM_UPDATER_PUBKEY")
+        .unwrap_or(PLACEHOLDER_UPDATER_PUBKEY)
+        .trim();
+    if configured.is_empty() || configured == PLACEHOLDER_UPDATER_PUBKEY {
+        return Err(anyhow!(
+            "SIMM updater public key is not configured at build time"
+        ));
+    }
+
+    Ok(configured.to_string())
+}
+
+async fn build_update(
+    app: &AppHandle,
+    channel: AppUpdateChannel,
+) -> Result<Option<tauri_plugin_updater::Update>> {
+    let manifest_url = manifest_url_for_channel(&channel);
+    let manifest = Url::parse(manifest_url)?;
+    let pubkey = updater_pubkey()?;
+
+    let updater = app
+        .updater_builder()
+        .pubkey(pubkey)
+        .endpoints(vec![manifest])?
+        .build()?;
+
+    Ok(updater.check().await?)
+}
+
+#[tauri::command]
+pub async fn check_app_update(
+    app: AppHandle,
+    channel: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let channel = parse_channel(channel);
+    let manifest_url = manifest_url_for_channel(&channel).to_string();
+    let current_version = app.package_info().version.to_string();
+
+    let status = match build_update(&app, channel.clone()).await {
+        Ok(Some(update)) => AppUpdateStatus {
+            current_version: update.current_version,
+            version_normalized: normalize_release_version(&update.version),
+            version: update.version,
+            update_available: true,
+            notes: update.body,
+            pub_date: update.date.map(|date| date.to_string()),
+            channel,
+            manifest_url,
+            checked_at: Utc::now().to_rfc3339(),
+        },
+        Ok(None) => AppUpdateStatus {
+            current_version: current_version.clone(),
+            version_normalized: normalize_release_version(&current_version),
+            version: current_version,
+            update_available: false,
+            notes: None,
+            pub_date: None,
+            channel,
+            manifest_url,
+            checked_at: Utc::now().to_rfc3339(),
+        },
+        Err(error) => return Err(error.to_string()),
+    };
+
+    serde_json::to_value(status).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn install_app_update(
+    app: AppHandle,
+    channel: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let channel = parse_channel(channel);
+    let Some(update) = build_update(&app, channel.clone())
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Err("No update is currently available".to_string());
+    };
+
+    let version = update.version.clone();
+    update
+        .download_and_install(|_, _| {}, || {})
         .await
         .map_err(|e| e.to_string())?;
-    serde_json::to_value(status).map_err(|e| e.to_string())
+
+    let result = AppUpdateInstallResult {
+        installed: true,
+        version,
+        channel,
+    };
+
+    serde_json::to_value(result).map_err(|e| e.to_string())
 }

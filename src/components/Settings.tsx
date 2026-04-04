@@ -29,6 +29,7 @@ type SettingsFormData = {
   showSecurityScanBadges?: boolean;
   updateCheckInterval: number;
   autoCheckUpdates: boolean;
+  appUpdateChannel: "stable" | "beta";
   logLevel: "debug" | "info" | "warn" | "error";
   modIconCacheLimitMb: number;
   databaseBackupCount: number;
@@ -171,6 +172,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
+    appUpdateChannel: "stable",
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
@@ -257,6 +259,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         showSecurityScanBadges: settings.showSecurityScanBadges,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
+        appUpdateChannel: settings.appUpdate?.channel ?? "stable",
         logLevel:
           (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
         modIconCacheLimitMb: normalizeModIconCacheLimitMb(
@@ -343,7 +346,23 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         setError(null);
         // Always set platform to 'windows' and language to 'english' since they're not user-configurable
         const normalizedFormData = {
-          ...formData,
+          defaultDownloadDir: formData.defaultDownloadDir,
+          maxConcurrentDownloads: formData.maxConcurrentDownloads,
+          theme: formData.theme,
+          melonLoaderVersion: formData.melonLoaderVersion,
+          autoInstallMelonLoader: formData.autoInstallMelonLoader,
+          enableSecurityScanner: formData.enableSecurityScanner,
+          autoInstallSecurityScanner: formData.autoInstallSecurityScanner,
+          blockCriticalScans: formData.blockCriticalScans,
+          promptOnHighScans: formData.promptOnHighScans,
+          showSecurityScanBadges: formData.showSecurityScanBadges,
+          updateCheckInterval: formData.updateCheckInterval,
+          autoCheckUpdates: formData.autoCheckUpdates,
+          appUpdate: {
+            ...(settings?.appUpdate ?? {}),
+            channel: formData.appUpdateChannel,
+          },
+          logLevel: formData.logLevel,
           modIconCacheLimitMb: normalizeModIconCacheLimitMb(
             formData.modIconCacheLimitMb,
           ),
@@ -999,6 +1018,25 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     </div>
 
                     <div className="settings-field settings-field--compact">
+                      <label>App update channel</label>
+                      <select
+                        value={formData.appUpdateChannel}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            appUpdateChannel: e.target.value as "stable" | "beta",
+                          })
+                        }
+                      >
+                        <option value="stable">Stable</option>
+                        <option value="beta">Beta</option>
+                      </select>
+                      <small>
+                        Stable uses production releases. Beta opts this app into prerelease updater manifests.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
                       <label>Mod icon cache limit (MB)</label>
                       <input
                         type="number"
@@ -1091,6 +1129,15 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         {formData.autoCheckUpdates
                           ? "Background checks follow the configured interval."
                           : "Checks only run when you trigger them manually."}
+                      </small>
+                    </div>
+                    <div className="settings-inline-status">
+                      <span>App Update Channel</span>
+                      <strong>{formData.appUpdateChannel === "beta" ? "Beta" : "Stable"}</strong>
+                      <small>
+                        {formData.appUpdateChannel === "beta"
+                          ? "Checks the beta updater manifest and prerelease builds."
+                          : "Checks the stable updater manifest and production releases."}
                       </small>
                     </div>
                   </div>

@@ -26,7 +26,7 @@ export function AppUpdateToast({
     <section className="app-update-toast" role="status" aria-live="polite">
       <header className="app-update-toast__header">
         <div>
-          <span className="app-update-toast__eyebrow">Nexus release detected</span>
+          <span className="app-update-toast__eyebrow">Update ready</span>
           <strong>SIMM update available</strong>
         </div>
         <button
@@ -40,7 +40,7 @@ export function AppUpdateToast({
       </header>
 
       <p className="app-update-toast__summary">
-        A newer public SIMM build is available on Nexus Mods.
+        A newer SIMM build is ready to download and install.
       </p>
 
       <dl className="app-update-toast__versions">

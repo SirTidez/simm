@@ -4,6 +4,7 @@ import type {
   Settings,
   Environment,
   AppUpdateStatus,
+  AppUpdateInstallResult,
   DownloadProgress,
   AppConfig,
   UpdateCheckResult,
@@ -17,6 +18,7 @@ import type {
   LocalModOwnershipCandidate,
   LocalModSourcePreview,
   CustomThemeDefinition,
+  AppUpdateChannel,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -41,8 +43,12 @@ export class ApiService {
     return invoke('get_home_directory');
   }
 
-  static async getAppUpdateStatus(currentVersion: string): Promise<AppUpdateStatus> {
-    return invoke('get_app_update_status', { currentVersion });
+  static async checkAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateStatus> {
+    return invoke('check_app_update', { channel: channel ?? null });
+  }
+
+  static async installAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateInstallResult> {
+    return invoke('install_app_update', { channel: channel ?? null });
   }
 
   // Settings

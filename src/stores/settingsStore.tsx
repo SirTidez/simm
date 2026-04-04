@@ -121,8 +121,18 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
 
       await ApiService.saveSettings(normalizedUpdates);
       // Update local state immediately without full refresh to avoid loading state
+      const mergedSettings = {
+        ...(settings || {}),
+        ...normalizedUpdates,
+        appUpdate: normalizedUpdates.appUpdate
+          ? {
+              ...(settings?.appUpdate ?? {}),
+              ...normalizedUpdates.appUpdate,
+            }
+          : settings?.appUpdate,
+      } as Settings;
       const newSettings = sanitizeThemeSettings(
-        { ...(settings || {}), ...normalizedUpdates } as Settings,
+        mergedSettings,
         customThemes,
       );
       const resolvedTheme = normalizedUpdates.theme
