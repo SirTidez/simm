@@ -188,6 +188,59 @@ impl ModsService {
         }
     }
 
+    /// Parses user-supplied runtime strings (case-insensitive). Returns `None` if unknown.
+    fn parse_runtime_string(runtime: &str) -> Option<crate::types::Runtime> {
+        match runtime.trim().to_ascii_lowercase().as_str() {
+            "il2cpp" => Some(crate::types::Runtime::Il2cpp),
+            "mono" => Some(crate::types::Runtime::Mono),
+            _ => None,
+        }
+    }
+
+    /// Resolves target runtime for zip install: explicit parse first, else same chain as
+    /// `install_storage_mod_to_envs` (branch config → installation inference → persisted env).
+    async fn resolve_env_runtime_for_zip_install(
+        &self,
+        game_dir: &str,
+        branch: &str,
+        runtime_param: &str,
+    ) -> Result<crate::types::Runtime> {
+        if let Some(r) = Self::parse_runtime_string(runtime_param) {
+            return Ok(r);
+        }
+        if let Some(env_id) = self.environment_id_for_dir(game_dir).await? {
+            let env = self.load_environment(&env_id).await?;
+            let resolved = crate::services::environment::EnvironmentService::runtime_for_branch(
+                &env.branch,
+            )
+            .or_else(|| {
+                if env.output_dir.is_empty() {
+                    None
+                } else {
+                    Some(
+                        crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
+                            Path::new(&env.output_dir),
+                        ),
+                    )
+                }
+            })
+            .unwrap_or(env.runtime.clone());
+            return Ok(resolved);
+        }
+        let from_branch =
+            crate::services::environment::EnvironmentService::runtime_for_branch(branch);
+        let from_path = if game_dir.is_empty() {
+            None
+        } else {
+            Some(
+                crate::services::environment::EnvironmentService::infer_runtime_from_installation_path(
+                    Path::new(game_dir),
+                ),
+            )
+        };
+        Ok(from_branch.or(from_path).unwrap_or(crate::types::Runtime::Mono))
+    }
+
     fn normalize_runtime_suffix_token(value: &str) -> String {
         let mut normalized = value.trim().to_string();
         loop {
@@ -1379,29 +1432,6 @@ impl ModsService {
         Ok(())
     }
 
-    async fn collect_storage_file_paths_recursive(
-        &self,
-        root: &Path,
-        files: &mut Vec<PathBuf>,
-    ) -> Result<()> {
-        if !root.exists() {
-            return Ok(());
-        }
-
-        let mut entries = fs::read_dir(root).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let metadata = fs::metadata(&path).await?;
-            if metadata.is_dir() {
-                Box::pin(self.collect_storage_file_paths_recursive(&path, files)).await?;
-            } else if metadata.is_file() {
-                files.push(path);
-            }
-        }
-
-        Ok(())
-    }
-
     async fn recover_mod_metadata_from_storage(
         &self,
         mods_directory: &Path,
@@ -2259,13 +2289,23 @@ impl ModsService {
 
         let mods_dir = storage_path.join("Mods");
         if mods_dir.exists() {
-            self.collect_storage_files_recursive(&mods_dir, true, &mut summary.primary_files)
+            self.collect_storage_relative_files_recursive(
+                &mods_dir,
+                &mods_dir,
+                true,
+                &mut summary.primary_files,
+            )
                 .await?;
         }
 
         let plugins_dir = storage_path.join("Plugins");
         if plugins_dir.exists() {
-            self.collect_storage_files_recursive(&plugins_dir, true, &mut summary.primary_files)
+            self.collect_storage_relative_files_recursive(
+                &plugins_dir,
+                &plugins_dir,
+                true,
+                &mut summary.primary_files,
+            )
                 .await?;
         }
 
@@ -2290,6 +2330,50 @@ impl ModsService {
         }
 
         Ok(summary)
+    }
+
+    async fn collect_storage_relative_files_recursive(
+        &self,
+        root: &Path,
+        dir: &Path,
+        dll_only: bool,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut pending = vec![dir.to_path_buf()];
+
+        while let Some(current) = pending.pop() {
+            let mut entries = fs::read_dir(&current).await.with_context(|| {
+                format!("Failed to read storage directory {}", current.display())
+            })?;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let metadata = fs::metadata(&path).await?;
+                if metadata.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let normalized = relative.to_string_lossy().replace('\\', "/");
+                if normalized.is_empty() {
+                    continue;
+                }
+
+                if dll_only {
+                    let lower_name = normalized.to_lowercase();
+                    if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
+                        files.push(normalized);
+                    }
+                } else {
+                    files.push(normalized);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn collect_storage_files_recursive(
@@ -2404,6 +2488,23 @@ impl ModsService {
         vec![RUNTIME_IL2CPP.to_string(), RUNTIME_MONO.to_string()]
     }
 
+    fn runtime_detection_files<'a>(&self, summary: &'a StoragePayloadSummary) -> &'a [String] {
+        if summary.primary_files.is_empty() {
+            &summary.attached_userlibs
+        } else {
+            &summary.primary_files
+        }
+    }
+
+    fn storage_entry_supports_runtime(&self, entry_name: &str, runtime_label: &str) -> bool {
+        let file_name = Path::new(entry_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(entry_name);
+        let file_runtime = self.detect_mod_runtime_from_name(file_name);
+        file_runtime == "unknown" || file_runtime == runtime_label
+    }
+
     fn build_files_by_runtime(
         &self,
         files: &[String],
@@ -2473,9 +2574,12 @@ impl ModsService {
             return Ok(false);
         }
 
-        let files = self.collect_storage_files(&storage_path).await?;
+        let payload_summary = self.collect_storage_payload_summary(&storage_path).await?;
         let available_runtimes =
-            self.detect_available_runtimes(&files, metadata.detected_runtime.clone());
+            self.detect_available_runtimes(
+                self.runtime_detection_files(&payload_summary),
+                metadata.detected_runtime.clone(),
+            );
 
         Ok(available_runtimes
             .iter()
@@ -2640,9 +2744,12 @@ impl ModsService {
                 continue;
             }
 
-            let files = self.collect_storage_files(&entry_path).await?;
+            let payload_summary = self.collect_storage_payload_summary(&entry_path).await?;
             let available_runtimes =
-                self.detect_available_runtimes(&files, template_meta.detected_runtime.clone());
+                self.detect_available_runtimes(
+                    self.runtime_detection_files(&payload_summary),
+                    template_meta.detected_runtime.clone(),
+                );
 
             let supports_runtime = match runtime {
                 Some(ref rt) => {
@@ -2661,7 +2768,7 @@ impl ModsService {
                 template_meta.detected_runtime,
                 available_runtimes,
                 supports_runtime,
-                files
+                self.runtime_detection_files(&payload_summary)
             );
 
             if supports_runtime {
@@ -4473,6 +4580,7 @@ impl ModsService {
 
     async fn install_storage_entries(
         &self,
+        source_root: &Path,
         source_dir: &Path,
         dest_dir: &Path,
         allow_dirs: bool,
@@ -4509,19 +4617,25 @@ impl ModsService {
             }
 
             let metadata = fs::metadata(&path).await?;
-            let file_runtime = self.detect_mod_runtime_from_name(file_name);
-            eprintln!("[install_storage_entries] Processing file: {}, detected runtime: {}, target runtime: {}", 
-                     file_name, file_runtime, runtime_label);
+            let relative_entry = path
+                .strip_prefix(source_root)
+                .ok()
+                .map(|value| value.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| file_name.to_string());
+            let file_runtime = self.detect_mod_runtime_from_name(&relative_entry);
+            eprintln!("[install_storage_entries] Processing file: {}, detected runtime: {}, target runtime: {}",
+                     relative_entry, file_runtime, runtime_label);
 
-            if file_runtime != "unknown" && file_runtime != runtime_label {
-                eprintln!("[install_storage_entries] Skipping file {} due to runtime mismatch (file: {}, env: {})", 
-                         file_name, file_runtime, runtime_label);
+            if !self.storage_entry_supports_runtime(&relative_entry, runtime_label) {
+                eprintln!("[install_storage_entries] Skipping file {} due to runtime mismatch (file: {}, env: {})",
+                         relative_entry, file_runtime, runtime_label);
                 continue;
             }
 
             if metadata.is_dir() && !allow_dirs {
                 let dest_path = dest_dir.join(file_name);
                 Box::pin(self.install_storage_entries(
+                    source_root,
                     &path,
                     &dest_path,
                     false,
@@ -4838,8 +4952,20 @@ impl ModsService {
             .await?;
         let mut results = Vec::new();
 
-        for env_id in environment_ids {
-            let env = self.load_environment(&env_id).await?;
+        let payload_summary = self.collect_storage_payload_summary(&storage_base).await?;
+        let storage_metadata_on_disk = self.load_storage_metadata(&storage_base).await?;
+        let storage_metadata_runtime = storage_metadata_on_disk
+            .as_ref()
+            .and_then(|m| m.detected_runtime.clone());
+        let storage_available_runtimes = self.detect_available_runtimes(
+            self.runtime_detection_files(&payload_summary),
+            storage_metadata_runtime,
+        );
+
+        let mut resolved_env_installs: Vec<(Environment, crate::types::Runtime, &'static str)> =
+            Vec::new();
+        for env_id in &environment_ids {
+            let env = self.load_environment(env_id).await?;
             let env_runtime = crate::services::environment::EnvironmentService::runtime_for_branch(
                 &env.branch,
             )
@@ -4856,13 +4982,31 @@ impl ModsService {
             })
             .unwrap_or(env.runtime.clone());
             let runtime_label = Self::runtime_label(&env_runtime);
+            if !storage_available_runtimes
+                .iter()
+                .any(|r| r == Self::runtime_label(&env_runtime))
+            {
+                return Err(anyhow::anyhow!(
+                    "Mod storage {} is not compatible with environment {} (resolved runtime {:?} / {}). Storage supports these runtimes: {:?} (from metadata/files).",
+                    storage_id,
+                    env_id,
+                    env_runtime,
+                    runtime_label,
+                    storage_available_runtimes
+                ));
+            }
+            resolved_env_installs.push((env, env_runtime, runtime_label));
+        }
+
+        for (env, env_runtime, runtime_label) in resolved_env_installs {
+            let env_id = env.id.clone();
             log::debug!(
-                "Installing storage into environment: storage_id={}, environment_id={}, branch={}, resolved_runtime={}, template_detected_runtime={:?}",
+                "Installing storage into environment: storage_id={}, environment_id={}, branch={}, resolved_runtime={}, storage_metadata_detected_runtime={:?}",
                 storage_id,
                 env_id,
                 env.branch,
                 runtime_label,
-                template_meta
+                storage_metadata_on_disk
                     .as_ref()
                     .and_then(|meta| meta.detected_runtime.clone())
             );
@@ -4894,6 +5038,7 @@ impl ModsService {
 
             self.install_storage_entries(
                 &storage_mods,
+                &storage_mods,
                 &mods_dir,
                 false,
                 runtime_label,
@@ -4906,6 +5051,7 @@ impl ModsService {
             )
             .await?;
             self.install_storage_entries(
+                &storage_plugins,
                 &storage_plugins,
                 &plugins_dir,
                 false,
@@ -4920,6 +5066,7 @@ impl ModsService {
             .await?;
             self.install_storage_entries(
                 &storage_userlibs,
+                &storage_userlibs,
                 &userlibs_dir,
                 true,
                 runtime_label,
@@ -4932,6 +5079,7 @@ impl ModsService {
             )
             .await?;
             self.install_storage_entries(
+                &storage_userdata,
                 &storage_userdata,
                 &userdata_dir,
                 true,
@@ -5306,7 +5454,7 @@ impl ModsService {
         zip_path: &str,
         _file_name: &str,
         runtime: &str,
-        _branch: &str,
+        branch: &str,
         metadata: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
         eprintln!("[DEBUG] install_zip_mod: Starting symlink-based installation");
@@ -5322,6 +5470,16 @@ impl ModsService {
         fs::create_dir_all(&plugins_directory).await?;
         fs::create_dir_all(&userlibs_directory).await?;
         fs::create_dir_all(&userdata_directory).await?;
+
+        // Single canonical runtime for duplicate detection, extraction, symlinks, and metadata
+        let normalized_runtime = self
+            .resolve_env_runtime_for_zip_install(game_dir, branch, runtime)
+            .await?;
+        let normalized_runtime_label = Self::runtime_label(&normalized_runtime);
+        eprintln!(
+            "[DEBUG] install_zip_mod: normalized_runtime={:?} label={}",
+            normalized_runtime, normalized_runtime_label
+        );
 
         // Create temp directory for extraction
         let temp_dir = std::env::temp_dir().join(format!(
@@ -5417,18 +5575,13 @@ impl ModsService {
                 .map(|s| s.to_string())
         });
 
-        // Check if we already have this mod/version installed
-        let requested_runtime = match runtime {
-            "IL2CPP" => Some(crate::types::Runtime::Il2cpp),
-            "Mono" => Some(crate::types::Runtime::Mono),
-            _ => None,
-        };
+        // Check if we already have this mod/version installed (canonical runtime)
         let existing_mod_id = self
             .find_existing_mod_installation(
                 game_dir,
                 &source_id,
                 &source_version,
-                requested_runtime.clone(),
+                Some(normalized_runtime.clone()),
             )
             .await?;
 
@@ -5441,125 +5594,82 @@ impl ModsService {
             let mod_storage_mods = mod_storage_base.join("Mods");
             let mod_storage_plugins = mod_storage_base.join("Plugins");
             let mod_storage_userlibs = mod_storage_base.join("UserLibs");
+            let mod_storage_userdata = mod_storage_base.join("UserData");
 
             // Clean up temp directory (we don't need it)
             let _ = fs::remove_dir_all(&temp_dir).await;
 
-            let mut symlink_paths = Vec::new();
-            self.ensure_storage_symlinks_recursive(
+            let env_runtime = normalized_runtime.clone();
+            let runtime_label = normalized_runtime_label;
+            let template_meta = self
+                .find_metadata_template_for_storage_id(&existing_id)
+                .await?;
+            let mut metadata_map = self
+                .load_mod_metadata(&mods_directory)
+                .await
+                .unwrap_or_else(|_| HashMap::new());
+            let mut installed_files = Vec::new();
+            let mut warnings = Vec::new();
+
+            self.install_storage_entries(
+                &mod_storage_mods,
                 &mod_storage_mods,
                 &mods_directory,
                 false,
-                false,
-                &mut symlink_paths,
+                runtime_label,
+                &template_meta,
+                &existing_id,
+                &mut metadata_map,
+                &mut installed_files,
+                &mut warnings,
+                &env_runtime,
             )
             .await?;
-            self.ensure_storage_symlinks_recursive(
+            self.install_storage_entries(
+                &mod_storage_plugins,
                 &mod_storage_plugins,
                 &plugins_directory,
                 false,
-                false,
-                &mut symlink_paths,
+                runtime_label,
+                &template_meta,
+                &existing_id,
+                &mut metadata_map,
+                &mut installed_files,
+                &mut warnings,
+                &env_runtime,
             )
             .await?;
-            self.ensure_storage_symlinks_recursive(
+            self.install_storage_entries(
+                &mod_storage_userlibs,
                 &mod_storage_userlibs,
                 &userlibs_directory,
                 true,
-                false,
-                &mut symlink_paths,
+                runtime_label,
+                &template_meta,
+                &existing_id,
+                &mut metadata_map,
+                &mut installed_files,
+                &mut warnings,
+                &env_runtime,
+            )
+            .await?;
+            self.install_storage_entries(
+                &mod_storage_userdata,
+                &mod_storage_userdata,
+                &userdata_directory,
+                true,
+                runtime_label,
+                &template_meta,
+                &existing_id,
+                &mut metadata_map,
+                &mut installed_files,
+                &mut warnings,
+                &env_runtime,
             )
             .await?;
 
-            if mod_storage_mods.exists() {
-                let template_meta = self
-                    .find_metadata_template_for_storage_id(&existing_id)
-                    .await?;
-                let mut metadata_map = self
-                    .load_mod_metadata(&mods_directory)
-                    .await
-                    .unwrap_or_else(|_| HashMap::new());
-                let mut stored_files = Vec::new();
-                self.collect_storage_file_paths_recursive(&mod_storage_mods, &mut stored_files)
-                    .await?;
-
-                for entry_path in stored_files {
-                    let file_name = entry_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-                    let mut meta = metadata_map.get(file_name).cloned().unwrap_or(ModMetadata {
-                        source: template_meta.as_ref().and_then(|t| t.source.clone()),
-                        source_id: template_meta.as_ref().and_then(|t| t.source_id.clone()),
-                        source_version: template_meta
-                            .as_ref()
-                            .and_then(|t| t.source_version.clone()),
-                        author: template_meta.as_ref().and_then(|t| t.author.clone()),
-                        mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
-                        source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
-                        summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
-                        icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
-                        icon_cache_path: template_meta
-                            .as_ref()
-                            .and_then(|t| t.icon_cache_path.clone()),
-                        downloads: template_meta.as_ref().and_then(|t| t.downloads),
-                        likes_or_endorsements: template_meta
-                            .as_ref()
-                            .and_then(|t| t.likes_or_endorsements),
-                        updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
-                        tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
-                        installed_version: template_meta
-                            .as_ref()
-                            .and_then(|t| t.installed_version.clone()),
-                        library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
-                        installed_at: None,
-                        last_update_check: None,
-                        metadata_last_refreshed: None,
-                        update_available: None,
-                        remote_version: None,
-                        detected_runtime: template_meta
-                            .as_ref()
-                            .and_then(|t| t.detected_runtime.clone()),
-                        runtime_match: template_meta.as_ref().and_then(|t| t.runtime_match),
-                        mod_storage_id: None,
-                        symlink_paths: None,
-                        security_scan: template_meta.as_ref().and_then(|t| t.security_scan.clone()),
-                    });
-
-                    if let Some(template) = template_meta.as_ref() {
-                        meta.source = template.source.clone();
-                        meta.source_id = template.source_id.clone();
-                        meta.source_version = template.source_version.clone();
-                        meta.author = template.author.clone();
-                        meta.mod_name = template.mod_name.clone();
-                        meta.source_url = template.source_url.clone();
-                        meta.summary = template.summary.clone();
-                        meta.icon_url = template.icon_url.clone();
-                        meta.icon_cache_path = template.icon_cache_path.clone();
-                        meta.downloads = template.downloads;
-                        meta.likes_or_endorsements = template.likes_or_endorsements;
-                        meta.updated_at = template.updated_at.clone();
-                        meta.tags = template.tags.clone();
-                        meta.library_added_at = template.library_added_at;
-                        meta.metadata_last_refreshed = template.metadata_last_refreshed;
-                        meta.detected_runtime = template.detected_runtime.clone();
-                        meta.runtime_match = template.runtime_match;
-                        meta.security_scan = template.security_scan.clone();
-                    }
-
-                    meta.installed_version = template_meta
-                        .as_ref()
-                        .and_then(|t| t.installed_version.clone())
-                        .or(self.extract_mod_version(&entry_path).await);
-                    meta.mod_storage_id = Some(existing_id.clone());
-                    meta.installed_at = Some(Utc::now());
-
-                    metadata_map.insert(file_name.to_string(), meta);
-                }
-
-                self.save_mod_metadata(&mods_directory, &metadata_map)
-                    .await?;
-            }
+            self.save_mod_metadata(&mods_directory, &metadata_map)
+                .await?;
 
             // Return success - mod is already installed, symlinks verified
             return Ok(serde_json::json!({
@@ -5617,7 +5727,7 @@ impl ModsService {
                         &mod_storage_plugins,
                         &mod_storage_userlibs,
                         &temp_dir,
-                        Some(runtime),
+                        Some(normalized_runtime_label),
                     )
                     .await
                 {
@@ -5643,7 +5753,7 @@ impl ModsService {
                         &mod_storage_plugins,
                         &mod_storage_userlibs,
                         &temp_dir,
-                        Some(runtime),
+                        Some(normalized_runtime_label),
                     )
                     .await
                 {
@@ -5739,12 +5849,7 @@ impl ModsService {
         let updated_at = Self::metadata_string(metadata_ref, "updatedAt");
         let tags = Self::metadata_tags(metadata_ref);
 
-        // Detect runtime from environment
-        let env_runtime = match runtime {
-            "IL2CPP" => crate::types::Runtime::Il2cpp,
-            "Mono" => crate::types::Runtime::Mono,
-            _ => crate::types::Runtime::Mono, // Default to Mono
-        };
+        let env_runtime = normalized_runtime.clone();
 
         // Try to get runtime from metadata first (user may have selected it)
         let metadata_detected_runtime = effective_metadata
@@ -5881,7 +5986,7 @@ impl ModsService {
         {
             Some("il2cpp") => Some(crate::types::Runtime::Il2cpp),
             Some("mono") => Some(crate::types::Runtime::Mono),
-            _ => Some(env_runtime.clone()),
+            _ => Some(normalized_runtime.clone()),
         };
         let fallback_storage_meta = ModMetadata {
             source: mod_source.clone(),
@@ -8207,6 +8312,79 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
+    async fn find_existing_mod_storage_by_source_version_uses_nested_runtime_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-nested-runtime");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let metadata = sample_metadata(
+            Some("storage-runtime-nested"),
+            Some("source-id"),
+            Some("1.0.0"),
+        );
+        let serialized = serde_json::to_string(&metadata)?;
+        sqlx::query(
+            "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?)",
+        )
+        .bind(&env.id)
+        .bind("Example.Mono.dll")
+        .bind(serialized)
+        .execute(&*pool)
+        .await?;
+
+        let storage_mods_dir = download_dir
+            .join("Mods")
+            .join("storage-runtime-nested")
+            .join("Mods")
+            .join("Mono");
+        fs::create_dir_all(&storage_mods_dir).await?;
+        fs::write(storage_mods_dir.join("Example.Mono.dll"), b"data").await?;
+
+        let mono_match = service
+            .find_existing_mod_storage_by_source_version(
+                "source-id",
+                "1.0.0",
+                Some(Runtime::Mono),
+            )
+            .await?;
+        let il2cpp_match = service
+            .find_existing_mod_storage_by_source_version(
+                "source-id",
+                "1.0.0",
+                Some(Runtime::Il2cpp),
+            )
+            .await?;
+
+        assert_eq!(mono_match.as_deref(), Some("storage-runtime-nested"));
+        assert_eq!(il2cpp_match, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn detect_mod_runtime_from_name_parses_keywords() -> Result<()> {
         let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
 
@@ -8709,8 +8887,26 @@ mod tests {
             .find(|item| item.storage_id == "nested-fomod")
             .expect("library entry for nested fomod storage");
 
-        assert!(entry.files.iter().any(|file| file == "PackRat.IL2CPP.dll"));
-        assert!(entry.files.iter().any(|file| file == "PackRat.Mono.dll"));
+        assert!(entry
+            .files
+            .iter()
+            .any(|file| file == "IL2CPP/PackRat.IL2CPP.dll"));
+        assert!(entry
+            .files
+            .iter()
+            .any(|file| file == "Mono/PackRat.Mono.dll"));
+        assert_eq!(
+            entry
+                .files_by_runtime
+                .get("IL2CPP")
+                .cloned()
+                .unwrap_or_default(),
+            vec!["IL2CPP/PackRat.IL2CPP.dll".to_string()]
+        );
+        assert_eq!(
+            entry.files_by_runtime.get("Mono").cloned().unwrap_or_default(),
+            vec!["Mono/PackRat.Mono.dll".to_string()]
+        );
         assert!(entry
             .available_runtimes
             .iter()
@@ -9876,6 +10072,7 @@ mod tests {
 
         service
             .install_storage_entries(
+                &source_dir,
                 &source_dir,
                 &dest_dir,
                 false,

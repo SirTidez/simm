@@ -190,4 +190,7 @@ jobs:
           }
 
           git commit -m "chore(release): update beta updater manifest for ${{ steps.version.outputs.version }}"
-          git push origin HEAD:${{ github.event.repository.default_branch }}
+          $branch = '${{ github.event.repository.default_branch }}'
+          git fetch origin $branch
+          git pull --rebase origin $branch
+          git push origin HEAD:$branch

@@ -119,6 +119,16 @@ function makeThunderstorePackage(
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function renderLibraryOverlay({
   libraryTab,
   navigationState,
@@ -412,6 +422,162 @@ describe('ModLibraryOverlay', () => {
     await waitFor(() => {
       expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(1);
       expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledWith('schedule1', 1629);
+    });
+  });
+
+  it('ignores stale Nexus file responses after search results are pruned', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
+    const deferred = createDeferred<Array<{
+      file_id: number;
+      name: string;
+      file_name: string;
+      version: string;
+      mod_version: string;
+      category_name: string;
+      is_primary: boolean;
+      uploaded_timestamp: number;
+    }>>();
+    apiMocks.searchNexusMods.mockImplementation(async (_gameId, query) => {
+      if (String(query).toLowerCase().includes('warehouse')) {
+        return {
+          mods: [
+            {
+              mod_id: 1701,
+              name: 'Warehouse Helper',
+              summary: 'Organize shelves.',
+              description: 'Organize shelves.',
+              picture_url: 'https://example.com/warehouse-helper.png',
+              version: '2.0.0',
+              author: 'AnotherAuthor',
+              uploaded_time: '2025-02-01',
+              updated_time: '2025-02-02',
+              category_id: 1,
+              contains_adult_content: false,
+              status: 'published',
+              endorsement_count: 10,
+              unique_downloads: 55,
+              mod_downloads: 120,
+            },
+          ],
+        };
+      }
+
+      return {
+        mods: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.0',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+      };
+    });
+    apiMocks.getNexusModsModFiles
+      .mockImplementationOnce(() => deferred.promise)
+      .mockResolvedValueOnce([
+        {
+          file_id: 401,
+          name: 'Pack Rat Mono 1.0.0',
+          file_name: 'PackRat-mono-1.0.0.zip',
+          version: '1.0.0',
+          mod_version: '1.0.0',
+          category_name: 'MAIN',
+          is_primary: true,
+          uploaded_timestamp: 1000,
+        },
+      ]);
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: 'discover',
+        showDiscovery: true,
+        showNexusModsResults: true,
+        nexusModsSearchResults: [
+          {
+            mod_id: 1629,
+            name: 'Pack Rat',
+            summary: 'Carry more stuff.',
+            description: 'Carry more stuff.',
+            picture_url: 'https://example.com/packrat.png',
+            version: '1.0.0',
+            author: 'ExampleAuthor',
+            uploaded_time: '2025-01-01',
+            updated_time: '2025-01-02',
+            category_id: 1,
+            contains_adult_content: false,
+            status: 'published',
+            endorsement_count: 42,
+            unique_downloads: 100,
+            mod_downloads: 250,
+          },
+        ],
+        activeModView: {
+          id: '1629',
+          name: 'Pack Rat',
+          source: 'nexusmods',
+          author: 'ExampleAuthor',
+          summary: 'Carry more stuff.',
+          iconUrl: 'https://example.com/packrat.png',
+          installedVersion: '1.0.0',
+          kind: 'nexusmods',
+        },
+      },
+    });
+
+    expect(await screen.findByText('Nexus Results')).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(screen.getByPlaceholderText('Search or browse Nexus Mods...'), {
+      target: { value: 'Warehouse' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    expect(await screen.findByText('Warehouse Helper')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(1);
+    });
+
+    deferred.resolve([
+      {
+        file_id: 401,
+        name: 'Pack Rat Mono 1.0.0',
+        file_name: 'PackRat-mono-1.0.0.zip',
+        version: '1.0.0',
+        mod_version: '1.0.0',
+        category_name: 'MAIN',
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+    ]);
+
+    fireEvent.change(screen.getByPlaceholderText('Search or browse Nexus Mods...'), {
+      target: { value: 'Pack Rat' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: /Pack Rat/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenLastCalledWith(
+        'schedule1',
+        1629,
+      );
     });
   });
 
@@ -1605,7 +1771,104 @@ describe('ModLibraryOverlay', () => {
     const button = await screen.findByRole('button', { name: 'Install to more…' });
     expect(button).toBeDisabled();
     expect(button.getAttribute('title')).toBe(
-      'No compatible branches found. Add a matching environment to install this runtime.',
+      'This version is already installed in every compatible environment (1).',
+    );
+  });
+
+  it('describes runtime-incompatible install targets in the button tooltip', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: 'env-mono',
+        name: 'Alternate',
+        path: 'C:/envs/alternate',
+        branch: 'alternate',
+        runtime: 'Mono',
+        modCount: 1,
+      },
+    ]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: 'il2cpp-only-storage',
+          displayName: 'IL2CPP Only Mod',
+          source: 'nexusmods',
+          sourceId: '5678',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'il2cpp-only-storage' },
+          installedInByRuntime: { IL2CPP: [] },
+          filesByRuntime: { IL2CPP: ['IL2CPPOnlyMod.dll'] },
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: 'library' });
+
+    const button = await screen.findByRole('button', { name: 'Install…' });
+    expect(button).toBeDisabled();
+    expect(button.getAttribute('title')).toContain(
+      'does not support the selected runtime',
+    );
+  });
+
+  it('describes sibling-version-blocked install targets distinctly from runtime mismatch', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: 'env-mono',
+        name: 'Alternate',
+        path: 'C:/envs/alternate',
+        branch: 'alternate',
+        runtime: 'Mono',
+        modCount: 1,
+      },
+    ]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: 'mono-v1-storage',
+          displayName: 'Sibling Block Mod',
+          source: 'nexusmods',
+          sourceId: '5678',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          installedIn: ['env-mono'],
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'mono-v1-storage' },
+          installedInByRuntime: { Mono: ['env-mono'] },
+          filesByRuntime: { Mono: ['SiblingBlockMod.dll'] },
+        }),
+        makeEntry({
+          storageId: 'mono-v2-storage',
+          displayName: 'Sibling Block Mod',
+          source: 'nexusmods',
+          sourceId: '5678',
+          sourceVersion: '1.1.0',
+          installedVersion: '1.1.0',
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'mono-v2-storage' },
+          installedInByRuntime: { Mono: [] },
+          filesByRuntime: { Mono: ['SiblingBlockMod.dll'] },
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: 'library' });
+
+    await screen.findByText('Sibling Block Mod');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Available versions' }), {
+      target: { value: 'mono-v2-storage' },
+    });
+
+    const button = await screen.findByRole('button', { name: 'Install to more…' });
+    expect(button).toBeDisabled();
+    await waitFor(() => {
+      expect(button.getAttribute('title')).toContain(
+        'Another version of this mod is already installed in 1 compatible environment',
+      );
+    });
+    expect(button.getAttribute('title')).not.toContain(
+      'does not support the selected runtime',
     );
   });
 

@@ -4,7 +4,6 @@ import { ApiService } from '../services/api';
 import { logger } from '../services/logger';
 import {
   applyThemeSelection,
-  persistThemeSelection,
   resolveThemeSelection,
 } from '../utils/theme';
 
@@ -46,20 +45,33 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
     theme: Settings['theme'] | undefined,
     availableCustomThemes: CustomThemeDefinition[],
   ) => {
-    const resolvedTheme = applyThemeSelection(theme ?? 'modern-blue', availableCustomThemes);
-    persistThemeSelection(resolvedTheme);
-    return resolvedTheme;
+    return applyThemeSelection(theme ?? 'modern-blue', availableCustomThemes);
   }, []);
 
   const refreshSettings = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const [data, nextCustomThemes, nextThemesDirectory] = await Promise.all([
+      const [settingsResult, themesResult, directoryResult] = await Promise.allSettled([
         ApiService.getSettings(),
         ApiService.getCustomThemes(),
         ApiService.getThemesDirectory(),
       ]);
+      if (settingsResult.status === 'rejected') {
+        throw settingsResult.reason;
+      }
+
+      const data = settingsResult.value;
+      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : [];
+      const nextThemesDirectory = directoryResult.status === 'fulfilled' ? directoryResult.value : null;
+
+      if (themesResult.status === 'rejected') {
+        logger.warn('Failed to refresh custom themes during settings load', themesResult.reason);
+      }
+      if (directoryResult.status === 'rejected') {
+        logger.warn('Failed to resolve themes directory during settings load', directoryResult.reason);
+      }
+
       const sanitizedSettings = sanitizeThemeSettings(data, nextCustomThemes);
       const resolvedTheme = applyTheme(sanitizedSettings.theme, nextCustomThemes);
 
@@ -80,10 +92,19 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
   const refreshThemes = useCallback(async () => {
     try {
       setError(null);
-      const [nextCustomThemes, nextThemesDirectory] = await Promise.all([
+      const [themesResult, directoryResult] = await Promise.allSettled([
         ApiService.getCustomThemes(),
         ApiService.getThemesDirectory(),
       ]);
+      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : [];
+      const nextThemesDirectory = directoryResult.status === 'fulfilled' ? directoryResult.value : null;
+
+      if (themesResult.status === 'rejected') {
+        logger.warn('Failed to refresh custom themes', themesResult.reason);
+      }
+      if (directoryResult.status === 'rejected') {
+        logger.warn('Failed to resolve themes directory', directoryResult.reason);
+      }
 
       setCustomThemes(nextCustomThemes);
       setThemesDirectory(nextThemesDirectory);
@@ -96,7 +117,6 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
     } catch (err) {
       logger.error('Failed to refresh custom themes', err);
       setError(err instanceof Error ? err.message : 'Failed to load custom themes');
-      throw err;
     }
   }, [applyTheme, settings]);
 
@@ -120,17 +140,26 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       }
 
       await ApiService.saveSettings(normalizedUpdates);
+      if (settings === null) {
+        const next = await ApiService.getSettings();
+        const sanitized = sanitizeThemeSettings(next, customThemes);
+        const resolvedTheme = normalizedUpdates.theme
+          ? applyTheme(sanitized.theme, customThemes)
+          : sanitized.theme;
+        setSettings({ ...sanitized, theme: resolvedTheme });
+        return;
+      }
       // Update local state immediately without full refresh to avoid loading state
-      const mergedSettings = {
-        ...(settings || {}),
+      const mergedSettings: Settings = {
+        ...settings,
         ...normalizedUpdates,
         appUpdate: normalizedUpdates.appUpdate
           ? {
-              ...(settings?.appUpdate ?? {}),
+              ...(settings.appUpdate ?? {}),
               ...normalizedUpdates.appUpdate,
             }
-          : settings?.appUpdate,
-      } as Settings;
+          : settings.appUpdate,
+      };
       const newSettings = sanitizeThemeSettings(
         mergedSettings,
         customThemes,
@@ -139,7 +168,7 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
         ? applyTheme(newSettings.theme, customThemes)
         : newSettings.theme;
       setSettings({ ...newSettings, theme: resolvedTheme });
-      
+
     } catch (err) {
       logger.error('Failed to persist settings update', err);
       throw err;
@@ -178,4 +207,3 @@ export function useSettingsStore() {
   }
   return context;
 }
-

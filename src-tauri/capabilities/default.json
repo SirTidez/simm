@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window",
+  "description": "Default capability for the main window. Updater uses HTTPS manifest URLs and pubkey signature verification (see tauri.conf.json plugins.updater); install UX is user-driven via the in-app update flow.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -84,4 +84,3 @@
     }
   ]
 }
-

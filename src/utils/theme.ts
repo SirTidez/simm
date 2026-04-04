@@ -20,6 +20,7 @@ export type BuiltInTheme = 'light' | 'dark' | 'modern-blue';
 export type ThemeId = string;
 
 export const THEME_STORAGE_KEY = 'simm-theme';
+export const THEME_BASE_STORAGE_KEY = 'simm-theme-base';
 
 export const isBuiltInTheme = (theme: string | undefined | null): theme is BuiltInTheme => {
   return theme === 'light' || theme === 'dark' || theme === 'modern-blue';
@@ -50,7 +51,16 @@ export const normalizeThemeSelection = (theme: Settings['theme'] | string | unde
     return 'modern-blue';
   }
 
-  return isBuiltInTheme(trimmed) ? trimmed : trimmed;
+  const normalized = trimmed.toLowerCase();
+  if (normalized === 'light' || normalized === 'dark' || normalized === 'modern-blue') {
+    return normalized;
+  }
+
+  if (normalized === 'custom') {
+    return 'modern-blue';
+  }
+
+  return trimmed;
 };
 
 export const resolveThemeSelection = (
@@ -91,10 +101,27 @@ export const persistThemeSelection = (theme: ThemeId) => {
   }
 };
 
+export const persistThemeBaseSelection = (theme: BuiltInTheme) => {
+  try {
+    window.localStorage.setItem(THEME_BASE_STORAGE_KEY, theme);
+  } catch {
+    // Ignore storage failures during theme persistence.
+  }
+};
+
 export const readCachedThemeSelection = (): ThemeId => {
   try {
     const cachedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
     return normalizeThemeSelection(cachedTheme ?? undefined);
+  } catch {
+    return 'modern-blue';
+  }
+};
+
+export const readCachedThemeBaseSelection = (): BuiltInTheme => {
+  try {
+    const cachedTheme = window.localStorage.getItem(THEME_BASE_STORAGE_KEY);
+    return normalizeBuiltInTheme(cachedTheme ?? undefined);
   } catch {
     return 'modern-blue';
   }
@@ -288,6 +315,9 @@ export const applyThemeSelection = (
   const builtInTheme = customTheme
     ? normalizeBuiltInTheme(customTheme.baseTheme)
     : normalizeBuiltInTheme(resolvedThemeId);
+
+  persistThemeSelection(resolvedThemeId);
+  persistThemeBaseSelection(builtInTheme);
 
   const root = document.documentElement;
   clearCustomThemeVariables(root);

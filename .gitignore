@@ -25,3 +25,5 @@ TEST_PLAN.md
 .serena/project.yml
 /test-results
 /.codex_tmp
+/.serena
+/.vscode

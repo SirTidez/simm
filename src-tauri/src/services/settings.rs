@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -345,16 +345,48 @@ impl SettingsService {
         let mut reader = fs::read_dir(&dir)
             .await
             .with_context(|| format!("Failed to read themes directory {}", dir.display()))?;
-        let mut themes = Vec::new();
+        let mut theme_paths = Vec::new();
 
         while let Some(entry) = reader
             .next_entry()
             .await
             .context("Failed to iterate theme directory entries")?
         {
-            let path = entry.path();
+            theme_paths.push(entry.path());
+        }
+
+        theme_paths.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
+
+        let mut themes = Vec::new();
+        let mut seen_theme_ids = HashSet::new();
+
+        for path in theme_paths {
             match Self::parse_custom_theme_file(&path).await {
-                Ok(Some(theme)) => themes.push(theme),
+                Ok(Some(theme)) => {
+                    let normalized_id = theme.id.to_ascii_lowercase();
+                    if matches!(
+                        normalized_id.as_str(),
+                        "light" | "dark" | "modern-blue" | "custom"
+                    ) {
+                        log::warn!(
+                            "Skipping custom theme {} because id '{}' is reserved",
+                            path.display(),
+                            theme.id
+                        );
+                        continue;
+                    }
+
+                    if !seen_theme_ids.insert(normalized_id.clone()) {
+                        log::warn!(
+                            "Skipping custom theme {} because sanitized id '{}' already exists",
+                            path.display(),
+                            theme.id
+                        );
+                        continue;
+                    }
+
+                    themes.push(theme);
+                }
                 Ok(None) => {}
                 Err(err) => log::warn!("Skipping invalid custom theme {}: {}", path.display(), err),
             }
@@ -913,6 +945,59 @@ mod tests {
                 .get("--bg-pattern")
                 .is_some_and(|value| value.contains("transparent 36%"))
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_custom_themes_skips_reserved_and_duplicate_ids() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool)?;
+        let themes_dir = service.get_themes_directory()?;
+
+        std::fs::write(
+            themes_dir.join("alpha!.json"),
+            r##"{
+  "name": "Alpha Scheme",
+  "baseTheme": "light",
+  "variables": {
+    "--app-bg-color": "#111111"
+  }
+}"##,
+        )?;
+        std::fs::write(
+            themes_dir.join("alpha.json"),
+            r##"{
+  "name": "Alpha Scheme Duplicate",
+  "baseTheme": "dark",
+  "variables": {
+    "--app-bg-color": "#222222"
+  }
+}"##,
+        )?;
+        std::fs::write(
+            themes_dir.join("Dark.json"),
+            r##"{
+  "name": "Reserved Dark",
+  "baseTheme": "light",
+  "variables": {
+    "--app-bg-color": "#333333"
+  }
+}"##,
+        )?;
+
+        let themes = service.list_custom_themes().await?;
+
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].id, "alpha");
+        assert_eq!(themes[0].base_theme, "light");
 
         Ok(())
     }

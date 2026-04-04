@@ -69,6 +69,11 @@ async fn upload_mod_impl(
 
     let mods_service = ModsService::new(db.clone());
 
+    let upload_kind = detect_upload_kind(&file_path);
+    if matches!(upload_kind, UploadKind::Unsupported) {
+        return Err("Only .zip, .rar, and .dll files are supported".to_string());
+    }
+
     let (metadata, security_report) = match prepare_security_scan(
         db,
         &file_path,
@@ -81,7 +86,7 @@ async fn upload_mod_impl(
         SecurityGateResult::EarlyResponse(response) => return Ok(response),
     };
 
-    let response = match detect_upload_kind(&file_path) {
+    let response = match upload_kind {
         UploadKind::Archive => mods_service
             .install_zip_mod(
                 &env.output_dir,
@@ -97,9 +102,7 @@ async fn upload_mod_impl(
             .install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
             .await
             .map_err(|e| e.to_string())?,
-        UploadKind::Unsupported => {
-            return Err("Only .zip, .rar, and .dll files are supported".to_string())
-        }
+        UploadKind::Unsupported => unreachable!("unsupported uploads should return before scanning"),
     };
 
     Ok(finalize_security_scan_response(
@@ -679,8 +682,14 @@ pub async fn check_mod_installed(
     }
 
     let mods_service = ModsService::new(db.inner().clone());
+    let requested_runtime = Some(env.runtime.clone());
     match mods_service
-        .find_existing_mod_installation(&env.output_dir, &source_id, &source_version, None)
+        .find_existing_mod_installation(
+            &env.output_dir,
+            &source_id,
+            &source_version,
+            requested_runtime,
+        )
         .await
     {
         Ok(Some(mod_storage_id)) => Ok(serde_json::json!({

@@ -140,7 +140,7 @@ export function interceptConsole() {
     sendToBackend('debug', message);
   };
 
-  const readyMessage = '[Logger] Console interception enabled - warnings and errors will be logged to file';
+  const readyMessage = '[Logger] Console interception enabled - debug, warnings, and errors will be logged to file';
   originalConsole.info(readyMessage);
   sendToBackend('warn', readyMessage);
 }

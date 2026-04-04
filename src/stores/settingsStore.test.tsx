@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 import { SettingsStoreProvider, useSettingsStore } from './settingsStore';
 import type { CustomThemeDefinition, Settings } from '../types';
-import { THEME_STORAGE_KEY } from '../utils/theme';
+import { THEME_BASE_STORAGE_KEY, THEME_STORAGE_KEY } from '../utils/theme';
 
 const apiMocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
@@ -79,6 +79,7 @@ describe('SettingsStore', () => {
     document.documentElement.style.cssText = '';
     document.body.style.cssText = '';
     window.localStorage.removeItem(THEME_STORAGE_KEY);
+    window.localStorage.removeItem(THEME_BASE_STORAGE_KEY);
     apiMocks.getCustomThemes.mockResolvedValue([]);
     apiMocks.getThemesDirectory.mockResolvedValue('C:/SIMM/themes');
   });
@@ -107,6 +108,7 @@ describe('SettingsStore', () => {
     expect(document.documentElement.style.getPropertyValue('--card-bg-color')).toBe('#ffffff');
     expect(document.documentElement.style.getPropertyValue('--primary-btn-color')).toBe('#3f74c9');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('light');
   });
 
   it('updates settings and theme without full refresh', async () => {
@@ -133,6 +135,7 @@ describe('SettingsStore', () => {
     expect(apiMocks.saveSettings).toHaveBeenCalledWith({ theme: 'dark' });
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('dark');
   });
 
   it('merges nested app update settings without dropping existing fields', async () => {
@@ -263,6 +266,7 @@ describe('SettingsStore', () => {
     expect(document.documentElement.style.getPropertyValue('--app-bg-color')).toBe('#1b120f');
     expect(document.documentElement.style.getPropertyValue('--primary-btn-color')).toBe('#d96b3a');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('sunset');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('dark');
   });
 
   it('falls back legacy custom themes to modern blue', async () => {
@@ -283,5 +287,29 @@ describe('SettingsStore', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('modern-blue');
     expect(document.documentElement.style.getPropertyValue('--app-bg-color')).toBe('#0f141d');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('modern-blue');
+  });
+
+  it('loads settings even when optional theme lookups fail', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce(baseSettings);
+    apiMocks.getCustomThemes.mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory.mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <Consumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('error').textContent).toBe('');
+    expect(screen.getByTestId('theme').textContent).toBe('light');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('light');
+    expect(screen.queryByText('theme failure')).toBeNull();
   });
 });

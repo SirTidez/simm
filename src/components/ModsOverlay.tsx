@@ -1266,57 +1266,6 @@ export function ModsOverlay({
     });
   };
 
-  const extractModNameFromFileName = (fileName: string): string => {
-    // Remove file extensions
-    let modName = fileName.replace(/\.(dll|zip|rar)$/i, '');
-
-    // Remove common version patterns (e.g., "ModName-1.2.3", "ModName_v1.0", "ModName 2.0")
-    modName = modName.replace(/[-_ ]?v?\d+\.\d+(\.\d+)?([-_ ].*)?$/i, '');
-    modName = modName.replace(/[-_ ]?\d+\.\d+\.\d+.*$/i, '');
-
-    // Remove common suffixes like "-IL2CPP", "-Mono", etc.
-    modName = modName.replace(/[-_ ]?(il2cpp|mono|beta|alpha|release).*$/i, '');
-
-    // Remove numeric IDs at the start (e.g., "12345-ModName")
-    modName = modName.replace(/^\d+-/, '');
-
-    // Trim and clean up
-    modName = modName.trim().replace(/[-_]+/g, ' ').trim();
-
-    return modName || fileName.replace(/\.(dll|zip|rar)$/i, '');
-  };
-
-  const fuzzyMatchModName = (searchName: string, modName: string): number => {
-    // Simple fuzzy matching score (0-1)
-    const searchLower = searchName.toLowerCase().trim();
-    const modLower = modName.toLowerCase().trim();
-
-    // Exact match
-    if (modLower === searchLower) return 1.0;
-
-    // Contains match
-    if (modLower.includes(searchLower) || searchLower.includes(modLower)) {
-      return 0.8;
-    }
-
-    // Word-based matching
-    const searchWords = searchLower.split(/\s+/);
-    const modWords = modLower.split(/\s+/);
-    let matchedWords = 0;
-
-    for (const searchWord of searchWords) {
-      if (modWords.some(modWord => modWord.includes(searchWord) || searchWord.includes(modWord))) {
-        matchedWords++;
-      }
-    }
-
-    if (matchedWords > 0) {
-      return matchedWords / Math.max(searchWords.length, modWords.length) * 0.6;
-    }
-
-    return 0;
-  };
-
   const detectModSource = async (fileName: string): Promise<ManualUploadSourceInfo> => {
     const fileNameLower = fileName.toLowerCase();
 
@@ -1352,46 +1301,6 @@ export function ModsOverlay({
         };
       }
       return { source: 'nexusmods' };
-    }
-
-    // If not clearly Thunderstore or Nexus, try searching Nexus Mods
-    // Extract a clean mod name from the filename
-    const cleanModName = extractModNameFromFileName(fileName);
-
-    // Only search if we have a reasonable mod name (at least 3 characters)
-    if (cleanModName.length >= 3) {
-      try {
-        // Search Nexus Mods for this mod name (search works without login)
-        const searchResults = await ApiService.searchNexusMods('schedule1', cleanModName);
-
-        if (searchResults.mods && searchResults.mods.length > 0) {
-          // Find the best matching mod using fuzzy matching
-          let bestMatch: NexusMod | null = null;
-          let bestScore = 0;
-
-          for (const mod of searchResults.mods) {
-            const score = fuzzyMatchModName(cleanModName, mod.name);
-            if (score > bestScore && score >= 0.6) { // Require at least 60% match
-              bestScore = score;
-              bestMatch = mod;
-            }
-          }
-
-          if (bestMatch) {
-            return {
-              source: 'nexusmods',
-              sourceId: bestMatch.mod_id.toString(),
-              sourceUrl: `https://www.nexusmods.com/schedule1/mods/${bestMatch.mod_id}`,
-              modName: bestMatch.name,
-              author: bestMatch.author,
-              sourceVersion: bestMatch.version,
-            };
-          }
-        }
-      } catch (err) {
-        // If search fails, silently fall through to unknown
-        console.warn('Failed to search Nexus Mods for mod:', cleanModName, err);
-      }
     }
 
     // Default to unknown for manual uploads
@@ -1473,7 +1382,7 @@ export function ModsOverlay({
         variant: results.some((result) => result.status !== 'success') ? 'mixed' : 'success',
       });
       showToast(summary, 9000);
-      if (results.some((result) => result.status !== 'success')) {
+      if (successCount === 0 && results.some((result) => result.status === 'failed')) {
         setError(summary);
       } else {
         setError(null);
@@ -1732,8 +1641,8 @@ export function ModsOverlay({
     void completeUploadItem(
       {
         fileName,
-        status: 'success',
-        message: 'Installed with runtime mismatch warning dismissed.',
+        status: 'skipped',
+        message: 'Install canceled after runtime mismatch warning.',
       },
       remainingQueue,
     );

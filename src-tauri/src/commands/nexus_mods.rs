@@ -37,6 +37,10 @@ fn nexus_warn(message: impl Into<String>) -> String {
     message
 }
 
+async fn cleanup_temp_archive(path: &std::path::Path) {
+    let _ = tokio::fs::remove_file(path).await;
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingNexusManualDownload {
@@ -1268,6 +1272,41 @@ async fn complete_pending_nxm_download(
             let environment_id = install_target
                 .clone()
                 .ok_or_else(|| nexus_error("Pending Nexus install is missing an environment id"))?;
+            let env_service = EnvironmentService::new(db.clone())
+                .map_err(|e| nexus_error(format!("Failed to create environment service: {}", e)))?;
+            let environment = env_service
+                .get_environment(&environment_id)
+                .await
+                .map_err(|e| {
+                    nexus_error(format!(
+                        "Failed to load environment {}: {}",
+                        environment_id, e
+                    ))
+                })?
+                .ok_or_else(|| nexus_warn("Environment not found for manual Nexus install"))?;
+
+            if runtime
+                .as_ref()
+                .is_some_and(|requested| requested != &environment.runtime)
+            {
+                return Ok(json!({
+                    "success": true,
+                    "kind": "install",
+                    "environmentId": environment_id,
+                    "storageId": existing_mod_id,
+                    "fromStorage": true,
+                    "result": { "results": [] },
+                    "installedEnvironmentIds": [],
+                    "installedEnvironmentNames": [],
+                    "requestedKind": pending.map(|value| value.kind.clone()),
+                    "usedFallback": false,
+                    "downloadedToLibraryOnly": true,
+                    "skippedEnvironmentIds": [environment.id.clone()],
+                    "skippedEnvironmentNames": [environment.name.clone()],
+                    "skipReason": "no-compatible-environments",
+                }));
+            }
+
             let install_result = mods_service
                 .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
                 .await
@@ -1383,7 +1422,7 @@ async fn complete_pending_nxm_download(
         ),
     );
 
-    let store_result = mods_service
+    let store_result = match mods_service
         .store_mod_archive(
             &archive_path.to_string_lossy(),
             original_filename,
@@ -1397,13 +1436,17 @@ async fn complete_pending_nxm_download(
             None,
         )
         .await
-        .map_err(|e| {
-            nexus_error(format!(
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
                 "Failed to store manually downloaded Nexus archive: {}",
                 e
-            ))
-        })?;
-    let _ = tokio::fs::remove_file(&archive_path).await;
+            )));
+        }
+    };
+    cleanup_temp_archive(&archive_path).await;
 
     if install_target.is_none() {
         return Ok(json!({
@@ -2343,7 +2386,7 @@ pub async fn install_nexus_mods_mod(
         }
     };
 
-    let store_result = mods_service
+    let store_result = match mods_service
         .store_mod_archive(
             &zip_path_str,
             original_filename,
@@ -2352,30 +2395,40 @@ pub async fn install_nexus_mods_mod(
             None,
         )
         .await
-        .map_err(|e| {
-            nexus_error(format!(
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
                 "Failed to store mod {} file {} before install: {}",
                 mod_id, file_id, e
-            ))
-        })?;
+            )));
+        }
+    };
 
-    let storage_id = store_result
-        .get("storageId")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| nexus_error("Stored Nexus archive did not return a storage ID"))?
-        .to_string();
+    let storage_id = match store_result.get("storageId").and_then(|value| value.as_str()) {
+        Some(value) => value.to_string(),
+        None => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error("Stored Nexus archive did not return a storage ID"));
+        }
+    };
 
-    let install_result = mods_service
+    let install_result = match mods_service
         .install_storage_mod_to_envs(&storage_id, vec![environment_id.clone()])
         .await
-        .map_err(|e| {
-            nexus_error(format!(
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
                 "Failed to install stored Nexus archive {} into environment {}: {}",
                 storage_id, environment_id, e
-            ))
-        })?;
+            )));
+        }
+    };
 
-    let _ = tokio::fs::remove_file(&archive_path).await;
+    cleanup_temp_archive(&archive_path).await;
 
     let installed_files = install_result
         .get("results")

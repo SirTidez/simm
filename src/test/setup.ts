@@ -1,4 +1,4 @@
-import { expect } from 'vitest';
+import { beforeEach, expect } from 'vitest';
 import * as matchers from '@testing-library/jest-dom/matchers';
 
 declare const process: {
@@ -12,6 +12,10 @@ expect.extend(matchers);
 (globalThis as any).__APP_VERSION__ = 'test';
 
 const storageState = new Map<string, string>();
+beforeEach(() => {
+  storageState.clear();
+});
+
 const memoryStorage: Storage = {
   get length() {
     return storageState.size;
