@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { EnvironmentList } from './EnvironmentList';
 import type { Environment } from '../types';
 
@@ -103,10 +103,12 @@ const secondCompletedEnv: Environment = {
 describe('EnvironmentList', () => {
   const unlistenFns: Array<ReturnType<typeof vi.fn>> = [];
   let modsChangedHandler: ((data: { environmentId: string }) => void) | null = null;
+  let completeHandler: ((data: { downloadId: string; manifestId?: string }) => Promise<void> | void) | null = null;
 
   beforeEach(() => {
     unlistenFns.length = 0;
     modsChangedHandler = null;
+    completeHandler = null;
 
     const mkUnlisten = () => {
       const fn = vi.fn();
@@ -119,6 +121,8 @@ describe('EnvironmentList', () => {
       eventMocks[key].mockImplementation(async (...args: any[]) => {
         if (key === 'onModsChanged') {
           modsChangedHandler = args[0] as (data: { environmentId: string }) => void;
+        } else if (key === 'onComplete') {
+          completeHandler = args[0] as (data: { downloadId: string; manifestId?: string }) => Promise<void> | void;
         }
         return mkUnlisten();
       });
@@ -179,6 +183,8 @@ describe('EnvironmentList', () => {
         autoCheckUpdates: false,
         updateCheckInterval: 60,
         steamUsername: 'tester',
+        autoInstallMelonLoader: true,
+        melonLoaderVersion: 'v1.0.0',
       },
     });
   });
@@ -230,6 +236,29 @@ describe('EnvironmentList', () => {
       expect(apiMocks.getModLibrary.mock.calls.length).toBeGreaterThan(initialLibraryCalls);
       expect(screen.getByText('1 (1 Update)')).toBeTruthy();
     }, { timeout: 2000 });
+  });
+
+  it('starts MelonLoader auto-install when a completed download finishes and auto-install is enabled', async () => {
+    render(<EnvironmentList />);
+
+    await waitFor(() => {
+      expect(eventMocks.onComplete).toHaveBeenCalled();
+      expect(completeHandler).not.toBeNull();
+    });
+
+    apiMocks.installMelonLoader.mockClear();
+    apiMocks.getMelonLoaderStatus.mockClear();
+    apiMocks.installMelonLoader.mockResolvedValueOnce({ success: true, version: 'v1.0.0' });
+    apiMocks.getMelonLoaderStatus.mockResolvedValueOnce({ installed: true, version: 'v1.0.0' });
+
+    await act(async () => {
+      await completeHandler?.({ downloadId: 'env-1' });
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.installMelonLoader).toHaveBeenCalledWith('env-1', 'v1.0.0');
+      expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledWith('env-1');
+    });
   });
 
   it('cleans up all event listeners on unmount', async () => {

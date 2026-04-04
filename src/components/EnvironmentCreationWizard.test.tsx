@@ -38,14 +38,21 @@ vi.mock('../services/api', () => ({
 }));
 
 describe('EnvironmentCreationWizard', () => {
-  const createEnvironment = vi.fn().mockResolvedValue({
-    id: 'env-1',
-    outputDir: 'D:\\Games\\Custom Install',
-  });
+  const createEnvironment = vi.fn();
+  const startDownload = vi.fn();
 
   beforeEach(() => {
+    createEnvironment.mockReset();
+    createEnvironment.mockResolvedValue({
+      id: 'env-1',
+      outputDir: 'D:\\Games\\Custom Install',
+    });
+    startDownload.mockReset();
+    startDownload.mockResolvedValue(undefined);
+
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({
       createEnvironment,
+      startDownload,
       refreshEnvironments: vi.fn().mockResolvedValue(undefined),
       environments: [],
     });
@@ -172,6 +179,7 @@ describe('EnvironmentCreationWizard', () => {
           outputDir: 'D:\\Games\\Custom Install',
         })
       );
+      expect(startDownload).toHaveBeenCalledWith('env-1');
     });
   });
 

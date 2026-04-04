@@ -74,17 +74,23 @@ pub fn emit_auth_error<R: Runtime>(
 pub fn emit_melonloader_installing<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    environment_id: String,
     message: String,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "melonloader_installing",
-        serde_json::json!({ "downloadId": download_id, "message": message }),
+        serde_json::json!({
+            "downloadId": download_id,
+            "environmentId": environment_id,
+            "message": message
+        }),
     )
 }
 
 pub fn emit_melonloader_installed<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    environment_id: String,
     message: String,
     version: Option<String>,
 ) -> Result<(), tauri::Error> {
@@ -92,6 +98,7 @@ pub fn emit_melonloader_installed<R: Runtime>(
         "melonloader_installed",
         serde_json::json!({
             "downloadId": download_id,
+            "environmentId": environment_id,
             "message": message,
             "version": version
         }),
@@ -101,11 +108,16 @@ pub fn emit_melonloader_installed<R: Runtime>(
 pub fn emit_melonloader_error<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    environment_id: String,
     message: String,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "melonloader_error",
-        serde_json::json!({ "downloadId": download_id, "message": message }),
+        serde_json::json!({
+            "downloadId": download_id,
+            "environmentId": environment_id,
+            "message": message
+        }),
     )
 }
 

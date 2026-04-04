@@ -164,7 +164,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     language: "english",
     theme: "modern-blue",
     melonLoaderVersion: "",
-    autoInstallMelonLoader: false,
+    autoInstallMelonLoader: true,
     enableSecurityScanner: true,
     autoInstallSecurityScanner: true,
     blockCriticalScans: true,
@@ -251,7 +251,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         language: "english", // Always English
         theme: settings.theme || "modern-blue",
         melonLoaderVersion: settings.melonLoaderVersion || "",
-        autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
+        autoInstallMelonLoader: settings.autoInstallMelonLoader !== false,
         enableSecurityScanner: settings.enableSecurityScanner,
         autoInstallSecurityScanner: settings.autoInstallSecurityScanner,
         blockCriticalScans: settings.blockCriticalScans,

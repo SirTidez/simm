@@ -57,7 +57,7 @@ function getParentPath(currentPath: string): string | null {
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
-  const { createEnvironment, refreshEnvironments, environments } = useEnvironmentStore();
+  const { createEnvironment, startDownload, refreshEnvironments, environments } = useEnvironmentStore();
   const { settings, refreshDepotDownloader } = useSettingsStore();
 
   const [wizardMode, setWizardMode] = useState<WizardMode>('landing');
@@ -371,13 +371,14 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     setError(null);
 
     try {
-      await createEnvironment({
+      const environment = await createEnvironment({
         appId: appConfig.appId,
         branch: selectedBranch.name,
         outputDir,
         name: name || undefined,
         description: description.trim() || undefined
       });
+      await startDownload(environment.id);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create game install');

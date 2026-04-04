@@ -444,7 +444,7 @@ impl SettingsService {
             language: "english".to_string(),
             theme: "modern-blue".to_string(),
             melon_loader_version: None,
-            auto_install_melon_loader: Some(false),
+            auto_install_melon_loader: Some(true),
             enable_security_scanner: Some(true),
             auto_install_security_scanner: Some(true),
             block_critical_scans: Some(true),

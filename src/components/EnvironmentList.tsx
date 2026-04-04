@@ -130,6 +130,7 @@ export function EnvironmentList({
   }, [environments]);
   const initialUpdateCheckDoneRef = useRef(false);
   const melonLoaderPrefetchStartedRef = useRef(false);
+  const autoInstallMelonLoaderInFlightRef = useRef<Set<string>>(new Set());
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;
@@ -411,38 +412,53 @@ export function EnvironmentList({
         });
 
         unlistenMelonLoaderInstalling = await onMelonLoaderInstalling((data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+          const env = environments.find(e => e.id === data.environmentId);
           if (env) {
-            console.log(`MelonLoader installing for ${data.downloadId}: ${data.message}`);
+            setInstallingMelonLoader((previous) => new Set(previous).add(data.environmentId));
+            console.log(`MelonLoader installing for ${data.environmentId}: ${data.message}`);
           }
         });
 
         unlistenMelonLoaderInstalled = await onMelonLoaderInstalled(async (data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+          const env = environments.find(e => e.id === data.environmentId);
           if (env) {
-            console.log(`MelonLoader installed for ${data.downloadId}: ${data.message}`);
+            console.log(`MelonLoader installed for ${data.environmentId}: ${data.message}`);
             try {
-              const statusResult = await ApiService.getMelonLoaderStatus(data.downloadId);
+              const statusResult = await ApiService.getMelonLoaderStatus(data.environmentId);
               setMelonLoaderStatus(prev => {
                 const next = new Map(prev);
-                next.set(data.downloadId, { installed: statusResult.installed, version: statusResult.version || data.version });
+                next.set(data.environmentId, { installed: statusResult.installed, version: statusResult.version || data.version });
                 return next;
               });
             } catch (err) {
               console.error('Failed to refresh MelonLoader status:', err);
+            } finally {
+              setInstallingMelonLoader((previous) => {
+                const next = new Set(previous);
+                next.delete(data.environmentId);
+                return next;
+              });
             }
           }
         });
 
         unlistenMelonLoaderError = await onMelonLoaderError((data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+          const env = environments.find(e => e.id === data.environmentId);
           if (env) {
+            setInstallingMelonLoader((previous) => {
+              const next = new Set(previous);
+              next.delete(data.environmentId);
+              return next;
+            });
             showMessage('MelonLoader Install Failed', data.message, 'error');
           }
         });
 
         unlistenComplete = await onCompleteEvent(async ({ downloadId }) => {
           const env = environments.find(e => e.id === downloadId);
+          if (env) {
+            void autoInstallMelonLoader(downloadId);
+          }
           if (env && env.updateAvailable) {
             setTimeout(async () => {
               try {
@@ -1129,6 +1145,68 @@ export function EnvironmentList({
     loadMelonLoaderReleases(env.id);
     setShowMelonLoaderVersionSelector(env.id);
   };
+
+  const autoInstallMelonLoader = useCallback(async (environmentId: string) => {
+    if (settings?.autoInstallMelonLoader === false) {
+      return;
+    }
+
+    if (autoInstallMelonLoaderInFlightRef.current.has(environmentId)) {
+      return;
+    }
+
+    if (melonLoaderStatus.get(environmentId)?.installed) {
+      return;
+    }
+
+    autoInstallMelonLoaderInFlightRef.current.add(environmentId);
+    setInstallingMelonLoader((previous) => new Set(previous).add(environmentId));
+
+    try {
+      let versionTag = settings?.melonLoaderVersion?.trim() || '';
+      if (!versionTag) {
+        const releases = await ApiService.getMelonLoaderReleases(environmentId);
+        versionTag = getLatestStableMelonLoaderTag(releases) ?? releases[0]?.tag_name ?? '';
+      }
+
+      if (!versionTag) {
+        console.warn(
+          `Skipping MelonLoader auto-install for ${environmentId}: no preferred version is configured`,
+        );
+        return;
+      }
+
+      const result = await ApiService.installMelonLoader(environmentId, versionTag);
+      if (!result.success) {
+        throw new Error(result.error || 'MelonLoader installation failed');
+      }
+
+      const statusResult = await ApiService.getMelonLoaderStatus(environmentId);
+      setMelonLoaderStatus((previous) => {
+        const next = new Map(previous);
+        next.set(environmentId, {
+          installed: statusResult.installed,
+          version: statusResult.version || result.version || versionTag,
+        });
+        return next;
+      });
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`Failed to auto-install MelonLoader for ${environmentId}:`, err);
+      showMessage(
+        'MelonLoader Install Failed',
+        `Failed to auto-install MelonLoader: ${errorMessage}`,
+        'error',
+      );
+    } finally {
+      autoInstallMelonLoaderInFlightRef.current.delete(environmentId);
+      setInstallingMelonLoader((previous) => {
+        const next = new Set(previous);
+        next.delete(environmentId);
+        return next;
+      });
+    }
+  }, [melonLoaderStatus, settings?.autoInstallMelonLoader, settings?.melonLoaderVersion, showMessage]);
 
   const closeMelonLoaderVersionSelector = useCallback(() => {
     setShowMelonLoaderVersionSelector(null);
