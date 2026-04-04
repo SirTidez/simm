@@ -73,19 +73,25 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
 
-          $setupSource = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe' | Select-Object -First 1
-          if (-not $setupSource) {
-            throw 'Setup executable not found in target/release/bundle/nsis.'
+          $setupSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe')
+          if ($setupSources.Count -ne 1) {
+            throw "Expected exactly one NSIS setup executable, found $($setupSources.Count)."
           }
+          $setupSource = $setupSources[0]
 
-          $updaterZip = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip' | Select-Object -First 1
-          if (-not $updaterZip) {
-            throw 'Updater archive not found in target/release/bundle/nsis.'
+          $updaterZips = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip')
+          if ($updaterZips.Count -ne 1) {
+            throw "Expected exactly one updater archive, found $($updaterZips.Count)."
           }
+          $updaterZip = $updaterZips[0]
 
-          $signatureSource = Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip.sig' | Select-Object -First 1
-          if (-not $signatureSource) {
-            throw 'Updater archive signature not found in target/release/bundle/nsis.'
+          $signatureSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip.sig')
+          if ($signatureSources.Count -ne 1) {
+            throw "Expected exactly one updater archive signature, found $($signatureSources.Count)."
+          }
+          $signatureSource = $signatureSources[0]
+          if ($signatureSource.BaseName -ne $updaterZip.Name) {
+            throw "Updater signature '$($signatureSource.Name)' does not match updater archive '$($updaterZip.Name)'."
           }
 
           $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
@@ -120,14 +126,16 @@ jobs:
           $tag = '${{ steps.version.outputs.tag }}'
           $assetPath = '${{ steps.asset.outputs.setup_file }}'
           $updaterAssetPath = '${{ steps.asset.outputs.updater_file }}'
+          $signatureAssetPath = '${{ steps.asset.outputs.signature_file }}'
           $assetName = '${{ steps.version.outputs.asset_name }}'
           $updaterAssetName = Split-Path -Path $updaterAssetPath -Leaf
+          $signatureAssetName = Split-Path -Path $signatureAssetPath -Leaf
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" --clobber
+            gh release upload $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" "$signatureAssetPath#$signatureAssetName" --clobber
           } else {
-            gh release create $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
+            gh release create $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" "$signatureAssetPath#$signatureAssetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
           }
 
       - name: Generate stable updater manifest
@@ -149,6 +157,18 @@ jobs:
             -OutputPath 'updater/stable/latest.json' `
             -Notes ($release.body ?? '') `
             -PubDate ($release.publishedAt ?? '')
+
+          $manifest = Get-Content 'updater/stable/latest.json' -Raw | ConvertFrom-Json
+          $platform = $manifest.platforms.'windows-x86_64'
+          if (-not $platform) {
+            throw 'Stable updater manifest is missing the windows-x86_64 platform entry.'
+          }
+          if (-not $platform.url.EndsWith('.nsis.zip')) {
+            throw "Stable updater manifest must point to the updater archive, got '$($platform.url)'."
+          }
+          if (-not $platform.signature) {
+            throw 'Stable updater manifest is missing the updater signature.'
+          }
 
       - name: Upload stable updater manifest to release
         env:

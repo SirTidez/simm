@@ -438,7 +438,7 @@ impl SettingsService {
                 last_resolved_url: None,
                 snoozed_until: None,
                 skipped_version_normalized: None,
-                channel: Some(AppUpdateChannel::Stable),
+                channel: Some(AppUpdateChannel::Beta),
             }),
         };
 

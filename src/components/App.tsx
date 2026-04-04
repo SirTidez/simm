@@ -385,7 +385,7 @@ function AppContent() {
     });
   }, [updateSettings]);
 
-  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'stable';
+  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'beta';
 
   useEffect(() => {
     if (!hasSettings || showStartupSplash) {

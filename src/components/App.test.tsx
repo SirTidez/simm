@@ -276,7 +276,7 @@ describe('App', () => {
     });
     settingsStoreMocks.useSettingsStore.mockReset();
     settingsStoreMocks.useSettingsStore.mockReturnValue({
-      settings: { appUpdate: { channel: 'stable' } },
+      settings: { appUpdate: { channel: 'beta' } },
       updateSettings: vi.fn().mockResolvedValue(undefined),
     });
   });
@@ -416,15 +416,15 @@ describe('App', () => {
             updateAvailable: true,
             notes: 'Update notes',
             pubDate: '2026-04-03T00:00:00Z',
-            channel: 'stable',
-            manifestUrl: 'https://raw.githubusercontent.com/SirTidez/simm/main/updater/stable/latest.json',
+            channel: 'beta',
+            manifestUrl: 'https://raw.githubusercontent.com/SirTidez/simm/main/updater/beta/latest-beta.json',
             checkedAt: '2026-04-03T00:00:00Z',
           });
         case 'install_app_update':
           return Promise.resolve({
             installed: true,
             version: '0.8.1',
-            channel: 'stable',
+            channel: 'beta',
           });
         default:
           return Promise.resolve(false);
@@ -440,7 +440,7 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(dialogMocks.confirm).toHaveBeenCalled();
-      expect(invokeMock).toHaveBeenCalledWith('install_app_update', { channel: 'stable' });
+      expect(invokeMock).toHaveBeenCalledWith('install_app_update', { channel: 'beta' });
       expect(processMocks.relaunch).toHaveBeenCalled();
     });
   });

@@ -172,7 +172,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
-    appUpdateChannel: "stable",
+    appUpdateChannel: "beta",
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
@@ -259,7 +259,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         showSecurityScanBadges: settings.showSecurityScanBadges,
         updateCheckInterval: settings.updateCheckInterval || 60,
         autoCheckUpdates: settings.autoCheckUpdates !== false,
-        appUpdateChannel: settings.appUpdate?.channel ?? "stable",
+        appUpdateChannel: settings.appUpdate?.channel ?? "beta",
         logLevel:
           (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
         modIconCacheLimitMb: normalizeModIconCacheLimitMb(
