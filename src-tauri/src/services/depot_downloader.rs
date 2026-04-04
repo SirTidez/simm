@@ -419,11 +419,12 @@ impl DepotDownloaderService {
         let service_clone = Arc::new(self.clone());
 
         // Handle stdout
+        let mut stdout_task = None;
         if let Some(stdout) = child.stdout.take() {
             let app_stdout = app.clone();
             let download_id_stdout = download_id.clone();
             let service_stdout = service_clone.clone();
-            tokio::spawn(async move {
+            stdout_task = Some(tokio::spawn(async move {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -436,15 +437,16 @@ impl DepotDownloaderService {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Handle stderr
+        let mut stderr_task = None;
         if let Some(stderr) = child.stderr.take() {
             let app_stderr = app.clone();
             let download_id_stderr = download_id.clone();
             let service_stderr = service_clone.clone();
-            tokio::spawn(async move {
+            stderr_task = Some(tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -457,7 +459,7 @@ impl DepotDownloaderService {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Store child process
@@ -471,6 +473,8 @@ impl DepotDownloaderService {
         let download_id_complete = download_id.clone();
         let service_complete = service_clone.clone();
         tokio::spawn(async move {
+            let mut stdout_task = stdout_task;
+            let mut stderr_task = stderr_task;
             // Poll for process completion
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -480,6 +484,15 @@ impl DepotDownloaderService {
                         Ok(Some(status)) => {
                             map.remove(&download_id_complete);
                             drop(map);
+
+                            // Wait for stdout/stderr readers to flush the final
+                            // manifest/progress lines before we emit completion.
+                            if let Some(handle) = stdout_task.take() {
+                                let _ = handle.await;
+                            }
+                            if let Some(handle) = stderr_task.take() {
+                                let _ = handle.await;
+                            }
 
                             if status.success() {
                                 let mut progress_map =

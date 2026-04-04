@@ -288,18 +288,10 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           }
 
           if (!manifestId) {
-            try {
-              const updateResult = await ApiService.checkUpdate(downloadId, true);
-              if (updateResult.remoteManifestId) {
-                await updateEnvironment(downloadId, {
-                  lastManifestId: updateResult.remoteManifestId,
-                  remoteManifestId: updateResult.remoteManifestId,
-                  updateAvailable: false
-                });
-              }
-            } catch (err) {
-              console.warn('Failed to backfill manifest after download completion:', err);
-            }
+            console.info(
+              'Download completed without a manifest ID in the completion event; skipping immediate manifest backfill.',
+              { downloadId },
+            );
           }
         });
 

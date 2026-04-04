@@ -203,7 +203,7 @@ describe('EnvironmentStore', () => {
     );
   });
 
-  it('backfills manifest baseline after completion when manifest event payload is missing', async () => {
+  it('does not trigger an immediate manifest backfill when the completion payload is missing', async () => {
     apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
     apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
       ...baseEnv,
@@ -214,14 +214,6 @@ describe('EnvironmentStore', () => {
     apiMocks.extractGameVersion
       .mockResolvedValueOnce({ version: null })
       .mockResolvedValueOnce({ version: '2.0.0' });
-    apiMocks.checkUpdate.mockResolvedValueOnce({
-      updateAvailable: false,
-      remoteManifestId: '789',
-      branch: 'main',
-      appId: '3164500',
-      checkedAt: 'now',
-    });
-
     render(
       <EnvironmentStoreProvider>
         <Consumer />
@@ -235,14 +227,14 @@ describe('EnvironmentStore', () => {
     completeHandler?.({ downloadId: 'env-1' });
 
     await waitFor(() => {
-      expect(apiMocks.checkUpdate).toHaveBeenCalledWith('env-1', true);
+      expect(screen.getByTestId('progress-count').textContent).toBe('0');
     });
 
+    expect(apiMocks.checkUpdate).not.toHaveBeenCalled();
     expect(apiMocks.updateEnvironment).toHaveBeenCalledWith(
       'env-1',
       expect.objectContaining({
-        lastManifestId: '789',
-        remoteManifestId: '789',
+        status: 'completed',
         updateAvailable: false,
       })
     );

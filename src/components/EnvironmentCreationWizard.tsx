@@ -16,6 +16,22 @@ function deriveBranchName(branch: BranchConfig): string {
   return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
 }
 
+function slugifyEnvironmentName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+function buildDefaultInstallFolder(defaultDownloadDir: string, environmentName: string): string {
+  const baseDir = defaultDownloadDir.trim().replace(/[\\/]+$/, '');
+  const slug = slugifyEnvironmentName(environmentName) || 'environment';
+
+  if (!baseDir) {
+    return slug;
+  }
+
+  const separator = baseDir.includes('/') && !baseDir.includes('\\') ? '/' : '\\';
+  return `${baseDir}${separator}${slug}`;
+}
+
 function getParentPath(currentPath: string): string | null {
   if (!currentPath) return null;
   if (/^[A-Z]:\\?$/i.test(currentPath)) return null;
@@ -48,6 +64,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<BranchConfig | null>(null);
   const [outputDir, setOutputDir] = useState('');
+  const [outputDirIsAutoDerived, setOutputDirIsAutoDerived] = useState(true);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
@@ -140,6 +157,15 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   }, []);
 
   useEffect(() => {
+    if (!outputDirIsAutoDerived || !selectedBranch) {
+      return;
+    }
+
+    const nextDerivedName = name.trim() || deriveBranchName(selectedBranch);
+    setOutputDir(buildDefaultInstallFolder(settings?.defaultDownloadDir || '', nextDerivedName));
+  }, [name, outputDirIsAutoDerived, selectedBranch, settings?.defaultDownloadDir]);
+
+  useEffect(() => {
     const detectSteamOnOpen = async () => {
       try {
         const installations = await ApiService.detectSteamInstallations();
@@ -189,6 +215,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     if (directoryPurpose === 'import') {
       setImportPath(selectedPath);
     } else {
+      setOutputDirIsAutoDerived(false);
       setOutputDir(selectedPath);
     }
     setShowDirectoryPicker(false);
@@ -322,6 +349,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
     const nextDerivedName = deriveBranchName(branch);
     setSelectedBranch(branch);
+    setOutputDirIsAutoDerived(true);
     setName((currentName) => {
       if (currentName && currentName !== previousDerivedNameRef.current) {
         return currentName;
@@ -329,7 +357,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       previousDerivedNameRef.current = nextDerivedName;
       return nextDerivedName;
     });
-    setOutputDir((currentOutput) => currentOutput || settings?.defaultDownloadDir || '');
+    setOutputDir(buildDefaultInstallFolder(settings?.defaultDownloadDir || '', nextDerivedName));
     setWizardMode('download-configure');
   };
 
@@ -859,7 +887,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       id="wizard-download-base-dir"
                       type="text"
                       value={outputDir}
-                      onChange={(e) => setOutputDir(e.target.value)}
+                      onChange={(e) => {
+                        setOutputDirIsAutoDerived(false);
+                        setOutputDir(e.target.value);
+                      }}
                       placeholder="C:\\Games\\Schedule I Beta"
                     />
                     <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('download')}>

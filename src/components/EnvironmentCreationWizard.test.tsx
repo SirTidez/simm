@@ -121,14 +121,35 @@ describe('EnvironmentCreationWizard', () => {
     fireEvent.click(backButtons[0]);
   };
 
-  it('uses the selected folder as the exact install target instead of appending the branch name', async () => {
+  it('derives the install folder from the default download directory and environment name', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
     fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
     clickBranchCard('Beta');
 
     const installFolderInput = await screen.findByLabelText(/install folder/i);
-    expect((installFolderInput as HTMLInputElement).value).toBe('C:\\Games\\Default Install');
+    expect((installFolderInput as HTMLInputElement).value).toBe('C:\\Games\\Default Install\\beta');
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: 'My Custom Install' },
+    });
+
+    await waitFor(() => {
+      expect((screen.getByLabelText(/install folder/i) as HTMLInputElement).value).toBe(
+        'C:\\Games\\Default Install\\my-custom-install'
+      );
+    });
+  });
+
+  it('keeps a manually selected install folder when the user browses for a different location', async () => {
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
+    clickBranchCard('Beta');
+
+    expect((await screen.findByLabelText(/install folder/i) as HTMLInputElement).value).toBe(
+      'C:\\Games\\Default Install\\beta'
+    );
 
     fireEvent.click(screen.getByRole('button', { name: /^browse$/i }));
     await screen.findByRole('heading', { name: /select install folder/i });
