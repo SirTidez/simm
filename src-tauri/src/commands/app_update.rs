@@ -72,17 +72,27 @@ fn manifest_url_for_channel(channel: &AppUpdateChannel) -> &'static str {
     }
 }
 
-fn updater_pubkey() -> Result<String> {
-    let configured = option_env!("SIMM_UPDATER_PUBKEY")
+fn updater_pubkey(app: &AppHandle) -> Result<String> {
+    let build_time = option_env!("SIMM_UPDATER_PUBKEY")
         .unwrap_or(PLACEHOLDER_UPDATER_PUBKEY)
         .trim();
-    if configured.is_empty() || configured == PLACEHOLDER_UPDATER_PUBKEY {
-        return Err(anyhow!(
-            "SIMM updater public key is not configured at build time"
-        ));
+    if !build_time.is_empty() && build_time != PLACEHOLDER_UPDATER_PUBKEY {
+        return Ok(build_time.to_string());
     }
 
-    Ok(configured.to_string())
+    let configured = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|value| value.get("pubkey"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != PLACEHOLDER_UPDATER_PUBKEY);
+
+    configured
+        .map(|value| value.to_string())
+        .ok_or_else(|| anyhow!("SIMM updater public key is not configured"))
 }
 
 async fn build_update(
@@ -91,7 +101,7 @@ async fn build_update(
 ) -> Result<Option<tauri_plugin_updater::Update>> {
     let manifest_url = manifest_url_for_channel(&channel);
     let manifest = Url::parse(manifest_url)?;
-    let pubkey = updater_pubkey()?;
+    let pubkey = updater_pubkey(app)?;
 
     let updater = app
         .updater_builder()

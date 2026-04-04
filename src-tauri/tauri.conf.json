@@ -70,6 +70,7 @@
       }
     },
     "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFEM0Q3NkM3MURGQ0RDMDAKUldRQTNQd2R4M1k5clM3eFVYd1VleVZBdU1WZnN6OVl6Z0swdTJnV2ppS2ZYWW1KSW82NnFNNEEK",
       "windows": {
         "installMode": "passive"
       }
