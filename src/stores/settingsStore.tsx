@@ -96,8 +96,6 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
         ApiService.getCustomThemes(),
         ApiService.getThemesDirectory(),
       ]);
-      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : [];
-      const nextThemesDirectory = directoryResult.status === 'fulfilled' ? directoryResult.value : null;
 
       if (themesResult.status === 'rejected') {
         logger.warn('Failed to refresh custom themes', themesResult.reason);
@@ -105,6 +103,20 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       if (directoryResult.status === 'rejected') {
         logger.warn('Failed to resolve themes directory', directoryResult.reason);
       }
+      if (themesResult.status === 'rejected' || directoryResult.status === 'rejected') {
+        const reasons = [themesResult, directoryResult]
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map((result) =>
+            result.reason instanceof Error ? result.reason.message : String(result.reason),
+          )
+          .filter(Boolean);
+        const message = reasons[0] || 'Failed to load custom themes';
+        setError(message);
+        throw new Error(message);
+      }
+
+      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : [];
+      const nextThemesDirectory = directoryResult.status === 'fulfilled' ? directoryResult.value : null;
 
       setCustomThemes(nextCustomThemes);
       setThemesDirectory(nextThemesDirectory);

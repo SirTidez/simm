@@ -67,6 +67,29 @@ function Consumer() {
   );
 }
 
+function RefreshThemesConsumer() {
+  const { customThemes, themesDirectory, error, refreshThemes } = useSettingsStore();
+  return (
+    <div>
+      <div data-testid="custom-theme-count">{customThemes.length}</div>
+      <div data-testid="themes-directory">{themesDirectory ?? 'none'}</div>
+      <div data-testid="refresh-error">{error ?? ''}</div>
+      <button
+        data-testid="refresh-themes"
+        onClick={async () => {
+          try {
+            await refreshThemes();
+          } catch {
+            // The store exposes failure by rejecting; the test asserts the state.
+          }
+        }}
+      >
+        Refresh Themes
+      </button>
+    </div>
+  );
+}
+
 describe('SettingsStore', () => {
   beforeEach(() => {
     apiMocks.getSettings.mockReset();
@@ -311,5 +334,37 @@ describe('SettingsStore', () => {
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
     expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('light');
     expect(screen.queryByText('theme failure')).toBeNull();
+  });
+
+  it('rejects manual theme refresh failures without clearing the previous theme state', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes
+      .mockResolvedValueOnce([sunsetTheme])
+      .mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory
+      .mockResolvedValueOnce('C:/SIMM/themes')
+      .mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <RefreshThemesConsumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('custom-theme-count').textContent).toBe('1');
+    });
+    expect(screen.getByTestId('themes-directory').textContent).toBe('C:/SIMM/themes');
+
+    fireEvent.click(screen.getByTestId('refresh-themes'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('refresh-error').textContent).toBe('theme failure');
+    });
+
+    expect(screen.getByTestId('custom-theme-count').textContent).toBe('1');
+    expect(screen.getByTestId('themes-directory').textContent).toBe('C:/SIMM/themes');
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('sunset');
   });
 });

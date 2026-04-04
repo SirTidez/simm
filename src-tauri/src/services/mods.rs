@@ -2497,11 +2497,7 @@ impl ModsService {
     }
 
     fn storage_entry_supports_runtime(&self, entry_name: &str, runtime_label: &str) -> bool {
-        let file_name = Path::new(entry_name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(entry_name);
-        let file_runtime = self.detect_mod_runtime_from_name(file_name);
+        let file_runtime = self.detect_mod_runtime_from_name(entry_name);
         file_runtime == "unknown" || file_runtime == runtime_label
     }
 
@@ -10655,6 +10651,77 @@ mod tests {
             .join("Net35")
             .join("ScheduleToolbox.dll");
         assert!(service.path_exists_or_symlink(&installed_path).await);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_storage_mod_to_envs_skips_nested_runtime_folder_for_other_runtime() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let mono_output_dir = temp.path().join("envs").join("env-mono-runtime-split");
+        let mono_env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate-beta".to_string(),
+                mono_output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let storage_base = download_dir.join("Mods").join("storage-runtime-split");
+        let mono_storage_dir = storage_base.join("Mods").join("Mono");
+        let il2cpp_storage_dir = storage_base.join("Mods").join("IL2CPP");
+        fs::create_dir_all(&mono_storage_dir).await?;
+        fs::create_dir_all(&il2cpp_storage_dir).await?;
+        fs::write(mono_storage_dir.join("RuntimeNeutral.dll"), b"mono").await?;
+        fs::write(il2cpp_storage_dir.join("RuntimeNeutral.dll"), b"il2cpp").await?;
+
+        let mut storage_meta = sample_metadata(
+            Some("storage-runtime-split"),
+            Some("Author/RuntimeNeutral"),
+            Some("1.0.0"),
+        );
+        storage_meta.source = Some(ModSource::Thunderstore);
+        storage_meta.mod_name = Some("RuntimeNeutral".to_string());
+        storage_meta.author = Some("Author".to_string());
+        service
+            .save_storage_metadata(&storage_base, &storage_meta)
+            .await?;
+
+        service
+            .install_storage_mod_to_envs("storage-runtime-split", vec![mono_env.id.clone()])
+            .await?;
+
+        let mono_installed_path = mono_output_dir
+            .join("Mods")
+            .join("Mono")
+            .join("RuntimeNeutral.dll");
+        let il2cpp_installed_path = mono_output_dir
+            .join("Mods")
+            .join("IL2CPP")
+            .join("RuntimeNeutral.dll");
+
+        assert!(service.path_exists_or_symlink(&mono_installed_path).await);
+        assert!(!service.path_exists_or_symlink(&il2cpp_installed_path).await);
+        assert_eq!(fs::read(&mono_installed_path).await?, b"mono");
 
         Ok(())
     }
