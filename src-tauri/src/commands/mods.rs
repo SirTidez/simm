@@ -74,17 +74,13 @@ async fn upload_mod_impl(
         return Err("Only .zip, .rar, and .dll files are supported".to_string());
     }
 
-    let (metadata, security_report) = match prepare_security_scan(
-        db,
-        &file_path,
-        metadata,
-        security_override.unwrap_or(false),
-    )
-    .await?
-    {
-        SecurityGateResult::Continue { metadata, report } => (metadata, report),
-        SecurityGateResult::EarlyResponse(response) => return Ok(response),
-    };
+    let (metadata, security_report) =
+        match prepare_security_scan(db, &file_path, metadata, security_override.unwrap_or(false))
+            .await?
+        {
+            SecurityGateResult::Continue { metadata, report } => (metadata, report),
+            SecurityGateResult::EarlyResponse(response) => return Ok(response),
+        };
 
     let response = match upload_kind {
         UploadKind::Archive => mods_service
@@ -102,7 +98,9 @@ async fn upload_mod_impl(
             .install_dll_mod(&env.output_dir, &file_path, &runtime, metadata)
             .await
             .map_err(|e| e.to_string())?,
-        UploadKind::Unsupported => unreachable!("unsupported uploads should return before scanning"),
+        UploadKind::Unsupported => {
+            unreachable!("unsupported uploads should return before scanning")
+        }
     };
 
     Ok(finalize_security_scan_response(
@@ -487,11 +485,7 @@ pub async fn get_local_mod_ownership_candidates(
 
     let mods_service = ModsService::new(db.inner().clone());
     mods_service
-        .get_local_mod_ownership_candidates(
-            &env.output_dir,
-            &file_name,
-            linked_name.as_deref(),
-        )
+        .get_local_mod_ownership_candidates(&env.output_dir, &file_name, linked_name.as_deref())
         .await
         .map_err(|e| e.to_string())
 }

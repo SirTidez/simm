@@ -885,7 +885,7 @@ fn derive_account_summary(
     })
 }
 
-fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
+pub(crate) fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
     let s = game_id.map(|s| s.trim()).unwrap_or("").to_string();
     if s.is_empty() {
         SUPPORTED_NEXUS_GAME_ID.to_string()
@@ -1483,7 +1483,10 @@ async fn complete_pending_nxm_download(
         })?
         .ok_or_else(|| nexus_warn("Environment not found for manual Nexus install"))?;
 
-    if runtime.as_ref().is_some_and(|requested| requested != &environment.runtime) {
+    if runtime
+        .as_ref()
+        .is_some_and(|requested| requested != &environment.runtime)
+    {
         return Ok(json!({
             "success": true,
             "kind": "install",
@@ -2406,11 +2409,16 @@ pub async fn install_nexus_mods_mod(
         }
     };
 
-    let storage_id = match store_result.get("storageId").and_then(|value| value.as_str()) {
+    let storage_id = match store_result
+        .get("storageId")
+        .and_then(|value| value.as_str())
+    {
         Some(value) => value.to_string(),
         None => {
             cleanup_temp_archive(&archive_path).await;
-            return Err(nexus_error("Stored Nexus archive did not return a storage ID"));
+            return Err(nexus_error(
+                "Stored Nexus archive did not return a storage ID",
+            ));
         }
     };
 
@@ -2448,7 +2456,10 @@ pub async fn install_nexus_mods_mod(
         .get("alreadyStored")
         .and_then(|value| value.as_bool())
     {
-        response.insert("alreadyStored".to_string(), serde_json::json!(already_stored));
+        response.insert(
+            "alreadyStored".to_string(),
+            serde_json::json!(already_stored),
+        );
         response.insert("fromStorage".to_string(), serde_json::json!(already_stored));
     }
 

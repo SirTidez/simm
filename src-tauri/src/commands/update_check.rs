@@ -1,3 +1,4 @@
+use crate::commands::nexus_mods::normalize_nexus_game_id;
 use crate::events;
 use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
@@ -317,6 +318,7 @@ pub async fn check_all_updates(
         .await
         .map_err(|e| e.to_string())?;
     let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
+    let nexus_game_id = normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref());
     let now = chrono::Utc::now();
     let envs_to_check: Vec<_> = if manual {
         envs.clone()
@@ -430,6 +432,7 @@ pub async fn check_all_updates(
             let thunderstore_service = thunderstore_service.clone();
             let nexus_mods_service = nexus_mods_service.clone();
             let github_service = github_service.clone();
+            let nexus_game_id = nexus_game_id.clone();
             let refresh_counter = refresh_counter.clone();
 
             tokio::spawn(async move {
@@ -440,6 +443,7 @@ pub async fn check_all_updates(
                         mods_service.as_ref(),
                         &thunderstore_service,
                         &nexus_mods_service,
+                        &nexus_game_id,
                         &github_service,
                     )
                     .await

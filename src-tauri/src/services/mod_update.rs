@@ -25,6 +25,7 @@ impl ModUpdateService {
         mods_service: &ModsService,
         thunderstore_service: &ThunderStoreService,
         nexus_mods_service: &NexusModsService,
+        nexus_game_id: &str,
         github_service: &GitHubReleasesService,
     ) -> Result<Vec<serde_json::Value>> {
         use crate::types::ModMetadata;
@@ -166,13 +167,12 @@ impl ModUpdateService {
                         if let Some(mod_id_str) = source_id {
                             // Parse mod ID
                             if let Ok(mod_id) = mod_id_str.parse::<u32>() {
-                                let game_id = "schedule1";
                                 // Check NexusMods for updates
                                 if let Ok(mod_info) =
-                                    nexus_mods_service.get_mod(game_id, mod_id).await
+                                    nexus_mods_service.get_mod(nexus_game_id, mod_id).await
                                 {
                                     let latest_version = nexus_mods_service
-                                        .get_mod_files(game_id, mod_id)
+                                        .get_mod_files(nexus_game_id, mod_id)
                                         .await
                                         .ok()
                                         .and_then(|files| {
@@ -711,6 +711,7 @@ impl ModUpdateService {
         mods_service: &ModsService,
         thunderstore_service: &ThunderStoreService,
         nexus_mods_service: &NexusModsService,
+        nexus_game_id: &str,
         nexus_access_token: Option<&str>,
         github_service: &GitHubReleasesService,
     ) -> Result<serde_json::Value> {
@@ -887,9 +888,13 @@ impl ModUpdateService {
                 let mod_id = source_id
                     .parse::<u32>()
                     .context("Invalid Nexus mod id in metadata")?;
+                let (_resolved_game_id, nexus_game_domain) = nexus_mods_service
+                    .resolve_game_identity(nexus_game_id)
+                    .await
+                    .context("Failed to resolve Nexus game identity")?;
 
                 let files = nexus_mods_service
-                    .get_mod_files("schedule1", mod_id)
+                    .get_mod_files(nexus_game_id, mod_id)
                     .await
                     .context("Failed to fetch Nexus mod files")?;
                 let target_file = Self::select_best_nexus_file_for_update(
@@ -944,7 +949,7 @@ impl ModUpdateService {
                 let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
                 let bytes = match nexus_mods_service
-                    .download_mod_file(access_token, "schedule1", mod_id, file_id)
+                    .download_mod_file(access_token, nexus_game_id, mod_id, file_id)
                     .await
                 {
                     Ok(bytes) => bytes,
@@ -969,7 +974,11 @@ impl ModUpdateService {
                                 "error": message,
                                 "errorCode": "nexus_manual_confirmation_required",
                                 "requiresManualDownload": true,
-                                "recoveryUrl": format!("https://www.nexusmods.com/schedule1/mods/{}?tab=files", mod_id)
+                                "recoveryUrl": format!(
+                                    "https://www.nexusmods.com/{}/mods/{}?tab=files",
+                                    nexus_game_domain,
+                                    mod_id
+                                )
                             }));
                         }
 
@@ -1002,12 +1011,16 @@ impl ModUpdateService {
                     ),
                 );
 
-                let mod_info = nexus_mods_service.get_mod("schedule1", mod_id).await.ok();
+                let mod_info = nexus_mods_service.get_mod(nexus_game_id, mod_id).await.ok();
                 let metadata_json = serde_json::json!({
                     "source": "nexusmods",
                     "sourceId": source_id,
                     "sourceVersion": latest_version,
-                    "sourceUrl": format!("https://www.nexusmods.com/schedule1/mods/{}", mod_id),
+                    "sourceUrl": format!(
+                        "https://www.nexusmods.com/{}/mods/{}",
+                        nexus_game_domain,
+                        mod_id
+                    ),
                     "modName": mod_info.as_ref().and_then(|m| m.get("name")).and_then(|v| v.as_str()).unwrap_or_default(),
                     "author": mod_info.as_ref().and_then(|m| m.get("author")).and_then(|v| v.as_str()).unwrap_or_default(),
                 });
@@ -1225,6 +1238,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                "schedule1",
                 &github_service,
             )
             .await
@@ -1259,6 +1273,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                "schedule1",
                 None,
                 &github_service,
             )
@@ -1391,6 +1406,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                "schedule1",
                 &github_service,
             )
             .await?;
@@ -1486,6 +1502,7 @@ mod tests {
                 &mods_service,
                 &thunderstore_service,
                 &nexus_mods_service,
+                "schedule1",
                 &github_service,
             )
             .await?;

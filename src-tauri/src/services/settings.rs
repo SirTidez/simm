@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -282,8 +282,8 @@ impl SettingsService {
             .await
             .with_context(|| format!("Failed to read custom theme {}", path.display()))?;
         let normalized_content = Self::normalize_theme_file_content(&content);
-        let parsed: CustomThemeFile = serde_json::from_str(normalized_content.as_ref())
-            .map_err(|err| {
+        let parsed: CustomThemeFile =
+            serde_json::from_str(normalized_content.as_ref()).map_err(|err| {
                 anyhow::anyhow!(
                     "Failed to parse custom theme {} at line {}, column {}: {}",
                     path.display(),
@@ -871,7 +871,10 @@ mod tests {
         assert_eq!(themes[0].name, "Sunset Glow");
         assert_eq!(themes[0].base_theme, "dark");
         assert_eq!(
-            themes[0].variables.get("--app-bg-color").map(String::as_str),
+            themes[0]
+                .variables
+                .get("--app-bg-color")
+                .map(String::as_str),
             Some("#1b120f")
         );
         assert_eq!(
@@ -909,7 +912,10 @@ mod tests {
         assert_eq!(themes[0].id, "copy-paste");
         assert_eq!(themes[0].base_theme, "light");
         assert_eq!(
-            themes[0].variables.get("--app-bg-color").map(String::as_str),
+            themes[0]
+                .variables
+                .get("--app-bg-color")
+                .map(String::as_str),
             Some("#fff7f4")
         );
 
@@ -939,12 +945,10 @@ mod tests {
         assert_eq!(themes.len(), 1);
         assert_eq!(themes[0].id, "broken-paste");
         assert_eq!(themes[0].base_theme, "light");
-        assert!(
-            themes[0]
-                .variables
-                .get("--bg-pattern")
-                .is_some_and(|value| value.contains("transparent 36%"))
-        );
+        assert!(themes[0]
+            .variables
+            .get("--bg-pattern")
+            .is_some_and(|value| value.contains("transparent 36%")));
 
         Ok(())
     }

@@ -238,7 +238,9 @@ impl ModsService {
                 ),
             )
         };
-        Ok(from_branch.or(from_path).unwrap_or(crate::types::Runtime::Mono))
+        Ok(from_branch
+            .or(from_path)
+            .unwrap_or(crate::types::Runtime::Mono))
     }
 
     fn normalize_runtime_suffix_token(value: &str) -> String {
@@ -319,12 +321,19 @@ impl ModsService {
 
     fn normalize_local_link_name(value: &str) -> String {
         Self::normalize_runtime_suffix_token(
-            value.trim_end_matches(".disabled")
+            value
+                .trim_end_matches(".disabled")
                 .trim_end_matches(".dll")
                 .trim_end_matches(".DLL"),
         )
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -381,9 +390,7 @@ impl ModsService {
 
         if host == "www.nexusmods.com" || host == "nexusmods.com" {
             if segments.len() < 3 || segments[1] != "mods" {
-                return Err(anyhow::anyhow!(
-                    "Nexus Mods URLs must point to a mod page"
-                ));
+                return Err(anyhow::anyhow!("Nexus Mods URLs must point to a mod page"));
             }
 
             let mod_id = segments[2]
@@ -505,9 +512,8 @@ impl ModsService {
                             )
                         })
                     });
-                let likes_or_endorsements = package
-                    .get("rating_score")
-                    .and_then(|value| value.as_i64());
+                let likes_or_endorsements =
+                    package.get("rating_score").and_then(|value| value.as_i64());
                 let updated_at = package
                     .get("date_updated")
                     .and_then(|value| value.as_str())
@@ -683,8 +689,7 @@ impl ModsService {
                             .as_deref()
                             .and_then(Self::infer_runtime_label_from_text)
                             .or_else(|| {
-                                file
-                                    .get("category_name")
+                                file.get("category_name")
                                     .and_then(|value| value.as_str())
                                     .and_then(Self::infer_runtime_label_from_text)
                             });
@@ -1280,7 +1285,9 @@ impl ModsService {
             Err(_) => storage_root.to_path_buf(),
         };
 
-        let relative = canonical_target.strip_prefix(&canonical_storage_root).ok()?;
+        let relative = canonical_target
+            .strip_prefix(&canonical_storage_root)
+            .ok()?;
         match relative.components().next() {
             Some(Component::Normal(value)) => {
                 let storage_id = value.to_string_lossy().trim().to_string();
@@ -2295,7 +2302,7 @@ impl ModsService {
                 true,
                 &mut summary.primary_files,
             )
-                .await?;
+            .await?;
         }
 
         let plugins_dir = storage_path.join("Plugins");
@@ -2306,7 +2313,7 @@ impl ModsService {
                 true,
                 &mut summary.primary_files,
             )
-                .await?;
+            .await?;
         }
 
         let userlibs_dir = storage_path.join("UserLibs");
@@ -2571,11 +2578,10 @@ impl ModsService {
         }
 
         let payload_summary = self.collect_storage_payload_summary(&storage_path).await?;
-        let available_runtimes =
-            self.detect_available_runtimes(
-                self.runtime_detection_files(&payload_summary),
-                metadata.detected_runtime.clone(),
-            );
+        let available_runtimes = self.detect_available_runtimes(
+            self.runtime_detection_files(&payload_summary),
+            metadata.detected_runtime.clone(),
+        );
 
         Ok(available_runtimes
             .iter()
@@ -2741,11 +2747,10 @@ impl ModsService {
             }
 
             let payload_summary = self.collect_storage_payload_summary(&entry_path).await?;
-            let available_runtimes =
-                self.detect_available_runtimes(
-                    self.runtime_detection_files(&payload_summary),
-                    template_meta.detected_runtime.clone(),
-                );
+            let available_runtimes = self.detect_available_runtimes(
+                self.runtime_detection_files(&payload_summary),
+                template_meta.detected_runtime.clone(),
+            );
 
             let supports_runtime = match runtime {
                 Some(ref rt) => {
@@ -3578,12 +3583,22 @@ impl ModsService {
             let source = file_metadata
                 .as_ref()
                 .and_then(|m| m.source.clone())
-                .or_else(|| if managed { None } else { Some(ModSource::Local) });
+                .or_else(|| {
+                    if managed {
+                        None
+                    } else {
+                        Some(ModSource::Local)
+                    }
+                });
             let source_url = file_metadata.as_ref().and_then(|m| m.source_url.clone());
             let author = file_metadata
                 .as_ref()
                 .and_then(|m| m.author.clone())
-                .or_else(|| confident_hint_metadata.as_ref().and_then(|meta| meta.author.clone()));
+                .or_else(|| {
+                    confident_hint_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.author.clone())
+                });
             let summary = file_metadata.as_ref().and_then(|m| m.summary.clone());
             let icon_url = file_metadata.as_ref().and_then(|m| m.icon_url.clone());
             let icon_cache_path = file_metadata
@@ -3904,12 +3919,14 @@ impl ModsService {
             if let Some(parent) = destination_path.parent() {
                 fs::create_dir_all(parent).await?;
             }
-            fs::copy(&source_path, &destination_path).await.with_context(|| {
-                format!(
-                    "Failed to copy selected ownership candidate into storage: {}",
-                    relative_path
-                )
-            })?;
+            fs::copy(&source_path, &destination_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to copy selected ownership candidate into storage: {}",
+                        relative_path
+                    )
+                })?;
         }
 
         Ok(())
@@ -3998,7 +4015,8 @@ impl ModsService {
         self.save_storage_metadata(&storage_base, &storage_metadata)
             .await?;
 
-        self.install_storage_mod_to_envs(&storage_id, vec![env_id]).await?;
+        self.install_storage_mod_to_envs(&storage_id, vec![env_id])
+            .await?;
         if selected_was_disabled {
             self.disable_mod(game_dir, file_name).await?;
         }
@@ -7642,7 +7660,8 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn load_mod_metadata_does_not_recover_plain_file_copies_from_library_storage() -> Result<()> {
+    async fn load_mod_metadata_does_not_recover_plain_file_copies_from_library_storage(
+    ) -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
@@ -7834,16 +7853,21 @@ mod tests {
             entry.get("source").and_then(|value| value.as_str()),
             Some("local")
         );
-        assert_eq!(
-            entry.get("version").and_then(|value| value.as_str()),
-            None
-        );
+        assert_eq!(entry.get("version").and_then(|value| value.as_str()), None);
         assert_eq!(
             entry.get("author").and_then(|value| value.as_str()),
             Some("Recovered Author")
         );
-        assert!(entry.get("sourceUrl").is_none() || entry.get("sourceUrl").is_some_and(|value| value.is_null()));
-        assert!(entry.get("securityScan").is_none() || entry.get("securityScan").is_some_and(|value| value.is_null()));
+        assert!(
+            entry.get("sourceUrl").is_none()
+                || entry.get("sourceUrl").is_some_and(|value| value.is_null())
+        );
+        assert!(
+            entry.get("securityScan").is_none()
+                || entry
+                    .get("securityScan")
+                    .is_some_and(|value| value.is_null())
+        );
 
         Ok(())
     }
@@ -7897,7 +7921,8 @@ mod tests {
         fs::write(mods_dir.join("RecoveredManaged.dll"), b"managed-bytes").await?;
 
         let mut metadata = HashMap::new();
-        let mut stale_meta = sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
+        let mut stale_meta =
+            sample_metadata(Some(storage_id), Some("owner/recovered"), Some("1.0.0"));
         stale_meta.source = Some(ModSource::Thunderstore);
         stale_meta.author = Some("Recovered Author".to_string());
         stale_meta.security_scan = Some(SecurityScanSummary {
@@ -8360,11 +8385,7 @@ mod tests {
         fs::write(storage_mods_dir.join("Example.Mono.dll"), b"data").await?;
 
         let mono_match = service
-            .find_existing_mod_storage_by_source_version(
-                "source-id",
-                "1.0.0",
-                Some(Runtime::Mono),
-            )
+            .find_existing_mod_storage_by_source_version("source-id", "1.0.0", Some(Runtime::Mono))
             .await?;
         let il2cpp_match = service
             .find_existing_mod_storage_by_source_version(
@@ -8690,10 +8711,7 @@ mod tests {
             .await?;
 
         let il2cpp_zip = temp.path().join("Example-IL2CPP.zip");
-        write_zip_fixture(
-            &il2cpp_zip,
-            &[("Example.IL2CPP.dll", b"il2cpp-runtime")],
-        )?;
+        write_zip_fixture(&il2cpp_zip, &[("Example.IL2CPP.dll", b"il2cpp-runtime")])?;
         let mono_zip = temp.path().join("Example-Mono.zip");
         write_zip_fixture(&mono_zip, &[("Example.Mono.dll", b"mono-runtime")])?;
 
@@ -8900,7 +8918,11 @@ mod tests {
             vec!["IL2CPP/PackRat.IL2CPP.dll".to_string()]
         );
         assert_eq!(
-            entry.files_by_runtime.get("Mono").cloned().unwrap_or_default(),
+            entry
+                .files_by_runtime
+                .get("Mono")
+                .cloned()
+                .unwrap_or_default(),
             vec!["Mono/PackRat.Mono.dll".to_string()]
         );
         assert!(entry
@@ -9504,16 +9526,10 @@ mod tests {
         fs::write(storage_v1.join("Example-v1.dll"), b"data-v1").await?;
         fs::write(storage_v2.join("Example-v2.dll"), b"data-v2").await?;
         service
-            .save_storage_metadata(
-                &download_dir.join("Mods").join("storage-v1"),
-                &metadata_v1,
-            )
+            .save_storage_metadata(&download_dir.join("Mods").join("storage-v1"), &metadata_v1)
             .await?;
         service
-            .save_storage_metadata(
-                &download_dir.join("Mods").join("storage-v2"),
-                &metadata_v2,
-            )
+            .save_storage_metadata(&download_dir.join("Mods").join("storage-v2"), &metadata_v2)
             .await?;
 
         let library = service.get_mod_library().await?;
@@ -9675,7 +9691,10 @@ mod tests {
             )
             .await?;
         service
-            .create_symlink_file(&mono_storage_file, &mono_mods_dir.join("S1FuelMod.Mono.dll"))
+            .create_symlink_file(
+                &mono_storage_file,
+                &mono_mods_dir.join("S1FuelMod.Mono.dll"),
+            )
             .await?;
 
         let library = service.get_mod_library().await?;
@@ -10514,10 +10533,8 @@ mod tests {
         fs::create_dir_all(&storage_userlibs).await?;
         fs::create_dir_all(&storage_userdata).await?;
 
-        let candidate_id = ModsService::normalize_link_candidate_id(
-            "userdata",
-            "MyFeature/state.json",
-        );
+        let candidate_id =
+            ModsService::normalize_link_candidate_id("userdata", "MyFeature/state.json");
         let allowed = HashSet::from([candidate_id.clone()]);
         service
             .copy_selected_local_link_candidates_to_storage(
@@ -10531,7 +10548,10 @@ mod tests {
             )
             .await?;
 
-        assert!(storage_userdata.join("MyFeature").join("state.json").exists());
+        assert!(storage_userdata
+            .join("MyFeature")
+            .join("state.json")
+            .exists());
 
         Ok(())
     }
@@ -10657,8 +10677,8 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn install_storage_mod_to_envs_skips_nested_runtime_folder_for_other_runtime() -> Result<()>
-    {
+    async fn install_storage_mod_to_envs_skips_nested_runtime_folder_for_other_runtime(
+    ) -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
         let _data_guard =
