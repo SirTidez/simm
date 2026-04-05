@@ -127,10 +127,7 @@ fn extract_package_uuid(package: &serde_json::Value) -> Option<String> {
 }
 
 fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
-    package
-        .get("versions")
-        .and_then(|v| v.as_array())
-        .and_then(|v| v.first())
+    select_latest_thunderstore_version(package)
         .and_then(|v| v.get("icon"))
         .and_then(|v| v.as_str())
         .or_else(|| {
@@ -142,6 +139,99 @@ fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
         .or_else(|| package.get("icon").and_then(|v| v.as_str()))
         .or_else(|| package.get("icon_url").and_then(|v| v.as_str()))
         .map(|v| v.to_string())
+}
+
+fn compare_thunderstore_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let normalize = |value: &str| {
+        value
+            .trim_start_matches(['v', 'V'])
+            .split(['-', '+'])
+            .next()
+            .unwrap_or_default()
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<u32>>()
+    };
+
+    let left_parts = normalize(left);
+    let right_parts = normalize(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        match left_parts
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right_parts.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    let left_lower = left.to_ascii_lowercase();
+    let right_lower = right.to_ascii_lowercase();
+    let has_prerelease = |value: &str| {
+        [
+            "alpha",
+            "beta",
+            "preview",
+            "pre",
+            "rc",
+            "nightly",
+            "experimental",
+            "dev",
+            "test",
+        ]
+        .iter()
+        .any(|marker| value.contains(marker))
+    };
+
+    match (has_prerelease(&left_lower), has_prerelease(&right_lower)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => left
+            .trim_start_matches(['v', 'V'])
+            .cmp(right.trim_start_matches(['v', 'V'])),
+    }
+}
+
+fn select_latest_thunderstore_version<'a>(
+    package: &'a serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    package
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .and_then(|versions| {
+            versions.iter().max_by(|left, right| {
+                let left_version = left
+                    .get("version_number")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let right_version = right
+                    .get("version_number")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                match compare_thunderstore_versions(left_version, right_version) {
+                    std::cmp::Ordering::Equal => {
+                        let left_updated = left
+                            .get("date_updated")
+                            .or_else(|| left.get("date_created"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let right_updated = right
+                            .get("date_updated")
+                            .or_else(|| right.get("date_created"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        left_updated.cmp(right_updated)
+                    }
+                    ordering => ordering,
+                }
+            })
+        })
 }
 
 async fn resolve_thunderstore_package_by_source_id(
@@ -387,7 +477,7 @@ pub async fn check_all_updates(
     }
 
     let mut seen_storage_ids = HashSet::new();
-    let mut library_thunderstore_targets: Vec<(String, String)> = Vec::new();
+    let mut library_thunderstore_targets: Vec<(String, String, Option<String>)> = Vec::new();
     if let Ok(library) = mods_service.get_mod_library().await {
         for entry in library.downloaded {
             if !matches!(entry.source, Some(ModSource::Thunderstore)) {
@@ -407,7 +497,11 @@ pub async fn check_all_updates(
             };
 
             if seen_storage_ids.insert(entry.storage_id.clone()) {
-                library_thunderstore_targets.push((entry.storage_id, source_id));
+                library_thunderstore_targets.push((
+                    entry.storage_id,
+                    source_id,
+                    entry.source_version.clone(),
+                ));
             }
         }
     }
@@ -489,7 +583,7 @@ pub async fn check_all_updates(
     }
 
     // Backfill missing Thunderstore metadata/icons for downloaded library entries
-    for (storage_id, source_id) in library_thunderstore_targets {
+    for (storage_id, source_id, source_version) in library_thunderstore_targets {
         if let Some(package) =
             resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await
         {
@@ -502,13 +596,7 @@ pub async fn check_all_updates(
             let metadata_update = ModMetadata {
                 source: Some(ModSource::Thunderstore),
                 source_id: Some(source_id.clone()),
-                source_version: package
-                    .get("versions")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
-                    .and_then(|v| v.get("version_number"))
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
+                source_version,
                 author: package
                     .get("owner")
                     .and_then(|v| v.as_str())
@@ -521,10 +609,7 @@ pub async fn check_all_updates(
                     .get("package_url")
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
-                summary: package
-                    .get("versions")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
+                summary: select_latest_thunderstore_version(&package)
                     .and_then(|v| v.get("description"))
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),

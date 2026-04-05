@@ -12,7 +12,7 @@ describe('InstallTargetsDialog', () => {
       <InstallTargetsDialog
         isOpen={true}
         title="Install"
-        entry={{
+        entries={[{
           storageId: 'storage-1',
           displayName: 'Example Mod',
           files: ['Example.dll'],
@@ -24,7 +24,7 @@ describe('InstallTargetsDialog', () => {
           storageIdsByRuntime: { Mono: 'storage-1' },
           installedInByRuntime: { Mono: [] },
           filesByRuntime: { Mono: ['Example.dll'] },
-        }}
+        }]}
         compatibleEnvironments={[
           {
             id: 'env-alt-beta',
@@ -61,7 +61,7 @@ describe('InstallTargetsDialog', () => {
       <InstallTargetsDialog
         isOpen={true}
         title="Install"
-        entry={{
+        entries={[{
           storageId: 'storage-1',
           displayName: 'Example Mod',
           files: ['Example.dll'],
@@ -73,7 +73,7 @@ describe('InstallTargetsDialog', () => {
           storageIdsByRuntime: { Mono: 'storage-1' },
           installedInByRuntime: { Mono: [] },
           filesByRuntime: { Mono: ['Example.dll'] },
-        }}
+        }]}
         compatibleEnvironments={[
           {
             id: 'env-alt',

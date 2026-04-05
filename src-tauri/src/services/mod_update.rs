@@ -71,18 +71,21 @@ impl ModUpdateService {
                         if let Some(source_id) = source_id {
                             // Check Thunderstore for updates (use Schedule I community endpoint)
                             if let Ok((_, package)) = self
-                                .resolve_thunderstore_package(thunderstore_service, &source_id)
+                                .resolve_thunderstore_package(
+                                    thunderstore_service,
+                                    &source_id,
+                                    Some(Self::runtime_label(&env.runtime)),
+                                )
                                 .await
                             {
-                                // Versions array is directly on package, not under "latest"
-                                if let Some(latest_version) = package
-                                    .get("versions")
-                                    .and_then(|v| v.as_array())
-                                    .and_then(|v| v.first())
-                                    .and_then(|v| v.get("version_number"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
+                                if let Some(latest_package_version) =
+                                    Self::select_latest_thunderstore_version(&package, None)
                                 {
+                                    let latest_version = latest_package_version
+                                        .get("version_number")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_default();
                                     let update_available = Self::versions_differ(
                                         current_version.as_deref(),
                                         &latest_version,
@@ -92,11 +95,8 @@ impl ModUpdateService {
                                     metadata.last_update_check = Some(now);
                                     metadata.update_available = Some(update_available);
                                     metadata.remote_version = Some(latest_version.clone());
-                                    metadata.summary = package
-                                        .get("versions")
-                                        .and_then(|v| v.as_array())
-                                        .and_then(|v| v.first())
-                                        .and_then(|v| v.get("description"))
+                                    metadata.summary = latest_package_version
+                                        .get("description")
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string())
                                         .or_else(|| {
@@ -382,7 +382,7 @@ impl ModUpdateService {
             };
 
             let Ok((_, package)) = self
-                .resolve_thunderstore_package(thunderstore_service, &source_id)
+                .resolve_thunderstore_package(thunderstore_service, &source_id, None)
                 .await
             else {
                 continue;
@@ -397,7 +397,7 @@ impl ModUpdateService {
             let metadata_update = ModMetadata {
                 source: Some(ModSource::Thunderstore),
                 source_id: Some(source_id.clone()),
-                source_version: Self::extract_package_latest_version(&package),
+                source_version: entry.source_version.clone(),
                 author: package
                     .get("owner")
                     .and_then(|v| v.as_str())
@@ -410,10 +410,7 @@ impl ModUpdateService {
                     .get("package_url")
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
-                summary: package
-                    .get("versions")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
+                summary: Self::select_latest_thunderstore_version(&package, None)
                     .and_then(|v| v.get("description"))
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
@@ -498,22 +495,9 @@ impl ModUpdateService {
             .map(|v| v.to_string())
     }
 
-    fn extract_package_latest_version(package: &Value) -> Option<String> {
-        package
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .and_then(|v| v.first())
-            .and_then(|v| v.get("version_number"))
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string())
-    }
-
     fn extract_package_icon(package: &Value) -> Option<String> {
-        package
-            .get("versions")
-            .and_then(|v| v.as_array())
-            .and_then(|v| v.first())
-            .and_then(|v| v.get("icon"))
+        Self::select_latest_thunderstore_version(package, None)
+            .and_then(|version| version.get("icon"))
             .and_then(|v| v.as_str())
             .or_else(|| {
                 package
@@ -526,10 +510,91 @@ impl ModUpdateService {
             .map(|v| v.to_string())
     }
 
+    fn select_latest_thunderstore_version<'a>(
+        package: &'a Value,
+        preferred_version: Option<&str>,
+    ) -> Option<&'a Value> {
+        let versions = package.get("versions").and_then(|v| v.as_array())?;
+
+        if let Some(preferred) = preferred_version {
+            if let Some(exact) = versions.iter().find(|version| {
+                version
+                    .get("version_number")
+                    .and_then(|v| v.as_str())
+                    .map(|candidate| {
+                        Self::compare_versions(candidate, preferred) == Ordering::Equal
+                    })
+                    .unwrap_or(false)
+            }) {
+                return Some(exact);
+            }
+        }
+
+        versions.iter().max_by(|left, right| {
+            let left_version = left
+                .get("version_number")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let right_version = right
+                .get("version_number")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            match Self::compare_versions(left_version, right_version) {
+                Ordering::Equal => {
+                    let left_updated = left
+                        .get("date_updated")
+                        .or_else(|| left.get("date_created"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let right_updated = right
+                        .get("date_updated")
+                        .or_else(|| right.get("date_created"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    left_updated.cmp(right_updated)
+                }
+                ordering => ordering,
+            }
+        })
+    }
+
+    fn normalize_thunderstore_package_name(name: &str) -> String {
+        let mut normalized = name.trim().to_string();
+
+        loop {
+            let lower = normalized.to_ascii_lowercase();
+            let suffix = [
+                " (mono)",
+                " [mono]",
+                "_mono",
+                "-mono",
+                " mono",
+                " (il2cpp)",
+                " [il2cpp]",
+                "_il2cpp",
+                "-il2cpp",
+                " il2cpp",
+            ]
+            .iter()
+            .find(|suffix| lower.ends_with(**suffix))
+            .copied();
+
+            let Some(suffix) = suffix else {
+                break;
+            };
+
+            normalized.truncate(normalized.len().saturating_sub(suffix.len()));
+            normalized = normalized.trim().to_string();
+        }
+
+        normalized
+    }
+
     async fn resolve_thunderstore_package(
         &self,
         thunderstore_service: &ThunderStoreService,
         source_id: &str,
+        preferred_runtime: Option<&str>,
     ) -> Result<(String, Value)> {
         if let Ok(Some(package)) = thunderstore_service
             .get_package(source_id, Some("schedule-i"))
@@ -542,16 +607,77 @@ impl ModUpdateService {
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("Invalid Thunderstore source id: {}", source_id))?;
 
+        let normalized_name = Self::normalize_thunderstore_package_name(name);
         let candidates = thunderstore_service
-            .search_packages_filtered_by_runtime("schedule-i", "unknown", Some(name))
+            .search_packages_filtered_by_runtime(
+                "schedule-i",
+                preferred_runtime.unwrap_or("unknown"),
+                Some(&normalized_name),
+            )
             .await
             .context("Failed to search Thunderstore packages while resolving update")?;
 
-        let matching = candidates.into_iter().find(|pkg| {
-            let pkg_owner = pkg.get("owner").and_then(|v| v.as_str()).unwrap_or("");
-            let pkg_name = pkg.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            pkg_owner.eq_ignore_ascii_case(owner) && pkg_name.eq_ignore_ascii_case(name)
-        });
+        let normalized_target = normalized_name.to_ascii_lowercase();
+        let raw_target = name.to_ascii_lowercase();
+        let owner_lower = owner.to_ascii_lowercase();
+        let owner_matches = |pkg: &Value| {
+            pkg.get("owner")
+                .and_then(|v| v.as_str())
+                .map(|value| value.eq_ignore_ascii_case(owner))
+                .unwrap_or(false)
+        };
+        let normalized_pkg_name = |pkg: &Value| {
+            Self::normalize_thunderstore_package_name(
+                pkg.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+            .to_ascii_lowercase()
+        };
+        let raw_pkg_name = |pkg: &Value| {
+            pkg.get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+
+        let matching = candidates
+            .iter()
+            .find(|pkg| owner_matches(pkg) && normalized_pkg_name(pkg) == normalized_target)
+            .cloned()
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|pkg| owner_matches(pkg) && raw_pkg_name(pkg) == raw_target)
+                    .cloned()
+            })
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|pkg| {
+                        owner_matches(pkg) && {
+                            let pkg_name = normalized_pkg_name(pkg);
+                            pkg_name.contains(&normalized_target)
+                                || normalized_target.contains(&pkg_name)
+                        }
+                    })
+                    .cloned()
+            })
+            .or_else(|| {
+                let owner_matches: Vec<_> = candidates
+                    .iter()
+                    .filter(|pkg| {
+                        pkg.get("owner")
+                            .and_then(|v| v.as_str())
+                            .map(|value| value.to_ascii_lowercase() == owner_lower)
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                if owner_matches.len() == 1 {
+                    owner_matches.into_iter().next()
+                } else {
+                    None
+                }
+            });
 
         let package = matching.ok_or_else(|| {
             anyhow::anyhow!(
@@ -757,11 +883,24 @@ impl ModUpdateService {
         match source {
             ModSource::Thunderstore => {
                 let (package_uuid, package) = self
-                    .resolve_thunderstore_package(thunderstore_service, &source_id)
+                    .resolve_thunderstore_package(
+                        thunderstore_service,
+                        &source_id,
+                        Some(runtime_label),
+                    )
                     .await?;
 
-                let latest_version =
-                    Self::extract_package_latest_version(&package).ok_or_else(|| {
+                let latest_package_version = Self::select_latest_thunderstore_version(
+                    &package,
+                    metadata.remote_version.as_deref(),
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Thunderstore package has no version information")
+                })?;
+                let latest_version = latest_package_version
+                    .get("version_number")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
                         anyhow::anyhow!("Thunderstore package has no version information")
                     })?;
                 if !Self::versions_differ(metadata.source_version.as_deref(), &latest_version) {
@@ -782,7 +921,11 @@ impl ModUpdateService {
                 let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
                 let bytes = thunderstore_service
-                    .download_package(&package_uuid, Some("schedule-i"), None)
+                    .download_package(
+                        &package_uuid,
+                        Some("schedule-i"),
+                        latest_package_version.get("uuid4").and_then(|v| v.as_str()),
+                    )
                     .await
                     .map_err(|error| {
                         let message = format!("Failed to download Thunderstore update: {}", error);
@@ -832,11 +975,8 @@ impl ModUpdateService {
                     "sourceUrl": package.get("package_url").and_then(|v| v.as_str()).unwrap_or_default(),
                     "modName": name,
                     "author": owner,
-                    "summary": package
-                        .get("versions")
-                        .and_then(|v| v.as_array())
-                        .and_then(|v| v.first())
-                        .and_then(|v| v.get("description"))
+                    "summary": latest_package_version
+                        .get("description")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default(),
                     "iconUrl": Self::extract_package_icon(&package).unwrap_or_default(),
@@ -1309,6 +1449,39 @@ mod tests {
     }
 
     #[test]
+    fn extract_package_latest_version_prefers_highest_version_over_payload_order() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "older-version",
+                    "version_number": "1.1.0",
+                    "date_updated": "2025-01-01T00:00:00Z",
+                    "description": "Older release"
+                },
+                {
+                    "uuid4": "latest-version",
+                    "version_number": "1.2.0",
+                    "date_updated": "2025-01-10T00:00:00Z",
+                    "description": "Latest release"
+                }
+            ]
+        });
+
+        assert_eq!(
+            ModUpdateService::select_latest_thunderstore_version(&package, None)
+                .and_then(|version| version.get("version_number"))
+                .and_then(|value| value.as_str()),
+            Some("1.2.0")
+        );
+        assert_eq!(
+            ModUpdateService::select_latest_thunderstore_version(&package, None)
+                .and_then(|version| version.get("uuid4"))
+                .and_then(|value| value.as_str()),
+            Some("latest-version")
+        );
+    }
+
+    #[test]
     fn select_best_nexus_file_for_update_offers_prerelease_when_newer_than_stable() {
         let files = vec![
             serde_json::json!({
@@ -1372,6 +1545,80 @@ mod tests {
 
         let icon = ModUpdateService::extract_package_icon(&package);
         assert_eq!(icon.as_deref(), Some("https://example.com/version.png"));
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_prefers_highest_version_over_response_order() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "older",
+                    "version_number": "1.2.0",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "latest",
+                    "version_number": "1.4.0",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                },
+                {
+                    "uuid4": "middle",
+                    "version_number": "1.3.0",
+                    "date_updated": "2026-04-03T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = ModUpdateService::select_latest_thunderstore_version(&package, None)
+            .expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|value| value.as_str()),
+            Some("latest")
+        );
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_can_pin_a_previously_surfaced_version() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "older",
+                    "version_number": "1.2.0",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "latest",
+                    "version_number": "1.4.0",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected =
+            ModUpdateService::select_latest_thunderstore_version(&package, Some("1.2.0"))
+                .expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|value| value.as_str()),
+            Some("older")
+        );
+    }
+
+    #[test]
+    fn normalize_thunderstore_package_name_strips_runtime_suffixes() {
+        assert_eq!(
+            ModUpdateService::normalize_thunderstore_package_name("Cartel_Enforcer_MONO"),
+            "Cartel_Enforcer"
+        );
+        assert_eq!(
+            ModUpdateService::normalize_thunderstore_package_name("ScheduleToolbox-IL2CPP"),
+            "ScheduleToolbox"
+        );
+        assert_eq!(
+            ModUpdateService::normalize_thunderstore_package_name("Pack Rat (Mono)"),
+            "Pack Rat"
+        );
     }
 
     #[tokio::test]
