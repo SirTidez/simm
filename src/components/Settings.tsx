@@ -8,6 +8,7 @@ import {
   notifyBatchUpdateCheckStarted,
 } from "./EnvironmentList";
 import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
+import type { Settings as AppSettings } from "../types";
 
 type SettingsProps = {
   isOpen: boolean;
@@ -128,6 +129,41 @@ function extractReleaseApiLastUpdated(
   return null;
 }
 
+function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
+  return {
+    defaultDownloadDir: settings.defaultDownloadDir || "",
+    maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
+    platform: "windows",
+    language: "english",
+    theme: settings.theme || "modern-blue",
+    melonLoaderVersion: settings.melonLoaderVersion || "",
+    autoInstallMelonLoader: settings.autoInstallMelonLoader !== false,
+    enableSecurityScanner: settings.enableSecurityScanner ?? true,
+    autoInstallSecurityScanner: settings.autoInstallSecurityScanner ?? true,
+    blockCriticalScans: settings.blockCriticalScans ?? true,
+    promptOnHighScans: settings.promptOnHighScans ?? true,
+    showSecurityScanBadges: settings.showSecurityScanBadges ?? true,
+    updateCheckInterval: settings.updateCheckInterval || 60,
+    autoCheckUpdates: settings.autoCheckUpdates !== false,
+    appUpdateChannel: settings.appUpdate?.channel ?? "beta",
+    logLevel:
+      (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
+    modIconCacheLimitMb: normalizeModIconCacheLimitMb(
+      settings.modIconCacheLimitMb,
+    ),
+    databaseBackupCount: normalizeDatabaseBackupCount(
+      settings.databaseBackupCount,
+    ),
+  };
+}
+
+function areFormDataEqual(
+  left: SettingsFormData,
+  right: SettingsFormData,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 export function Settings({ isOpen, onClose }: SettingsProps) {
   const {
     settings,
@@ -244,31 +280,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
 
   useEffect(() => {
     if (settings) {
-      setFormData({
-        defaultDownloadDir: settings.defaultDownloadDir || "",
-        maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
-        platform: "windows" as "windows" | "macos" | "linux", // Always Windows
-        language: "english", // Always English
-        theme: settings.theme || "modern-blue",
-        melonLoaderVersion: settings.melonLoaderVersion || "",
-        autoInstallMelonLoader: settings.autoInstallMelonLoader !== false,
-        enableSecurityScanner: settings.enableSecurityScanner,
-        autoInstallSecurityScanner: settings.autoInstallSecurityScanner,
-        blockCriticalScans: settings.blockCriticalScans,
-        promptOnHighScans: settings.promptOnHighScans,
-        showSecurityScanBadges: settings.showSecurityScanBadges,
-        updateCheckInterval: settings.updateCheckInterval || 60,
-        autoCheckUpdates: settings.autoCheckUpdates !== false,
-        appUpdateChannel: settings.appUpdate?.channel ?? "beta",
-        logLevel:
-          (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
-        modIconCacheLimitMb: normalizeModIconCacheLimitMb(
-          settings.modIconCacheLimitMb,
-        ),
-        databaseBackupCount: normalizeDatabaseBackupCount(
-          settings.databaseBackupCount,
-        ),
-      });
+      const nextFormData = buildFormDataFromSettings(settings);
+      setFormData((current) =>
+        areFormDataEqual(current, nextFormData) ? current : nextFormData,
+      );
     }
   }, [settings]);
 
@@ -334,6 +349,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   // Auto-save with debouncing
   useEffect(() => {
     if (!settings) return; // Don't save on initial load
+
+    const currentPersistedFormData = buildFormDataFromSettings(settings);
+    if (areFormDataEqual(formData, currentPersistedFormData)) {
+      return;
+    }
 
     // Clear existing timeout
     if (saveTimeoutRef.current) {
