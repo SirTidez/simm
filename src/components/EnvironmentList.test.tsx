@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   getMelonLoaderStatus: vi.fn(),
   getEnvironments: vi.fn(),
   getModLibrary: vi.fn(),
+  getMods: vi.fn(),
   getModsCount: vi.fn(),
   getModUpdatesSummary: vi.fn(),
   getPluginsCount: vi.fn(),
@@ -155,6 +156,20 @@ describe('EnvironmentList', () => {
         },
       ],
     });
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Example Mod',
+          fileName: 'Example Mod.dll',
+          path: 'C:/env-1/Mods/Example Mod.dll',
+          source: 'thunderstore',
+          managed: true,
+          modStorageId: 'mod-1',
+        },
+      ],
+      modsDirectory: 'C:/env-1/Mods',
+      count: 1,
+    });
     apiMocks.getModsCount.mockResolvedValue({ count: 2 });
     apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 1, updates: [] });
     apiMocks.getPluginsCount.mockResolvedValue({ count: 0 });
@@ -236,6 +251,57 @@ describe('EnvironmentList', () => {
       expect(apiMocks.getModLibrary.mock.calls.length).toBeGreaterThan(initialLibraryCalls);
       expect(screen.getByText('1 (1 Update)')).toBeTruthy();
     }, { timeout: 2000 });
+  });
+
+  it('counts S1API alongside other mods on the home card instead of as a separate tool', async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        {
+          storageId: 'tool-1',
+          displayName: 'S1API',
+          files: [],
+          source: 'github',
+          sourceId: 'ifbars/s1api',
+          sourceVersion: '1.0.0',
+          managed: true,
+          installedIn: ['env-1'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'tool-1' },
+          installedInByRuntime: { IL2CPP: ['env-1'] },
+          filesByRuntime: { IL2CPP: [] },
+          updateAvailable: false,
+        },
+      ],
+    });
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'S1API',
+          fileName: 'S1API.dll',
+          path: 'C:/env-1/Mods/S1API.dll',
+          source: 'github',
+          managed: true,
+          modStorageId: 'tool-1',
+        },
+        {
+          name: 'Local Steam Mod',
+          fileName: 'Local Steam Mod.dll',
+          path: 'C:/env-1/Mods/Local Steam Mod.dll',
+          source: 'local',
+          managed: false,
+        },
+      ],
+      modsDirectory: 'C:/env-1/Mods',
+      count: 2,
+    });
+
+    render(<EnvironmentList />);
+
+    expect(await screen.findByText('2')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByText('2 (+1 Tool)')).toBeNull();
+      expect(screen.queryByTitle('1 user mods, 1 SIMM-managed core tool')).toBeNull();
+    });
   });
 
   it('starts MelonLoader auto-install when a completed download finishes and auto-install is enabled', async () => {

@@ -30,6 +30,9 @@ import {
   onUserLibsChanged
 } from '../services/events';
 
+type InstalledModsResponse = Awaited<ReturnType<typeof ApiService.getMods>>;
+type ModLibraryResponse = Awaited<ReturnType<typeof ApiService.getModLibrary>>;
+
 function safeExternalUrl(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
@@ -49,6 +52,28 @@ function getLatestStableMelonLoaderTag(
 
 function isSteamEnvironment(env: Pick<Environment, 'environmentType' | 'id'>): boolean {
   return env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+}
+
+function countUnmanagedLocalMods(installedMods: InstalledModsResponse | null | undefined): number {
+  return (installedMods?.mods || []).filter((mod) => !mod.managed && (mod.source === 'local' || !mod.source)).length;
+}
+
+async function buildEnvironmentCardModSnapshot(
+  environmentId: string,
+  library: ModLibraryResponse | null | undefined,
+  refreshInstalledMods: boolean = false,
+) {
+  const snapshot = buildEnvironmentModSnapshot(library, environmentId);
+
+  try {
+    const installedMods = await ApiService.getMods(environmentId, refreshInstalledMods);
+    return {
+      ...snapshot,
+      userMods: snapshot.userMods + countUnmanagedLocalMods(installedMods),
+    };
+  } catch {
+    return snapshot;
+  }
 }
 
 // Shared ref to track last update check time (accessible across components)
@@ -538,8 +563,8 @@ export function EnvironmentList({
 
         unlistenModUpdatesChecked = await onModUpdatesChecked((data) => {
           void ApiService.getModLibrary()
-            .then((library) => {
-              const snapshot = buildEnvironmentModSnapshot(library, data.environmentId);
+            .then((library) => buildEnvironmentCardModSnapshot(data.environmentId, library, true))
+            .then((snapshot) => {
               setModsCounts(prev => {
                 const next = new Map(prev);
                 next.set(data.environmentId, snapshot.userMods);
@@ -578,7 +603,7 @@ export function EnvironmentList({
             const timer = setTimeout(async () => {
               try {
                 const library = await ApiService.getModLibrary();
-                const snapshot = buildEnvironmentModSnapshot(library, data.environmentId);
+                const snapshot = await buildEnvironmentCardModSnapshot(data.environmentId, library, true);
                 setModsCounts(prev => {
                   const next = new Map(prev);
                   next.set(data.environmentId, snapshot.userMods);
@@ -868,7 +893,7 @@ export function EnvironmentList({
       }
       for (const env of environments) {
         if (env.status === 'completed') {
-          const modSnapshot = buildEnvironmentModSnapshot(library, env.id);
+          const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, library);
           modCounts.set(env.id, modSnapshot.userMods);
           coreToolCountsMap.set(env.id, modSnapshot.coreTools);
           modUpdatesCountsMap.set(env.id, modSnapshot.updateCount);
@@ -954,8 +979,8 @@ export function EnvironmentList({
       const env = environments.find(e => e.id === modsOverlay.envId);
       if (env && env.status === 'completed') {
         ApiService.getModLibrary()
-          .then((library) => {
-            const snapshot = buildEnvironmentModSnapshot(library, env.id);
+          .then((library) => buildEnvironmentCardModSnapshot(env.id, library, true))
+          .then((snapshot) => {
             setModsCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, snapshot.userMods);

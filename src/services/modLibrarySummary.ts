@@ -7,8 +7,6 @@ const runtimeSuffixPatterns = [
 ];
 
 const coreToolSourceIds = new Set([
-  'ifbars/s1api',
-  'ifbars/s1api_forked',
   'ifbars/mlvscan',
 ]);
 
