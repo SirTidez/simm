@@ -10,9 +10,9 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::types::AppUpdateChannel;
 
 const STABLE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/SirTidez/simm/main/updater/stable/latest.json";
+    "https://raw.githubusercontent.com/SirTidez/simm/master/updater/stable/latest.json";
 const BETA_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/SirTidez/simm/main/updater/beta/latest-beta.json";
+    "https://raw.githubusercontent.com/SirTidez/simm/master/updater/beta/latest-beta.json";
 const PLACEHOLDER_UPDATER_PUBKEY: &str = "REPLACE_WITH_SIMM_UPDATER_PUBLIC_KEY";
 
 static VERSION_CORE_REGEX: Lazy<Regex> = Lazy::new(|| {
