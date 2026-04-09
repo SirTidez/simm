@@ -3118,6 +3118,179 @@ impl ModsService {
         false
     }
 
+    async fn load_metadata_rows_for_storage(
+        &self,
+        output_dir: &str,
+        storage_id: &str,
+    ) -> Result<Vec<(String, String, ModMetadata)>> {
+        let Some(env_id) = self.environment_id_for_dir(output_dir).await? else {
+            return Ok(Vec::new());
+        };
+
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT kind, file_name, data FROM mod_metadata WHERE environment_id = ?",
+        )
+        .bind(&env_id)
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to load metadata rows for storage")?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(kind, file_name, data)| {
+                let meta = serde_json::from_str::<ModMetadata>(&data).ok()?;
+                (meta.mod_storage_id.as_deref() == Some(storage_id)).then_some((kind, file_name, meta))
+            })
+            .collect())
+    }
+
+    async fn load_raw_mod_metadata_entry(
+        &self,
+        output_dir: &str,
+        file_name: &str,
+    ) -> Result<Option<ModMetadata>> {
+        let Some(env_id) = self.environment_id_for_dir(output_dir).await? else {
+            return Ok(None);
+        };
+
+        let candidates = [file_name.to_string(), format!("{}.disabled", file_name)];
+        for candidate in candidates {
+            let row = sqlx::query_scalar::<_, String>(
+                "SELECT data FROM mod_metadata WHERE environment_id = ? AND kind = 'mods' AND file_name = ? LIMIT 1",
+            )
+            .bind(&env_id)
+            .bind(&candidate)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to load raw mod metadata entry")?;
+
+            if let Some(data) = row {
+                if let Ok(meta) = serde_json::from_str::<ModMetadata>(&data) {
+                    return Ok(Some(meta));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn try_load_raw_mod_metadata_entry(
+        &self,
+        output_dir: &str,
+        file_name: &str,
+    ) -> Option<ModMetadata> {
+        match self.load_raw_mod_metadata_entry(output_dir, file_name).await {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::debug!(
+                    "Skipping managed metadata lookup for {} in {}: {}",
+                    file_name,
+                    output_dir,
+                    error
+                );
+                None
+            }
+        }
+    }
+
+    fn storage_row_default_path(&self, output_dir: &str, kind: &str, file_name: &str) -> Option<PathBuf> {
+        match kind {
+            "mods" => Some(self.get_mods_directory(output_dir).join(file_name)),
+            "plugins" => Some(self.get_plugins_directory(output_dir).join(file_name)),
+            "userlibs" => Some(Path::new(output_dir).join("UserLibs").join(file_name)),
+            "userdata" => Some(Path::new(output_dir).join("UserData").join(file_name)),
+            _ => None,
+        }
+    }
+
+    fn storage_source_path_for_env_path(
+        &self,
+        storage_base: &Path,
+        output_dir: &str,
+        env_path: &Path,
+    ) -> Option<PathBuf> {
+        let relative = env_path.strip_prefix(output_dir).ok()?;
+        let mut components = relative.components();
+        let bucket = match components.next()?.as_os_str().to_string_lossy().as_ref() {
+            value if value.eq_ignore_ascii_case("Mods") => "Mods",
+            value if value.eq_ignore_ascii_case("Plugins") => "Plugins",
+            value if value.eq_ignore_ascii_case("UserLibs") => "UserLibs",
+            value if value.eq_ignore_ascii_case("UserData") => "UserData",
+            _ => return None,
+        };
+
+        let mut source_path = storage_base.join(bucket);
+        let tail: Vec<String> = components
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .collect();
+        if tail.is_empty() {
+            return None;
+        }
+
+        for (index, component) in tail.iter().enumerate() {
+            if index == tail.len() - 1 {
+                source_path.push(component.trim_end_matches(".disabled"));
+            } else {
+                source_path.push(component);
+            }
+        }
+
+        Some(source_path)
+    }
+
+    fn active_and_disabled_paths(&self, path: &Path) -> (PathBuf, PathBuf) {
+        let path_string = path.to_string_lossy().to_string();
+        if path_string.to_ascii_lowercase().ends_with(".disabled") {
+            let active = PathBuf::from(path_string[..path_string.len() - ".disabled".len()].to_string());
+            (active, path.to_path_buf())
+        } else {
+            (path.to_path_buf(), PathBuf::from(format!("{}.disabled", path_string)))
+        }
+    }
+
+    async fn toggle_storage_paths(
+        &self,
+        output_dir: &str,
+        storage_id: &str,
+        disable: bool,
+    ) -> Result<bool> {
+        let rows = self
+            .load_metadata_rows_for_storage(output_dir, storage_id)
+            .await?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+
+        let mut candidate_paths: HashSet<PathBuf> = HashSet::new();
+        for (kind, file_name, meta) in rows {
+            if let Some(paths) = meta.symlink_paths {
+                for path in paths {
+                    candidate_paths.insert(PathBuf::from(path));
+                }
+            } else if let Some(path) = self.storage_row_default_path(output_dir, &kind, &file_name) {
+                candidate_paths.insert(path);
+            }
+        }
+
+        let mut changed = false;
+        for path in candidate_paths {
+            let (active_path, disabled_path) = self.active_and_disabled_paths(&path);
+            let from_path = if disable { &active_path } else { &disabled_path };
+            let to_path = if disable { &disabled_path } else { &active_path };
+
+            if !self.path_exists_or_symlink(from_path).await || self.path_exists_or_symlink(to_path).await {
+                continue;
+            }
+
+            fs::rename(from_path, to_path)
+                .await
+                .with_context(|| format!("Failed to {} managed path {}", if disable { "disable" } else { "enable" }, from_path.display()))?;
+            changed = true;
+        }
+
+        Ok(changed)
+    }
+
     pub async fn reconcile_tracked_mod_state(&self) -> Result<Vec<String>> {
         #[derive(Clone)]
         struct ReconcileEntry {
@@ -5123,6 +5296,20 @@ impl ModsService {
                 installed_files.len(),
                 env_id
             );
+            let all_symlink_paths: Vec<String> = metadata_map
+                .values()
+                .filter(|meta| meta.mod_storage_id.as_deref() == Some(storage_id))
+                .flat_map(|meta| meta.symlink_paths.clone().unwrap_or_default())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            if !all_symlink_paths.is_empty() {
+                for meta in metadata_map.values_mut() {
+                    if meta.mod_storage_id.as_deref() == Some(storage_id) {
+                        meta.symlink_paths = Some(all_symlink_paths.clone());
+                    }
+                }
+            }
             log::debug!(
                 "Completed storage install for environment: storage_id={}, environment_id={}, runtime={}, installed_files={:?}, warnings={:?}",
                 storage_id,
@@ -5185,22 +5372,44 @@ impl ModsService {
                         } else {
                             Some(PathBuf::from(format!("{}.disabled", path_str)))
                         };
+                        let matches_source_path = if let Some(source_path) =
+                            self.storage_source_path_for_env_path(
+                                &storage_base,
+                                &env.output_dir,
+                                path,
+                            ) {
+                            self.path_matches_storage_source(path, &source_path).await
+                        } else {
+                            false
+                        };
                         if self
                             .infer_storage_id_from_symlink(path, &storage_dir)
                             .await
                             .as_deref()
                             == Some(storage_id)
+                            || matches_source_path
                         {
                             if let Ok(did_remove) = self.remove_path_if_exists(path).await {
                                 removed |= did_remove;
                             }
                         }
                         if let Some(disabled) = disabled_path {
+                            let matches_disabled_source_path = if let Some(source_path) =
+                                self.storage_source_path_for_env_path(
+                                    &storage_base,
+                                    &env.output_dir,
+                                    &disabled,
+                                ) {
+                                self.path_matches_storage_source(&disabled, &source_path).await
+                            } else {
+                                false
+                            };
                             if self
                                 .infer_storage_id_from_symlink(&disabled, &storage_dir)
                                 .await
                                 .as_deref()
                                 == Some(storage_id)
+                                || matches_disabled_source_path
                             {
                                 if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await
                                 {
@@ -5368,6 +5577,19 @@ impl ModsService {
             return Err(anyhow::anyhow!("Invalid mod file"));
         }
 
+        let env_id = self.environment_id_for_dir(game_dir).await?;
+        if let Some(storage_id) = self
+            .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
+            .await
+            .and_then(|meta| meta.mod_storage_id)
+        {
+            if let Some(env_id) = env_id {
+                self.uninstall_storage_mod_from_envs(&storage_id, vec![env_id])
+                    .await?;
+                return Ok(());
+            }
+        }
+
         let file_to_delete = if mod_path.exists() {
             mod_path
         } else if disabled_path.exists() {
@@ -5403,6 +5625,16 @@ impl ModsService {
         let mod_path = mods_directory.join(mod_file_name);
         let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
 
+        if let Some(storage_id) = self
+            .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
+            .await
+            .and_then(|meta| meta.mod_storage_id)
+        {
+            if self.toggle_storage_paths(game_dir, &storage_id, true).await? {
+                return Ok(());
+            }
+        }
+
         // Security: Ensure the file is within the mods directory and ends with .dll
         if !mod_file_name.to_lowercase().ends_with(".dll") {
             return Err(anyhow::anyhow!("Invalid mod file"));
@@ -5434,6 +5666,16 @@ impl ModsService {
         let mods_directory = self.get_mods_directory(game_dir);
         let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
         let mod_path = mods_directory.join(mod_file_name);
+
+        if let Some(storage_id) = self
+            .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
+            .await
+            .and_then(|meta| meta.mod_storage_id)
+        {
+            if self.toggle_storage_paths(game_dir, &storage_id, false).await? {
+                return Ok(());
+            }
+        }
 
         // Security: Ensure the file is within the mods directory and ends with .dll
         if !mod_file_name.to_lowercase().ends_with(".dll") {
@@ -8234,6 +8476,79 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn disable_and_enable_managed_mod_toggles_companion_plugin_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-managed-toggle");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+
+        let storage_root = service.get_mods_storage_dir().await?;
+        let storage_mods_dir = storage_root.join("managed-storage").join("Mods");
+        let storage_plugins_dir = storage_root.join("managed-storage").join("Plugins");
+        fs::create_dir_all(&storage_mods_dir).await?;
+        fs::create_dir_all(&storage_plugins_dir).await?;
+
+        let storage_mod_path = storage_mods_dir.join("ManagedMod.dll");
+        let storage_plugin_path = storage_plugins_dir.join("LoaderPlugin.dll");
+        fs::write(&storage_mod_path, b"data").await?;
+        fs::write(&storage_plugin_path, b"data").await?;
+
+        let mod_path = mods_dir.join("ManagedMod.dll");
+        let plugin_path = plugins_dir.join("LoaderPlugin.dll");
+        service.create_symlink_file(&storage_mod_path, &mod_path).await?;
+        service
+            .create_symlink_file(&storage_plugin_path, &plugin_path)
+            .await?;
+
+        let mut metadata = HashMap::new();
+        let mut mod_meta = sample_metadata(Some("managed-storage"), None, Some("1.0.0"));
+        mod_meta.symlink_paths = Some(vec![
+            mod_path.to_string_lossy().to_string(),
+            plugin_path.to_string_lossy().to_string(),
+        ]);
+        metadata.insert("ManagedMod.dll".to_string(), mod_meta);
+
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        service
+            .disable_mod(output_dir.to_string_lossy().as_ref(), "ManagedMod.dll")
+            .await?;
+        assert!(!mod_path.exists());
+        assert!(!plugin_path.exists());
+        assert!(mods_dir.join("ManagedMod.dll.disabled").exists());
+        assert!(plugins_dir.join("LoaderPlugin.dll.disabled").exists());
+
+        service
+            .enable_mod(output_dir.to_string_lossy().as_ref(), "ManagedMod.dll")
+            .await?;
+        assert!(mod_path.exists());
+        assert!(plugin_path.exists());
+        assert!(!mods_dir.join("ManagedMod.dll.disabled").exists());
+        assert!(!plugins_dir.join("LoaderPlugin.dll.disabled").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn delete_mod_removes_file_and_metadata() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
@@ -8269,6 +8584,63 @@ mod tests {
             .await?;
 
         assert!(!mods_dir.join("Example.dll").exists());
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?")
+                .bind(&env.id)
+                .fetch_one(&*pool)
+                .await?;
+        assert_eq!(count, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_managed_mod_removes_companion_plugin_files() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-managed-delete");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+
+        let mod_path = mods_dir.join("ManagedMod.dll");
+        let plugin_path = plugins_dir.join("LoaderPlugin.dll");
+        fs::write(&mod_path, b"data").await?;
+        fs::write(&plugin_path, b"data").await?;
+
+        let mut metadata = HashMap::new();
+        let mut mod_meta = sample_metadata(Some("managed-storage"), None, Some("1.0.0"));
+        mod_meta.symlink_paths = Some(vec![
+            mod_path.to_string_lossy().to_string(),
+            plugin_path.to_string_lossy().to_string(),
+        ]);
+        metadata.insert("ManagedMod.dll".to_string(), mod_meta);
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        service
+            .delete_mod(output_dir.to_string_lossy().as_ref(), "ManagedMod.dll")
+            .await?;
+
+        assert!(!mod_path.exists());
+        assert!(!plugin_path.exists());
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?")

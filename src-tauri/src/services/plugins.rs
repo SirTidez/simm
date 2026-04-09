@@ -610,27 +610,44 @@ impl PluginsService {
             };
 
             let plugin_name = original_file_name.replace(".dll", "").replace(".DLL", "");
+            let normalized_file_path = Self::normalize_path(&file_path);
 
             // Get metadata for the original filename (without .disabled)
+            let managed_mod_metadata = mods_metadata
+                .get(&original_file_name)
+                .or_else(|| mods_metadata.get(&file_name))
+                .or_else(|| {
+                    mods_metadata.values().find(|meta| {
+                        meta.symlink_paths.as_ref().is_some_and(|paths| {
+                            paths.iter().any(|path| Self::normalize_path(path) == normalized_file_path)
+                        })
+                    })
+                });
             let file_metadata = plugin_metadata
                 .get(&original_file_name)
                 .or_else(|| plugin_metadata.get(&file_name))
+                .or(managed_mod_metadata)
                 .cloned();
 
             // Check for related mod in mods metadata
-            let related_mod = mods_metadata
-                .values()
-                .find(|meta| {
-                    meta.mod_name
-                        .as_ref()
-                        .map(|n| n.to_lowercase() == plugin_name.to_lowercase())
-                        .unwrap_or(false)
-                })
-                .and_then(|meta| meta.mod_name.clone());
+            let related_mod = file_metadata
+                .as_ref()
+                .and_then(|meta| meta.mod_name.clone())
+                .or_else(|| {
+                    mods_metadata
+                        .values()
+                        .find(|meta| {
+                            meta.mod_name
+                                .as_ref()
+                                .map(|n| n.to_lowercase() == plugin_name.to_lowercase())
+                                .unwrap_or(false)
+                        })
+                        .and_then(|meta| meta.mod_name.clone())
+                });
 
             let version = file_metadata
                 .as_ref()
-                .and_then(|m| m.installed_version.clone());
+                .and_then(|m| m.installed_version.clone().or(m.source_version.clone()));
 
             let source = file_metadata.as_ref().and_then(|m| m.source.clone());
 
@@ -1072,9 +1089,10 @@ mod tests {
     use super::PluginsService;
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
-    use crate::types::{schedule_i_config, ModSource};
+    use crate::types::{schedule_i_config, ModMetadata, ModSource};
     use anyhow::Result;
     use serial_test::serial;
+    use std::collections::HashMap;
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -1264,6 +1282,87 @@ mod tests {
         assert!(matches!(entry.source, Some(ModSource::Github)));
         assert_eq!(entry.source_id.as_deref(), Some("example/repo"));
         assert_eq!(entry.source_version.as_deref(), Some("1.2.3"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_plugins_falls_back_to_managed_mod_metadata_for_source() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let mods_service = crate::services::mods::ModsService::new(pool.clone());
+        let service = PluginsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("plugins-managed-fallback");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::write(plugins_dir.join("LoaderPlugin.dll"), b"data").await?;
+
+        let mut mods_metadata = HashMap::new();
+        let parent_mod_meta = ModMetadata {
+            source: Some(ModSource::Github),
+            source_id: Some("ifBars/S1API_Forked".to_string()),
+            source_version: Some("1.2.3".to_string()),
+            author: None,
+            mod_name: Some("S1API".to_string()),
+            source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
+            installed_version: None,
+            library_added_at: None,
+            installed_at: None,
+            last_update_check: None,
+            metadata_last_refreshed: None,
+            update_available: None,
+            remote_version: None,
+            detected_runtime: None,
+            runtime_match: None,
+            mod_storage_id: Some("s1api-storage".to_string()),
+            symlink_paths: Some(vec![
+                plugins_dir.join("LoaderPlugin.dll").to_string_lossy().to_string(),
+            ]),
+            security_scan: None,
+        };
+        mods_metadata.insert("S1API.dll".to_string(), parent_mod_meta);
+        mods_service.save_mod_metadata(&mods_dir, &mods_metadata).await?;
+
+        let list = service
+            .list_plugins(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let plugins = list
+            .get("plugins")
+            .and_then(|value| value.as_array())
+            .expect("plugins array");
+        let loader = plugins
+            .iter()
+            .find(|plugin| plugin.get("fileName").and_then(|value| value.as_str()) == Some("LoaderPlugin.dll"))
+            .expect("managed plugin entry");
+
+        assert_eq!(loader.get("source").and_then(|value| value.as_str()), Some("github"));
+        assert_eq!(loader.get("version").and_then(|value| value.as_str()), Some("1.2.3"));
+        assert_eq!(loader.get("relatedMod").and_then(|value| value.as_str()), Some("S1API"));
 
         Ok(())
     }
