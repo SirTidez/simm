@@ -5,6 +5,7 @@ import { ApiService } from '../services/api';
 import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/events';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
+import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 
 interface ModUpdatesEntry {
   count: number;
@@ -44,7 +45,9 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
   // Load mod updates summary for completed environments
   const loadModUpdatesSummary = React.useCallback(async () => {
     try {
-      const library = await ApiService.getModLibrary();
+      const library = await normalizeLibraryFeaturedDownloads(
+        await ApiService.getModLibrary(),
+      );
       const map = new Map<string, ModUpdatesEntry>();
       for (const env of environments) {
         if (env.status !== 'completed') {
@@ -235,7 +238,11 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
         )}
         {completedEnvs.length > 0 && (
           <>
-            {totalModsNeedingUpdate === 0 ? (
+            {metadataRefreshRunning && totalModsNeedingUpdate === 0 ? (
+              <span className="statusbar-stat statusbar-check">
+                &bull; Checking Mods Status<span className="checking-dots" aria-hidden="true"></span>
+              </span>
+            ) : totalModsNeedingUpdate === 0 ? (
               <span className="statusbar-stat statusbar-stat-ok">
                 &bull; Mods up to date
               </span>

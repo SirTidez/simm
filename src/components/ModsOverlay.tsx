@@ -3845,7 +3845,7 @@ export function ModsOverlay({
                     {checkingModUpdates ? 'Checking...' : 'Check Updates'}
                   </button>
                   <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
-                    {uploading ? uploadButtonBusyLabel : 'Upload Mod'}
+                    {uploading ? uploadButtonBusyLabel : 'Add Mod'}
                   </button>
                   <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
                     Open Folder

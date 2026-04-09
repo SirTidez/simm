@@ -13,6 +13,7 @@ import { ConfirmOverlay } from './ConfirmOverlay';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
+import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import {
   onAuthWaiting,
   onAuthSuccess,
@@ -136,7 +137,7 @@ export function EnvironmentList({
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [modsCounts, setModsCounts] = useState<Map<string, number>>(new Map());
-  const [coreToolCounts, setCoreToolCounts] = useState<Map<string, number>>(new Map());
+  const [featuredDownloadCounts, setFeaturedDownloadCounts] = useState<Map<string, number>>(new Map());
   const [modUpdatesCounts, setModUpdatesCounts] = useState<Map<string, number>>(new Map());
   const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
   const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
@@ -563,6 +564,7 @@ export function EnvironmentList({
 
         unlistenModUpdatesChecked = await onModUpdatesChecked((data) => {
           void ApiService.getModLibrary()
+            .then((library) => normalizeLibraryFeaturedDownloads(library))
             .then((library) => buildEnvironmentCardModSnapshot(data.environmentId, library, true))
             .then((snapshot) => {
               setModsCounts(prev => {
@@ -570,9 +572,9 @@ export function EnvironmentList({
                 next.set(data.environmentId, snapshot.userMods);
                 return next;
               });
-              setCoreToolCounts(prev => {
+              setFeaturedDownloadCounts(prev => {
                 const next = new Map(prev);
-                next.set(data.environmentId, snapshot.coreTools);
+                next.set(data.environmentId, snapshot.featuredDownloads);
                 return next;
               });
               setModUpdatesCounts(prev => {
@@ -603,15 +605,16 @@ export function EnvironmentList({
             const timer = setTimeout(async () => {
               try {
                 const library = await ApiService.getModLibrary();
-                const snapshot = await buildEnvironmentCardModSnapshot(data.environmentId, library, true);
+                const normalizedLibrary = await normalizeLibraryFeaturedDownloads(library);
+                const snapshot = await buildEnvironmentCardModSnapshot(data.environmentId, normalizedLibrary, true);
                 setModsCounts(prev => {
                   const next = new Map(prev);
                   next.set(data.environmentId, snapshot.userMods);
                   return next;
                 });
-                setCoreToolCounts(prev => {
+                setFeaturedDownloadCounts(prev => {
                   const next = new Map(prev);
-                  next.set(data.environmentId, snapshot.coreTools);
+                  next.set(data.environmentId, snapshot.featuredDownloads);
                   return next;
                 });
                 setModUpdatesCounts(prev => {
@@ -880,14 +883,16 @@ export function EnvironmentList({
   useEffect(() => {
     const loadCounts = async () => {
       const modCounts = new Map<string, number>();
-      const coreToolCountsMap = new Map<string, number>();
+      const featuredDownloadCountsMap = new Map<string, number>();
       const modUpdatesCountsMap = new Map<string, number>();
       const pluginCounts = new Map<string, number>();
       const userLibsCounts = new Map<string, number>();
       const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
       let library = null;
       try {
-        library = await ApiService.getModLibrary();
+        library = await normalizeLibraryFeaturedDownloads(
+          await ApiService.getModLibrary(),
+        );
       } catch {
         library = null;
       }
@@ -895,7 +900,7 @@ export function EnvironmentList({
         if (env.status === 'completed') {
           const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, library);
           modCounts.set(env.id, modSnapshot.userMods);
-          coreToolCountsMap.set(env.id, modSnapshot.coreTools);
+          featuredDownloadCountsMap.set(env.id, modSnapshot.featuredDownloads);
           modUpdatesCountsMap.set(env.id, modSnapshot.updateCount);
           try {
             const pluginResult = await ApiService.getPluginsCount(env.id);
@@ -918,7 +923,7 @@ export function EnvironmentList({
         }
       }
       setModsCounts(modCounts);
-      setCoreToolCounts(coreToolCountsMap);
+      setFeaturedDownloadCounts(featuredDownloadCountsMap);
       setModUpdatesCounts(modUpdatesCountsMap);
       setPluginsCounts(pluginCounts);
       setUserLibsCounts(userLibsCounts);
@@ -979,6 +984,7 @@ export function EnvironmentList({
       const env = environments.find(e => e.id === modsOverlay.envId);
       if (env && env.status === 'completed') {
         ApiService.getModLibrary()
+          .then((library) => normalizeLibraryFeaturedDownloads(library))
           .then((library) => buildEnvironmentCardModSnapshot(env.id, library, true))
           .then((snapshot) => {
             setModsCounts(prev => {
@@ -986,9 +992,9 @@ export function EnvironmentList({
               next.set(env.id, snapshot.userMods);
               return next;
             });
-            setCoreToolCounts(prev => {
+            setFeaturedDownloadCounts(prev => {
               const next = new Map(prev);
-              next.set(env.id, snapshot.coreTools);
+              next.set(env.id, snapshot.featuredDownloads);
               return next;
             });
             setModUpdatesCounts(prev => {
@@ -1003,7 +1009,7 @@ export function EnvironmentList({
               next.set(env.id, 0);
               return next;
             });
-            setCoreToolCounts(prev => {
+            setFeaturedDownloadCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, 0);
               return next;
@@ -1488,7 +1494,8 @@ export function EnvironmentList({
     const status = getDominantStatus(env);
     const launchMethod = preferredLaunchMethod.get(env.id) || 'steam';
     const modCount = modsCounts.get(env.id) ?? 0;
-    const coreToolCount = coreToolCounts.get(env.id) ?? 0;
+    const featuredDownloadCount = featuredDownloadCounts.get(env.id) ?? 0;
+    const totalModCount = modCount + featuredDownloadCount;
     const modUpdateCount = modUpdatesCounts.get(env.id) ?? 0;
     const pluginCount = pluginsCounts.get(env.id) ?? 0;
     const userLibsCount = userLibsCounts.get(env.id) ?? 0;
@@ -1498,13 +1505,11 @@ export function EnvironmentList({
       {
         label: 'Mods',
         value: isCompleted
-          ? `${modCount}${coreToolCount > 0 ? ` (+${coreToolCount} ${coreToolCount === 1 ? 'Tool' : 'Tools'})` : ''}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
+          ? `${totalModCount}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
           : 'Unavailable',
         tone: modUpdateCount > 0 ? 'warning' : undefined,
         onClick: isCompleted && modUpdateCount > 0 ? () => handleOpenModUpdatesOverlay(env.id) : undefined,
-        title: coreToolCount > 0
-          ? `${modCount} user mods, ${coreToolCount} SIMM-managed core tool${coreToolCount === 1 ? '' : 's'}`
-          : undefined,
+        title: isCompleted ? `${totalModCount} total mods` : undefined,
       },
       { label: 'Plugins', value: isCompleted ? `${pluginCount}` : 'Unavailable' },
       { label: 'UserLibs', value: isCompleted ? `${userLibsCount}` : 'Unavailable' },

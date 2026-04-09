@@ -6,7 +6,9 @@ const runtimeSuffixPatterns = [
   /\s+(mono|il2cpp)\s*$/i,
 ];
 
-const coreToolSourceIds = new Set([
+const featuredDownloadSourceIds = new Set([
+  'ifbars/s1api',
+  'ifbars/s1api_forked',
   'ifbars/mlvscan',
 ]);
 
@@ -35,10 +37,39 @@ export interface ModUpdateSummaryEntry {
 
 export interface EnvironmentModSnapshot {
   userMods: number;
-  coreTools: number;
+  featuredDownloads: number;
   total: number;
   updateCount: number;
   updates: ModUpdateSummaryEntry[];
+}
+
+export function applyFeaturedDownloadRemoteVersions(
+  library: ModLibraryResult | null | undefined,
+  latestBySourceId: ReadonlyMap<string, string>,
+): ModLibraryResult | null | undefined {
+  if (!library) {
+    return library;
+  }
+
+  return {
+    ...library,
+    downloaded: (library.downloaded ?? []).map((entry) => {
+      const normalizedSourceId = (entry.sourceId || '').trim().toLowerCase();
+      const latestVersion = latestBySourceId.get(normalizedSourceId);
+      if (!latestVersion) {
+        return entry;
+      }
+
+      const currentVersion = entry.sourceVersion || entry.installedVersion || '';
+      return {
+        ...entry,
+        remoteVersion: latestVersion,
+        updateAvailable: currentVersion
+          ? compareVersionTokensDesc(latestVersion, currentVersion) < 0
+          : true,
+      };
+    }),
+  };
 }
 
 export function normalizeThunderstoreName(name: string): string {
@@ -279,18 +310,18 @@ function compareEntriesForEnvironmentUpdateSummary(a: ModLibraryEntry, b: ModLib
     || a.displayName.localeCompare(b.displayName);
 }
 
-export function isCoreToolGroup(group: DownloadedModGroup): boolean {
+export function isFeaturedDownloadGroup(group: DownloadedModGroup): boolean {
   return group.entries.some((entry) => {
     const sourceId = (entry.sourceId || '').trim().toLowerCase();
-    return coreToolSourceIds.has(sourceId);
+    return featuredDownloadSourceIds.has(sourceId);
   });
 }
 
 export function buildEnvironmentModSnapshot(library: ModLibraryResult | null | undefined, environmentId: string): EnvironmentModSnapshot {
   const downloaded = library?.downloaded ?? [];
   const groups = buildDownloadedGroups(downloaded).filter((group) => group.installedIn.includes(environmentId));
-  const userGroups = groups.filter((group) => !isCoreToolGroup(group));
-  const updates = userGroups
+  const userGroups = groups.filter((group) => !isFeaturedDownloadGroup(group));
+  const updates = groups
     .map((group) => {
       const installedEntries = group.entries.filter((entry) => entry.installedIn.includes(environmentId));
       const updateEntries = installedEntries
@@ -314,7 +345,7 @@ export function buildEnvironmentModSnapshot(library: ModLibraryResult | null | u
 
   return {
     userMods: userGroups.length,
-    coreTools: groups.length - userGroups.length,
+    featuredDownloads: groups.length - userGroups.length,
     total: groups.length,
     updateCount: updates.length,
     updates,

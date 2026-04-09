@@ -298,9 +298,14 @@ describe('EnvironmentList', () => {
     render(<EnvironmentList />);
 
     expect(await screen.findByText('2')).toBeTruthy();
+    expect(
+      await screen.findByTitle('2 total mods'),
+    ).toBeTruthy();
     await waitFor(() => {
       expect(screen.queryByText('2 (+1 Tool)')).toBeNull();
+      expect(screen.queryByTitle('1 SIMM-managed mod, 1 user mod')).toBeNull();
       expect(screen.queryByTitle('1 user mods, 1 SIMM-managed core tool')).toBeNull();
+      expect(screen.queryByText('1 (+1 Featured)')).toBeNull();
     });
   });
 

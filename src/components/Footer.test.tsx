@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { Footer } from './Footer';
 import type { Environment } from '../types';
 
@@ -14,6 +14,8 @@ const settingsStoreMocks = vi.hoisted(() => ({
 const apiMocks = vi.hoisted(() => ({
   getAllModUpdatesSummary: vi.fn(),
   getModLibrary: vi.fn(),
+  getS1APILatestRelease: vi.fn(),
+  getMLVScanLatestRelease: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -72,22 +74,42 @@ function mockStores(environments: Environment[]) {
 }
 
 describe('Footer', () => {
+  let modUpdatesCheckedHandler: (() => void | Promise<void>) | null = null;
+  let metadataRefreshStatusHandler: ((data: { activeCount?: number; running?: boolean }) => void) | null = null;
+
   beforeEach(() => {
     envStoreMocks.useEnvironmentStore.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
     apiMocks.getAllModUpdatesSummary.mockReset();
     apiMocks.getModLibrary.mockReset();
+    apiMocks.getS1APILatestRelease.mockReset();
+    apiMocks.getMLVScanLatestRelease.mockReset();
     eventMocks.onModUpdatesChecked.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
 
-    eventMocks.onModUpdatesChecked.mockResolvedValue(() => {});
-    eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
+    modUpdatesCheckedHandler = null;
+    metadataRefreshStatusHandler = null;
+
+    eventMocks.onModUpdatesChecked.mockImplementation(async (handler) => {
+      modUpdatesCheckedHandler = handler;
+      return () => {
+        modUpdatesCheckedHandler = null;
+      };
+    });
+    eventMocks.onModMetadataRefreshStatus.mockImplementation(async (handler) => {
+      metadataRefreshStatusHandler = handler;
+      return () => {
+        metadataRefreshStatusHandler = null;
+      };
+    });
     apiMocks.getAllModUpdatesSummary.mockResolvedValue([]);
     apiMocks.getModLibrary.mockResolvedValue({
       entries: [],
       groups: [],
       totalCount: 0,
     });
+    apiMocks.getS1APILatestRelease.mockResolvedValue(null);
+    apiMocks.getMLVScanLatestRelease.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -140,6 +162,42 @@ describe('Footer', () => {
     expect(await screen.findByText(/2\s+Mods need updating/i)).toBeTruthy();
   });
 
+  it('counts featured GitHub downloads in the mod update summary', async () => {
+    mockStores([completedEnv]);
+    apiMocks.getModLibrary.mockResolvedValueOnce({
+      downloaded: [
+        {
+          storageId: 'mlvscan-a',
+          displayName: 'MLVScan',
+          files: ['MLVScan.dll'],
+          source: 'github',
+          sourceId: 'ifBars/MLVScan',
+          sourceVersion: 'v2.0.1',
+          installedVersion: 'v2.0.1',
+          remoteVersion: undefined,
+          updateAvailable: false,
+          managed: true,
+          installedIn: ['env-1'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: {},
+          installedInByRuntime: { IL2CPP: ['env-1'] },
+          filesByRuntime: {},
+        },
+      ],
+    });
+    apiMocks.getMLVScanLatestRelease.mockResolvedValue({
+      tag_name: 'v2.0.2',
+      name: 'v2.0.2',
+      published_at: '2026-04-04T07:27:38Z',
+      prerelease: false,
+      download_url: 'https://example.com/mlvscan.zip',
+    });
+
+    render(<Footer />);
+
+    expect(await screen.findByText(/1\s+Mod needs updating/i)).toBeTruthy();
+  });
+
   it('shows all mods up to date when completed environments have no mod updates', async () => {
     mockStores([completedEnv]);
     apiMocks.getModLibrary.mockResolvedValueOnce({
@@ -150,6 +208,57 @@ describe('Footer', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Mods up to date/i)).toBeTruthy();
+    });
+  });
+
+  it('shows checking mod status while metadata refresh is active until updates are found', async () => {
+    mockStores([completedEnv]);
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({
+        downloaded: [],
+      })
+      .mockResolvedValueOnce({
+        downloaded: [
+          {
+            storageId: 'mod-a',
+            displayName: 'Mod A',
+            files: ['ModA.dll'],
+            source: 'thunderstore',
+            sourceId: 'author/mod-a',
+            sourceVersion: '1.0.0',
+            installedVersion: '1.0.0',
+            remoteVersion: '1.1.0',
+            updateAvailable: true,
+            managed: false,
+            installedIn: ['env-1'],
+            availableRuntimes: ['IL2CPP'],
+            storageIdsByRuntime: {},
+            installedInByRuntime: { IL2CPP: ['env-1'] },
+            filesByRuntime: {},
+          },
+        ],
+      });
+
+    render(<Footer />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Mods up to date/i)).toBeTruthy();
+    });
+
+    await act(async () => {
+      metadataRefreshStatusHandler?.({ activeCount: 1, running: true });
+    });
+
+    expect(screen.getByText(/Checking Mods Status/i)).toBeTruthy();
+    expect(screen.queryByText(/Mods up to date/i)).toBeNull();
+
+    await act(async () => {
+      await modUpdatesCheckedHandler?.();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/1\s+Mod needs updating/i)).toBeTruthy();
+      expect(screen.queryByText(/Checking Mods Status/i)).toBeNull();
     });
   });
 

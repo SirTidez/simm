@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   ModLibraryOverlay,
   type ModLibraryNavigationState,
@@ -34,10 +35,15 @@ const apiMocks = vi.hoisted(() => ({
   uninstallDownloadedMod: vi.fn(),
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
+  storeModArchive: vi.fn(),
 }));
 
 vi.mock("../services/api", () => ({
   ApiService: apiMocks,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -195,6 +201,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.uninstallDownloadedMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
+    apiMocks.storeModArchive.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
 
@@ -248,6 +255,10 @@ describe("ModLibraryOverlay", () => {
     apiMocks.uninstallDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.getModSecurityScanReport.mockResolvedValue(null);
+    apiMocks.storeModArchive.mockResolvedValue({
+      success: true,
+      storageId: "imported-storage",
+    });
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
     settingsStoreMocks.useSettingsStore.mockReturnValue({
       settings: {
@@ -261,6 +272,7 @@ describe("ModLibraryOverlay", () => {
       prerelease: false,
       download_url: "https://example.com/mlvscan.zip",
     });
+    vi.mocked(open).mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -300,6 +312,102 @@ describe("ModLibraryOverlay", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /S1API/i })).toHaveTextContent(
         "Update",
+      );
+    });
+  });
+
+  it("downloads MLVScan from the GitHub release source used by the library entry", async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({
+        downloaded: [
+          makeEntry({
+            storageId: "mlvscan-old",
+            displayName: "MLVScan",
+            source: "github",
+            sourceId: "ifBars/MLVScan",
+            sourceVersion: "v2.0.1",
+            installedVersion: "v2.0.1",
+            availableRuntimes: ["IL2CPP"],
+            storageIdsByRuntime: { IL2CPP: "mlvscan-old" },
+            installedInByRuntime: { IL2CPP: [] },
+            filesByRuntime: { IL2CPP: ["MLVScan.dll"] },
+          }),
+        ],
+      })
+      .mockResolvedValue({
+        downloaded: [
+          makeEntry({
+            storageId: "mlvscan-new",
+            displayName: "MLVScan",
+            source: "github",
+            sourceId: "ifBars/MLVScan",
+            sourceVersion: "v2.0.2",
+            installedVersion: "v2.0.2",
+            availableRuntimes: ["IL2CPP"],
+            storageIdsByRuntime: { IL2CPP: "mlvscan-new" },
+            installedInByRuntime: { IL2CPP: [] },
+            filesByRuntime: { IL2CPP: ["MLVScan.dll"] },
+          }),
+        ],
+      });
+    apiMocks.getMLVScanLatestRelease.mockResolvedValue({
+      tag_name: "v2.0.2",
+      name: "v2.0.2",
+      published_at: "2026-04-04T07:27:38Z",
+      prerelease: false,
+      download_url: "https://example.com/mlvscan.zip",
+      body: "Latest MLVScan release",
+    });
+    apiMocks.downloadMLVScanToLibrary.mockResolvedValue({
+      success: true,
+      storageId: "mlvscan-new",
+    });
+
+    renderLibraryOverlay();
+
+    fireEvent.click(await screen.findByRole("button", { name: /MLVScan/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.downloadMLVScanToLibrary).toHaveBeenCalledWith("v2.0.2");
+      expect(apiMocks.downloadThunderstoreToLibrary).not.toHaveBeenCalled();
+    });
+  });
+
+  it("shows an add files action and imports local archives into the library", async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValue({
+        downloaded: [
+          makeEntry({
+            storageId: "imported-storage",
+            displayName: "My Mod",
+            source: "local",
+            sourceVersion: undefined,
+            availableRuntimes: ["Mono"],
+            storageIdsByRuntime: { Mono: "imported-storage" },
+            installedInByRuntime: { Mono: [] },
+            filesByRuntime: { Mono: ["MyMod.dll"] },
+          }),
+        ],
+      });
+    vi.mocked(open).mockResolvedValue("C:/mods/my-mod-mono.zip");
+
+    renderLibraryOverlay({ libraryTab: "library" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add Files" }));
+
+    await waitFor(() => {
+      expect(apiMocks.storeModArchive).toHaveBeenCalledWith(
+        "C:/mods/my-mod-mono.zip",
+        "my-mod-mono.zip",
+        "Mono",
+        {
+          source: "local",
+          modName: "my-mod-mono",
+        },
+        "mods",
+        false,
+        undefined,
       );
     });
   });

@@ -301,7 +301,7 @@ describe("Settings", () => {
 
     render(<Settings isOpen={true} onClose={vi.fn()} />);
 
-    const toggle = screen.getByRole("checkbox", {
+    const toggle = screen.getByRole("switch", {
       name: /auto-install after download/i,
     });
 
@@ -323,7 +323,7 @@ describe("Settings", () => {
 
     expect(updateSettingsSpy).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByRole("checkbox", {
+      screen.getByRole("switch", {
         name: /auto-install after download/i,
       }),
     ).toBeTruthy();

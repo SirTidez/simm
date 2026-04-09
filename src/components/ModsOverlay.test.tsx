@@ -299,7 +299,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     expect(await screen.findByText('Select Mod Runtime')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Mono' }));
@@ -343,7 +343,7 @@ describe('ModsOverlay', () => {
     const initialLibraryCalls = apiMocks.getModLibrary.mock.calls.length;
     const initialUpdateSummaryCalls = apiMocks.getModUpdatesSummary.mock.calls.length;
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     await waitFor(() => {
       expect(apiMocks.uploadMod).toHaveBeenNthCalledWith(
@@ -391,7 +391,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     expect(await screen.findByText('Select Mod Runtime')).toBeTruthy();
     fireEvent.click(document.querySelector('.modal-close') as HTMLElement);
@@ -429,7 +429,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     await waitFor(() => {
       expect(apiMocks.uploadMod).toHaveBeenCalledTimes(2);

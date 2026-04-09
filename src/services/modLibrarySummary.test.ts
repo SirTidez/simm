@@ -85,4 +85,37 @@ describe('modLibrarySummary', () => {
       },
     ]);
   });
+
+  it('includes featured GitHub downloads in environment update summaries', () => {
+    const snapshot = buildEnvironmentModSnapshot({
+      downloaded: [
+        makeEntry({
+          storageId: 'mlvscan-storage',
+          displayName: 'MLVScan',
+          source: 'github',
+          sourceId: 'ifBars/MLVScan',
+          sourceVersion: 'v2.0.1',
+          remoteVersion: 'v2.0.2',
+          updateAvailable: true,
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'mlvscan-storage' },
+          installedInByRuntime: { IL2CPP: ['env-main'] },
+          filesByRuntime: { IL2CPP: ['MLVScan.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, 'env-main');
+
+    expect(snapshot.featuredDownloads).toBe(1);
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates).toEqual([
+      {
+        modName: 'MLVScan',
+        currentVersion: 'v2.0.1',
+        latestVersion: 'v2.0.2',
+        source: 'github',
+        groupKey: 'github::ifbars/mlvscan',
+      },
+    ]);
+  });
 });

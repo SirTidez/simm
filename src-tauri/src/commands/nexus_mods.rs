@@ -37,6 +37,25 @@ fn nexus_warn(message: impl Into<String>) -> String {
     message
 }
 
+fn classify_oauth_refresh_failure(status: reqwest::StatusCode, value: &Value) -> String {
+    let error_code = value
+        .get("error")
+        .and_then(|entry| entry.as_str())
+        .unwrap_or_default();
+
+    if status == reqwest::StatusCode::BAD_REQUEST && error_code.eq_ignore_ascii_case("invalid_grant")
+    {
+        return nexus_warn(
+            "Stored Nexus login could not be refreshed because Nexus rejected the saved refresh token. This usually means the previous login expired, was revoked, or was replaced. Reconnect Nexus if downloads stop working.",
+        );
+    }
+
+    nexus_error(format!(
+        "OAuth token refresh failed ({}): {}",
+        status, value
+    ))
+}
+
 async fn cleanup_temp_archive(path: &std::path::Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -643,10 +662,7 @@ async fn oauth_refresh_token_local(
         .await
         .map_err(|e| nexus_error(format!("Invalid OAuth refresh response: {}", e)))?;
     if !status.is_success() {
-        return Err(nexus_error(format!(
-            "OAuth token refresh failed ({}): {}",
-            status, value
-        )));
+        return Err(classify_oauth_refresh_failure(status, &value));
     }
 
     Ok(value)
@@ -2474,7 +2490,7 @@ pub async fn install_nexus_mods_mod(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_jwt_payload, derive_account_flags};
+    use super::{classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags};
     use serde_json::json;
 
     fn build_test_jwt(payload: serde_json::Value) -> String {
@@ -2537,5 +2553,19 @@ mod tests {
         let (is_premium, is_supporter) = derive_account_flags(&userinfo, &token);
         assert!(!is_premium);
         assert!(is_supporter);
+    }
+
+    #[test]
+    fn oauth_refresh_invalid_grant_is_downgraded_to_warning_message() {
+        let message = classify_oauth_refresh_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            &json!({
+                "error": "invalid_grant",
+                "error_description": "expired"
+            }),
+        );
+
+        assert!(message.contains("Stored Nexus login could not be refreshed"));
+        assert!(!message.contains("OAuth token refresh failed"));
     }
 }
