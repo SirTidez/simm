@@ -5,7 +5,11 @@ import { resolve } from 'path'
 
 // Read package.json to get version
 const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf-8'))
-const tauriPlatform = process.env.TAURI_PLATFORM
+const tauriPlatform = (
+  process.env.TAURI_ENV_PLATFORM ??
+  process.env.TAURI_PLATFORM ??
+  ''
+).toLowerCase()
 const isWindowsBuild =
   tauriPlatform === 'windows' || (!tauriPlatform && process.platform === 'win32')
 

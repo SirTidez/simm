@@ -4669,6 +4669,7 @@ impl ModsService {
                         &mod_storage_mods,
                         &mod_storage_plugins,
                         &mod_storage_userlibs,
+                        &mod_storage_userdata,
                         &temp_dir,
                         runtime_label,
                     )
@@ -4680,6 +4681,7 @@ impl ModsService {
                         &mod_storage_mods,
                         &mod_storage_plugins,
                         &mod_storage_userlibs,
+                        &mod_storage_userdata,
                         &temp_dir,
                         runtime_label,
                     )
@@ -6021,6 +6023,7 @@ impl ModsService {
                         &mod_storage_mods,
                         &mod_storage_plugins,
                         &mod_storage_userlibs,
+                        &mod_storage_userdata,
                         &temp_dir,
                         Some(normalized_runtime_label),
                     )
@@ -6047,6 +6050,7 @@ impl ModsService {
                         &mod_storage_mods,
                         &mod_storage_plugins,
                         &mod_storage_userlibs,
+                        &mod_storage_userdata,
                         &temp_dir,
                         Some(normalized_runtime_label),
                     )
@@ -6095,6 +6099,14 @@ impl ModsService {
         self.ensure_storage_symlinks_recursive(
             &mod_storage_userlibs,
             &userlibs_directory,
+            true,
+            true,
+            &mut symlink_paths,
+        )
+        .await?;
+        self.ensure_storage_symlinks_recursive(
+            &mod_storage_userdata,
+            &userdata_directory,
             true,
             true,
             &mut symlink_paths,
@@ -6372,6 +6384,7 @@ impl ModsService {
         mods_dir: &Path,
         plugins_dir: &Path,
         userlibs_dir: &Path,
+        userdata_dir: &Path,
         temp_dir: &Path,
         runtime: Option<&str>,
     ) -> Result<Vec<String>> {
@@ -6424,10 +6437,7 @@ impl ModsService {
                 mods_dir,
                 plugins_dir,
                 userlibs_dir,
-                &mods_dir
-                    .parent()
-                    .map(|path| path.join("UserData"))
-                    .unwrap_or_else(|| PathBuf::from("UserData")),
+                userdata_dir,
                 runtime,
             )
             .await?
@@ -6470,6 +6480,7 @@ impl ModsService {
                         let mods_path = entry_path.join("mods");
                         let plugins_path = entry_path.join("plugins");
                         let userlibs_path = entry_path.join("userlibs");
+                        let userdata_path = entry_path.join("userdata");
 
                         if mods_path.exists() {
                             self.copy_directory_filtered(
@@ -6491,6 +6502,10 @@ impl ModsService {
                         }
                         if userlibs_path.exists() {
                             Box::pin(self.copy_directory_recursive(&userlibs_path, userlibs_dir))
+                                .await?;
+                        }
+                        if userdata_path.exists() {
+                            Box::pin(self.copy_directory_recursive(&userdata_path, userdata_dir))
                                 .await?;
                         }
 
@@ -6535,11 +6550,7 @@ impl ModsService {
                 } else if dir_name == "userlibs" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
-                    let userdata_dir = mods_dir
-                        .parent()
-                        .map(|path| path.join("UserData"))
-                        .unwrap_or_else(|| PathBuf::from("UserData"));
-                    Box::pin(self.copy_directory_recursive(&entry_path, &userdata_dir)).await?;
+                    Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
                 }
             } else if file_name.to_lowercase().ends_with(".dll") {
                 // Check runtime match
@@ -6569,6 +6580,7 @@ impl ModsService {
         mods_dir: &Path,
         plugins_dir: &Path,
         userlibs_dir: &Path,
+        userdata_dir: &Path,
         temp_dir: &Path,
         runtime: Option<&str>,
     ) -> Result<Vec<String>> {
@@ -6609,10 +6621,7 @@ impl ModsService {
                 mods_dir,
                 plugins_dir,
                 userlibs_dir,
-                &mods_dir
-                    .parent()
-                    .map(|path| path.join("UserData"))
-                    .unwrap_or_else(|| PathBuf::from("UserData")),
+                userdata_dir,
                 runtime,
             )
             .await?
@@ -6651,6 +6660,7 @@ impl ModsService {
                         let mods_path = entry_path.join("mods");
                         let plugins_path = entry_path.join("plugins");
                         let userlibs_path = entry_path.join("userlibs");
+                        let userdata_path = entry_path.join("userdata");
 
                         if mods_path.exists() {
                             self.copy_directory_filtered(
@@ -6672,6 +6682,10 @@ impl ModsService {
                         }
                         if userlibs_path.exists() {
                             Box::pin(self.copy_directory_recursive(&userlibs_path, userlibs_dir))
+                                .await?;
+                        }
+                        if userdata_path.exists() {
+                            Box::pin(self.copy_directory_recursive(&userdata_path, userdata_dir))
                                 .await?;
                         }
 
@@ -6715,6 +6729,8 @@ impl ModsService {
                     .await?;
                 } else if dir_name == "userlibs" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
+                } else if dir_name == "userdata" {
+                    Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
                 }
             } else if file_name.to_lowercase().ends_with(".dll") {
                 // Check runtime match
@@ -9181,6 +9197,82 @@ mod tests {
             .join("Mods")
             .join("Example.Mono.dll")
             .exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_links_userdata_on_first_install() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-userdata");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("WithUserData.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                ("Example.dll", b"runtime"),
+                ("UserData/MyFeature/config.json", br#"{"enabled":true}"#),
+            ],
+        )?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "WithUserData.zip",
+                "IL2CPP",
+                "main",
+                Some(serde_json::json!({
+                    "source": "local"
+                })),
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+
+        let installed_config = output_dir
+            .join("UserData")
+            .join("MyFeature")
+            .join("config.json");
+        assert!(installed_config.exists());
+
+        let metadata = service.load_mod_metadata(&output_dir.join("Mods")).await?;
+        let meta = metadata.get("Example.dll").expect("mod metadata");
+        let symlink_paths = meta.symlink_paths.as_ref().expect("symlink paths");
+        assert!(
+            symlink_paths.iter().any(|path| {
+                path.ends_with("UserData\\MyFeature") || path.ends_with("UserData/MyFeature")
+            }),
+            "expected UserData symlink path, got {:?}",
+            symlink_paths
+        );
 
         Ok(())
     }

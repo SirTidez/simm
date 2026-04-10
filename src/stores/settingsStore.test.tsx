@@ -112,6 +112,33 @@ function RefreshThemesResultConsumer() {
   );
 }
 
+function RefreshSettingsFallbackConsumer() {
+  const { customThemes, themesDirectory, refreshSettings, refreshThemes } = useSettingsStore();
+
+  return (
+    <div>
+      <div data-testid="fallback-theme-count">{customThemes.length}</div>
+      <div data-testid="fallback-themes-directory">{themesDirectory ?? 'none'}</div>
+      <button
+        data-testid="trigger-refresh-themes"
+        onClick={() => {
+          void refreshThemes();
+        }}
+      >
+        Refresh Themes
+      </button>
+      <button
+        data-testid="trigger-refresh-settings"
+        onClick={() => {
+          void refreshSettings();
+        }}
+      >
+        Refresh Settings
+      </button>
+    </div>
+  );
+}
+
 describe('SettingsStore', () => {
   beforeEach(() => {
     apiMocks.getSettings.mockReset();
@@ -225,6 +252,46 @@ describe('SettingsStore', () => {
     await waitFor(() => {
       expect(screen.getByTestId('update-channel').textContent).toBe('beta');
       expect(screen.getByTestId('skipped-version').textContent).toBe('0.8.0');
+    });
+  });
+
+  it('keeps the latest loaded theme state when a later settings refresh cannot read themes', async () => {
+    apiMocks.getSettings
+      .mockResolvedValueOnce({ ...baseSettings, theme: 'light' })
+      .mockResolvedValueOnce({ ...baseSettings, theme: 'light' });
+    apiMocks.getCustomThemes
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([sunsetTheme])
+      .mockRejectedValueOnce(new Error('theme read failed'));
+    apiMocks.getThemesDirectory
+      .mockResolvedValueOnce('C:/SIMM/themes')
+      .mockResolvedValueOnce('D:/AltThemes')
+      .mockRejectedValueOnce(new Error('dir read failed'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <RefreshSettingsFallbackConsumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('fallback-theme-count').textContent).toBe('0');
+      expect(screen.getByTestId('fallback-themes-directory').textContent).toBe('C:/SIMM/themes');
+    });
+
+    fireEvent.click(screen.getByTestId('trigger-refresh-themes'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('fallback-theme-count').textContent).toBe('1');
+      expect(screen.getByTestId('fallback-themes-directory').textContent).toBe('D:/AltThemes');
+    });
+
+    fireEvent.click(screen.getByTestId('trigger-refresh-settings'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('fallback-theme-count').textContent).toBe('1');
+      expect(screen.getByTestId('fallback-themes-directory').textContent).toBe('D:/AltThemes');
     });
   });
 

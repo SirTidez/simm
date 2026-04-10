@@ -67,6 +67,11 @@ jobs:
           SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
         run: npm run tauri build -- --bundles nsis
 
+      - name: Restore tauri config
+        if: always()
+        shell: pwsh
+        run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
+
       - name: Prepare release assets
         id: asset
         shell: pwsh

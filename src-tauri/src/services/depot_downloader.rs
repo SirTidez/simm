@@ -88,6 +88,16 @@ impl DepotDownloaderService {
         download_id: &str,
         app: &AppHandle<R>,
     ) -> Result<()> {
+        if self
+            .download_progress
+            .read()
+            .await
+            .get(download_id)
+            .is_some_and(|progress| matches!(progress.status, DownloadStatus::Cancelled))
+        {
+            return Ok(());
+        }
+
         let mut progress = {
             let map = self.download_progress.write().await;
             map.get(download_id)
@@ -958,6 +968,43 @@ mod tests {
             .await
             .expect("progress set");
         assert_eq!(progress.manifest_id.as_deref(), Some("3177164058227208309"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parse_progress_ignores_lines_after_cancellation() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+
+        service.download_progress.write().await.insert(
+            "download-cancelled".to_string(),
+            DownloadProgress {
+                download_id: "download-cancelled".to_string(),
+                status: DownloadStatus::Cancelled,
+                progress: 12.0,
+                downloaded_files: Some(1),
+                total_files: Some(10),
+                speed: None,
+                eta: None,
+                message: Some("Download cancelled".to_string()),
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .parse_progress("Downloading depot 123 (45%)", "download-cancelled", &handle)
+            .await?;
+
+        let progress = service
+            .get_progress("download-cancelled")
+            .await
+            .expect("progress retained");
+        assert!(matches!(progress.status, DownloadStatus::Cancelled));
+        assert_eq!(progress.progress, 12.0);
+        assert_eq!(progress.downloaded_files, Some(1));
 
         Ok(())
     }

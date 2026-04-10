@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { Settings, DepotDownloaderInfo, CustomThemeDefinition } from '../types';
 import { ApiService } from '../services/api';
 import { logger } from '../services/logger';
@@ -42,6 +42,8 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
   const [depotDownloader, setDepotDownloader] = useState<DepotDownloaderInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const customThemesRef = useRef<CustomThemeDefinition[]>([]);
+  const themesDirectoryRef = useRef<string | null>(null);
 
   const applyTheme = useCallback((
     theme: Settings['theme'] | undefined,
@@ -49,6 +51,14 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
   ) => {
     return applyThemeSelection(theme ?? 'modern-blue', availableCustomThemes);
   }, []);
+
+  useEffect(() => {
+    customThemesRef.current = customThemes;
+  }, [customThemes]);
+
+  useEffect(() => {
+    themesDirectoryRef.current = themesDirectory;
+  }, [themesDirectory]);
 
   const refreshSettings = useCallback(async () => {
     try {
@@ -64,10 +74,12 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       }
 
       const data = settingsResult.value;
-      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : customThemes;
+      const nextCustomThemes = themesResult.status === 'fulfilled'
+        ? themesResult.value
+        : customThemesRef.current;
       const nextThemesDirectory = directoryResult.status === 'fulfilled'
         ? directoryResult.value
-        : themesDirectory;
+        : themesDirectoryRef.current;
 
       if (themesResult.status === 'rejected') {
         logger.warn('Failed to refresh custom themes during settings load', themesResult.reason);

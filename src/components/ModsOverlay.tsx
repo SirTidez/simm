@@ -1641,8 +1641,8 @@ export function ModsOverlay({
     void completeUploadItem(
       {
         fileName,
-        status: 'skipped',
-        message: 'Install canceled after runtime mismatch warning.',
+        status: 'success',
+        message: 'Installed; runtime mismatch warning was dismissed.',
       },
       remainingQueue,
     );

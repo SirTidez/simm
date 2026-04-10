@@ -37,7 +37,15 @@ fn nexus_warn(message: impl Into<String>) -> String {
     message
 }
 
-fn classify_oauth_refresh_failure(status: reqwest::StatusCode, value: &Value) -> String {
+enum OAuthRefreshFailure {
+    ReconnectRequired(String),
+    Error(String),
+}
+
+fn classify_oauth_refresh_failure(
+    status: reqwest::StatusCode,
+    value: &Value,
+) -> OAuthRefreshFailure {
     let error_code = value
         .get("error")
         .and_then(|entry| entry.as_str())
@@ -45,15 +53,15 @@ fn classify_oauth_refresh_failure(status: reqwest::StatusCode, value: &Value) ->
 
     if status == reqwest::StatusCode::BAD_REQUEST && error_code.eq_ignore_ascii_case("invalid_grant")
     {
-        return nexus_warn(
+        return OAuthRefreshFailure::ReconnectRequired(nexus_warn(
             "Stored Nexus login could not be refreshed because Nexus rejected the saved refresh token. This usually means the previous login expired, was revoked, or was replaced. Reconnect Nexus if downloads stop working.",
-        );
+        ));
     }
 
-    nexus_error(format!(
+    OAuthRefreshFailure::Error(nexus_error(format!(
         "OAuth token refresh failed ({}): {}",
         status, value
-    ))
+    )))
 }
 
 async fn cleanup_temp_archive(path: &std::path::Path) {
@@ -638,7 +646,7 @@ async fn oauth_refresh_token_local(
     client_id: &str,
     refresh_token: &str,
     scope: &str,
-) -> Result<Value, String> {
+) -> Result<Value, OAuthRefreshFailure> {
     let mut form: Vec<(&str, String)> = vec![
         ("grant_type", "refresh_token".to_string()),
         ("client_id", client_id.to_string()),
@@ -654,13 +662,13 @@ async fn oauth_refresh_token_local(
         .form(&form)
         .send()
         .await
-        .map_err(|e| nexus_error(format!("OAuth refresh request failed: {}", e)))?;
+        .map_err(|e| OAuthRefreshFailure::Error(nexus_error(format!("OAuth refresh request failed: {}", e))))?;
 
     let status = response.status();
     let value = response
         .json::<Value>()
         .await
-        .map_err(|e| nexus_error(format!("Invalid OAuth refresh response: {}", e)))?;
+        .map_err(|e| OAuthRefreshFailure::Error(nexus_error(format!("Invalid OAuth refresh response: {}", e))))?;
     if !status.is_success() {
         return Err(classify_oauth_refresh_failure(status, &value));
     }
@@ -1001,7 +1009,19 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
 
     let client_id = oauth_client_id().map_err(nexus_error)?;
     let scope = oauth_scope();
-    let token = oauth_refresh_token_local(&client_id, &refresh_token, &scope).await?;
+    let token = match oauth_refresh_token_local(&client_id, &refresh_token, &scope).await {
+        Ok(token) => token,
+        Err(OAuthRefreshFailure::ReconnectRequired(message)) => {
+            if let Err(error) = settings.clear_nexus_oauth_session().await {
+                error_with_location(&format!(
+                    "Failed to clear revoked Nexus OAuth session after refresh rejection: {}",
+                    error
+                ));
+            }
+            return Err(message);
+        }
+        Err(OAuthRefreshFailure::Error(message)) => return Err(message),
+    };
 
     let next_access = token
         .get("access_token")
@@ -2386,14 +2406,20 @@ pub async fn install_nexus_mods_mod(
 
     let metadata = Value::Object(metadata_obj);
 
-    let security_scan = crate::commands::mods::prepare_security_scan(
+    let security_scan = match crate::commands::mods::prepare_security_scan(
         db_pool.clone(),
         &zip_path_str,
         Some(metadata),
         security_override.unwrap_or(false),
     )
     .await
-    .map_err(|e| nexus_error(e.to_string()))?;
+    {
+        Ok(scan) => scan,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(e.to_string()));
+        }
+    };
 
     let (metadata, security_report) = match security_scan {
         crate::commands::mods::SecurityGateResult::Continue { metadata, report } => {
@@ -2490,7 +2516,10 @@ pub async fn install_nexus_mods_mod(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags};
+    use super::{
+        classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
+        OAuthRefreshFailure,
+    };
     use serde_json::json;
 
     fn build_test_jwt(payload: serde_json::Value) -> String {
@@ -2557,7 +2586,7 @@ mod tests {
 
     #[test]
     fn oauth_refresh_invalid_grant_is_downgraded_to_warning_message() {
-        let message = classify_oauth_refresh_failure(
+        let failure = classify_oauth_refresh_failure(
             reqwest::StatusCode::BAD_REQUEST,
             &json!({
                 "error": "invalid_grant",
@@ -2565,7 +2594,14 @@ mod tests {
             }),
         );
 
-        assert!(message.contains("Stored Nexus login could not be refreshed"));
-        assert!(!message.contains("OAuth token refresh failed"));
+        match failure {
+            OAuthRefreshFailure::ReconnectRequired(message) => {
+                assert!(message.contains("Stored Nexus login could not be refreshed"));
+                assert!(!message.contains("OAuth token refresh failed"));
+            }
+            OAuthRefreshFailure::Error(message) => {
+                panic!("expected reconnect-required outcome, got error: {}", message);
+            }
+        }
     }
 }

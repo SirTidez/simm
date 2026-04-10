@@ -611,6 +611,15 @@ impl PluginsService {
 
             let plugin_name = original_file_name.replace(".dll", "").replace(".DLL", "");
             let normalized_file_path = Self::normalize_path(&file_path);
+            let normalized_active_path = normalized_file_path
+                .strip_suffix(".disabled")
+                .unwrap_or(&normalized_file_path)
+                .to_string();
+            let normalized_disabled_path = if normalized_file_path.ends_with(".disabled") {
+                normalized_file_path.clone()
+            } else {
+                format!("{}.disabled", normalized_file_path)
+            };
 
             // Get metadata for the original filename (without .disabled)
             let managed_mod_metadata = mods_metadata
@@ -619,7 +628,15 @@ impl PluginsService {
                 .or_else(|| {
                     mods_metadata.values().find(|meta| {
                         meta.symlink_paths.as_ref().is_some_and(|paths| {
-                            paths.iter().any(|path| Self::normalize_path(path) == normalized_file_path)
+                            paths.iter().any(|path| {
+                                let normalized_path = Self::normalize_path(path);
+                                let normalized_path_active = normalized_path
+                                    .strip_suffix(".disabled")
+                                    .unwrap_or(&normalized_path);
+                                normalized_path == normalized_file_path
+                                    || normalized_path == normalized_disabled_path
+                                    || normalized_path_active == normalized_active_path
+                            })
                         })
                     })
                 });
@@ -1089,6 +1106,7 @@ mod tests {
     use super::PluginsService;
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
+    use crate::services::mods::ModsService;
     use crate::types::{schedule_i_config, ModMetadata, ModSource};
     use anyhow::Result;
     use serial_test::serial;
@@ -1363,6 +1381,86 @@ mod tests {
         assert_eq!(loader.get("source").and_then(|value| value.as_str()), Some("github"));
         assert_eq!(loader.get("version").and_then(|value| value.as_str()), Some("1.2.3"));
         assert_eq!(loader.get("relatedMod").and_then(|value| value.as_str()), Some("S1API"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_plugins_preserves_managed_metadata_for_disabled_companion_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = PluginsService::new(pool.clone());
+        let mods_service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-disabled");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let mods_dir = output_dir.join("Mods");
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::write(plugins_dir.join("LoaderPlugin.dll.disabled"), b"data").await?;
+
+        let mut mods_metadata = HashMap::new();
+        let parent_mod_meta = ModMetadata {
+            source: Some(ModSource::Github),
+            source_id: Some("ifBars/S1API_Forked".to_string()),
+            source_version: Some("1.2.3".to_string()),
+            author: None,
+            mod_name: Some("S1API".to_string()),
+            source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
+            installed_version: None,
+            library_added_at: None,
+            installed_at: None,
+            last_update_check: None,
+            metadata_last_refreshed: None,
+            update_available: None,
+            remote_version: None,
+            detected_runtime: None,
+            runtime_match: None,
+            mod_storage_id: Some("s1api-storage".to_string()),
+            symlink_paths: Some(vec![
+                plugins_dir.join("LoaderPlugin.dll").to_string_lossy().to_string(),
+            ]),
+            security_scan: None,
+        };
+        mods_metadata.insert("S1API.dll".to_string(), parent_mod_meta);
+        mods_service.save_mod_metadata(&mods_dir, &mods_metadata).await?;
+
+        let list = service
+            .list_plugins(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let plugins = list
+            .get("plugins")
+            .and_then(|value| value.as_array())
+            .expect("plugins array");
+        let loader = plugins
+            .iter()
+            .find(|plugin| plugin.get("fileName").and_then(|value| value.as_str()) == Some("LoaderPlugin.dll"))
+            .expect("managed disabled plugin entry");
+
+        assert_eq!(loader.get("source").and_then(|value| value.as_str()), Some("github"));
+        assert_eq!(loader.get("version").and_then(|value| value.as_str()), Some("1.2.3"));
+        assert_eq!(loader.get("relatedMod").and_then(|value| value.as_str()), Some("S1API"));
+        assert_eq!(loader.get("disabled").and_then(|value| value.as_bool()), Some(true));
 
         Ok(())
     }
