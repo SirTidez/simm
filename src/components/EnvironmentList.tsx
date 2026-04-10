@@ -157,6 +157,7 @@ export function EnvironmentList({
   const initialUpdateCheckDoneRef = useRef(false);
   const melonLoaderPrefetchStartedRef = useRef(false);
   const autoInstallMelonLoaderInFlightRef = useRef<Set<string>>(new Set());
+  const autoInstallMelonLoaderRef = useRef<((environmentId: string) => Promise<void>) | null>(null);
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;
@@ -483,7 +484,7 @@ export function EnvironmentList({
         unlistenComplete = await onCompleteEvent(async ({ downloadId }) => {
           const env = environments.find(e => e.id === downloadId);
           if (env) {
-            void autoInstallMelonLoader(downloadId);
+            void autoInstallMelonLoaderRef.current?.(downloadId);
           }
           if (env && env.updateAvailable) {
             setTimeout(async () => {
@@ -1238,6 +1239,10 @@ export function EnvironmentList({
       });
     }
   }, [melonLoaderStatus, settings?.autoInstallMelonLoader, settings?.melonLoaderVersion, showMessage]);
+
+  useEffect(() => {
+    autoInstallMelonLoaderRef.current = autoInstallMelonLoader;
+  }, [autoInstallMelonLoader]);
 
   const closeMelonLoaderVersionSelector = useCallback(() => {
     setShowMelonLoaderVersionSelector(null);

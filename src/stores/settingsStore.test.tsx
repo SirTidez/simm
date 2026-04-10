@@ -1,3 +1,4 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 import { SettingsStoreProvider, useSettingsStore } from './settingsStore';
@@ -85,6 +86,27 @@ function RefreshThemesConsumer() {
         }}
       >
         Refresh Themes
+      </button>
+    </div>
+  );
+}
+
+function RefreshThemesResultConsumer() {
+  const { refreshThemes } = useSettingsStore();
+  const [result, setResult] = React.useState('idle');
+
+  return (
+    <div>
+      <div data-testid="refresh-result">{result}</div>
+      <button
+        data-testid="refresh-themes-result"
+        onClick={() => {
+          void refreshThemes()
+            .then(() => setResult('resolved'))
+            .catch(() => setResult('rejected'));
+        }}
+      >
+        Refresh Themes Result
       </button>
     </div>
   );
@@ -336,6 +358,28 @@ describe('SettingsStore', () => {
     expect(screen.queryByText('theme failure')).toBeNull();
   });
 
+  it('preserves a selected custom theme when optional theme lookups fail during load', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes.mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory.mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <Consumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('theme').textContent).toBe('sunset');
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBeNull();
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBeNull();
+  });
+
   it('rejects manual theme refresh failures without clearing the previous theme state', async () => {
     apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
     apiMocks.getCustomThemes
@@ -366,5 +410,28 @@ describe('SettingsStore', () => {
     expect(screen.getByTestId('custom-theme-count').textContent).toBe('1');
     expect(screen.getByTestId('themes-directory').textContent).toBe('C:/SIMM/themes');
     expect(document.documentElement.getAttribute('data-custom-theme')).toBe('sunset');
+  });
+
+  it('rejects refreshThemes so callers can surface failure UI', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes
+      .mockResolvedValueOnce([sunsetTheme])
+      .mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory
+      .mockResolvedValueOnce('C:/SIMM/themes')
+      .mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <RefreshThemesResultConsumer />
+      </SettingsStoreProvider>
+    );
+
+    fireEvent.click(await screen.findByTestId('refresh-themes-result'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('refresh-result').textContent).toBe('rejected');
+    });
   });
 });

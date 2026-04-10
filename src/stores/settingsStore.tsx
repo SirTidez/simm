@@ -4,6 +4,8 @@ import { ApiService } from '../services/api';
 import { logger } from '../services/logger';
 import {
   applyThemeSelection,
+  isBuiltInTheme,
+  normalizeThemeSelection,
   resolveThemeSelection,
 } from '../utils/theme';
 
@@ -62,8 +64,10 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       }
 
       const data = settingsResult.value;
-      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : [];
-      const nextThemesDirectory = directoryResult.status === 'fulfilled' ? directoryResult.value : null;
+      const nextCustomThemes = themesResult.status === 'fulfilled' ? themesResult.value : customThemes;
+      const nextThemesDirectory = directoryResult.status === 'fulfilled'
+        ? directoryResult.value
+        : themesDirectory;
 
       if (themesResult.status === 'rejected') {
         logger.warn('Failed to refresh custom themes during settings load', themesResult.reason);
@@ -72,8 +76,15 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
         logger.warn('Failed to resolve themes directory during settings load', directoryResult.reason);
       }
 
-      const sanitizedSettings = sanitizeThemeSettings(data, nextCustomThemes);
-      const resolvedTheme = applyTheme(sanitizedSettings.theme, nextCustomThemes);
+      const normalizedTheme = normalizeThemeSelection(data.theme);
+      const shouldPreserveUnresolvedCustomTheme =
+        themesResult.status === 'rejected' && !isBuiltInTheme(normalizedTheme);
+      const sanitizedSettings = shouldPreserveUnresolvedCustomTheme
+        ? { ...data, theme: normalizedTheme }
+        : sanitizeThemeSettings(data, nextCustomThemes);
+      const resolvedTheme = shouldPreserveUnresolvedCustomTheme
+        ? sanitizedSettings.theme
+        : applyTheme(sanitizedSettings.theme, nextCustomThemes);
 
       setCustomThemes(nextCustomThemes);
       setThemesDirectory(nextThemesDirectory);
@@ -129,8 +140,9 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
     } catch (err) {
       logger.error('Failed to refresh custom themes', err);
       setError(err instanceof Error ? err.message : 'Failed to load custom themes');
+      throw err;
     }
-  }, [applyTheme, settings]);
+  }, [applyTheme, settings, themesDirectory, customThemes]);
 
   const refreshDepotDownloader = useCallback(async () => {
     try {

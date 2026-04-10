@@ -332,6 +332,36 @@ describe('EnvironmentList', () => {
     });
   });
 
+  it('uses the latest auto-install settings when a download completes', async () => {
+    const { rerender } = render(<EnvironmentList />);
+
+    await waitFor(() => {
+      expect(eventMocks.onComplete).toHaveBeenCalled();
+      expect(completeHandler).not.toBeNull();
+    });
+
+    storeMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        autoCheckUpdates: false,
+        updateCheckInterval: 60,
+        steamUsername: 'tester',
+        autoInstallMelonLoader: false,
+        melonLoaderVersion: 'v9.9.9',
+      },
+    });
+
+    rerender(<EnvironmentList />);
+    apiMocks.installMelonLoader.mockClear();
+
+    await act(async () => {
+      await completeHandler?.({ downloadId: 'env-1' });
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.installMelonLoader).not.toHaveBeenCalled();
+    });
+  });
+
   it('cleans up all event listeners on unmount', async () => {
     const { unmount } = render(<EnvironmentList />);
 

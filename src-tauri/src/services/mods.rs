@@ -5577,14 +5577,53 @@ impl ModsService {
             return Err(anyhow::anyhow!("Invalid mod file"));
         }
 
+        let managed_meta = self.try_load_raw_mod_metadata_entry(game_dir, mod_file_name).await;
         let env_id = self.environment_id_for_dir(game_dir).await?;
-        if let Some(storage_id) = self
-            .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
-            .await
-            .and_then(|meta| meta.mod_storage_id)
+        if let Some(storage_id) = managed_meta
+            .as_ref()
+            .and_then(|meta| meta.mod_storage_id.clone())
         {
             if let Some(env_id) = env_id {
-                self.uninstall_storage_mod_from_envs(&storage_id, vec![env_id])
+                let uninstall_result = self
+                    .uninstall_storage_mod_from_envs(&storage_id, vec![env_id])
+                    .await?;
+                let removed_any = uninstall_result
+                    .get("results")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|results| {
+                        results.iter().any(|result| {
+                            result
+                                .get("removedFiles")
+                                .and_then(|value| value.as_array())
+                                .is_some_and(|files| !files.is_empty())
+                        })
+                    });
+                if removed_any {
+                    return Ok(());
+                }
+            }
+        }
+
+        if let Some(meta) = managed_meta.as_ref() {
+            let mut removed_any = false;
+            let mut candidate_paths: HashSet<PathBuf> = self
+                .tracked_candidate_paths(game_dir, mod_file_name, meta.symlink_paths.as_ref())
+                .into_iter()
+                .collect();
+            candidate_paths.insert(mod_path.clone());
+            candidate_paths.insert(disabled_path.clone());
+
+            for path in candidate_paths {
+                removed_any |= self.remove_path_if_exists(&path).await?;
+            }
+
+            if removed_any {
+                let mut metadata_map = self
+                    .load_mod_metadata(&mods_directory)
+                    .await
+                    .unwrap_or_else(|_| HashMap::new());
+                metadata_map.remove(mod_file_name);
+                self.save_mod_metadata(&mods_directory, &metadata_map)
                     .await?;
                 return Ok(());
             }
