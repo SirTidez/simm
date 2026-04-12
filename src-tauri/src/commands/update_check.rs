@@ -142,20 +142,35 @@ fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
 }
 
 fn compare_thunderstore_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let normalize = |value: &str| {
-        value
+    let expand = |value: &str| {
+        let normalized = value
             .trim_start_matches(['v', 'V'])
+            .to_string();
+        let core = normalized
             .split(['-', '+'])
             .next()
-            .unwrap_or_default()
-            .split(|ch: char| !ch.is_ascii_digit())
+            .unwrap_or_default();
+        let mut segments = core.split('.').collect::<Vec<_>>();
+        if let Some(patch) = segments.get(2).copied() {
+            if patch.len() > 1 && patch.chars().all(|ch| ch.is_ascii_digit()) {
+                let mut expanded = Vec::with_capacity(segments.len() + 1);
+                expanded.extend(segments.iter().take(2).copied());
+                expanded.push(&patch[..1]);
+                expanded.push(&patch[1..]);
+                expanded.extend(segments.iter().skip(3).copied());
+                segments = expanded;
+            }
+        }
+
+        segments
+            .into_iter()
             .filter(|segment| !segment.is_empty())
             .map(|segment| segment.parse::<u32>().unwrap_or(0))
             .collect::<Vec<u32>>()
     };
 
-    let left_parts = normalize(left);
-    let right_parts = normalize(right);
+    let left_parts = expand(left);
+    let right_parts = expand(right);
     let max_len = left_parts.len().max(right_parts.len());
 
     for index in 0..max_len {
@@ -721,7 +736,10 @@ pub async fn get_update_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_mod_updates_payload, extract_mod_name_for_event, get_github_service};
+    use super::{
+        build_mod_updates_payload, compare_thunderstore_versions, extract_mod_name_for_event,
+        get_github_service, select_latest_thunderstore_version,
+    };
     use crate::db::initialize_pool;
     use serial_test::serial;
     use std::sync::Arc;
@@ -820,6 +838,57 @@ mod tests {
         assert_eq!(
             updates[0].get("source").and_then(|v| v.as_str()),
             Some("github")
+        );
+    }
+
+    #[test]
+    fn compare_thunderstore_versions_uses_revision_suffix_ordering() {
+        assert_eq!(
+            compare_thunderstore_versions("3.0.22", "3.0.3"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_thunderstore_versions("3.0.32", "3.0.4"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_thunderstore_versions("3.0.4", "3.0.32"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_uses_revision_suffix_ordering() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "r2",
+                    "version_number": "3.0.22",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "r3",
+                    "version_number": "3.0.3",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                },
+                {
+                    "uuid4": "r2-next",
+                    "version_number": "3.0.32",
+                    "date_updated": "2026-04-03T00:00:00Z"
+                },
+                {
+                    "uuid4": "r4",
+                    "version_number": "3.0.4",
+                    "date_updated": "2026-04-04T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = select_latest_thunderstore_version(&package).expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|v| v.as_str()),
+            Some("r4")
         );
     }
 }

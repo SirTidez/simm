@@ -86,7 +86,7 @@ impl ModUpdateService {
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string())
                                         .unwrap_or_default();
-                                    let update_available = Self::versions_differ(
+                                    let update_available = Self::versions_differ_for_thunderstore(
                                         current_version.as_deref(),
                                         &latest_version,
                                     );
@@ -522,7 +522,8 @@ impl ModUpdateService {
                     .get("version_number")
                     .and_then(|v| v.as_str())
                     .map(|candidate| {
-                        Self::compare_versions(candidate, preferred) == Ordering::Equal
+                        Self::compare_thunderstore_versions(candidate, preferred)
+                            == Ordering::Equal
                     })
                     .unwrap_or(false)
             }) {
@@ -539,7 +540,7 @@ impl ModUpdateService {
                 .get("version_number")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            match Self::compare_versions(left_version, right_version) {
+            match Self::compare_thunderstore_versions(left_version, right_version) {
                 Ordering::Equal => {
                     let left_updated = left
                         .get("date_updated")
@@ -724,6 +725,32 @@ impl ModUpdateService {
         parts
     }
 
+    fn extract_thunderstore_numeric_parts(value: &str) -> Vec<u32> {
+        let core = value
+            .trim_start_matches(['v', 'V'])
+            .split(['-', '+'])
+            .next()
+            .unwrap_or_default();
+
+        let mut segments = core.split('.').collect::<Vec<_>>();
+        if let Some(patch) = segments.get(2).copied() {
+            if patch.len() > 1 && patch.chars().all(|ch| ch.is_ascii_digit()) {
+                let mut expanded = Vec::with_capacity(segments.len() + 1);
+                expanded.extend(segments.iter().take(2).copied());
+                expanded.push(&patch[..1]);
+                expanded.push(&patch[1..]);
+                expanded.extend(segments.iter().skip(3).copied());
+                segments = expanded;
+            }
+        }
+
+        segments
+            .into_iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.parse::<u32>().unwrap_or(0))
+            .collect()
+    }
+
     fn is_prerelease_marker(value: &str) -> bool {
         let lower = value.to_ascii_lowercase();
         [
@@ -739,6 +766,32 @@ impl ModUpdateService {
         ]
         .iter()
         .any(|marker| lower.contains(marker))
+    }
+
+    fn compare_thunderstore_versions(current: &str, latest: &str) -> Ordering {
+        let current_parts = Self::extract_thunderstore_numeric_parts(current);
+        let latest_parts = Self::extract_thunderstore_numeric_parts(latest);
+        let max_len = current_parts.len().max(latest_parts.len());
+
+        for index in 0..max_len {
+            let current_value = current_parts.get(index).copied().unwrap_or(0);
+            let latest_value = latest_parts.get(index).copied().unwrap_or(0);
+            match current_value.cmp(&latest_value) {
+                Ordering::Equal => continue,
+                ordering => return ordering,
+            }
+        }
+
+        match (
+            Self::is_prerelease_marker(current),
+            Self::is_prerelease_marker(latest),
+        ) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => current
+                .trim_start_matches(['v', 'V'])
+                .cmp(latest.trim_start_matches(['v', 'V'])),
+        }
     }
 
     fn compare_versions(current: &str, latest: &str) -> Ordering {
@@ -903,7 +956,10 @@ impl ModUpdateService {
                     .ok_or_else(|| {
                         anyhow::anyhow!("Thunderstore package has no version information")
                     })?;
-                if !Self::versions_differ(metadata.source_version.as_deref(), &latest_version) {
+                if !Self::versions_differ_for_thunderstore(
+                    metadata.source_version.as_deref(),
+                    &latest_version,
+                ) {
                     return Ok(serde_json::json!({
                         "success": true,
                         "message": "Already up to date",
@@ -1302,6 +1358,13 @@ impl ModUpdateService {
             None => true,
         }
     }
+
+    fn versions_differ_for_thunderstore(current: Option<&str>, latest: &str) -> bool {
+        match current {
+            Some(value) => Self::compare_thunderstore_versions(value, latest) == Ordering::Less,
+            None => true,
+        }
+    }
 }
 
 impl Default for ModUpdateService {
@@ -1449,6 +1512,26 @@ mod tests {
     }
 
     #[test]
+    fn thunderstore_versions_treat_appended_patch_digits_as_revision_suffixes() {
+        assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("3.0.22"),
+            "3.0.3",
+        ));
+        assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("3.0.32"),
+            "3.0.4",
+        ));
+        assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("3.0.3"),
+            "3.0.32",
+        ));
+        assert!(!ModUpdateService::versions_differ_for_thunderstore(
+            Some("3.0.4"),
+            "3.0.32",
+        ));
+    }
+
+    #[test]
     fn extract_package_latest_version_prefers_highest_version_over_payload_order() {
         let package = serde_json::json!({
             "versions": [
@@ -1575,6 +1658,48 @@ mod tests {
         assert_eq!(
             selected.get("uuid4").and_then(|value| value.as_str()),
             Some("latest")
+        );
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_uses_revision_suffix_ordering() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "patched-r2",
+                    "version_number": "3.0.22",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "patched-r3",
+                    "version_number": "3.0.3",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                },
+                {
+                    "uuid4": "patched-r2-next",
+                    "version_number": "3.0.32",
+                    "date_updated": "2026-04-03T00:00:00Z"
+                },
+                {
+                    "uuid4": "patched-r4",
+                    "version_number": "3.0.4",
+                    "date_updated": "2026-04-04T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = ModUpdateService::select_latest_thunderstore_version(&package, None)
+            .expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|value| value.as_str()),
+            Some("patched-r4")
+        );
+        assert_eq!(
+            selected
+                .get("version_number")
+                .and_then(|value| value.as_str()),
+            Some("3.0.4")
         );
     }
 

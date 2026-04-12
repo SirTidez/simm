@@ -17,25 +17,35 @@ impl ThunderStoreService {
             .to_ascii_lowercase()
     }
 
-    fn extract_numeric_version_parts(value: &str) -> Vec<u32> {
-        Self::normalize_version_token(value)
+    fn extract_thunderstore_numeric_parts(value: &str) -> Vec<u32> {
+        let normalized = Self::normalize_version_token(value);
+        let core = normalized
             .split(['-', '+'])
             .next()
-            .unwrap_or_default()
-            .split('.')
-            .map(|segment| {
-                segment
-                    .chars()
-                    .filter(|ch| ch.is_ascii_digit())
-                    .collect::<String>()
-            })
+            .unwrap_or_default();
+
+        let mut segments = core.split('.').collect::<Vec<_>>();
+        if let Some(patch) = segments.get(2).copied() {
+            if patch.len() > 1 && patch.chars().all(|ch| ch.is_ascii_digit()) {
+                let mut expanded = Vec::with_capacity(segments.len() + 1);
+                expanded.extend(segments.iter().take(2).copied());
+                expanded.push(&patch[..1]);
+                expanded.push(&patch[1..]);
+                expanded.extend(segments.iter().skip(3).copied());
+                segments = expanded;
+            }
+        }
+
+        segments
+            .into_iter()
+            .filter(|segment| !segment.is_empty())
             .map(|segment| segment.parse::<u32>().unwrap_or(0))
             .collect()
     }
 
     fn compare_versions(left: &str, right: &str) -> Ordering {
-        let left_parts = Self::extract_numeric_version_parts(left);
-        let right_parts = Self::extract_numeric_version_parts(right);
+        let left_parts = Self::extract_thunderstore_numeric_parts(left);
+        let right_parts = Self::extract_thunderstore_numeric_parts(right);
         let len = left_parts.len().max(right_parts.len());
 
         for index in 0..len {
@@ -444,6 +454,46 @@ mod tests {
                 .get("version_number")
                 .and_then(|value| value.as_str()),
             Some("1.0.0")
+        );
+    }
+
+    #[test]
+    fn select_package_version_uses_thunderstore_revision_suffix_ordering() {
+        let versions = vec![
+            serde_json::json!({
+                "uuid4": "r2",
+                "version_number": "3.0.22",
+                "date_updated": "2026-04-01T00:00:00Z"
+            }),
+            serde_json::json!({
+                "uuid4": "r3",
+                "version_number": "3.0.3",
+                "date_updated": "2026-04-02T00:00:00Z"
+            }),
+            serde_json::json!({
+                "uuid4": "r2-next",
+                "version_number": "3.0.32",
+                "date_updated": "2026-04-03T00:00:00Z"
+            }),
+            serde_json::json!({
+                "uuid4": "r4",
+                "version_number": "3.0.4",
+                "date_updated": "2026-04-04T00:00:00Z"
+            }),
+        ];
+
+        let selected =
+            ThunderStoreService::select_package_version(&versions, None).expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|value| value.as_str()),
+            Some("r4")
+        );
+        assert_eq!(
+            selected
+                .get("version_number")
+                .and_then(|value| value.as_str()),
+            Some("3.0.4")
         );
     }
 }
