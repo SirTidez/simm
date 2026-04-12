@@ -322,4 +322,18 @@ mod tests {
         let url = service.get_melonloader_x64_asset_url(&release);
         assert_eq!(url.as_deref(), Some("https://example.com/windows.zip"));
     }
+
+    #[test]
+    fn s1api_release_endpoints_use_lockwire_routes() {
+        assert_eq!(
+            GitHubReleasesService::latest_endpoint("ifBars", "S1API", false)
+                .expect("latest endpoint"),
+            "/releases/s1api/latest"
+        );
+        assert_eq!(
+            GitHubReleasesService::all_endpoint("ifBars", "S1API")
+                .expect("all endpoint"),
+            "/releases/s1api/all"
+        );
+    }
 }

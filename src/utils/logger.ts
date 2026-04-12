@@ -11,9 +11,10 @@ const originalConsole = {
 };
 
 let consoleIntercepted = false;
+let backendForwardFailureLogged = false;
 
 function shouldForwardToBackend(level: string): boolean {
-  return level === 'debug' || level === 'warn' || level === 'error';
+  return level === 'debug' || level === 'info' || level === 'warn' || level === 'error';
 }
 
 /**
@@ -41,8 +42,12 @@ function sendToBackend(level: string, message: string, data?: any) {
     level,
     message,
     data: data ? safeStringify(data) : null,
-  }).catch(() => {
-    // Silently fail - logging should never block the app
+  }).catch((error) => {
+    if (backendForwardFailureLogged) {
+      return;
+    }
+    backendForwardFailureLogged = true;
+    originalConsole.warn('[Logger] Failed to forward logs to backend', error);
   });
 }
 
@@ -140,9 +145,9 @@ export function interceptConsole() {
     sendToBackend('debug', message);
   };
 
-  const readyMessage = '[Logger] Console interception enabled - debug, warnings, and errors will be logged to file';
+  const readyMessage = '[Logger] Console interception enabled - info, debug, warnings, and errors will be logged to file';
   originalConsole.info(readyMessage);
-  sendToBackend('warn', readyMessage);
+  sendToBackend('info', readyMessage);
 }
 
 

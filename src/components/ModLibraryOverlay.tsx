@@ -33,6 +33,7 @@ import {
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
   areVersionsEquivalent,
+  areVersionsEquivalentForSource,
   buildDownloadedGroups,
   compareVersionTokensDescForSource,
   compareVersionTokensDesc,
@@ -124,6 +125,8 @@ interface FeaturedGithubRelease {
   body?: string;
 }
 
+type RuntimeInstallTargets = Partial<Record<"IL2CPP" | "Mono", string[]>>;
+
 const FEATURED_DOWNLOADS = {
   s1api: {
     key: "featured-s1api",
@@ -140,6 +143,100 @@ const FEATURED_DOWNLOADS = {
     author: "ifBars",
   },
 } as const;
+
+function getDownloadedGroupSourceIds(group: DownloadedModGroup): string[] {
+  return group.entries
+    .map((entry) => (entry.sourceId || "").toLowerCase())
+    .filter(Boolean);
+}
+
+function isS1ApiDownloadedGroup(group: DownloadedModGroup): boolean {
+  const sourceIds = getDownloadedGroupSourceIds(group);
+  return (
+    sourceIds.includes("ifbars/s1api") ||
+    sourceIds.includes("ifbars/s1api_forked") ||
+    normalizeThunderstoreName(group.displayName).toLowerCase() === "s1api"
+  );
+}
+
+function isMlvscanDownloadedGroup(group: DownloadedModGroup): boolean {
+  const sourceIds = getDownloadedGroupSourceIds(group);
+  return (
+    sourceIds.includes("ifbars/mlvscan") ||
+    normalizeThunderstoreName(group.displayName).toLowerCase() === "mlvscan"
+  );
+}
+
+function getFeaturedGithubUpdateConfig(
+  group: DownloadedModGroup,
+):
+  | {
+      downloader: typeof ApiService.downloadS1APIToLibrary;
+      loadLatestRelease: () => Promise<FeaturedGithubRelease | null>;
+    }
+  | null {
+  if (isS1ApiDownloadedGroup(group)) {
+    return {
+      downloader: ApiService.downloadS1APIToLibrary,
+      loadLatestRelease: () => ApiService.getS1APILatestRelease(""),
+    };
+  }
+
+  if (isMlvscanDownloadedGroup(group)) {
+    return {
+      downloader: ApiService.downloadMLVScanToLibrary,
+      loadLatestRelease: () => ApiService.getMLVScanLatestRelease(""),
+    };
+  }
+
+  return null;
+}
+
+function collectDownloadedGroupStorageIds(
+  group: Pick<DownloadedModGroup, "entries">,
+): string[] {
+  return Array.from(
+    new Set(
+      group.entries.flatMap(
+        (entry) =>
+          [
+            entry.storageId,
+            ...Object.values(entry.storageIdsByRuntime || {}),
+          ].filter(Boolean) as string[],
+      ),
+    ),
+  );
+}
+
+function mergeInstallTargets(...targets: string[][]): string[] {
+  return Array.from(new Set(targets.flat()));
+}
+
+function mergeRuntimeInstallTargets(
+  ...maps: RuntimeInstallTargets[]
+): RuntimeInstallTargets {
+  return {
+    IL2CPP: mergeInstallTargets(...maps.map((map) => map.IL2CPP || [])),
+    Mono: mergeInstallTargets(...maps.map((map) => map.Mono || [])),
+  };
+}
+
+function getDownloadedVersionSourceId(
+  groups: DownloadedModGroup[],
+): string | undefined {
+  const sourceIds = groups.flatMap(getDownloadedGroupSourceIds);
+  if (
+    sourceIds.includes("ifbars/s1api") ||
+    sourceIds.includes("ifbars/s1api_forked")
+  ) {
+    return FEATURED_DOWNLOADS.s1api.sourceId;
+  }
+
+  return groups
+    .flatMap((group) => group.entries)
+    .map((entry) => entry.sourceId)
+    .find(Boolean);
+}
 
 export type DownloadedFilter =
   | "all"
@@ -1229,10 +1326,13 @@ export function ModLibraryOverlay({
         return undefined;
       }
 
+      const versionSourceId = getDownloadedVersionSourceId(groups);
+
       const sortedByVersion = groups
         .flatMap((group) => group.entries)
         .sort((a, b) =>
-          compareVersionTokensDesc(
+          compareVersionTokensDescForSource(
+            versionSourceId,
             a.sourceVersion || a.installedVersion,
             b.sourceVersion || b.installedVersion,
           ),
@@ -1246,26 +1346,9 @@ export function ModLibraryOverlay({
     [],
   );
 
-  const s1apiGroups = downloadedGroups.filter((group) => {
-    const sourceIds = group.entries
-      .map((entry) => (entry.sourceId || "").toLowerCase())
-      .filter(Boolean);
-    return (
-      sourceIds.includes("ifbars/s1api") ||
-      sourceIds.includes("ifbars/s1api_forked") ||
-      normalizeThunderstoreName(group.displayName).toLowerCase() === "s1api"
-    );
-  });
+  const s1apiGroups = downloadedGroups.filter(isS1ApiDownloadedGroup);
 
-  const mlvscanGroups = downloadedGroups.filter((group) => {
-    const sourceIds = group.entries
-      .map((entry) => (entry.sourceId || "").toLowerCase())
-      .filter(Boolean);
-    return (
-      sourceIds.includes("ifbars/mlvscan") ||
-      normalizeThunderstoreName(group.displayName).toLowerCase() === "mlvscan"
-    );
-  });
+  const mlvscanGroups = downloadedGroups.filter(isMlvscanDownloadedGroup);
 
   const s1apiInLibrary = s1apiGroups.length > 0;
   const mlvscanInLibrary = mlvscanGroups.length > 0;
@@ -1293,23 +1376,12 @@ export function ModLibraryOverlay({
 
   const isGroupUpdateAvailable = useCallback(
     (group: DownloadedModGroup): boolean => {
-      const sourceIds = group.entries
-        .map((entry) => (entry.sourceId || "").toLowerCase())
-        .filter(Boolean);
-      const normalizedName = normalizeThunderstoreName(
-        group.displayName,
-      ).toLowerCase();
-
-      const isS1apiGroup =
-        sourceIds.includes("ifbars/s1api") ||
-        sourceIds.includes("ifbars/s1api_forked") ||
-        normalizedName === "s1api";
+      const isS1apiGroup = isS1ApiDownloadedGroup(group);
       if (isS1apiGroup && !!s1apiInstalledVersion && !!s1apiLatestVersion) {
         return !!s1apiNeedsUpdate;
       }
 
-      const isMlvscanGroup =
-        sourceIds.includes("ifbars/mlvscan") || normalizedName === "mlvscan";
+      const isMlvscanGroup = isMlvscanDownloadedGroup(group);
       if (
         isMlvscanGroup &&
         !!mlvscanInstalledVersion &&
@@ -1464,10 +1536,17 @@ export function ModLibraryOverlay({
   }, [activeModView, nexusModsSearchResults]);
 
   const loadLibrarySnapshot = useCallback(async () => {
-    const data = await normalizeLibraryFeaturedDownloads(
-      await ApiService.getModLibrary(),
-    );
-    return data ?? { downloaded: [] };
+    try {
+      const data = await normalizeLibraryFeaturedDownloads(
+        await ApiService.getModLibrary(),
+      );
+      return data ?? { downloaded: [] };
+    } catch (error) {
+      logger.error("Failed to load mod library snapshot", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }, []);
 
   const refreshLibrary = useCallback(async () => {
@@ -2380,8 +2459,20 @@ export function ModLibraryOverlay({
   );
 
   const activateGroupEntry = useCallback(
-    async (group: DownloadedModGroup, targetEntry: ModLibraryEntry) => {
-      if (group.installedIn.length === 0) {
+    async (
+      group: DownloadedModGroup,
+      targetEntry: ModLibraryEntry,
+      installTargets?: {
+        installedIn: string[];
+        installedInByRuntime: RuntimeInstallTargets;
+        replaceStorageIds: string[];
+      },
+    ) => {
+      const installedIn = installTargets?.installedIn || group.installedIn;
+      const installedInByRuntime =
+        installTargets?.installedInByRuntime || group.installedInByRuntime;
+
+      if (installedIn.length === 0) {
         return;
       }
 
@@ -2389,21 +2480,16 @@ export function ModLibraryOverlay({
       try {
         const warningMessages: string[] = [];
         const allStorageIds = Array.from(
-          new Set(
-            group.entries.flatMap(
-              (entry) =>
-                [
-                  entry.storageId,
-                  ...Object.values(entry.storageIdsByRuntime || {}),
-                ].filter(Boolean) as string[],
-            ),
-          ),
+          new Set([
+            ...collectDownloadedGroupStorageIds(group),
+            ...(installTargets?.replaceStorageIds || []),
+          ]),
         );
 
         const runtimeTargets = (["IL2CPP", "Mono"] as const)
           .map((runtime) => ({
             runtime,
-            envIds: group.installedInByRuntime[runtime] || [],
+            envIds: installedInByRuntime[runtime] || [],
           }))
           .filter(
             (
@@ -2443,7 +2529,7 @@ export function ModLibraryOverlay({
           );
         }
 
-        const remainingEnvIds = group.installedIn.filter(
+        const remainingEnvIds = installedIn.filter(
           (id) => !handledEnvIds.has(id),
         );
         if (remainingEnvIds.length > 0) {
@@ -2558,16 +2644,32 @@ export function ModLibraryOverlay({
     }
 
     const loadFeaturedReleases = async () => {
-      try {
-        const [s1apiRelease, mlvscanRelease] = await Promise.all([
-          ApiService.getS1APILatestRelease(""),
-          ApiService.getMLVScanLatestRelease(""),
-        ]);
-        setS1apiFeaturedRelease(s1apiRelease);
-        setMlvscanFeaturedRelease(mlvscanRelease);
-      } catch (err) {
-        console.warn("Failed to load featured GitHub releases:", err);
+      const [s1apiResult, mlvscanResult] = await Promise.allSettled([
+        ApiService.getS1APILatestRelease(""),
+        ApiService.getMLVScanLatestRelease(""),
+      ]);
+
+      if (s1apiResult.status === "fulfilled") {
+        setS1apiFeaturedRelease(s1apiResult.value);
+      } else {
+        logger.warn("Failed to load featured S1API release metadata", {
+          error:
+            s1apiResult.reason instanceof Error
+              ? s1apiResult.reason.message
+              : String(s1apiResult.reason),
+        });
         setS1apiFeaturedRelease(null);
+      }
+
+      if (mlvscanResult.status === "fulfilled") {
+        setMlvscanFeaturedRelease(mlvscanResult.value);
+      } else {
+        logger.warn("Failed to load featured MLVScan release metadata", {
+          error:
+            mlvscanResult.reason instanceof Error
+              ? mlvscanResult.reason.message
+              : String(mlvscanResult.reason),
+        });
         setMlvscanFeaturedRelease(null);
       }
     };
@@ -2628,6 +2730,10 @@ export function ModLibraryOverlay({
           entry.source === "github",
       );
       if (!sourceEntry || !sourceEntry.source) {
+        logger.warn("Downloaded mod group is missing supported source metadata for update", {
+          groupKey: group.key,
+          displayName: group.displayName,
+        });
         showLibraryNotice(
           "Mod Update Failed",
           "This downloaded mod is missing supported source metadata, so SIMM cannot fetch an update for it.",
@@ -2635,9 +2741,12 @@ export function ModLibraryOverlay({
         return;
       }
 
+      const versionSourceId =
+        sourceEntry.sourceId || group.entries[0]?.sourceId;
       const existingLatestEntry = group.remoteVersion
         ? group.entries.find((entry) =>
-            areVersionsEquivalent(
+            areVersionsEquivalentForSource(
+              entry.sourceId || versionSourceId,
               getEntryVersionLabel(entry),
               group.remoteVersion,
             ),
@@ -2675,14 +2784,56 @@ export function ModLibraryOverlay({
             ? [...group.availableRuntimes]
             : ["IL2CPP"];
 
+      logger.info("Starting mod library update", {
+        groupKey: group.key,
+        displayName: group.displayName,
+        source: sourceEntry.source,
+        sourceId: sourceEntry.sourceId,
+        remoteVersion: group.remoteVersion,
+        runtimesToUpdate,
+      });
+
       setUpdatingGroup(group.key);
       let keepPendingUpdate = false;
       try {
         const downloadedStorageIds: string[] = [];
         let downloadedUpdatedRuntime = false;
         const thunderstoreMissingRuntimes: Array<"IL2CPP" | "Mono"> = [];
+        const featuredGithubUpdate = getFeaturedGithubUpdateConfig(group);
 
-        if (sourceEntry.source === "thunderstore") {
+        if (featuredGithubUpdate) {
+          const latestVersionTag =
+            group.remoteVersion ||
+            (await featuredGithubUpdate.loadLatestRelease())?.tag_name;
+
+          if (!latestVersionTag) {
+            throw new Error("Could not resolve the latest GitHub release.");
+          }
+
+          logger.debug("Resolved featured GitHub update target for mod group", {
+            groupKey: group.key,
+            displayName: group.displayName,
+            versionTag: latestVersionTag,
+          });
+
+          const result = await downloadGithubReleaseWithSecurity(
+            featuredGithubUpdate.downloader,
+            latestVersionTag,
+            `Security Findings - ${group.displayName}`,
+          );
+          if (!result) {
+            logger.warn("Featured GitHub mod update ended without a stored download", {
+              groupKey: group.key,
+              displayName: group.displayName,
+              versionTag: latestVersionTag,
+            });
+            return;
+          }
+          if (result.storageId) {
+            downloadedStorageIds.push(result.storageId);
+            downloadedUpdatedRuntime = true;
+          }
+        } else if (sourceEntry.source === "thunderstore") {
           if (!sourceEntry.sourceId) {
             throw new Error("Missing Thunderstore source id for update");
           }
@@ -2885,6 +3036,12 @@ export function ModLibraryOverlay({
             `Security Findings - ${group.displayName}`,
           );
           if (!result) {
+            logger.warn("GitHub-backed mod update ended without a stored download", {
+              groupKey: group.key,
+              displayName: group.displayName,
+              sourceId: sourceEntry.sourceId,
+              versionTag: latestVersionTag,
+            });
             return;
           }
           if (result.storageId) {
@@ -2903,14 +3060,22 @@ export function ModLibraryOverlay({
         setLibrary(nextLibrary);
         notifyLibraryUpdated();
 
-        const refreshedGroup = buildDownloadedGroups(
-          nextLibrary.downloaded,
-        ).find((item) => item.key === group.key);
+        const refreshedGroups = buildDownloadedGroups(nextLibrary.downloaded);
+        const refreshedGroup =
+          refreshedGroups.find((item) =>
+            item.entries.some((entry) =>
+              [
+                entry.storageId,
+                ...Object.values(entry.storageIdsByRuntime || {}),
+              ].some((id) => downloadedStorageIds.includes(id)),
+            ),
+          ) || refreshedGroups.find((item) => item.key === group.key);
         const selectedEntry =
           refreshedGroup?.entries.find((entry) => {
             return (
               (group.remoteVersion &&
-                areVersionsEquivalent(
+                areVersionsEquivalentForSource(
+                  entry.sourceId || versionSourceId,
                   getEntryVersionLabel(entry),
                   group.remoteVersion,
                 )) ||
@@ -2935,7 +3100,8 @@ export function ModLibraryOverlay({
 
         if (
           group.remoteVersion &&
-          !areVersionsEquivalent(
+          !areVersionsEquivalentForSource(
+            selectedEntry.sourceId || versionSourceId,
             getEntryVersionLabel(selectedEntry),
             group.remoteVersion,
           )
@@ -2945,9 +3111,49 @@ export function ModLibraryOverlay({
           );
         }
 
-        await activateGroupEntry(refreshedGroup, selectedEntry);
+        const needsCrossGroupActivation =
+          refreshedGroup.key !== group.key && group.installedIn.length > 0;
+
+        logger.info("Downloaded mod update resolved to library entry", {
+          originalGroupKey: group.key,
+          refreshedGroupKey: refreshedGroup.key,
+          selectedStorageId: selectedEntry.storageId,
+          downloadedStorageIds,
+          expectedVersion: group.remoteVersion,
+          selectedVersion: getEntryVersionLabel(selectedEntry),
+        });
+
+        await activateGroupEntry(
+          refreshedGroup,
+          selectedEntry,
+          needsCrossGroupActivation
+            ? {
+                installedIn: mergeInstallTargets(
+                  group.installedIn,
+                  refreshedGroup.installedIn,
+                ),
+                installedInByRuntime: mergeRuntimeInstallTargets(
+                  group.installedInByRuntime,
+                  refreshedGroup.installedInByRuntime,
+                ),
+                replaceStorageIds: Array.from(
+                  new Set([
+                    ...collectDownloadedGroupStorageIds(group),
+                    ...collectDownloadedGroupStorageIds(refreshedGroup),
+                  ]),
+                ),
+              }
+            : undefined,
+        );
       } catch (err) {
-        console.error("Failed to update and activate mod version:", err);
+        logger.error("Failed to update and activate mod version", {
+          groupKey: group.key,
+          displayName: group.displayName,
+          source: sourceEntry.source,
+          sourceId: sourceEntry.sourceId,
+          remoteVersion: group.remoteVersion,
+          error: err instanceof Error ? err.message : String(err),
+        });
         showLibraryNotice(
           "Mod Update Failed",
           err instanceof Error
@@ -3074,7 +3280,11 @@ export function ModLibraryOverlay({
 
       const entryVersion = getEntryVersionLabel(entry);
       const matchingEntries = containingGroup.entries.filter((candidate) =>
-        areVersionsEquivalent(getEntryVersionLabel(candidate), entryVersion),
+        areVersionsEquivalentForSource(
+          candidate.sourceId || entry.sourceId,
+          getEntryVersionLabel(candidate),
+          entryVersion,
+        ),
       );
 
       if (matchingEntries.length <= 1) {
@@ -3918,12 +4128,22 @@ export function ModLibraryOverlay({
       downloader: typeof ApiService.downloadS1APIToLibrary,
     ) => {
       if (!latestRelease?.tag_name) {
+        logger.warn("Featured GitHub release is unavailable for download", {
+          displayName: featured.displayName,
+          sourceId: featured.sourceId,
+        });
         showLibraryNotice(
           `${featured.displayName} Unavailable`,
           `The latest ${featured.displayName} release could not be resolved. Try refreshing and retry the download.`,
         );
         return;
       }
+
+      logger.info("Starting featured GitHub download", {
+        displayName: featured.displayName,
+        sourceId: featured.sourceId,
+        versionTag: latestRelease.tag_name,
+      });
 
       setDownloading(featured.key);
       try {
@@ -3933,8 +4153,21 @@ export function ModLibraryOverlay({
           `Security Findings - ${featured.displayName}`,
         );
         if (!result) {
+          logger.warn("Featured GitHub download ended without storing a library entry", {
+            displayName: featured.displayName,
+            sourceId: featured.sourceId,
+            versionTag: latestRelease.tag_name,
+          });
           return;
         }
+
+        logger.info("Stored featured GitHub download in library", {
+          displayName: featured.displayName,
+          sourceId: featured.sourceId,
+          versionTag: latestRelease.tag_name,
+          storageId: result.storageId,
+          alreadyStored: result.alreadyStored ?? false,
+        });
 
         await finalizeLibraryDownloadBatch(
           [
@@ -3962,7 +4195,11 @@ export function ModLibraryOverlay({
           "Install Downloaded Mod",
         );
       } catch (err) {
-        console.error(`Failed to download ${featured.displayName}:`, err);
+        logger.error(`Failed to download ${featured.displayName}`, {
+          sourceId: featured.sourceId,
+          versionTag: latestRelease.tag_name,
+          error: err instanceof Error ? err.message : String(err),
+        });
         showLibraryNotice(
           `${featured.displayName} Download Failed`,
           err instanceof Error

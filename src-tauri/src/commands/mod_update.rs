@@ -183,7 +183,15 @@ pub async fn update_mod(
             &github_service,
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|error| {
+            log::error!(
+                "Failed to update mod {} for environment {}: {}",
+                mod_file_name,
+                environment_id,
+                error
+            );
+            error.to_string()
+        })
 }
 
 #[tauri::command]

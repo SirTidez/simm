@@ -2414,6 +2414,98 @@ describe("ModLibraryOverlay", () => {
     });
   });
 
+  it("updates legacy Thunderstore S1API_Forked entries with the GitHub S1API download", async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({
+        downloaded: [
+          makeEntry({
+            storageId: "s1api-forked-old",
+            displayName: "S1API_Forked",
+            source: "thunderstore",
+            sourceId: "ifBars/S1API_Forked",
+            sourceVersion: "3.0.22",
+            installedVersion: "3.0.22",
+            remoteVersion: "v3.0.3",
+            updateAvailable: true,
+            availableRuntimes: ["Mono"],
+            installedIn: ["env-main"],
+            installedInByRuntime: { Mono: ["env-main"] },
+            storageIdsByRuntime: { Mono: "s1api-forked-old" },
+            filesByRuntime: { Mono: ["S1API.Mono.MelonLoader.dll"] },
+          }),
+        ],
+      })
+      .mockResolvedValue({
+        downloaded: [
+          makeEntry({
+            storageId: "s1api-forked-old",
+            displayName: "S1API_Forked",
+            source: "thunderstore",
+            sourceId: "ifBars/S1API_Forked",
+            sourceVersion: "3.0.22",
+            installedVersion: "3.0.22",
+            remoteVersion: "v3.0.3",
+            updateAvailable: true,
+            availableRuntimes: ["Mono"],
+            installedIn: ["env-main"],
+            installedInByRuntime: { Mono: ["env-main"] },
+            storageIdsByRuntime: { Mono: "s1api-forked-old" },
+            filesByRuntime: { Mono: ["S1API.Mono.MelonLoader.dll"] },
+          }),
+          makeEntry({
+            storageId: "s1api-new",
+            displayName: "S1API",
+            source: "github",
+            sourceId: "ifBars/S1API",
+            sourceVersion: "v3.0.3",
+            installedVersion: "v3.0.3",
+            remoteVersion: "v3.0.3",
+            updateAvailable: false,
+            availableRuntimes: ["Mono"],
+            installedIn: [],
+            installedInByRuntime: { Mono: [] },
+            storageIdsByRuntime: { Mono: "s1api-new" },
+            filesByRuntime: { Mono: ["S1API.Mono.MelonLoader.dll"] },
+          }),
+        ],
+      });
+    apiMocks.getS1APILatestRelease.mockResolvedValue({
+      tag_name: "v3.0.3",
+      name: "S1API v3.0.3",
+      published_at: "2026-04-10",
+      prerelease: false,
+      download_url: "https://github.com/ifBars/S1API/releases/download/v3.0.3/S1API-Forked-3.0.3.zip",
+    });
+    apiMocks.downloadS1APIToLibrary.mockResolvedValue({
+      success: true,
+      storageId: "s1api-new",
+    });
+
+    renderLibraryOverlay({ libraryTab: "library" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Update and activate" }),
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.downloadS1APIToLibrary).toHaveBeenCalledWith("v3.0.3");
+    });
+    expect(apiMocks.downloadThunderstoreToLibrary).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(apiMocks.uninstallDownloadedMod).toHaveBeenCalledWith(
+        "s1api-forked-old",
+        ["env-main"],
+      );
+    });
+    await waitFor(() => {
+      expect(apiMocks.installDownloadedMod).toHaveBeenCalledWith(
+        "s1api-new",
+        ["env-main"],
+      );
+    });
+    expect(screen.queryByText("Mod Update Failed")).toBeNull();
+  });
+
   it("offers both Mono and IL2CPP environments for same-version Thunderstore runtime siblings", async () => {
     apiMocks.getEnvironments.mockResolvedValue([
       {

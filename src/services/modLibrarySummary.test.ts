@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyFeaturedDownloadRemoteVersions,
+  areVersionsEquivalentForSource,
   buildDownloadedGroups,
   buildEnvironmentModSnapshot,
   compareVersionTokensDesc,
@@ -174,5 +175,37 @@ describe('modLibrarySummary', () => {
 
     expect(snapshot.updateCount).toBe(1);
     expect(snapshot.updates[0]?.latestVersion).toBe('1.0.10');
+  });
+
+  it('treats S1API alias source ids as one downloaded group', () => {
+    const groups = buildDownloadedGroups([
+      makeEntry({
+        storageId: 's1api-forked-storage',
+        displayName: 'S1API',
+        source: 'github',
+        sourceId: 'ifBars/S1API_Forked',
+        sourceVersion: '3.0.22',
+      }),
+      makeEntry({
+        storageId: 's1api-storage',
+        displayName: 'S1API',
+        source: 'github',
+        sourceId: 'ifBars/S1API',
+        sourceVersion: 'v3.0.3',
+      }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.key).toBe('github::ifbars/s1api');
+    expect(groups[0]?.entries).toHaveLength(2);
+  });
+
+  it('uses S1API-aware equality for alias source ids', () => {
+    expect(
+      areVersionsEquivalentForSource('ifBars/S1API_Forked', '3.0.22', '3.0.3'),
+    ).toBe(false);
+    expect(
+      areVersionsEquivalentForSource('ifBars/S1API', 'v3.0.3', '3.0.3'),
+    ).toBe(true);
   });
 });

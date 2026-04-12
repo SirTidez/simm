@@ -17,6 +17,14 @@ const s1ApiRevisionSourceIds = new Set([
   'ifbars/s1api_forked',
 ]);
 
+function canonicalizeGithubSourceId(sourceId?: string): string {
+  const normalized = (sourceId || '').trim().toLowerCase();
+  if (s1ApiRevisionSourceIds.has(normalized)) {
+    return 'ifbars/s1api';
+  }
+  return normalized;
+}
+
 export interface DownloadedModGroup {
   key: string;
   displayName: string;
@@ -206,6 +214,15 @@ export function areVersionsEquivalent(a?: string, b?: string): boolean {
   return compareVersionTokensDesc(normalizedA, normalizedB) === 0;
 }
 
+export function areVersionsEquivalentForSource(sourceId: string | undefined, a?: string, b?: string): boolean {
+  const normalizedA = normalizeVersionToken(a);
+  const normalizedB = normalizeVersionToken(b);
+  if (!normalizedA || !normalizedB) {
+    return false;
+  }
+  return compareVersionTokensDescForSource(sourceId, a, b) === 0;
+}
+
 export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): DownloadedModGroup[] {
   const groups = new Map<
     string,
@@ -239,7 +256,10 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
       key = `thunderstore::${normalizeThunderstoreName(baseName).toLowerCase()}`;
       displayName = baseName || entry.displayName;
     } else if ((entry.source === 'nexusmods' || entry.source === 'github') && entry.sourceId) {
-      key = `${entry.source}::${entry.sourceId.toLowerCase()}`;
+      const normalizedSourceId = entry.source === 'github'
+        ? canonicalizeGithubSourceId(entry.sourceId)
+        : entry.sourceId.toLowerCase();
+      key = `${entry.source}::${normalizedSourceId}`;
     } else if ((entry.source === 'nexusmods' || entry.source === 'github') && !entry.sourceId) {
       key = `${entry.source}::${normalizedDisplayName}`;
     } else if (entry.managed) {

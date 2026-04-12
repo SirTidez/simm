@@ -9,7 +9,7 @@ import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads
 
 interface ModUpdatesEntry {
   count: number;
-  updates: Array<{ modFileName: string; modName: string; currentVersion: string; latestVersion: string; source: string }>;
+  updates: Array<{ groupKey: string; modName: string; currentVersion: string; latestVersion: string; source: string }>;
 }
 
 // Version injected at build time by Vite
@@ -31,7 +31,10 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
   const [metadataRefreshRunning, setMetadataRefreshRunning] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
 
-  const totalModsNeedingUpdate = Array.from(modUpdatesByEnv.values()).reduce((sum, e) => sum + e.count, 0);
+  const totalModsNeedingUpdate = new Set(
+    Array.from(modUpdatesByEnv.values())
+      .flatMap((entry) => entry.updates.map((update) => update.groupKey)),
+  ).size;
 
   // Update current time every 30 seconds to refresh the "Last check" display
   useEffect(() => {
@@ -57,7 +60,7 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
         map.set(env.id, {
           count: snapshot.updateCount,
           updates: snapshot.updates.map((update) => ({
-            modFileName: update.groupKey,
+            groupKey: update.groupKey,
             modName: update.modName,
             currentVersion: update.currentVersion,
             latestVersion: update.latestVersion,

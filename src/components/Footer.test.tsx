@@ -61,6 +61,13 @@ const completedEnv: Environment = {
   status: 'completed',
 };
 
+const secondCompletedEnv: Environment = {
+  ...completedEnv,
+  id: 'env-2',
+  name: 'Env Two',
+  outputDir: 'C:/env-2',
+};
+
 function mockStores(environments: Environment[]) {
   envStoreMocks.useEnvironmentStore.mockReturnValue({
     environments,
@@ -196,6 +203,36 @@ describe('Footer', () => {
     render(<Footer />);
 
     expect(await screen.findByText(/1\s+Mod needs updating/i)).toBeTruthy();
+  });
+
+  it('deduplicates footer mod updates across installs of the same mod', async () => {
+    mockStores([completedEnv, secondCompletedEnv]);
+    apiMocks.getModLibrary.mockResolvedValueOnce({
+      downloaded: [
+        {
+          storageId: 'mod-a',
+          displayName: 'Mod A',
+          files: ['ModA.dll'],
+          source: 'thunderstore',
+          sourceId: 'author/mod-a',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          remoteVersion: '1.1.0',
+          updateAvailable: true,
+          managed: false,
+          installedIn: ['env-1', 'env-2'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: {},
+          installedInByRuntime: { IL2CPP: ['env-1', 'env-2'] },
+          filesByRuntime: {},
+        },
+      ],
+    });
+
+    render(<Footer />);
+
+    expect(await screen.findByText(/1\s+Mod needs updating/i)).toBeTruthy();
+    expect(screen.queryByText(/2\s+Mods need updating/i)).toBeNull();
   });
 
   it('shows all mods up to date when completed environments have no mod updates', async () => {

@@ -14,6 +14,7 @@ import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredCon
 import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
+import { logger } from '../services/logger';
 import {
   onAuthWaiting,
   onAuthSuccess,
@@ -584,8 +585,14 @@ export function EnvironmentList({
                 return next;
               });
             })
-            .catch(() => {
-              // Ignore summary refresh failures; counts will update on the next successful refresh.
+            .catch((error) => {
+              logger.warn(
+                'Failed to refresh environment mod summary after mod updates check',
+                {
+                  environmentId: data.environmentId,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              );
             });
         });
 
@@ -624,7 +631,10 @@ export function EnvironmentList({
                   return next;
                 });
               } catch (err) {
-                console.error('Failed to refresh mods count:', err);
+                logger.error('Failed to refresh environment mod counts after filesystem change', {
+                  environmentId: data.environmentId,
+                  error: err instanceof Error ? err.message : String(err),
+                });
               } finally {
                 modsRefreshTimers.current.delete(data.environmentId);
               }
