@@ -6378,6 +6378,55 @@ impl ModsService {
         None
     }
 
+    fn is_ignored_thunderstore_package_entry(file_name: &str) -> bool {
+        matches!(
+            file_name.to_ascii_lowercase().as_str(),
+            "manifest.json" | "readme.md" | "changelog.md" | "license" | "license.md" | "icon.png"
+        )
+    }
+
+    async fn copy_loose_archive_payload_to_mods(
+        &self,
+        entry_path: &Path,
+        file_name: &str,
+        mods_dir: &Path,
+        runtime: Option<&str>,
+        installed_files: &mut Vec<String>,
+    ) -> Result<()> {
+        let dest_path = mods_dir.join(file_name);
+        let metadata = fs::metadata(entry_path).await?;
+
+        if metadata.is_dir() {
+            Box::pin(self.copy_directory_filtered(
+                entry_path,
+                &dest_path,
+                runtime,
+                installed_files,
+            ))
+            .await?;
+            return Ok(());
+        }
+
+        let lower_name = file_name.to_ascii_lowercase();
+        if lower_name.ends_with(".dll") {
+            let file_runtime = self.detect_mod_runtime_from_name(file_name);
+            let matches_runtime = match runtime {
+                Some(target) => file_runtime == target || file_runtime == "unknown",
+                None => true,
+            };
+            if !matches_runtime {
+                return Ok(());
+            }
+            installed_files.push(file_name.to_string());
+        }
+
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::copy(entry_path, &dest_path).await?;
+        Ok(())
+    }
+
     async fn extract_and_install_zip(
         &self,
         zip_path: &Path,
@@ -6430,6 +6479,7 @@ impl ModsService {
         let mut installed_files = Vec::new();
 
         let content_root = self.resolve_archive_content_root(temp_dir).await?;
+        let is_thunderstore_package = content_root.join("manifest.json").exists();
 
         if let Some(fomod_files) = self
             .try_extract_fomod_content(
@@ -6470,12 +6520,14 @@ impl ModsService {
                 if has_il2cpp_dir || has_mono_dir {
                     // This archive has runtime-specific structure
                     let dir_runtime = self.detect_mod_runtime_from_name(file_name);
+                    let is_runtime_dir =
+                        dir_runtime == RUNTIME_IL2CPP || dir_runtime == RUNTIME_MONO;
                     let should_process = match runtime {
                         Some(target) => dir_runtime == target,
-                        None => dir_runtime == RUNTIME_IL2CPP || dir_runtime == RUNTIME_MONO,
+                        None => is_runtime_dir,
                     };
 
-                    if should_process {
+                    if is_runtime_dir && should_process {
                         // Process the runtime-specific directory
                         let mods_path = entry_path.join("mods");
                         let plugins_path = entry_path.join("plugins");
@@ -6509,7 +6561,7 @@ impl ModsService {
                                 .await?;
                         }
 
-                        // Also copy any DLLs directly in this runtime directory
+                        // Copy any loose files/folders in the selected runtime directory into Mods.
                         let mut runtime_entries = fs::read_dir(&entry_path).await?;
                         while let Some(runtime_entry) = runtime_entries.next_entry().await? {
                             let runtime_entry_path = runtime_entry.path();
@@ -6518,16 +6570,32 @@ impl ModsService {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("");
 
-                            if runtime_entry_path.is_file()
-                                && runtime_file_name.to_lowercase().ends_with(".dll")
-                            {
-                                let dest_path = mods_dir.join(runtime_file_name);
-                                fs::copy(&runtime_entry_path, &dest_path).await?;
-                                installed_files.push(runtime_file_name.to_string());
+                            let runtime_lower_name = runtime_file_name.to_ascii_lowercase();
+                            if matches!(
+                                runtime_lower_name.as_str(),
+                                "mods" | "plugins" | "userlibs" | "userdata"
+                            ) {
+                                continue;
                             }
+                            if is_thunderstore_package
+                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
+                            {
+                                continue;
+                            }
+
+                            self.copy_loose_archive_payload_to_mods(
+                                &runtime_entry_path,
+                                runtime_file_name,
+                                mods_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
                         }
                     }
-                    continue;
+                    if is_runtime_dir {
+                        continue;
+                    }
                 }
 
                 // Standard structure without runtime-specific folders
@@ -6551,6 +6619,17 @@ impl ModsService {
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
+                } else if !is_thunderstore_package
+                    || !Self::is_ignored_thunderstore_package_entry(file_name)
+                {
+                    self.copy_loose_archive_payload_to_mods(
+                        &entry_path,
+                        file_name,
+                        mods_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
                 }
             } else if file_name.to_lowercase().ends_with(".dll") {
                 // Check runtime match
@@ -6564,6 +6643,17 @@ impl ModsService {
                     fs::copy(&entry_path, &dest_path).await?;
                     installed_files.push(file_name.to_string());
                 }
+            } else if !is_thunderstore_package
+                || !Self::is_ignored_thunderstore_package_entry(file_name)
+            {
+                self.copy_loose_archive_payload_to_mods(
+                    &entry_path,
+                    file_name,
+                    mods_dir,
+                    runtime,
+                    &mut installed_files,
+                )
+                .await?;
             }
         }
 
@@ -6614,6 +6704,7 @@ impl ModsService {
         let mut installed_files = Vec::new();
 
         let content_root = self.resolve_archive_content_root(temp_dir).await?;
+        let is_thunderstore_package = content_root.join("manifest.json").exists();
 
         if let Some(fomod_files) = self
             .try_extract_fomod_content(
@@ -6650,12 +6741,14 @@ impl ModsService {
                 if has_il2cpp_dir || has_mono_dir {
                     // This archive has runtime-specific structure
                     let dir_runtime = self.detect_mod_runtime_from_name(file_name);
+                    let is_runtime_dir =
+                        dir_runtime == RUNTIME_IL2CPP || dir_runtime == RUNTIME_MONO;
                     let should_process = match runtime {
                         Some(target) => dir_runtime == target,
-                        None => dir_runtime == RUNTIME_IL2CPP || dir_runtime == RUNTIME_MONO,
+                        None => is_runtime_dir,
                     };
 
-                    if should_process {
+                    if is_runtime_dir && should_process {
                         // Process the runtime-specific directory
                         let mods_path = entry_path.join("mods");
                         let plugins_path = entry_path.join("plugins");
@@ -6689,7 +6782,7 @@ impl ModsService {
                                 .await?;
                         }
 
-                        // Also copy any DLLs directly in this runtime directory
+                        // Copy any loose files/folders in the selected runtime directory into Mods.
                         let mut runtime_entries = fs::read_dir(&entry_path).await?;
                         while let Some(runtime_entry) = runtime_entries.next_entry().await? {
                             let runtime_entry_path = runtime_entry.path();
@@ -6698,16 +6791,32 @@ impl ModsService {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("");
 
-                            if runtime_entry_path.is_file()
-                                && runtime_file_name.to_lowercase().ends_with(".dll")
-                            {
-                                let dest_path = mods_dir.join(runtime_file_name);
-                                fs::copy(&runtime_entry_path, &dest_path).await?;
-                                installed_files.push(runtime_file_name.to_string());
+                            let runtime_lower_name = runtime_file_name.to_ascii_lowercase();
+                            if matches!(
+                                runtime_lower_name.as_str(),
+                                "mods" | "plugins" | "userlibs" | "userdata"
+                            ) {
+                                continue;
                             }
+                            if is_thunderstore_package
+                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
+                            {
+                                continue;
+                            }
+
+                            self.copy_loose_archive_payload_to_mods(
+                                &runtime_entry_path,
+                                runtime_file_name,
+                                mods_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
                         }
                     }
-                    continue;
+                    if is_runtime_dir {
+                        continue;
+                    }
                 }
 
                 // Standard structure without runtime-specific folders
@@ -6731,6 +6840,17 @@ impl ModsService {
                     Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
                 } else if dir_name == "userdata" {
                     Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
+                } else if !is_thunderstore_package
+                    || !Self::is_ignored_thunderstore_package_entry(file_name)
+                {
+                    self.copy_loose_archive_payload_to_mods(
+                        &entry_path,
+                        file_name,
+                        mods_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
                 }
             } else if file_name.to_lowercase().ends_with(".dll") {
                 // Check runtime match
@@ -6744,6 +6864,17 @@ impl ModsService {
                     fs::copy(&entry_path, &dest_path).await?;
                     installed_files.push(file_name.to_string());
                 }
+            } else if !is_thunderstore_package
+                || !Self::is_ignored_thunderstore_package_entry(file_name)
+            {
+                self.copy_loose_archive_payload_to_mods(
+                    &entry_path,
+                    file_name,
+                    mods_dir,
+                    runtime,
+                    &mut installed_files,
+                )
+                .await?;
             }
         }
 
@@ -11322,6 +11453,283 @@ mod tests {
             "nested initial install should create a symlink or a regular fallback file"
         );
         assert_eq!(fs::read(&installed_path).await?, b"nested");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn store_mod_archive_installs_loose_thunderstore_payloads_without_package_metadata(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-thunderstore-extra-payload");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("DomsExpandedIngredientsAndEffects.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"DomsExpandedIngredientsAndEffects","version_number":"1.2.0","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("CHANGELOG.md", b"changes"),
+                ("LICENSE.md", b"license"),
+                ("icon.png", b"png"),
+                ("DomsExpandedIngredientsAndEffects-Mono.dll", b"mono"),
+                ("DomsCustomEffects/Icons/Airhorn.png", b"airhorn"),
+                ("DomsCustomEffects/Sounds/Party.wav", b"party"),
+            ],
+        )?;
+
+        let stored = service
+            .store_mod_archive(
+                zip_path.to_string_lossy().as_ref(),
+                "DomsExpandedIngredientsAndEffects.zip",
+                Some(Runtime::Mono),
+                Some(serde_json::json!({
+                    "source": "thunderstore",
+                    "sourceId": "dom/example",
+                    "sourceVersion": "1.2.0",
+                    "modName": "Dom's Enhanced Effects"
+                })),
+                None,
+            )
+            .await?;
+
+        let storage_id = stored
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("storage id");
+        let storage_base = service.get_mods_storage_dir().await?.join(storage_id);
+        let staged_dll = storage_base
+            .join("Mods")
+            .join("DomsExpandedIngredientsAndEffects-Mono.dll");
+        let staged_asset = storage_base
+            .join("Mods")
+            .join("DomsCustomEffects")
+            .join("Icons")
+            .join("Airhorn.png");
+        assert!(staged_dll.exists());
+        assert!(staged_asset.exists());
+        assert_eq!(fs::read(&staged_asset).await?, b"airhorn");
+        assert!(!storage_base.join("Mods").join("manifest.json").exists());
+        assert!(!storage_base.join("Mods").join("README.md").exists());
+        assert!(!storage_base.join("Mods").join("CHANGELOG.md").exists());
+        assert!(!storage_base.join("Mods").join("LICENSE.md").exists());
+        assert!(!storage_base.join("Mods").join("icon.png").exists());
+
+        service
+            .install_storage_mod_to_envs(storage_id, vec![env.id.clone()])
+            .await?;
+
+        let installed_asset = output_dir
+            .join("Mods")
+            .join("DomsCustomEffects")
+            .join("Icons")
+            .join("Airhorn.png");
+        assert!(service.path_exists_or_symlink(&installed_asset).await);
+        assert_eq!(fs::read(&installed_asset).await?, b"airhorn");
+        assert!(!output_dir.join("Mods").join("manifest.json").exists());
+        assert!(!output_dir.join("Mods").join("README.md").exists());
+
+        service
+            .uninstall_storage_mod_from_envs(storage_id, vec![env.id.clone()])
+            .await?;
+
+        assert!(!service.path_exists_or_symlink(&installed_asset).await);
+        assert!(
+            !service
+                .path_exists_or_symlink(
+                    &output_dir
+                        .join("Mods")
+                        .join("DomsExpandedIngredientsAndEffects-Mono.dll"),
+                )
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_installs_loose_reused_thunderstore_payloads_from_nexusmods(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-nexus-loose-payload");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("NexusThunderstoreStyle.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"DomsExpandedIngredientsAndEffects","version_number":"1.2.0","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("CHANGELOG.md", b"changes"),
+                ("LICENSE.md", b"license"),
+                ("icon.png", b"png"),
+                ("DomsExpandedIngredientsAndEffects-Mono.dll", b"mono"),
+                ("DomsCustomEffects/Icons/Airhorn.png", b"airhorn"),
+                ("DomsCustomEffects/Sounds/Party.wav", b"party"),
+            ],
+        )?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "NexusThunderstoreStyle.zip",
+                "Mono",
+                "alternate",
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "schedule1/1777",
+                    "sourceVersion": "1.2.0",
+                    "modName": "Dom's Enhanced Effects"
+                })),
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|value| value.as_bool()), Some(true));
+        let installed_dll = output_dir
+            .join("Mods")
+            .join("DomsExpandedIngredientsAndEffects-Mono.dll");
+        let installed_asset = output_dir
+            .join("Mods")
+            .join("DomsCustomEffects")
+            .join("Icons")
+            .join("Airhorn.png");
+        assert!(service.path_exists_or_symlink(&installed_dll).await);
+        assert!(service.path_exists_or_symlink(&installed_asset).await);
+        assert_eq!(fs::read(&installed_asset).await?, b"airhorn");
+        assert!(!output_dir.join("Mods").join("manifest.json").exists());
+        assert!(!output_dir.join("Mods").join("README.md").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_installs_loose_reused_thunderstore_payloads_for_manual_archives(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-manual-loose-payload");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("ManualThunderstoreStyle.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"DomsExpandedIngredientsAndEffects","version_number":"1.2.0","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("DomsExpandedIngredientsAndEffects-Mono.dll", b"mono"),
+                ("DomsCustomEffects/Sounds/Party.wav", b"party"),
+            ],
+        )?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "ManualThunderstoreStyle.zip",
+                "Mono",
+                "alternate",
+                None,
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|value| value.as_bool()), Some(true));
+        let installed_asset = output_dir
+            .join("Mods")
+            .join("DomsCustomEffects")
+            .join("Sounds")
+            .join("Party.wav");
+        assert!(service.path_exists_or_symlink(&installed_asset).await);
+        assert_eq!(fs::read(&installed_asset).await?, b"party");
+        assert!(!output_dir.join("Mods").join("manifest.json").exists());
+        assert!(!output_dir.join("Mods").join("README.md").exists());
 
         Ok(())
     }
