@@ -2463,6 +2463,46 @@ impl ModsService {
         Ok(())
     }
 
+    async fn collect_mod_dll_entries_recursive(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<(String, String)>> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut dll_files: Vec<(String, String)> = Vec::new();
+
+        while let Some(current) = pending.pop() {
+            let mut entries = fs::read_dir(&current)
+                .await
+                .with_context(|| format!("Failed to read Mods directory {}", current.display()))?;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let metadata = entry.metadata().await?;
+
+                if metadata.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let relative_path = relative.to_string_lossy().replace('\\', "/");
+                if relative_path.is_empty() {
+                    continue;
+                }
+
+                let lower_name = relative_path.to_ascii_lowercase();
+                if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
+                    dll_files.push((path.to_string_lossy().to_string(), relative_path));
+                }
+            }
+        }
+
+        Ok(dll_files)
+    }
+
+
     fn detect_available_runtimes(
         &self,
         files: &[String],
@@ -3690,23 +3730,7 @@ impl ModsService {
             }));
         }
 
-        let mut entries = fs::read_dir(&mods_directory)
-            .await
-            .context("Failed to read Mods directory")?;
-
-        let mut dll_files = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file() {
-                // Extract file name from path before converting to string
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let path_string = path.to_string_lossy().to_string();
-                let lower_name = file_name.to_lowercase();
-                if lower_name.ends_with(".dll") || lower_name.ends_with(".dll.disabled") {
-                    dll_files.push((path_string, file_name.to_string()));
-                }
-            }
-        }
+        let dll_files = self.collect_mod_dll_entries_recursive(&mods_directory).await?;
 
         // Load metadata
         let metadata = self
@@ -3715,20 +3739,32 @@ impl ModsService {
             .unwrap_or_else(|_| HashMap::new());
 
         let mut mods = Vec::new();
-        for (file_path, file_name) in dll_files {
-            let is_disabled = file_name.to_lowercase().ends_with(".disabled");
-            let original_file_name = if is_disabled {
-                file_name.replace(".disabled", "")
+        for (file_path, relative_path) in dll_files {
+            let is_disabled = relative_path.to_lowercase().ends_with(".disabled");
+            let original_relative_path = if is_disabled {
+                relative_path.replace(".disabled", "")
             } else {
-                file_name.clone()
+                relative_path.clone()
             };
+            let original_file_name = Path::new(&original_relative_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&original_relative_path)
+                .to_string();
+            let current_file_name = Path::new(&relative_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&relative_path)
+                .to_string();
 
             let mod_name = original_file_name.replace(".dll", "").replace(".DLL", "");
 
             // Get metadata
             let file_metadata = metadata
-                .get(&original_file_name)
-                .or_else(|| metadata.get(&file_name))
+                .get(&original_relative_path)
+                .or_else(|| metadata.get(&relative_path))
+                .or_else(|| metadata.get(&original_file_name))
+                .or_else(|| metadata.get(&current_file_name))
                 .cloned();
 
             // Extract version if not disabled and not in metadata
@@ -3795,7 +3831,7 @@ impl ModsService {
 
             mods.push(ModInfo {
                 name: mod_name.clone(),
-                file_name: original_file_name,
+                file_name: original_relative_path,
                 path: file_path,
                 version,
                 source,
@@ -4884,7 +4920,7 @@ impl ModsService {
                     warnings.push(format!("Skipped {}: {}", dest_path.display(), err));
                     continue;
                 }
-                installed_files.push(file_name.to_string());
+                installed_files.push(relative_entry.clone());
                 eprintln!("[install_storage_entries] Successfully created directory symlink and added {} to installed_files", file_name);
             } else {
                 eprintln!(
@@ -4905,7 +4941,7 @@ impl ModsService {
                     warnings.push(format!("Skipped {}: {}", dest_path.display(), err));
                     continue;
                 }
-                installed_files.push(file_name.to_string());
+                installed_files.push(relative_entry.clone());
                 eprintln!("[install_storage_entries] Successfully created file symlink and added {} to installed_files", file_name);
             }
 
@@ -4920,7 +4956,10 @@ impl ModsService {
                 _ => false,
             });
 
-            let mut meta = metadata_map.get(file_name).cloned().unwrap_or(ModMetadata {
+            let mut meta = metadata_map
+                .get(&relative_entry)
+                .cloned()
+                .unwrap_or(ModMetadata {
                 source: template_meta.as_ref().and_then(|t| t.source.clone()),
                 source_id: template_meta.as_ref().and_then(|t| t.source_id.clone()),
                 source_version: template_meta
@@ -4952,7 +4991,7 @@ impl ModsService {
                 mod_storage_id: None,
                 symlink_paths: None,
                 security_scan: template_meta.as_ref().and_then(|t| t.security_scan.clone()),
-            });
+                });
 
             if let Some(template) = template_meta.as_ref() {
                 meta.source = template.source.clone();
@@ -4981,7 +5020,7 @@ impl ModsService {
             meta.mod_storage_id = Some(storage_id.to_string());
             meta.symlink_paths = Some(vec![dest_path.to_string_lossy().to_string()]);
             meta.installed_at = Some(Utc::now());
-            metadata_map.insert(file_name.to_string(), meta);
+            metadata_map.insert(relative_entry, meta);
         }
 
         eprintln!(
@@ -5666,6 +5705,11 @@ impl ModsService {
         let mod_path = mods_directory.join(mod_file_name);
         let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
 
+        // Security: Ensure the file is within the mods directory and ends with .dll
+        if !mod_file_name.to_lowercase().ends_with(".dll") {
+            return Err(anyhow::anyhow!("Invalid mod file"));
+        }
+
         if let Some(storage_id) = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
             .await
@@ -5674,11 +5718,6 @@ impl ModsService {
             if self.toggle_storage_paths(game_dir, &storage_id, true).await? {
                 return Ok(());
             }
-        }
-
-        // Security: Ensure the file is within the mods directory and ends with .dll
-        if !mod_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid mod file"));
         }
 
         if !mod_path.exists() {
@@ -5708,6 +5747,11 @@ impl ModsService {
         let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
         let mod_path = mods_directory.join(mod_file_name);
 
+        // Security: Ensure the file is within the mods directory and ends with .dll
+        if !mod_file_name.to_lowercase().ends_with(".dll") {
+            return Err(anyhow::anyhow!("Invalid mod file"));
+        }
+
         if let Some(storage_id) = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
             .await
@@ -5716,11 +5760,6 @@ impl ModsService {
             if self.toggle_storage_paths(game_dir, &storage_id, false).await? {
                 return Ok(());
             }
-        }
-
-        // Security: Ensure the file is within the mods directory and ends with .dll
-        if !mod_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid mod file"));
         }
 
         if !disabled_path.exists() {
@@ -8636,6 +8675,75 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
+    async fn list_and_count_mods_include_nested_mod_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-nested-mods");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(mods_dir.join("Mono")).await?;
+        fs::create_dir_all(mods_dir.join("Net35")).await?;
+        fs::write(mods_dir.join("Mono").join("Shared.dll"), b"mono").await?;
+        fs::write(mods_dir.join("Net35").join("Shared.dll"), b"net35").await?;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "Mono/Shared.dll".to_string(),
+            sample_metadata(Some("storage-mono"), None, Some("1.0.0")),
+        );
+        metadata.insert(
+            "Net35/Shared.dll".to_string(),
+            sample_metadata(Some("storage-net35"), None, Some("1.1.0")),
+        );
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let result = service
+            .list_mods(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let mods = result
+            .get("mods")
+            .and_then(|value| value.as_array())
+            .expect("mods array");
+        let mut file_names = mods
+            .iter()
+            .filter_map(|entry| entry.get("fileName").and_then(|value| value.as_str()))
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        file_names.sort();
+
+        assert_eq!(
+            file_names,
+            vec!["Mono/Shared.dll".to_string(), "Net35/Shared.dll".to_string()]
+        );
+        assert_eq!(
+            result.get("count").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+
+        let count = service
+            .count_mods(output_dir.to_string_lossy().as_ref())
+            .await?;
+        assert_eq!(count, 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn disable_and_enable_mod_renames_files() -> Result<()> {
         let temp = tempdir()?;
         let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
@@ -9331,6 +9439,64 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn disable_and_enable_mod_reject_non_dll_managed_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-managed-non-dll");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+
+        let active_path = mods_dir.join("notes.txt");
+        fs::write(&active_path, b"notes").await?;
+
+        let mut metadata = HashMap::new();
+        let mut meta = sample_metadata(Some("managed-storage"), None, None);
+        meta.symlink_paths = Some(vec![active_path.to_string_lossy().to_string()]);
+        metadata.insert("notes.txt".to_string(), meta.clone());
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let disable_err = service
+            .disable_mod(output_dir.to_string_lossy().as_ref(), "notes.txt")
+            .await
+            .expect_err("non-dll managed entry should be rejected");
+        assert!(disable_err.to_string().contains("Invalid mod file"));
+        assert!(active_path.exists());
+        assert!(!mods_dir.join("notes.txt.disabled").exists());
+
+        fs::remove_file(&active_path).await?;
+        let disabled_path = mods_dir.join("notes.txt.disabled");
+        fs::write(&disabled_path, b"notes").await?;
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let enable_err = service
+            .enable_mod(output_dir.to_string_lossy().as_ref(), "notes.txt")
+            .await
+            .expect_err("non-dll managed entry should be rejected");
+        assert!(enable_err.to_string().contains("Invalid mod file"));
+        assert!(!active_path.exists());
+        assert!(disabled_path.exists());
+
+        Ok(())
+    }
+
 
     #[tokio::test]
     #[serial]
@@ -10746,6 +10912,54 @@ mod tests {
         assert_eq!(fs::read(&installed_path).await?, b"data");
         assert_eq!(installed_files, vec!["Example.dll".to_string()]);
         assert!(metadata_map.contains_key("Example.dll"));
+        assert!(warnings.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn install_storage_entries_keeps_bucket_qualified_metadata_keys() -> Result<()> {
+        let temp = tempdir()?;
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+
+        let source_dir = temp.path().join("storage").join("Mods");
+        fs::create_dir_all(source_dir.join("Mono")).await?;
+        fs::create_dir_all(source_dir.join("Net35")).await?;
+        fs::write(source_dir.join("Mono").join("Shared.dll"), b"mono").await?;
+        fs::write(source_dir.join("Net35").join("Shared.dll"), b"net35").await?;
+
+        let dest_dir = temp.path().join("missing").join("Mods");
+        let mut metadata_map = HashMap::new();
+        let mut installed_files = Vec::new();
+        let mut warnings = Vec::new();
+
+        service
+            .install_storage_entries(
+                &source_dir,
+                &source_dir,
+                &dest_dir,
+                false,
+                "Mono",
+                &None,
+                "storage-1",
+                &mut metadata_map,
+                &mut installed_files,
+                &mut warnings,
+                &Runtime::Mono,
+            )
+            .await?;
+
+        let mut installed_files_sorted = installed_files.clone();
+        installed_files_sorted.sort();
+        assert_eq!(
+            installed_files_sorted,
+            vec![
+                "Mono/Shared.dll".to_string(),
+                "Net35/Shared.dll".to_string()
+            ]
+        );
+        assert!(metadata_map.contains_key("Mono/Shared.dll"));
+        assert!(metadata_map.contains_key("Net35/Shared.dll"));
         assert!(warnings.is_empty());
 
         Ok(())

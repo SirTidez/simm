@@ -4,8 +4,6 @@ use std::process::Command;
 fn main() {
     // Build the frontend before building Tauri
     // This ensures the frontend is always built when building with cargo
-    println!("cargo:warning=Building frontend...");
-
     let root_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
 
     // Check if dist directory exists and is recent (optional optimization)
@@ -38,9 +36,7 @@ fn main() {
         };
 
         match npm_build_result {
-            Ok(status) if status.success() => {
-                println!("cargo:warning=Frontend build completed successfully");
-            }
+            Ok(status) if status.success() => {}
             Ok(status) => {
                 eprintln!(
                     "cargo:warning=Frontend build failed with exit code: {:?}",
