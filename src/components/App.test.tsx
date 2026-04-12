@@ -444,4 +444,54 @@ describe('App', () => {
       expect(processMocks.relaunch).toHaveBeenCalled();
     });
   });
+
+  it('does not immediately rerun app update checks when the settings updater identity changes', async () => {
+    let updateSettingsVersion = 0;
+    const firstUpdateSettings = vi.fn().mockImplementation(async () => {
+      updateSettingsVersion = 1;
+    });
+    const secondUpdateSettings = vi.fn().mockResolvedValue(undefined);
+
+    settingsStoreMocks.useSettingsStore.mockImplementation(() => ({
+      settings: { appUpdate: { channel: 'beta' } },
+      updateSettings: updateSettingsVersion === 0 ? firstUpdateSettings : secondUpdateSettings,
+    }));
+
+    invokeMock.mockImplementation((command: string) => {
+      switch (command) {
+        case 'was_simm_directory_just_created':
+          return Promise.resolve(false);
+        case 'check_app_update':
+          return Promise.resolve({
+            currentVersion: '0.8.0',
+            version: '0.8.1',
+            versionNormalized: '0.8.1',
+            updateAvailable: true,
+            notes: 'Update notes',
+            pubDate: '2026-04-03T00:00:00Z',
+            channel: 'beta',
+            manifestUrl: 'https://raw.githubusercontent.com/SirTidez/simm/master/updater/beta/latest-beta.json',
+            checkedAt: '2026-04-03T00:00:00Z',
+          });
+        default:
+          return Promise.resolve(false);
+      }
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
+    await screen.findByRole('button', { name: 'Install App Update' });
+
+    await waitFor(() => {
+      expect(firstUpdateSettings).toHaveBeenCalledTimes(1);
+    });
+
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(1);
+    expect(secondUpdateSettings).not.toHaveBeenCalled();
+  });
 });

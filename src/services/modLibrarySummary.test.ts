@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildDownloadedGroups, buildEnvironmentModSnapshot, compareVersionTokensDesc } from './modLibrarySummary';
+import {
+  applyFeaturedDownloadRemoteVersions,
+  buildDownloadedGroups,
+  buildEnvironmentModSnapshot,
+  compareVersionTokensDesc,
+} from './modLibrarySummary';
 import type { ModLibraryEntry } from '../types';
 
 function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
@@ -117,5 +122,57 @@ describe('modLibrarySummary', () => {
         groupKey: 'github::ifbars/mlvscan',
       },
     ]);
+  });
+
+  it('treats S1API revision tags as newer featured-download releases', () => {
+    const library = applyFeaturedDownloadRemoteVersions({
+      downloaded: [
+        makeEntry({
+          storageId: 's1api-storage',
+          displayName: 'S1API',
+          source: 'github',
+          sourceId: 'ifBars/S1API',
+          sourceVersion: '3.0.22',
+          installedInByRuntime: { IL2CPP: ['env-main'] },
+          filesByRuntime: { IL2CPP: ['S1API.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, new Map([['ifbars/s1api', '3.0.3']]));
+
+    const snapshot = buildEnvironmentModSnapshot(library, 'env-main');
+
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates).toEqual([
+      {
+        modName: 'S1API',
+        currentVersion: '3.0.22',
+        latestVersion: '3.0.3',
+        source: 'github',
+        groupKey: 'github::ifbars/s1api',
+      },
+    ]);
+  });
+
+  it('keeps normal semver ordering for non-S1API featured downloads', () => {
+    const library = applyFeaturedDownloadRemoteVersions({
+      downloaded: [
+        makeEntry({
+          storageId: 'featured-storage',
+          displayName: 'Example Featured Tool',
+          source: 'github',
+          sourceId: 'example/tool',
+          sourceVersion: '1.0.9',
+          installedInByRuntime: { IL2CPP: ['env-main'] },
+          filesByRuntime: { IL2CPP: ['ExampleTool.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, new Map([['example/tool', '1.0.10']]));
+
+    const snapshot = buildEnvironmentModSnapshot(library, 'env-main');
+
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates[0]?.latestVersion).toBe('1.0.10');
   });
 });

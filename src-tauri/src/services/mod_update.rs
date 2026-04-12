@@ -79,7 +79,11 @@ impl ModUpdateService {
                                 .await
                             {
                                 if let Some(latest_package_version) =
-                                    Self::select_latest_thunderstore_version(&package, None)
+                                    Self::select_latest_thunderstore_version(
+                                        &package,
+                                        Some(&source_id),
+                                        None,
+                                    )
                                 {
                                     let latest_version = latest_package_version
                                         .get("version_number")
@@ -87,6 +91,7 @@ impl ModUpdateService {
                                         .map(|s| s.to_string())
                                         .unwrap_or_default();
                                     let update_available = Self::versions_differ_for_thunderstore(
+                                        Some(&source_id),
                                         current_version.as_deref(),
                                         &latest_version,
                                     );
@@ -106,7 +111,8 @@ impl ModUpdateService {
                                                 .and_then(|v| v.as_str())
                                                 .map(|s| s.to_string())
                                         });
-                                    metadata.icon_url = Self::extract_package_icon(&package);
+                                    metadata.icon_url =
+                                        Self::extract_package_icon(&package, Some(&source_id));
                                     metadata.icon_cache_path = mods_service
                                         .cache_icon_for_metadata(metadata.icon_url.as_deref())
                                         .await
@@ -389,7 +395,7 @@ impl ModUpdateService {
             };
 
             let now = Utc::now();
-            let icon_url = Self::extract_package_icon(&package);
+            let icon_url = Self::extract_package_icon(&package, Some(&source_id));
             let icon_cache_path = mods_service
                 .cache_icon_for_metadata(icon_url.as_deref())
                 .await;
@@ -410,7 +416,7 @@ impl ModUpdateService {
                     .get("package_url")
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
-                summary: Self::select_latest_thunderstore_version(&package, None)
+                summary: Self::select_latest_thunderstore_version(&package, Some(&source_id), None)
                     .and_then(|v| v.get("description"))
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
@@ -495,8 +501,15 @@ impl ModUpdateService {
             .map(|v| v.to_string())
     }
 
-    fn extract_package_icon(package: &Value) -> Option<String> {
-        Self::select_latest_thunderstore_version(package, None)
+    fn is_s1api_thunderstore_source_id(source_id: Option<&str>) -> bool {
+        matches!(
+            source_id.map(|value| value.trim().to_ascii_lowercase()),
+            Some(value) if value == "ifbars/s1api" || value == "ifbars/s1api_forked"
+        )
+    }
+
+    fn extract_package_icon(package: &Value, source_id: Option<&str>) -> Option<String> {
+        Self::select_latest_thunderstore_version(package, source_id, None)
             .and_then(|version| version.get("icon"))
             .and_then(|v| v.as_str())
             .or_else(|| {
@@ -512,6 +525,7 @@ impl ModUpdateService {
 
     fn select_latest_thunderstore_version<'a>(
         package: &'a Value,
+        source_id: Option<&str>,
         preferred_version: Option<&str>,
     ) -> Option<&'a Value> {
         let versions = package.get("versions").and_then(|v| v.as_array())?;
@@ -522,7 +536,7 @@ impl ModUpdateService {
                     .get("version_number")
                     .and_then(|v| v.as_str())
                     .map(|candidate| {
-                        Self::compare_thunderstore_versions(candidate, preferred)
+                        Self::compare_thunderstore_versions(source_id, candidate, preferred)
                             == Ordering::Equal
                     })
                     .unwrap_or(false)
@@ -540,7 +554,7 @@ impl ModUpdateService {
                 .get("version_number")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            match Self::compare_thunderstore_versions(left_version, right_version) {
+            match Self::compare_thunderstore_versions(source_id, left_version, right_version) {
                 Ordering::Equal => {
                     let left_updated = left
                         .get("date_updated")
@@ -725,7 +739,7 @@ impl ModUpdateService {
         parts
     }
 
-    fn extract_thunderstore_numeric_parts(value: &str) -> Vec<u32> {
+    fn extract_s1api_revision_parts(value: &str) -> Vec<u32> {
         let core = value
             .trim_start_matches(['v', 'V'])
             .split(['-', '+'])
@@ -768,9 +782,9 @@ impl ModUpdateService {
         .any(|marker| lower.contains(marker))
     }
 
-    fn compare_thunderstore_versions(current: &str, latest: &str) -> Ordering {
-        let current_parts = Self::extract_thunderstore_numeric_parts(current);
-        let latest_parts = Self::extract_thunderstore_numeric_parts(latest);
+    fn compare_s1api_revision_versions(current: &str, latest: &str) -> Ordering {
+        let current_parts = Self::extract_s1api_revision_parts(current);
+        let latest_parts = Self::extract_s1api_revision_parts(latest);
         let max_len = current_parts.len().max(latest_parts.len());
 
         for index in 0..max_len {
@@ -792,6 +806,18 @@ impl ModUpdateService {
                 .trim_start_matches(['v', 'V'])
                 .cmp(latest.trim_start_matches(['v', 'V'])),
         }
+    }
+
+    fn compare_thunderstore_versions(
+        source_id: Option<&str>,
+        current: &str,
+        latest: &str,
+    ) -> Ordering {
+        if Self::is_s1api_thunderstore_source_id(source_id) {
+            return Self::compare_s1api_revision_versions(current, latest);
+        }
+
+        Self::compare_versions(current, latest)
     }
 
     fn compare_versions(current: &str, latest: &str) -> Ordering {
@@ -945,6 +971,7 @@ impl ModUpdateService {
 
                 let latest_package_version = Self::select_latest_thunderstore_version(
                     &package,
+                    Some(&source_id),
                     metadata.remote_version.as_deref(),
                 )
                 .ok_or_else(|| {
@@ -957,6 +984,7 @@ impl ModUpdateService {
                         anyhow::anyhow!("Thunderstore package has no version information")
                     })?;
                 if !Self::versions_differ_for_thunderstore(
+                    Some(&source_id),
                     metadata.source_version.as_deref(),
                     &latest_version,
                 ) {
@@ -1035,7 +1063,8 @@ impl ModUpdateService {
                         .get("description")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default(),
-                    "iconUrl": Self::extract_package_icon(&package).unwrap_or_default(),
+                    "iconUrl": Self::extract_package_icon(&package, Some(&source_id))
+                        .unwrap_or_default(),
                     "downloads": package
                         .get("versions")
                         .and_then(|v| v.as_array())
@@ -1359,9 +1388,15 @@ impl ModUpdateService {
         }
     }
 
-    fn versions_differ_for_thunderstore(current: Option<&str>, latest: &str) -> bool {
+    fn versions_differ_for_thunderstore(
+        source_id: Option<&str>,
+        current: Option<&str>,
+        latest: &str,
+    ) -> bool {
         match current {
-            Some(value) => Self::compare_thunderstore_versions(value, latest) == Ordering::Less,
+            Some(value) => {
+                Self::compare_thunderstore_versions(source_id, value, latest) == Ordering::Less
+            }
             None => true,
         }
     }
@@ -1512,22 +1547,40 @@ mod tests {
     }
 
     #[test]
-    fn thunderstore_versions_treat_appended_patch_digits_as_revision_suffixes() {
+    fn s1api_thunderstore_versions_treat_appended_patch_digits_as_revision_suffixes() {
         assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("ifBars/S1API"),
             Some("3.0.22"),
             "3.0.3",
         ));
         assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("ifBars/S1API"),
             Some("3.0.32"),
             "3.0.4",
         ));
         assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("ifBars/S1API"),
             Some("3.0.3"),
             "3.0.32",
         ));
         assert!(!ModUpdateService::versions_differ_for_thunderstore(
+            Some("ifBars/S1API"),
             Some("3.0.4"),
             "3.0.32",
+        ));
+    }
+
+    #[test]
+    fn non_s1api_thunderstore_versions_keep_normal_semver_ordering() {
+        assert!(ModUpdateService::versions_differ_for_thunderstore(
+            Some("example/mod"),
+            Some("1.0.9"),
+            "1.0.10",
+        ));
+        assert!(!ModUpdateService::versions_differ_for_thunderstore(
+            Some("example/mod"),
+            Some("1.0.10"),
+            "1.0.9",
         ));
     }
 
@@ -1551,15 +1604,23 @@ mod tests {
         });
 
         assert_eq!(
-            ModUpdateService::select_latest_thunderstore_version(&package, None)
-                .and_then(|version| version.get("version_number"))
-                .and_then(|value| value.as_str()),
+            ModUpdateService::select_latest_thunderstore_version(
+                &package,
+                Some("example/mod"),
+                None,
+            )
+            .and_then(|version| version.get("version_number"))
+            .and_then(|value| value.as_str()),
             Some("1.2.0")
         );
         assert_eq!(
-            ModUpdateService::select_latest_thunderstore_version(&package, None)
-                .and_then(|version| version.get("uuid4"))
-                .and_then(|value| value.as_str()),
+            ModUpdateService::select_latest_thunderstore_version(
+                &package,
+                Some("example/mod"),
+                None,
+            )
+            .and_then(|version| version.get("uuid4"))
+            .and_then(|value| value.as_str()),
             Some("latest-version")
         );
     }
@@ -1626,7 +1687,7 @@ mod tests {
             ]
         });
 
-        let icon = ModUpdateService::extract_package_icon(&package);
+        let icon = ModUpdateService::extract_package_icon(&package, Some("example/mod"));
         assert_eq!(icon.as_deref(), Some("https://example.com/version.png"));
     }
 
@@ -1652,8 +1713,12 @@ mod tests {
             ]
         });
 
-        let selected = ModUpdateService::select_latest_thunderstore_version(&package, None)
-            .expect("selected version");
+        let selected = ModUpdateService::select_latest_thunderstore_version(
+            &package,
+            Some("example/mod"),
+            None,
+        )
+        .expect("selected version");
 
         assert_eq!(
             selected.get("uuid4").and_then(|value| value.as_str()),
@@ -1662,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn select_latest_thunderstore_version_uses_revision_suffix_ordering() {
+    fn select_latest_thunderstore_version_uses_revision_suffix_ordering_for_s1api() {
         let package = serde_json::json!({
             "versions": [
                 {
@@ -1688,8 +1753,12 @@ mod tests {
             ]
         });
 
-        let selected = ModUpdateService::select_latest_thunderstore_version(&package, None)
-            .expect("selected version");
+        let selected = ModUpdateService::select_latest_thunderstore_version(
+            &package,
+            Some("ifBars/S1API"),
+            None,
+        )
+        .expect("selected version");
 
         assert_eq!(
             selected.get("uuid4").and_then(|value| value.as_str()),
@@ -1700,6 +1769,36 @@ mod tests {
                 .get("version_number")
                 .and_then(|value| value.as_str()),
             Some("3.0.4")
+        );
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_keeps_semver_for_non_s1api_packages() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "stable-9",
+                    "version_number": "1.0.9",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "stable-10",
+                    "version_number": "1.0.10",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = ModUpdateService::select_latest_thunderstore_version(
+            &package,
+            Some("example/mod"),
+            None,
+        )
+        .expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|value| value.as_str()),
+            Some("stable-10")
         );
     }
 
@@ -1720,9 +1819,12 @@ mod tests {
             ]
         });
 
-        let selected =
-            ModUpdateService::select_latest_thunderstore_version(&package, Some("1.2.0"))
-                .expect("selected version");
+        let selected = ModUpdateService::select_latest_thunderstore_version(
+            &package,
+            Some("example/mod"),
+            Some("1.2.0"),
+        )
+        .expect("selected version");
 
         assert_eq!(
             selected.get("uuid4").and_then(|value| value.as_str()),

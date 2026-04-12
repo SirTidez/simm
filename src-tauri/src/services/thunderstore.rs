@@ -19,10 +19,7 @@ impl ThunderStoreService {
 
     fn extract_thunderstore_numeric_parts(value: &str) -> Vec<u32> {
         let normalized = Self::normalize_version_token(value);
-        let core = normalized
-            .split(['-', '+'])
-            .next()
-            .unwrap_or_default();
+        let core = normalized.split(['-', '+']).next().unwrap_or_default();
 
         let mut segments = core.split('.').collect::<Vec<_>>();
         if let Some(patch) = segments.get(2).copied() {

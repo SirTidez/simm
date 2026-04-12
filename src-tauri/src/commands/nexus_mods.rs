@@ -51,7 +51,8 @@ fn classify_oauth_refresh_failure(
         .and_then(|entry| entry.as_str())
         .unwrap_or_default();
 
-    if status == reqwest::StatusCode::BAD_REQUEST && error_code.eq_ignore_ascii_case("invalid_grant")
+    if status == reqwest::StatusCode::BAD_REQUEST
+        && error_code.eq_ignore_ascii_case("invalid_grant")
     {
         return OAuthRefreshFailure::ReconnectRequired(nexus_warn(
             "Stored Nexus login could not be refreshed because Nexus rejected the saved refresh token. This usually means the previous login expired, was revoked, or was replaced. Reconnect Nexus if downloads stop working.",
@@ -662,13 +663,17 @@ async fn oauth_refresh_token_local(
         .form(&form)
         .send()
         .await
-        .map_err(|e| OAuthRefreshFailure::Error(nexus_error(format!("OAuth refresh request failed: {}", e))))?;
+        .map_err(|e| {
+            OAuthRefreshFailure::Error(nexus_error(format!("OAuth refresh request failed: {}", e)))
+        })?;
 
     let status = response.status();
-    let value = response
-        .json::<Value>()
-        .await
-        .map_err(|e| OAuthRefreshFailure::Error(nexus_error(format!("Invalid OAuth refresh response: {}", e))))?;
+    let value = response.json::<Value>().await.map_err(|e| {
+        OAuthRefreshFailure::Error(nexus_error(format!(
+            "Invalid OAuth refresh response: {}",
+            e
+        )))
+    })?;
     if !status.is_success() {
         return Err(classify_oauth_refresh_failure(status, &value));
     }
@@ -2600,7 +2605,10 @@ mod tests {
                 assert!(!message.contains("OAuth token refresh failed"));
             }
             OAuthRefreshFailure::Error(message) => {
-                panic!("expected reconnect-required outcome, got error: {}", message);
+                panic!(
+                    "expected reconnect-required outcome, got error: {}",
+                    message
+                );
             }
         }
     }

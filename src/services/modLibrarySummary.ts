@@ -12,6 +12,11 @@ const featuredDownloadSourceIds = new Set([
   'ifbars/mlvscan',
 ]);
 
+const s1ApiRevisionSourceIds = new Set([
+  'ifbars/s1api',
+  'ifbars/s1api_forked',
+]);
+
 export interface DownloadedModGroup {
   key: string;
   displayName: string;
@@ -65,7 +70,7 @@ export function applyFeaturedDownloadRemoteVersions(
         ...entry,
         remoteVersion: latestVersion,
         updateAvailable: currentVersion
-          ? compareVersionTokensDesc(latestVersion, currentVersion) < 0
+          ? compareVersionTokensDescForSource(entry.sourceId, latestVersion, currentVersion) < 0
           : true,
       };
     }),
@@ -142,6 +147,54 @@ export function compareVersionTokensDesc(a?: string, b?: string): number {
     return aPrerelease ? 1 : -1;
   }
   return 0;
+}
+
+function usesS1ApiRevisionOrdering(sourceId?: string): boolean {
+  return s1ApiRevisionSourceIds.has((sourceId || '').trim().toLowerCase());
+}
+
+function extractS1ApiRevisionParts(value?: string): number[] {
+  const normalized = normalizeVersionToken(value);
+  const core = normalized.split(/[-+]/)[0] || '';
+  let segments = core.split('.');
+
+  if (segments[2] && /^\d+$/.test(segments[2]) && segments[2].length > 1) {
+    segments = [
+      ...segments.slice(0, 2),
+      segments[2].slice(0, 1),
+      segments[2].slice(1),
+      ...segments.slice(3),
+    ];
+  }
+
+  return segments
+    .filter((segment) => segment.length > 0)
+    .map((segment) => Number.parseInt(segment, 10) || 0);
+}
+
+function compareS1ApiRevisionTokensDesc(a?: string, b?: string): number {
+  const aParts = extractS1ApiRevisionParts(a);
+  const bParts = extractS1ApiRevisionParts(b);
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i += 1) {
+    const av = aParts[i] || 0;
+    const bv = bParts[i] || 0;
+    if (av !== bv) {
+      return bv - av;
+    }
+  }
+  const aPrerelease = hasPrereleaseMarker(a);
+  const bPrerelease = hasPrereleaseMarker(b);
+  if (aPrerelease !== bPrerelease) {
+    return aPrerelease ? 1 : -1;
+  }
+  return 0;
+}
+
+function compareVersionTokensDescForSource(sourceId: string | undefined, a?: string, b?: string): number {
+  return usesS1ApiRevisionOrdering(sourceId)
+    ? compareS1ApiRevisionTokensDesc(a, b)
+    : compareVersionTokensDesc(a, b);
 }
 
 export function areVersionsEquivalent(a?: string, b?: string): boolean {
@@ -236,19 +289,22 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
 
   return Array.from(groups.values())
     .map((group) => {
-      const remoteVersions = Array.from(group.remoteVersions).sort((a, b) => compareVersionTokensDesc(a, b));
-      const sourceVersions = Array.from(group.sourceVersions).sort((a, b) => compareVersionTokensDesc(a, b));
+      const versionSourceId = group.entries[0]?.sourceId;
+      const remoteVersions = Array.from(group.remoteVersions)
+        .sort((a, b) => compareVersionTokensDescForSource(versionSourceId, a, b));
+      const sourceVersions = Array.from(group.sourceVersions)
+        .sort((a, b) => compareVersionTokensDescForSource(versionSourceId, a, b));
       const highestDownloadedVersion = sourceVersions[0];
       const latestRemoteVersion = remoteVersions[0];
       const hasRemoteVersion = normalizeVersionToken(latestRemoteVersion).length > 0;
       const hasDownloadedVersion = normalizeVersionToken(highestDownloadedVersion).length > 0;
       const effectiveLatestVersion = hasRemoteVersion && hasDownloadedVersion
-        ? (compareVersionTokensDesc(latestRemoteVersion, highestDownloadedVersion) < 0
+        ? (compareVersionTokensDescForSource(versionSourceId, latestRemoteVersion, highestDownloadedVersion) < 0
           ? latestRemoteVersion
           : highestDownloadedVersion)
         : (latestRemoteVersion || highestDownloadedVersion);
       const updateAvailable = hasRemoteVersion && hasDownloadedVersion
-        ? compareVersionTokensDesc(latestRemoteVersion, highestDownloadedVersion) < 0
+        ? compareVersionTokensDescForSource(versionSourceId, latestRemoteVersion, highestDownloadedVersion) < 0
         : (hasRemoteVersion ? group.updateAvailable : false);
 
       return {
@@ -274,7 +330,11 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
 
 export function getGroupInstalledVersion(group: DownloadedModGroup): string {
   const sortedByVersion = [...group.entries].sort((a, b) =>
-    compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion),
+    compareVersionTokensDescForSource(
+      a.sourceId || b.sourceId,
+      a.sourceVersion || a.installedVersion,
+      b.sourceVersion || b.installedVersion,
+    ),
   );
   const latestEntry = sortedByVersion[0];
   return latestEntry?.sourceVersion || latestEntry?.installedVersion || 'unknown';
@@ -296,7 +356,7 @@ function getEntryLatestVersion(entry: ModLibraryEntry): string {
   const hasRemoteVersion = normalizeVersionToken(remoteVersion).length > 0;
 
   if (hasInstalledVersion && hasRemoteVersion) {
-    return compareVersionTokensDesc(remoteVersion, installedVersion) < 0
+    return compareVersionTokensDescForSource(entry.sourceId, remoteVersion, installedVersion) < 0
       ? (remoteVersion || installedVersion)
       : installedVersion;
   }
@@ -305,8 +365,9 @@ function getEntryLatestVersion(entry: ModLibraryEntry): string {
 }
 
 function compareEntriesForEnvironmentUpdateSummary(a: ModLibraryEntry, b: ModLibraryEntry): number {
-  return compareVersionTokensDesc(getEntryLatestVersion(a), getEntryLatestVersion(b))
-    || compareVersionTokensDesc(getEntryInstalledVersion(a), getEntryInstalledVersion(b))
+  const sourceId = a.sourceId || b.sourceId;
+  return compareVersionTokensDescForSource(sourceId, getEntryLatestVersion(a), getEntryLatestVersion(b))
+    || compareVersionTokensDescForSource(sourceId, getEntryInstalledVersion(a), getEntryInstalledVersion(b))
     || a.displayName.localeCompare(b.displayName);
 }
 

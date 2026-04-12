@@ -122,6 +122,7 @@ function AppContent() {
   const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
+  const updateSettingsRef = useRef(updateSettings);
   const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
@@ -374,16 +375,20 @@ function AppContent() {
     appUpdateSettingsRef.current = settings?.appUpdate ?? null;
   }, [settings?.appUpdate]);
 
+  useEffect(() => {
+    updateSettingsRef.current = updateSettings;
+  }, [updateSettings]);
+
   const persistAppUpdateSettings = useCallback(async (updates: Partial<AppUpdatePreferences>) => {
     const mergedSettings = {
       ...(appUpdateSettingsRef.current ?? {}),
       ...updates,
     };
     appUpdateSettingsRef.current = mergedSettings;
-    await updateSettings({
+    await updateSettingsRef.current({
       appUpdate: mergedSettings,
     });
-  }, [updateSettings]);
+  }, []);
 
   const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'beta';
 
@@ -438,6 +443,7 @@ function AppContent() {
           lastResolvedUrl: currentAppUpdateSettings.lastResolvedUrl ?? null,
           snoozedUntil: currentAppUpdateSettings.snoozedUntil ?? null,
           skippedVersionNormalized: currentAppUpdateSettings.skippedVersionNormalized ?? null,
+          channel: currentAppUpdateSettings.channel ?? null,
         });
         const nextSerialized = JSON.stringify(nextSettings);
         if (previousSerialized !== nextSerialized) {

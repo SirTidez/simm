@@ -1358,13 +1358,16 @@ mod tests {
             detected_runtime: None,
             runtime_match: None,
             mod_storage_id: Some("s1api-storage".to_string()),
-            symlink_paths: Some(vec![
-                plugins_dir.join("LoaderPlugin.dll").to_string_lossy().to_string(),
-            ]),
+            symlink_paths: Some(vec![plugins_dir
+                .join("LoaderPlugin.dll")
+                .to_string_lossy()
+                .to_string()]),
             security_scan: None,
         };
         mods_metadata.insert("S1API.dll".to_string(), parent_mod_meta);
-        mods_service.save_mod_metadata(&mods_dir, &mods_metadata).await?;
+        mods_service
+            .save_mod_metadata(&mods_dir, &mods_metadata)
+            .await?;
 
         let list = service
             .list_plugins(output_dir.to_string_lossy().as_ref())
@@ -1375,12 +1378,23 @@ mod tests {
             .expect("plugins array");
         let loader = plugins
             .iter()
-            .find(|plugin| plugin.get("fileName").and_then(|value| value.as_str()) == Some("LoaderPlugin.dll"))
+            .find(|plugin| {
+                plugin.get("fileName").and_then(|value| value.as_str()) == Some("LoaderPlugin.dll")
+            })
             .expect("managed plugin entry");
 
-        assert_eq!(loader.get("source").and_then(|value| value.as_str()), Some("github"));
-        assert_eq!(loader.get("version").and_then(|value| value.as_str()), Some("1.2.3"));
-        assert_eq!(loader.get("relatedMod").and_then(|value| value.as_str()), Some("S1API"));
+        assert_eq!(
+            loader.get("source").and_then(|value| value.as_str()),
+            Some("github")
+        );
+        assert_eq!(
+            loader.get("version").and_then(|value| value.as_str()),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            loader.get("relatedMod").and_then(|value| value.as_str()),
+            Some("S1API")
+        );
 
         Ok(())
     }
@@ -1437,13 +1451,16 @@ mod tests {
             detected_runtime: None,
             runtime_match: None,
             mod_storage_id: Some("s1api-storage".to_string()),
-            symlink_paths: Some(vec![
-                plugins_dir.join("LoaderPlugin.dll").to_string_lossy().to_string(),
-            ]),
+            symlink_paths: Some(vec![plugins_dir
+                .join("LoaderPlugin.dll")
+                .to_string_lossy()
+                .to_string()]),
             security_scan: None,
         };
         mods_metadata.insert("S1API.dll".to_string(), parent_mod_meta);
-        mods_service.save_mod_metadata(&mods_dir, &mods_metadata).await?;
+        mods_service
+            .save_mod_metadata(&mods_dir, &mods_metadata)
+            .await?;
 
         let list = service
             .list_plugins(output_dir.to_string_lossy().as_ref())
@@ -1454,13 +1471,27 @@ mod tests {
             .expect("plugins array");
         let loader = plugins
             .iter()
-            .find(|plugin| plugin.get("fileName").and_then(|value| value.as_str()) == Some("LoaderPlugin.dll"))
+            .find(|plugin| {
+                plugin.get("fileName").and_then(|value| value.as_str()) == Some("LoaderPlugin.dll")
+            })
             .expect("managed disabled plugin entry");
 
-        assert_eq!(loader.get("source").and_then(|value| value.as_str()), Some("github"));
-        assert_eq!(loader.get("version").and_then(|value| value.as_str()), Some("1.2.3"));
-        assert_eq!(loader.get("relatedMod").and_then(|value| value.as_str()), Some("S1API"));
-        assert_eq!(loader.get("disabled").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            loader.get("source").and_then(|value| value.as_str()),
+            Some("github")
+        );
+        assert_eq!(
+            loader.get("version").and_then(|value| value.as_str()),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            loader.get("relatedMod").and_then(|value| value.as_str()),
+            Some("S1API")
+        );
+        assert_eq!(
+            loader.get("disabled").and_then(|value| value.as_bool()),
+            Some(true)
+        );
 
         Ok(())
     }

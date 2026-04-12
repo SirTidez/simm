@@ -126,8 +126,18 @@ fn extract_package_uuid(package: &serde_json::Value) -> Option<String> {
         .map(|v| v.to_string())
 }
 
-fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
-    select_latest_thunderstore_version(package)
+fn is_s1api_thunderstore_source_id(source_id: Option<&str>) -> bool {
+    matches!(
+        source_id.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if value == "ifbars/s1api" || value == "ifbars/s1api_forked"
+    )
+}
+
+fn extract_thunderstore_icon(
+    package: &serde_json::Value,
+    source_id: Option<&str>,
+) -> Option<String> {
+    select_latest_thunderstore_version(package, source_id)
         .and_then(|v| v.get("icon"))
         .and_then(|v| v.as_str())
         .or_else(|| {
@@ -141,15 +151,79 @@ fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
         .map(|v| v.to_string())
 }
 
-fn compare_thunderstore_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let expand = |value: &str| {
-        let normalized = value
+fn extract_numeric_version_parts(value: &str) -> Vec<u32> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let core = value
+        .trim_start_matches(['v', 'V'])
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default();
+
+    for ch in core.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            parts.push(current.parse::<u32>().unwrap_or(0));
+            current.clear();
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current.parse::<u32>().unwrap_or(0));
+    }
+
+    parts
+}
+
+fn compare_standard_thunderstore_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = extract_numeric_version_parts(left);
+    let right_parts = extract_numeric_version_parts(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        match left_parts
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right_parts.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    let left_lower = left.to_ascii_lowercase();
+    let right_lower = right.to_ascii_lowercase();
+    let has_prerelease = |value: &str| {
+        [
+            "alpha",
+            "beta",
+            "preview",
+            "pre",
+            "rc",
+            "nightly",
+            "experimental",
+            "dev",
+            "test",
+        ]
+        .iter()
+        .any(|marker| value.contains(marker))
+    };
+
+    match (has_prerelease(&left_lower), has_prerelease(&right_lower)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => left
             .trim_start_matches(['v', 'V'])
-            .to_string();
-        let core = normalized
-            .split(['-', '+'])
-            .next()
-            .unwrap_or_default();
+            .cmp(right.trim_start_matches(['v', 'V'])),
+    }
+}
+
+fn compare_s1api_revision_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let expand = |value: &str| {
+        let normalized = value.trim_start_matches(['v', 'V']).to_string();
+        let core = normalized.split(['-', '+']).next().unwrap_or_default();
         let mut segments = core.split('.').collect::<Vec<_>>();
         if let Some(patch) = segments.get(2).copied() {
             if patch.len() > 1 && patch.chars().all(|ch| ch.is_ascii_digit()) {
@@ -212,8 +286,21 @@ fn compare_thunderstore_versions(left: &str, right: &str) -> std::cmp::Ordering 
     }
 }
 
+fn compare_thunderstore_versions(
+    source_id: Option<&str>,
+    left: &str,
+    right: &str,
+) -> std::cmp::Ordering {
+    if is_s1api_thunderstore_source_id(source_id) {
+        return compare_s1api_revision_versions(left, right);
+    }
+
+    compare_standard_thunderstore_versions(left, right)
+}
+
 fn select_latest_thunderstore_version<'a>(
     package: &'a serde_json::Value,
+    source_id: Option<&str>,
 ) -> Option<&'a serde_json::Value> {
     package
         .get("versions")
@@ -229,7 +316,7 @@ fn select_latest_thunderstore_version<'a>(
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
 
-                match compare_thunderstore_versions(left_version, right_version) {
+                match compare_thunderstore_versions(source_id, left_version, right_version) {
                     std::cmp::Ordering::Equal => {
                         let left_updated = left
                             .get("date_updated")
@@ -603,7 +690,7 @@ pub async fn check_all_updates(
             resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await
         {
             let now = chrono::Utc::now();
-            let icon_url = extract_thunderstore_icon(&package);
+            let icon_url = extract_thunderstore_icon(&package, Some(&source_id));
             let icon_cache_path = mods_service
                 .cache_icon_for_metadata(icon_url.as_deref())
                 .await;
@@ -624,7 +711,7 @@ pub async fn check_all_updates(
                     .get("package_url")
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
-                summary: select_latest_thunderstore_version(&package)
+                summary: select_latest_thunderstore_version(&package, Some(&source_id))
                     .and_then(|v| v.get("description"))
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
@@ -842,23 +929,35 @@ mod tests {
     }
 
     #[test]
-    fn compare_thunderstore_versions_uses_revision_suffix_ordering() {
+    fn compare_thunderstore_versions_uses_revision_suffix_ordering_for_s1api() {
         assert_eq!(
-            compare_thunderstore_versions("3.0.22", "3.0.3"),
+            compare_thunderstore_versions(Some("ifBars/S1API"), "3.0.22", "3.0.3"),
             std::cmp::Ordering::Less
         );
         assert_eq!(
-            compare_thunderstore_versions("3.0.32", "3.0.4"),
+            compare_thunderstore_versions(Some("ifBars/S1API"), "3.0.32", "3.0.4"),
             std::cmp::Ordering::Less
         );
         assert_eq!(
-            compare_thunderstore_versions("3.0.4", "3.0.32"),
+            compare_thunderstore_versions(Some("ifBars/S1API"), "3.0.4", "3.0.32"),
             std::cmp::Ordering::Greater
         );
     }
 
     #[test]
-    fn select_latest_thunderstore_version_uses_revision_suffix_ordering() {
+    fn compare_thunderstore_versions_keeps_semver_for_non_s1api_packages() {
+        assert_eq!(
+            compare_thunderstore_versions(Some("example/mod"), "1.0.9", "1.0.10"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_thunderstore_versions(Some("example/mod"), "1.0.10", "1.0.9"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_uses_revision_suffix_ordering_for_s1api() {
         let package = serde_json::json!({
             "versions": [
                 {
@@ -884,11 +983,35 @@ mod tests {
             ]
         });
 
-        let selected = select_latest_thunderstore_version(&package).expect("selected version");
+        let selected = select_latest_thunderstore_version(&package, Some("ifBars/S1API"))
+            .expect("selected version");
+
+        assert_eq!(selected.get("uuid4").and_then(|v| v.as_str()), Some("r4"));
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_keeps_semver_for_non_s1api_packages() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "stable-9",
+                    "version_number": "1.0.9",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "stable-10",
+                    "version_number": "1.0.10",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = select_latest_thunderstore_version(&package, Some("example/mod"))
+            .expect("selected version");
 
         assert_eq!(
             selected.get("uuid4").and_then(|v| v.as_str()),
-            Some("r4")
+            Some("stable-10")
         );
     }
 }

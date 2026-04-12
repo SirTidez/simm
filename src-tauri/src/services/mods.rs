@@ -2502,7 +2502,6 @@ impl ModsService {
         Ok(dll_files)
     }
 
-
     fn detect_available_runtimes(
         &self,
         files: &[String],
@@ -3179,7 +3178,8 @@ impl ModsService {
             .into_iter()
             .filter_map(|(kind, file_name, data)| {
                 let meta = serde_json::from_str::<ModMetadata>(&data).ok()?;
-                (meta.mod_storage_id.as_deref() == Some(storage_id)).then_some((kind, file_name, meta))
+                (meta.mod_storage_id.as_deref() == Some(storage_id))
+                    .then_some((kind, file_name, meta))
             })
             .collect())
     }
@@ -3219,7 +3219,10 @@ impl ModsService {
         output_dir: &str,
         file_name: &str,
     ) -> Option<ModMetadata> {
-        match self.load_raw_mod_metadata_entry(output_dir, file_name).await {
+        match self
+            .load_raw_mod_metadata_entry(output_dir, file_name)
+            .await
+        {
             Ok(entry) => entry,
             Err(error) => {
                 log::debug!(
@@ -3233,7 +3236,12 @@ impl ModsService {
         }
     }
 
-    fn storage_row_default_path(&self, output_dir: &str, kind: &str, file_name: &str) -> Option<PathBuf> {
+    fn storage_row_default_path(
+        &self,
+        output_dir: &str,
+        kind: &str,
+        file_name: &str,
+    ) -> Option<PathBuf> {
         match kind {
             "mods" => Some(self.get_mods_directory(output_dir).join(file_name)),
             "plugins" => Some(self.get_plugins_directory(output_dir).join(file_name)),
@@ -3281,10 +3289,14 @@ impl ModsService {
     fn active_and_disabled_paths(&self, path: &Path) -> (PathBuf, PathBuf) {
         let path_string = path.to_string_lossy().to_string();
         if path_string.to_ascii_lowercase().ends_with(".disabled") {
-            let active = PathBuf::from(path_string[..path_string.len() - ".disabled".len()].to_string());
+            let active =
+                PathBuf::from(path_string[..path_string.len() - ".disabled".len()].to_string());
             (active, path.to_path_buf())
         } else {
-            (path.to_path_buf(), PathBuf::from(format!("{}.disabled", path_string)))
+            (
+                path.to_path_buf(),
+                PathBuf::from(format!("{}.disabled", path_string)),
+            )
         }
     }
 
@@ -3307,7 +3319,8 @@ impl ModsService {
                 for path in paths {
                     candidate_paths.insert(PathBuf::from(path));
                 }
-            } else if let Some(path) = self.storage_row_default_path(output_dir, &kind, &file_name) {
+            } else if let Some(path) = self.storage_row_default_path(output_dir, &kind, &file_name)
+            {
                 candidate_paths.insert(path);
             }
         }
@@ -3315,16 +3328,30 @@ impl ModsService {
         let mut changed = false;
         for path in candidate_paths {
             let (active_path, disabled_path) = self.active_and_disabled_paths(&path);
-            let from_path = if disable { &active_path } else { &disabled_path };
-            let to_path = if disable { &disabled_path } else { &active_path };
+            let from_path = if disable {
+                &active_path
+            } else {
+                &disabled_path
+            };
+            let to_path = if disable {
+                &disabled_path
+            } else {
+                &active_path
+            };
 
-            if !self.path_exists_or_symlink(from_path).await || self.path_exists_or_symlink(to_path).await {
+            if !self.path_exists_or_symlink(from_path).await
+                || self.path_exists_or_symlink(to_path).await
+            {
                 continue;
             }
 
-            fs::rename(from_path, to_path)
-                .await
-                .with_context(|| format!("Failed to {} managed path {}", if disable { "disable" } else { "enable" }, from_path.display()))?;
+            fs::rename(from_path, to_path).await.with_context(|| {
+                format!(
+                    "Failed to {} managed path {}",
+                    if disable { "disable" } else { "enable" },
+                    from_path.display()
+                )
+            })?;
             changed = true;
         }
 
@@ -3730,7 +3757,9 @@ impl ModsService {
             }));
         }
 
-        let dll_files = self.collect_mod_dll_entries_recursive(&mods_directory).await?;
+        let dll_files = self
+            .collect_mod_dll_entries_recursive(&mods_directory)
+            .await?;
 
         // Load metadata
         let metadata = self
@@ -4960,37 +4989,39 @@ impl ModsService {
                 .get(&relative_entry)
                 .cloned()
                 .unwrap_or(ModMetadata {
-                source: template_meta.as_ref().and_then(|t| t.source.clone()),
-                source_id: template_meta.as_ref().and_then(|t| t.source_id.clone()),
-                source_version: template_meta
-                    .as_ref()
-                    .and_then(|t| t.source_version.clone()),
-                author: template_meta.as_ref().and_then(|t| t.author.clone()),
-                mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
-                source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
-                summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
-                icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
-                icon_cache_path: template_meta
-                    .as_ref()
-                    .and_then(|t| t.icon_cache_path.clone()),
-                downloads: template_meta.as_ref().and_then(|t| t.downloads),
-                likes_or_endorsements: template_meta.as_ref().and_then(|t| t.likes_or_endorsements),
-                updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
-                tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
-                installed_version: template_meta
-                    .as_ref()
-                    .and_then(|t| t.installed_version.clone()),
-                library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
-                installed_at: None,
-                last_update_check: None,
-                metadata_last_refreshed: None,
-                update_available: None,
-                remote_version: None,
-                detected_runtime: None,
-                runtime_match: None,
-                mod_storage_id: None,
-                symlink_paths: None,
-                security_scan: template_meta.as_ref().and_then(|t| t.security_scan.clone()),
+                    source: template_meta.as_ref().and_then(|t| t.source.clone()),
+                    source_id: template_meta.as_ref().and_then(|t| t.source_id.clone()),
+                    source_version: template_meta
+                        .as_ref()
+                        .and_then(|t| t.source_version.clone()),
+                    author: template_meta.as_ref().and_then(|t| t.author.clone()),
+                    mod_name: template_meta.as_ref().and_then(|t| t.mod_name.clone()),
+                    source_url: template_meta.as_ref().and_then(|t| t.source_url.clone()),
+                    summary: template_meta.as_ref().and_then(|t| t.summary.clone()),
+                    icon_url: template_meta.as_ref().and_then(|t| t.icon_url.clone()),
+                    icon_cache_path: template_meta
+                        .as_ref()
+                        .and_then(|t| t.icon_cache_path.clone()),
+                    downloads: template_meta.as_ref().and_then(|t| t.downloads),
+                    likes_or_endorsements: template_meta
+                        .as_ref()
+                        .and_then(|t| t.likes_or_endorsements),
+                    updated_at: template_meta.as_ref().and_then(|t| t.updated_at.clone()),
+                    tags: template_meta.as_ref().and_then(|t| t.tags.clone()),
+                    installed_version: template_meta
+                        .as_ref()
+                        .and_then(|t| t.installed_version.clone()),
+                    library_added_at: template_meta.as_ref().and_then(|t| t.library_added_at),
+                    installed_at: None,
+                    last_update_check: None,
+                    metadata_last_refreshed: None,
+                    update_available: None,
+                    remote_version: None,
+                    detected_runtime: None,
+                    runtime_match: None,
+                    mod_storage_id: None,
+                    symlink_paths: None,
+                    security_scan: template_meta.as_ref().and_then(|t| t.security_scan.clone()),
                 });
 
             if let Some(template) = template_meta.as_ref() {
@@ -5413,12 +5444,9 @@ impl ModsService {
                         } else {
                             Some(PathBuf::from(format!("{}.disabled", path_str)))
                         };
-                        let matches_source_path = if let Some(source_path) =
-                            self.storage_source_path_for_env_path(
-                                &storage_base,
-                                &env.output_dir,
-                                path,
-                            ) {
+                        let matches_source_path = if let Some(source_path) = self
+                            .storage_source_path_for_env_path(&storage_base, &env.output_dir, path)
+                        {
                             self.path_matches_storage_source(path, &source_path).await
                         } else {
                             false
@@ -5435,13 +5463,14 @@ impl ModsService {
                             }
                         }
                         if let Some(disabled) = disabled_path {
-                            let matches_disabled_source_path = if let Some(source_path) =
-                                self.storage_source_path_for_env_path(
+                            let matches_disabled_source_path = if let Some(source_path) = self
+                                .storage_source_path_for_env_path(
                                     &storage_base,
                                     &env.output_dir,
                                     &disabled,
                                 ) {
-                                self.path_matches_storage_source(&disabled, &source_path).await
+                                self.path_matches_storage_source(&disabled, &source_path)
+                                    .await
                             } else {
                                 false
                             };
@@ -5618,7 +5647,9 @@ impl ModsService {
             return Err(anyhow::anyhow!("Invalid mod file"));
         }
 
-        let managed_meta = self.try_load_raw_mod_metadata_entry(game_dir, mod_file_name).await;
+        let managed_meta = self
+            .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
+            .await;
         let env_id = self.environment_id_for_dir(game_dir).await?;
         if let Some(storage_id) = managed_meta
             .as_ref()
@@ -5715,7 +5746,10 @@ impl ModsService {
             .await
             .and_then(|meta| meta.mod_storage_id)
         {
-            if self.toggle_storage_paths(game_dir, &storage_id, true).await? {
+            if self
+                .toggle_storage_paths(game_dir, &storage_id, true)
+                .await?
+            {
                 return Ok(());
             }
         }
@@ -5757,7 +5791,10 @@ impl ModsService {
             .await
             .and_then(|meta| meta.mod_storage_id)
         {
-            if self.toggle_storage_paths(game_dir, &storage_id, false).await? {
+            if self
+                .toggle_storage_paths(game_dir, &storage_id, false)
+                .await?
+            {
                 return Ok(());
             }
         }
@@ -8728,7 +8765,10 @@ mod tests {
 
         assert_eq!(
             file_names,
-            vec!["Mono/Shared.dll".to_string(), "Net35/Shared.dll".to_string()]
+            vec![
+                "Mono/Shared.dll".to_string(),
+                "Net35/Shared.dll".to_string()
+            ]
         );
         assert_eq!(
             result.get("count").and_then(|value| value.as_u64()),
@@ -8807,7 +8847,9 @@ mod tests {
 
         let mod_path = mods_dir.join("ManagedMod.dll");
         let plugin_path = plugins_dir.join("LoaderPlugin.dll");
-        service.create_symlink_file(&storage_mod_path, &mod_path).await?;
+        service
+            .create_symlink_file(&storage_mod_path, &mod_path)
+            .await?;
         service
             .create_symlink_file(&storage_plugin_path, &plugin_path)
             .await?;
@@ -9496,7 +9538,6 @@ mod tests {
 
         Ok(())
     }
-
 
     #[tokio::test]
     #[serial]
@@ -11693,7 +11734,10 @@ mod tests {
             }))
             .await?;
 
-        let output_dir = temp.path().join("envs").join("env-thunderstore-extra-payload");
+        let output_dir = temp
+            .path()
+            .join("envs")
+            .join("env-thunderstore-extra-payload");
         let env = env_service
             .create_environment(
                 schedule_i_config().app_id,
@@ -11858,7 +11902,10 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(result.get("success").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(true)
+        );
         let installed_dll = output_dir
             .join("Mods")
             .join("DomsExpandedIngredientsAndEffects-Mono.dll");
@@ -11934,7 +11981,10 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(result.get("success").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(true)
+        );
         let installed_asset = output_dir
             .join("Mods")
             .join("DomsCustomEffects")
