@@ -191,7 +191,7 @@ function compareS1ApiRevisionTokensDesc(a?: string, b?: string): number {
   return 0;
 }
 
-function compareVersionTokensDescForSource(sourceId: string | undefined, a?: string, b?: string): number {
+export function compareVersionTokensDescForSource(sourceId: string | undefined, a?: string, b?: string): number {
   return usesS1ApiRevisionOrdering(sourceId)
     ? compareS1ApiRevisionTokensDesc(a, b)
     : compareVersionTokensDesc(a, b);

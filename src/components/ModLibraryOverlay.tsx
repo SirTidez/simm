@@ -34,6 +34,7 @@ import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
   areVersionsEquivalent,
   buildDownloadedGroups,
+  compareVersionTokensDescForSource,
   compareVersionTokensDesc,
   normalizeThunderstoreName,
   normalizeVersionToken,
@@ -1275,7 +1276,11 @@ export function ModLibraryOverlay({
     s1apiInLibrary &&
     s1apiInstalledVersion &&
     s1apiLatestVersion &&
-    compareVersions(s1apiInstalledVersion, s1apiLatestVersion) < 0;
+    compareVersionTokensDescForSource(
+      FEATURED_DOWNLOADS.s1api.sourceId,
+      s1apiLatestVersion,
+      s1apiInstalledVersion,
+    ) < 0;
 
   const mlvscanInstalledVersion =
     getLatestDownloadedVersionForGroups(mlvscanGroups);

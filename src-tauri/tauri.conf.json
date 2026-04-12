@@ -40,7 +40,6 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],
