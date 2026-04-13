@@ -39,7 +39,7 @@ describe('WelcomeOverlay', () => {
     );
 
     expect(await screen.findByText('Welcome to Schedule I Mod Manager')).toBeTruthy();
-    expect(screen.getByText('C:\\Users\\Tester\\SIMM')).toBeTruthy();
+    expect(await screen.findByText('C:\\Users\\Tester\\SIMM')).toBeTruthy();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Open SIMM Folder' })[0]);
 

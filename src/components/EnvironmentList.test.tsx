@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   getMelonLoaderStatus: vi.fn(),
   getEnvironments: vi.fn(),
   getModLibrary: vi.fn(),
+  searchThunderstore: vi.fn(),
   getMods: vi.fn(),
   getModsCount: vi.fn(),
   getModUpdatesSummary: vi.fn(),
@@ -156,6 +157,7 @@ describe('EnvironmentList', () => {
         },
       ],
     });
+    apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
     apiMocks.getMods.mockResolvedValue({
       mods: [
         {

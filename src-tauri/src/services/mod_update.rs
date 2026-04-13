@@ -13,9 +13,395 @@ use tauri::{AppHandle, Runtime};
 #[derive(Clone)]
 pub struct ModUpdateService;
 
+#[derive(Clone)]
+struct ManagedLibraryUpdateCandidate {
+    file_name: String,
+    storage_id: String,
+    metadata: crate::types::ModMetadata,
+}
+
 impl ModUpdateService {
     pub fn new() -> Self {
         Self
+    }
+
+    fn sync_refreshed_metadata_fields(
+        target: &mut crate::types::ModMetadata,
+        updated: &crate::types::ModMetadata,
+    ) {
+        target.last_update_check = updated.last_update_check;
+        target.update_available = updated.update_available;
+        target.remote_version = updated.remote_version.clone();
+        target.summary = updated.summary.clone();
+        target.icon_url = updated.icon_url.clone();
+        target.icon_cache_path = updated.icon_cache_path.clone();
+        target.downloads = updated.downloads;
+        target.likes_or_endorsements = updated.likes_or_endorsements;
+        target.updated_at = updated.updated_at.clone();
+        target.tags = updated.tags.clone();
+        target.metadata_last_refreshed = updated.metadata_last_refreshed;
+    }
+
+    fn representative_library_entry_path(
+        entry: &crate::types::ModLibraryEntry,
+        runtime_label: &str,
+    ) -> String {
+        entry
+            .files_by_runtime
+            .get(runtime_label)
+            .and_then(|files| files.first())
+            .or_else(|| entry.files.first())
+            .or_else(|| entry.attached_userlibs.first())
+            .or_else(|| entry.attached_userdata.first())
+            .cloned()
+            .unwrap_or_else(|| entry.display_name.clone())
+    }
+
+    fn build_managed_library_update_candidates(
+        library: &crate::types::ModLibraryResult,
+        environment_id: &str,
+        runtime_label: &str,
+        processed_storage_ids: &HashSet<String>,
+    ) -> Vec<ManagedLibraryUpdateCandidate> {
+        let mut seen_storage_ids = processed_storage_ids.clone();
+        let mut candidates = Vec::new();
+
+        for entry in &library.downloaded {
+            if !entry.managed {
+                continue;
+            }
+
+            let installed_for_runtime = entry
+                .installed_in_by_runtime
+                .get(runtime_label)
+                .map(|env_ids| env_ids.iter().any(|env_id| env_id == environment_id))
+                .unwrap_or_else(|| entry.installed_in.iter().any(|env_id| env_id == environment_id));
+            if !installed_for_runtime {
+                continue;
+            }
+
+            let storage_id = entry
+                .storage_ids_by_runtime
+                .get(runtime_label)
+                .cloned()
+                .unwrap_or_else(|| entry.storage_id.clone());
+            if storage_id.trim().is_empty() || !seen_storage_ids.insert(storage_id.clone()) {
+                continue;
+            }
+
+            let Some(source) = entry.source.clone() else {
+                continue;
+            };
+            let Some(source_id) = entry
+                .source_id
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                continue;
+            };
+
+            let metadata = crate::types::ModMetadata {
+                source: Some(source),
+                source_id: Some(source_id),
+                source_version: entry.source_version.clone(),
+                author: entry.author.clone(),
+                mod_name: Some(entry.display_name.clone()),
+                source_url: entry.source_url.clone(),
+                summary: entry.summary.clone(),
+                icon_url: entry.icon_url.clone(),
+                icon_cache_path: entry.icon_cache_path.clone(),
+                downloads: entry.downloads,
+                likes_or_endorsements: entry.likes_or_endorsements,
+                updated_at: entry.updated_at.clone(),
+                tags: entry.tags.clone(),
+                installed_version: entry.installed_version.clone(),
+                library_added_at: entry.library_added_at,
+                installed_at: entry.installed_at,
+                last_update_check: None,
+                metadata_last_refreshed: None,
+                update_available: entry.update_available,
+                remote_version: entry.remote_version.clone(),
+                detected_runtime: match runtime_label {
+                    "IL2CPP" => Some(crate::types::Runtime::Il2cpp),
+                    "Mono" => Some(crate::types::Runtime::Mono),
+                    _ => None,
+                },
+                runtime_match: None,
+                mod_storage_id: Some(storage_id.clone()),
+                symlink_paths: None,
+                security_scan: entry.security_scan.clone(),
+            };
+
+            candidates.push(ManagedLibraryUpdateCandidate {
+                file_name: Self::representative_library_entry_path(entry, runtime_label),
+                storage_id,
+                metadata,
+            });
+        }
+
+        candidates
+    }
+
+    async fn refresh_update_metadata(
+        &self,
+        file_name: &str,
+        mut metadata: crate::types::ModMetadata,
+        runtime_label: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        mods_service: &ModsService,
+        thunderstore_service: &ThunderStoreService,
+        nexus_mods_service: &NexusModsService,
+        nexus_game_id: &str,
+        github_service: &GitHubReleasesService,
+    ) -> Result<(crate::types::ModMetadata, Option<serde_json::Value>)> {
+        use crate::types::ModSource;
+
+        let source = metadata.source.clone();
+        let source_id = metadata.source_id.clone();
+        let current_version = metadata.source_version.clone();
+
+        let result = if let Some(ModSource::Thunderstore) = source {
+            if let Some(source_id) = source_id {
+                metadata.last_update_check = Some(now);
+
+                if let Ok((_, package)) = self
+                    .resolve_thunderstore_package(
+                        thunderstore_service,
+                        &source_id,
+                        Some(runtime_label),
+                    )
+                    .await
+                {
+                    if let Some(latest_package_version) =
+                        Self::select_latest_thunderstore_version(&package, Some(&source_id), None)
+                    {
+                        let latest_version = latest_package_version
+                            .get("version_number")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        let update_available = Self::versions_differ_for_thunderstore(
+                            Some(&source_id),
+                            current_version.as_deref(),
+                            &latest_version,
+                        );
+
+                        metadata.update_available = Some(update_available);
+                        metadata.remote_version = Some(latest_version.clone());
+                        metadata.summary = latest_package_version
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                package
+                                    .get("latest")
+                                    .and_then(|v| v.get("description"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            });
+                        metadata.icon_url =
+                            Self::extract_package_icon(&package, Some(&source_id));
+                        metadata.icon_cache_path = mods_service
+                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                            .await
+                            .or_else(|| metadata.icon_cache_path.clone());
+                        metadata.downloads = package
+                            .get("versions")
+                            .and_then(|v| v.as_array())
+                            .map(|versions| {
+                                versions
+                                    .iter()
+                                    .map(|ver| {
+                                        ver.get("downloads")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                    })
+                                    .sum::<u64>()
+                            });
+                        metadata.likes_or_endorsements =
+                            package.get("rating_score").and_then(|v| v.as_i64());
+                        metadata.updated_at = package
+                            .get("date_updated")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        metadata.tags = package
+                            .get("categories")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect::<Vec<String>>()
+                            })
+                            .filter(|tags| !tags.is_empty());
+                        metadata.metadata_last_refreshed = Some(now);
+
+                        Some(serde_json::json!({
+                            "modFileName": file_name,
+                            "updateAvailable": update_available,
+                            "currentVersion": current_version,
+                            "latestVersion": latest_version,
+                            "source": "thunderstore",
+                            "packageInfo": package
+                        }))
+                    } else {
+                        metadata.update_available = Some(false);
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else if let Some(ModSource::Nexusmods) = source {
+            if let Some(mod_id_str) = source_id {
+                metadata.last_update_check = Some(now);
+
+                if let Ok(mod_id) = mod_id_str.parse::<u32>() {
+                    if let Ok(mod_info) = nexus_mods_service.get_mod(nexus_game_id, mod_id).await {
+                        let latest_version = nexus_mods_service
+                            .get_mod_files(nexus_game_id, mod_id)
+                            .await
+                            .ok()
+                            .and_then(|files| {
+                                Self::select_best_nexus_file_for_update(
+                                    &files,
+                                    runtime_label,
+                                    current_version.as_deref(),
+                                )
+                            })
+                            .and_then(|file| {
+                                file.get("version")
+                                    .or_else(|| file.get("mod_version"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .or_else(|| {
+                                mod_info
+                                    .get("version")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            });
+
+                        if let Some(latest_version) = latest_version {
+                            let update_available =
+                                Self::versions_differ(current_version.as_deref(), &latest_version);
+
+                            metadata.update_available = Some(update_available);
+                            metadata.remote_version = Some(latest_version.clone());
+                            metadata.summary = mod_info
+                                .get("summary")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            metadata.icon_url = mod_info
+                                .get("picture_url")
+                                .or_else(|| mod_info.get("pictureUrl"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            metadata.icon_cache_path = mods_service
+                                .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                .await
+                                .or_else(|| metadata.icon_cache_path.clone());
+                            metadata.downloads = mod_info
+                                .get("mod_downloads")
+                                .or_else(|| mod_info.get("downloads"))
+                                .and_then(|v| v.as_u64());
+                            metadata.likes_or_endorsements = mod_info
+                                .get("endorsement_count")
+                                .or_else(|| mod_info.get("endorsements"))
+                                .and_then(|v| v.as_i64());
+                            metadata.updated_at = mod_info
+                                .get("updated_at")
+                                .or_else(|| mod_info.get("updatedAt"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            metadata.metadata_last_refreshed = Some(now);
+
+                            Some(serde_json::json!({
+                                "modFileName": file_name,
+                                "updateAvailable": update_available,
+                                "currentVersion": current_version,
+                                "latestVersion": latest_version,
+                                "source": "nexusmods",
+                                "packageInfo": mod_info
+                            }))
+                        } else {
+                            metadata.update_available = Some(false);
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else if let Some(ModSource::Github) = source {
+            if let Some(repo) = source_id {
+                metadata.last_update_check = Some(now);
+
+                let parts: Vec<&str> = repo.split('/').collect();
+                if parts.len() == 2 {
+                    let owner = parts[0];
+                    let repo_name = parts[1];
+
+                    if let Ok(Some(latest_release)) =
+                        github_service.get_latest_release(owner, repo_name, false).await
+                    {
+                        if let Some(latest_version) = latest_release
+                            .get("tag_name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                        {
+                            let update_available =
+                                Self::versions_differ(current_version.as_deref(), &latest_version);
+
+                            metadata.update_available = Some(update_available);
+                            metadata.remote_version = Some(latest_version.clone());
+                            metadata.summary = latest_release
+                                .get("body")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            metadata.icon_cache_path = mods_service
+                                .cache_icon_for_metadata(metadata.icon_url.as_deref())
+                                .await
+                                .or_else(|| metadata.icon_cache_path.clone());
+                            metadata.updated_at = latest_release
+                                .get("published_at")
+                                .or_else(|| latest_release.get("created_at"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            metadata.metadata_last_refreshed = Some(now);
+
+                            Some(serde_json::json!({
+                                "modFileName": file_name,
+                                "modName": metadata.mod_name.clone().unwrap_or_else(|| file_name.to_string()),
+                                "updateAvailable": update_available,
+                                "currentVersion": current_version,
+                                "latestVersion": latest_version,
+                                "source": "github",
+                                "packageInfo": latest_release
+                            }))
+                        } else {
+                            metadata.update_available = Some(false);
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok((metadata, result))
     }
 
     pub async fn check_mod_updates(
@@ -55,281 +441,79 @@ impl ModUpdateService {
             .await
             .unwrap_or_else(|_| HashMap::new());
         let mut storage_metadata_updates: HashMap<String, ModMetadata> = HashMap::new();
+        let mut processed_storage_ids: HashSet<String> = HashSet::new();
 
         let mut results = Vec::new();
         let now = Utc::now();
+        let runtime_label = Self::runtime_label(&env.runtime);
 
         // Check each mod for updates
         for mod_info in mods_array {
             if let Some(file_name) = mod_info.get("fileName").and_then(|n| n.as_str()) {
                 if let Some(metadata) = all_metadata.get_mut(file_name) {
-                    let source = metadata.source.clone();
-                    let source_id = metadata.source_id.clone();
-                    let current_version = metadata.source_version.clone();
+                    let (updated_metadata, maybe_result) = self
+                        .refresh_update_metadata(
+                            file_name,
+                            metadata.clone(),
+                            runtime_label,
+                            now,
+                            mods_service,
+                            thunderstore_service,
+                            nexus_mods_service,
+                            nexus_game_id,
+                            github_service,
+                        )
+                        .await?;
 
-                    if let Some(crate::types::ModSource::Thunderstore) = source {
-                        if let Some(source_id) = source_id {
-                            // Check Thunderstore for updates (use Schedule I community endpoint)
-                            if let Ok((_, package)) = self
-                                .resolve_thunderstore_package(
-                                    thunderstore_service,
-                                    &source_id,
-                                    Some(Self::runtime_label(&env.runtime)),
-                                )
-                                .await
-                            {
-                                if let Some(latest_package_version) =
-                                    Self::select_latest_thunderstore_version(
-                                        &package,
-                                        Some(&source_id),
-                                        None,
-                                    )
-                                {
-                                    let latest_version = latest_package_version
-                                        .get("version_number")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                        .unwrap_or_default();
-                                    let update_available = Self::versions_differ_for_thunderstore(
-                                        Some(&source_id),
-                                        current_version.as_deref(),
-                                        &latest_version,
-                                    );
+                    *metadata = updated_metadata.clone();
 
-                                    // Update metadata with check results
-                                    metadata.last_update_check = Some(now);
-                                    metadata.update_available = Some(update_available);
-                                    metadata.remote_version = Some(latest_version.clone());
-                                    metadata.summary = latest_package_version
-                                        .get("description")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                        .or_else(|| {
-                                            package
-                                                .get("latest")
-                                                .and_then(|v| v.get("description"))
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s.to_string())
-                                        });
-                                    metadata.icon_url =
-                                        Self::extract_package_icon(&package, Some(&source_id));
-                                    metadata.icon_cache_path = mods_service
-                                        .cache_icon_for_metadata(metadata.icon_url.as_deref())
-                                        .await
-                                        .or_else(|| metadata.icon_cache_path.clone());
-                                    metadata.downloads = package
-                                        .get("versions")
-                                        .and_then(|v| v.as_array())
-                                        .map(|versions| {
-                                            versions
-                                                .iter()
-                                                .map(|ver| {
-                                                    ver.get("downloads")
-                                                        .and_then(|v| v.as_u64())
-                                                        .unwrap_or(0)
-                                                })
-                                                .sum::<u64>()
-                                        });
-                                    metadata.likes_or_endorsements =
-                                        package.get("rating_score").and_then(|v| v.as_i64());
-                                    metadata.updated_at = package
-                                        .get("date_updated")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-                                    metadata.tags = package
-                                        .get("categories")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                                .collect::<Vec<String>>()
-                                        })
-                                        .filter(|tags| !tags.is_empty());
-                                    metadata.metadata_last_refreshed = Some(now);
-                                    if let Some(storage_id) = metadata.mod_storage_id.clone() {
-                                        storage_metadata_updates
-                                            .insert(storage_id, metadata.clone());
-                                    }
+                    if let Some(storage_id) = updated_metadata.mod_storage_id.clone() {
+                        processed_storage_ids.insert(storage_id.clone());
+                        storage_metadata_updates.insert(storage_id, updated_metadata.clone());
+                    }
 
-                                    results.push(serde_json::json!({
-                                        "modFileName": file_name,
-                                        "updateAvailable": update_available,
-                                        "currentVersion": current_version,
-                                        "latestVersion": latest_version,
-                                        "source": "thunderstore",
-                                        "packageInfo": package
-                                    }));
-                                } else {
-                                    // No version found, still update check time
-                                    metadata.last_update_check = Some(now);
-                                    metadata.update_available = Some(false);
-                                }
-                            } else {
-                                // Failed to fetch package, still update check time
-                                metadata.last_update_check = Some(now);
-                            }
-                        }
-                    } else if let Some(crate::types::ModSource::Nexusmods) = source {
-                        if let Some(mod_id_str) = source_id {
-                            // Parse mod ID
-                            if let Ok(mod_id) = mod_id_str.parse::<u32>() {
-                                // Check NexusMods for updates
-                                if let Ok(mod_info) =
-                                    nexus_mods_service.get_mod(nexus_game_id, mod_id).await
-                                {
-                                    let latest_version = nexus_mods_service
-                                        .get_mod_files(nexus_game_id, mod_id)
-                                        .await
-                                        .ok()
-                                        .and_then(|files| {
-                                            Self::select_best_nexus_file_for_update(
-                                                &files,
-                                                Self::runtime_label(&env.runtime),
-                                                current_version.as_deref(),
-                                            )
-                                        })
-                                        .and_then(|file| {
-                                            file.get("version")
-                                                .or_else(|| file.get("mod_version"))
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s.to_string())
-                                        })
-                                        .or_else(|| {
-                                            mod_info
-                                                .get("version")
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s.to_string())
-                                        });
-
-                                    if let Some(latest_version) = latest_version {
-                                        let update_available = Self::versions_differ(
-                                            current_version.as_deref(),
-                                            &latest_version,
-                                        );
-
-                                        // Update metadata with check results
-                                        metadata.last_update_check = Some(now);
-                                        metadata.update_available = Some(update_available);
-                                        metadata.remote_version = Some(latest_version.clone());
-                                        metadata.summary = mod_info
-                                            .get("summary")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string());
-                                        metadata.icon_url = mod_info
-                                            .get("picture_url")
-                                            .or_else(|| mod_info.get("pictureUrl"))
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string());
-                                        metadata.icon_cache_path = mods_service
-                                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
-                                            .await
-                                            .or_else(|| metadata.icon_cache_path.clone());
-                                        metadata.downloads = mod_info
-                                            .get("mod_downloads")
-                                            .or_else(|| mod_info.get("downloads"))
-                                            .and_then(|v| v.as_u64());
-                                        metadata.likes_or_endorsements = mod_info
-                                            .get("endorsement_count")
-                                            .or_else(|| mod_info.get("endorsements"))
-                                            .and_then(|v| v.as_i64());
-                                        metadata.updated_at = mod_info
-                                            .get("updated_at")
-                                            .or_else(|| mod_info.get("updatedAt"))
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string());
-                                        metadata.metadata_last_refreshed = Some(now);
-                                        if let Some(storage_id) = metadata.mod_storage_id.clone() {
-                                            storage_metadata_updates
-                                                .insert(storage_id, metadata.clone());
-                                        }
-
-                                        results.push(serde_json::json!({
-                                            "modFileName": file_name,
-                                            "updateAvailable": update_available,
-                                            "currentVersion": current_version,
-                                            "latestVersion": latest_version,
-                                            "source": "nexusmods",
-                                            "packageInfo": mod_info
-                                        }));
-                                    } else {
-                                        // No version found, still update check time
-                                        metadata.last_update_check = Some(now);
-                                        metadata.update_available = Some(false);
-                                    }
-                                } else {
-                                    // Failed to fetch mod, still update check time
-                                    metadata.last_update_check = Some(now);
-                                }
-                            }
-                        }
-                    } else if let Some(crate::types::ModSource::Github) = source {
-                        if let Some(repo) = source_id {
-                            // Parse owner/repo from source_id (e.g., "ifBars/S1API")
-                            let parts: Vec<&str> = repo.split('/').collect();
-                            if parts.len() == 2 {
-                                let owner = parts[0];
-                                let repo_name = parts[1];
-
-                                // Check GitHub for latest release
-                                if let Ok(Some(latest_release)) = github_service
-                                    .get_latest_release(owner, repo_name, false)
-                                    .await
-                                {
-                                    if let Some(latest_version) = latest_release
-                                        .get("tag_name")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                    {
-                                        let update_available = Self::versions_differ(
-                                            current_version.as_deref(),
-                                            &latest_version,
-                                        );
-
-                                        // Update metadata with check results
-                                        metadata.last_update_check = Some(now);
-                                        metadata.update_available = Some(update_available);
-                                        metadata.remote_version = Some(latest_version.clone());
-                                        metadata.summary = latest_release
-                                            .get("body")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string());
-                                        metadata.icon_cache_path = mods_service
-                                            .cache_icon_for_metadata(metadata.icon_url.as_deref())
-                                            .await
-                                            .or_else(|| metadata.icon_cache_path.clone());
-                                        metadata.updated_at = latest_release
-                                            .get("published_at")
-                                            .or_else(|| latest_release.get("created_at"))
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string());
-                                        metadata.metadata_last_refreshed = Some(now);
-                                        if let Some(storage_id) = metadata.mod_storage_id.clone() {
-                                            storage_metadata_updates
-                                                .insert(storage_id, metadata.clone());
-                                        }
-
-                                        results.push(serde_json::json!({
-                                            "modFileName": file_name,
-                                            "modName": metadata.mod_name.clone().unwrap_or_else(|| file_name.to_string()),
-                                            "updateAvailable": update_available,
-                                            "currentVersion": current_version,
-                                            "latestVersion": latest_version,
-                                            "source": "github",
-                                            "packageInfo": latest_release
-                                        }));
-                                    } else {
-                                        // No version found, still update check time
-                                        metadata.last_update_check = Some(now);
-                                        metadata.update_available = Some(false);
-                                    }
-                                } else {
-                                    // Failed to fetch release, still update check time
-                                    metadata.last_update_check = Some(now);
-                                }
-                            }
-                        }
+                    if let Some(result) = maybe_result {
+                        results.push(result);
                     }
                 }
+            }
+        }
+
+        let library = mods_service.get_mod_library().await?;
+        let managed_library_candidates = Self::build_managed_library_update_candidates(
+            &library,
+            environment_id,
+            runtime_label,
+            &processed_storage_ids,
+        );
+
+        for candidate in managed_library_candidates {
+            let (updated_metadata, maybe_result) = self
+                .refresh_update_metadata(
+                    &candidate.file_name,
+                    candidate.metadata,
+                    runtime_label,
+                    now,
+                    mods_service,
+                    thunderstore_service,
+                    nexus_mods_service,
+                    nexus_game_id,
+                    github_service,
+                )
+                .await?;
+
+            processed_storage_ids.insert(candidate.storage_id.clone());
+            storage_metadata_updates.insert(candidate.storage_id.clone(), updated_metadata.clone());
+
+            for existing_metadata in all_metadata.values_mut() {
+                if existing_metadata.mod_storage_id.as_deref() == Some(candidate.storage_id.as_str())
+                {
+                    Self::sync_refreshed_metadata_fields(existing_metadata, &updated_metadata);
+                }
+            }
+
+            if let Some(result) = maybe_result {
+                results.push(result);
             }
         }
 
@@ -1417,8 +1601,11 @@ mod tests {
     use crate::services::mods::ModsService;
     use crate::services::nexus_mods::NexusModsService;
     use crate::services::thunderstore::ThunderStoreService;
-    use crate::types::{schedule_i_config, ModMetadata, ModSource};
+    use crate::types::{
+        schedule_i_config, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource,
+    };
     use serial_test::serial;
+    use std::collections::{HashMap, HashSet};
     use tauri::test::mock_app;
     use tempfile::tempdir;
 
@@ -1443,6 +1630,54 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    fn make_library_entry(overrides: impl FnOnce(&mut ModLibraryEntry)) -> ModLibraryEntry {
+        let mut entry = ModLibraryEntry {
+            storage_id: "storage-1".to_string(),
+            display_name: "SteamNetworkLib".to_string(),
+            files: Vec::new(),
+            attached_userlibs: vec!["SteamNetworkLib.dll".to_string()],
+            attached_userdata: Vec::new(),
+            source: Some(ModSource::Thunderstore),
+            source_id: Some("ifBars/SteamNetworkLib_Mono".to_string()),
+            source_version: Some("1.2.1".to_string()),
+            source_url: Some(
+                "https://thunderstore.io/c/schedule-i/p/ifBars/SteamNetworkLib_Mono/"
+                    .to_string(),
+            ),
+            summary: Some("Steam networking library".to_string()),
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
+            installed_version: Some("1.2.1".to_string()),
+            library_added_at: None,
+            installed_at: None,
+            author: Some("ifBars".to_string()),
+            update_available: None,
+            remote_version: None,
+            managed: true,
+            installed_in: vec!["env-mono".to_string()],
+            available_runtimes: vec!["Mono".to_string()],
+            storage_ids_by_runtime: HashMap::from([(
+                "Mono".to_string(),
+                "storage-1".to_string(),
+            )]),
+            installed_in_by_runtime: HashMap::from([(
+                "Mono".to_string(),
+                vec!["env-mono".to_string()],
+            )]),
+            files_by_runtime: HashMap::from([(
+                "Mono".to_string(),
+                vec!["SteamNetworkLib.dll".to_string()],
+            )]),
+            security_scan: None,
+        };
+        overrides(&mut entry);
+        entry
     }
 
     #[tokio::test]
@@ -1846,6 +2081,62 @@ mod tests {
             ModUpdateService::normalize_thunderstore_package_name("Pack Rat (Mono)"),
             "Pack Rat"
         );
+    }
+
+    #[test]
+    fn managed_library_update_candidates_include_userlibs_only_entries() {
+        let library = ModLibraryResult {
+            downloaded: vec![make_library_entry(|_| {})],
+        };
+
+        let candidates = ModUpdateService::build_managed_library_update_candidates(
+            &library,
+            "env-mono",
+            "Mono",
+            &HashSet::new(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].file_name, "SteamNetworkLib.dll");
+        assert_eq!(candidates[0].storage_id, "storage-1");
+        assert_eq!(
+            candidates[0].metadata.source_id.as_deref(),
+            Some("ifBars/SteamNetworkLib_Mono")
+        );
+        assert_eq!(
+            candidates[0].metadata.detected_runtime,
+            Some(crate::types::Runtime::Mono)
+        );
+    }
+
+    #[test]
+    fn managed_library_update_candidates_skip_processed_or_wrong_runtime_entries() {
+        let mono_entry = make_library_entry(|_| {});
+        let il2cpp_entry = make_library_entry(|entry| {
+            entry.storage_id = "storage-2".to_string();
+            entry.source_id = Some("ifBars/SteamNetworkLib_Il2Cpp".to_string());
+            entry.installed_in = vec!["env-il2cpp".to_string()];
+            entry.available_runtimes = vec!["IL2CPP".to_string()];
+            entry.storage_ids_by_runtime =
+                HashMap::from([("IL2CPP".to_string(), "storage-2".to_string())]);
+            entry.installed_in_by_runtime =
+                HashMap::from([("IL2CPP".to_string(), vec!["env-il2cpp".to_string()])]);
+            entry.files_by_runtime =
+                HashMap::from([("IL2CPP".to_string(), vec!["SteamNetworkLib.dll".to_string()])]);
+        });
+        let library = ModLibraryResult {
+            downloaded: vec![mono_entry, il2cpp_entry],
+        };
+
+        let processed = HashSet::from(["storage-1".to_string()]);
+        let candidates = ModUpdateService::build_managed_library_update_candidates(
+            &library,
+            "env-mono",
+            "Mono",
+            &processed,
+        );
+
+        assert!(candidates.is_empty());
     }
 
     #[tokio::test]

@@ -20,21 +20,7 @@ impl ThunderStoreService {
     fn extract_thunderstore_numeric_parts(value: &str) -> Vec<u32> {
         let normalized = Self::normalize_version_token(value);
         let core = normalized.split(['-', '+']).next().unwrap_or_default();
-
-        let mut segments = core.split('.').collect::<Vec<_>>();
-        if let Some(patch) = segments.get(2).copied() {
-            if patch.len() > 1 && patch.chars().all(|ch| ch.is_ascii_digit()) {
-                let mut expanded = Vec::with_capacity(segments.len() + 1);
-                expanded.extend(segments.iter().take(2).copied());
-                expanded.push(&patch[..1]);
-                expanded.push(&patch[1..]);
-                expanded.extend(segments.iter().skip(3).copied());
-                segments = expanded;
-            }
-        }
-
-        segments
-            .into_iter()
+        core.split('.')
             .filter(|segment| !segment.is_empty())
             .map(|segment| segment.parse::<u32>().unwrap_or(0))
             .collect()
@@ -455,27 +441,17 @@ mod tests {
     }
 
     #[test]
-    fn select_package_version_uses_thunderstore_revision_suffix_ordering() {
+    fn select_package_version_keeps_normal_semver_for_multi_digit_patch_numbers() {
         let versions = vec![
             serde_json::json!({
-                "uuid4": "r2",
-                "version_number": "3.0.22",
+                "uuid4": "stable-9",
+                "version_number": "1.0.9",
                 "date_updated": "2026-04-01T00:00:00Z"
             }),
             serde_json::json!({
-                "uuid4": "r3",
-                "version_number": "3.0.3",
+                "uuid4": "stable-10",
+                "version_number": "1.0.10",
                 "date_updated": "2026-04-02T00:00:00Z"
-            }),
-            serde_json::json!({
-                "uuid4": "r2-next",
-                "version_number": "3.0.32",
-                "date_updated": "2026-04-03T00:00:00Z"
-            }),
-            serde_json::json!({
-                "uuid4": "r4",
-                "version_number": "3.0.4",
-                "date_updated": "2026-04-04T00:00:00Z"
             }),
         ];
 
@@ -484,13 +460,13 @@ mod tests {
 
         assert_eq!(
             selected.get("uuid4").and_then(|value| value.as_str()),
-            Some("r4")
+            Some("stable-10")
         );
         assert_eq!(
             selected
                 .get("version_number")
                 .and_then(|value| value.as_str()),
-            Some("3.0.4")
+            Some("1.0.10")
         );
     }
 }

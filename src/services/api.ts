@@ -395,7 +395,7 @@ export class ApiService {
       updatedAt?: string;
       tags?: string[];
     },
-    target?: 'mods' | 'plugins',
+    target?: 'mods' | 'plugins' | 'userlibs',
     cleanup?: boolean,
     securityOverride?: boolean,
   ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {

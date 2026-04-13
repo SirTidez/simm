@@ -10,6 +10,8 @@ const featuredDownloadSourceIds = new Set([
   'ifbars/s1api',
   'ifbars/s1api_forked',
   'ifbars/mlvscan',
+  'hdlmrell/meshvault',
+  'ifbars/s1mapi',
 ]);
 
 const s1ApiRevisionSourceIds = new Set([

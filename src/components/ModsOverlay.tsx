@@ -1266,6 +1266,46 @@ export function ModsOverlay({
     });
   };
 
+  const extractModNameFromFileName = (fileName: string): string => {
+    let modName = fileName.replace(/\.(dll|zip|rar)$/i, '');
+
+    modName = modName.replace(/[-_ ]?v?\d+\.\d+(\.\d+)?([-_ ].*)?$/i, '');
+    modName = modName.replace(/[-_ ]?\d+\.\d+\.\d+.*$/i, '');
+    modName = modName.replace(/[-_ ]?(il2cpp|mono|beta|alpha|release).*$/i, '');
+    modName = modName.replace(/^\d+-/, '');
+
+    modName = modName.trim().replace(/[-_]+/g, ' ').trim();
+
+    return modName || fileName.replace(/\.(dll|zip|rar)$/i, '');
+  };
+
+  const fuzzyMatchModName = (searchName: string, modName: string): number => {
+    const searchLower = searchName.toLowerCase().trim();
+    const modLower = modName.toLowerCase().trim();
+
+    if (modLower === searchLower) return 1.0;
+
+    if (modLower.includes(searchLower) || searchLower.includes(modLower)) {
+      return 0.8;
+    }
+
+    const searchWords = searchLower.split(/\s+/);
+    const modWords = modLower.split(/\s+/);
+    let matchedWords = 0;
+
+    for (const searchWord of searchWords) {
+      if (modWords.some(modWord => modWord.includes(searchWord) || searchWord.includes(modWord))) {
+        matchedWords++;
+      }
+    }
+
+    if (matchedWords > 0) {
+      return (matchedWords / Math.max(searchWords.length, modWords.length)) * 0.6;
+    }
+
+    return 0;
+  };
+
   const detectModSource = async (fileName: string): Promise<ManualUploadSourceInfo> => {
     const fileNameLower = fileName.toLowerCase();
 
@@ -1281,8 +1321,8 @@ export function ModsOverlay({
           source: 'thunderstore',
           modName: match[1],
           sourceVersion: match[2],
-  };
-}
+        };
+      }
       return { source: 'thunderstore' };
     }
 
@@ -1301,6 +1341,39 @@ export function ModsOverlay({
         };
       }
       return { source: 'nexusmods' };
+    }
+
+    const cleanModName = extractModNameFromFileName(fileName);
+    if (cleanModName.length >= 3) {
+      try {
+        const searchResults = await ApiService.searchNexusMods('schedule1', cleanModName);
+
+        if (searchResults.mods && searchResults.mods.length > 0) {
+          let bestMatch: NexusMod | null = null;
+          let bestScore = 0;
+
+          for (const mod of searchResults.mods) {
+            const score = fuzzyMatchModName(cleanModName, mod.name);
+            if (score > bestScore && score >= 0.6) {
+              bestScore = score;
+              bestMatch = mod;
+            }
+          }
+
+          if (bestMatch) {
+            return {
+              source: 'nexusmods',
+              sourceId: bestMatch.mod_id.toString(),
+              sourceUrl: `https://www.nexusmods.com/schedule1/mods/${bestMatch.mod_id}`,
+              modName: bestMatch.name,
+              author: bestMatch.author,
+              sourceVersion: bestMatch.version,
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to search Nexus Mods for mod:', cleanModName, err);
+      }
     }
 
     // Default to unknown for manual uploads

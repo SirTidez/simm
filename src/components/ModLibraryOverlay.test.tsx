@@ -405,7 +405,7 @@ describe("ModLibraryOverlay", () => {
           source: "local",
           modName: "my-mod-mono",
         },
-        "mods",
+        undefined,
         false,
         undefined,
       );

@@ -144,6 +144,28 @@ const FEATURED_DOWNLOADS = {
   },
 } as const;
 
+const FEATURED_THUNDERSTORE_DOWNLOADS = {
+  meshvault: {
+    key: "featured-meshvault",
+    sourceId: "hdlmrell/MeshVault",
+    displayName: "MeshVault",
+    packageUrl: "https://thunderstore.io/c/schedule-i/p/hdlmrell/MeshVault/",
+    author: "hdlmrell",
+    installBucketLabel: "Plugins",
+    summary: "Thunderstore package for shared mesh loading and vault access.",
+  },
+  s1mapi: {
+    key: "featured-s1mapi",
+    sourceId: "ifBars/S1MAPI",
+    displayName: "S1MAPI",
+    packageUrl: "https://thunderstore.io/c/schedule-i/p/ifBars/S1MAPI/",
+    author: "ifBars",
+    installBucketLabel: "UserLibs",
+    summary:
+      "Thunderstore package for shared Schedule I mapping and construction APIs.",
+  },
+} as const;
+
 function getDownloadedGroupSourceIds(group: DownloadedModGroup): string[] {
   return group.entries
     .map((entry) => (entry.sourceId || "").toLowerCase())
@@ -164,6 +186,22 @@ function isMlvscanDownloadedGroup(group: DownloadedModGroup): boolean {
   return (
     sourceIds.includes("ifbars/mlvscan") ||
     normalizeThunderstoreName(group.displayName).toLowerCase() === "mlvscan"
+  );
+}
+
+function isMeshVaultDownloadedGroup(group: DownloadedModGroup): boolean {
+  const sourceIds = getDownloadedGroupSourceIds(group);
+  return (
+    sourceIds.includes("hdlmrell/meshvault") ||
+    normalizeThunderstoreName(group.displayName).toLowerCase() === "meshvault"
+  );
+}
+
+function isS1MApiDownloadedGroup(group: DownloadedModGroup): boolean {
+  const sourceIds = getDownloadedGroupSourceIds(group);
+  return (
+    sourceIds.includes("ifbars/s1mapi") ||
+    normalizeThunderstoreName(group.displayName).toLowerCase() === "s1mapi"
   );
 }
 
@@ -798,6 +836,7 @@ const buildThunderstoreVersionOptions = (
 
 const getLatestThunderstorePackageVersion = (
   pkg?: ThunderstorePackage | null,
+  sourceId?: string,
 ): ThunderstorePackageVersion | null => {
   const versions = pkg?.versions || [];
   if (versions.length === 0) {
@@ -805,7 +844,8 @@ const getLatestThunderstorePackageVersion = (
   }
 
   return [...versions].sort((left, right) => {
-    const versionDelta = compareVersionTokensDesc(
+    const versionDelta = compareVersionTokensDescForSource(
+      sourceId,
       left.version_number,
       right.version_number,
     );
@@ -1285,6 +1325,10 @@ export function ModLibraryOverlay({
     useState<FeaturedGithubRelease | null>(null);
   const [mlvscanFeaturedRelease, setMlvscanFeaturedRelease] =
     useState<FeaturedGithubRelease | null>(null);
+  const [meshVaultFeaturedPackage, setMeshVaultFeaturedPackage] =
+    useState<ThunderstorePackageGroup | null>(null);
+  const [s1mapiFeaturedPackage, setS1mapiFeaturedPackage] =
+    useState<ThunderstorePackageGroup | null>(null);
 
   const downloadedGroups = useMemo(
     () => buildDownloadedGroups(library?.downloaded ?? []),
@@ -1349,9 +1393,13 @@ export function ModLibraryOverlay({
   const s1apiGroups = downloadedGroups.filter(isS1ApiDownloadedGroup);
 
   const mlvscanGroups = downloadedGroups.filter(isMlvscanDownloadedGroup);
+  const meshVaultGroups = downloadedGroups.filter(isMeshVaultDownloadedGroup);
+  const s1mapiGroups = downloadedGroups.filter(isS1MApiDownloadedGroup);
 
   const s1apiInLibrary = s1apiGroups.length > 0;
   const mlvscanInLibrary = mlvscanGroups.length > 0;
+  const meshVaultInLibrary = meshVaultGroups.length > 0;
+  const s1mapiInLibrary = s1mapiGroups.length > 0;
   const s1apiInstalledVersion =
     getLatestDownloadedVersionForGroups(s1apiGroups);
   const s1apiLatestVersion = s1apiFeaturedRelease?.tag_name;
@@ -1373,6 +1421,32 @@ export function ModLibraryOverlay({
     mlvscanInstalledVersion &&
     mlvscanLatestVersion &&
     compareVersions(mlvscanInstalledVersion, mlvscanLatestVersion) < 0;
+  const meshVaultInstalledVersion =
+    getLatestDownloadedVersionForGroups(meshVaultGroups);
+  const meshVaultLatestVersion =
+    buildThunderstoreVersionOptions(meshVaultFeaturedPackage)[0]?.versionNumber;
+  const meshVaultNeedsUpdate =
+    meshVaultInLibrary &&
+    meshVaultInstalledVersion &&
+    meshVaultLatestVersion &&
+    compareVersionTokensDescForSource(
+      FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+      meshVaultLatestVersion,
+      meshVaultInstalledVersion,
+    ) < 0;
+  const s1mapiInstalledVersion =
+    getLatestDownloadedVersionForGroups(s1mapiGroups);
+  const s1mapiLatestVersion =
+    buildThunderstoreVersionOptions(s1mapiFeaturedPackage)[0]?.versionNumber;
+  const s1mapiNeedsUpdate =
+    s1mapiInLibrary &&
+    s1mapiInstalledVersion &&
+    s1mapiLatestVersion &&
+    compareVersionTokensDescForSource(
+      FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+      s1mapiLatestVersion,
+      s1mapiInstalledVersion,
+    ) < 0;
 
   const isGroupUpdateAvailable = useCallback(
     (group: DownloadedModGroup): boolean => {
@@ -1390,12 +1464,32 @@ export function ModLibraryOverlay({
         return !!mlvscanNeedsUpdate;
       }
 
+      const isMeshVaultGroup = isMeshVaultDownloadedGroup(group);
+      if (
+        isMeshVaultGroup &&
+        !!meshVaultInstalledVersion &&
+        !!meshVaultLatestVersion
+      ) {
+        return !!meshVaultNeedsUpdate;
+      }
+
+      const isS1mapiGroup = isS1MApiDownloadedGroup(group);
+      if (isS1mapiGroup && !!s1mapiInstalledVersion && !!s1mapiLatestVersion) {
+        return !!s1mapiNeedsUpdate;
+      }
+
       return !!group.updateAvailable;
     },
     [
+      meshVaultInstalledVersion,
+      meshVaultLatestVersion,
+      meshVaultNeedsUpdate,
       mlvscanInstalledVersion,
       mlvscanLatestVersion,
       mlvscanNeedsUpdate,
+      s1mapiInstalledVersion,
+      s1mapiLatestVersion,
+      s1mapiNeedsUpdate,
       s1apiInstalledVersion,
       s1apiLatestVersion,
       s1apiNeedsUpdate,
@@ -2644,6 +2738,26 @@ export function ModLibraryOverlay({
     }
 
     const loadFeaturedReleases = async () => {
+      const buildFeaturedThunderstorePackage = (
+        featured:
+          (typeof FEATURED_THUNDERSTORE_DOWNLOADS)[keyof typeof FEATURED_THUNDERSTORE_DOWNLOADS],
+        packagesByRuntime: Partial<Record<ThunderstoreRuntime, ThunderstorePackage>>,
+      ): ThunderstorePackageGroup | null => {
+        const representative =
+          packagesByRuntime.IL2CPP || packagesByRuntime.Mono || null;
+        if (!representative) {
+          return null;
+        }
+
+        return {
+          key: `${featured.author.toLowerCase()}::${normalizeThunderstoreName(featured.displayName).toLowerCase()}`,
+          name: featured.displayName,
+          owner: featured.author,
+          packageUrl: representative.package_url || featured.packageUrl,
+          packagesByRuntime,
+        };
+      };
+
       const [s1apiResult, mlvscanResult] = await Promise.allSettled([
         ApiService.getS1APILatestRelease(""),
         ApiService.getMLVScanLatestRelease(""),
@@ -2672,10 +2786,98 @@ export function ModLibraryOverlay({
         });
         setMlvscanFeaturedRelease(null);
       }
+
+      const [
+        meshVaultIl2cpp,
+        meshVaultMono,
+        s1mapiIl2cpp,
+        s1mapiMono,
+      ] = await Promise.allSettled([
+        findThunderstorePackageForRuntime(
+          FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+          "IL2CPP",
+        ),
+        findThunderstorePackageForRuntime(
+          FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+          "Mono",
+        ),
+        findThunderstorePackageForRuntime(
+          FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+          "IL2CPP",
+        ),
+        findThunderstorePackageForRuntime(
+          FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+          "Mono",
+        ),
+      ]);
+
+      if (
+        meshVaultIl2cpp.status === "rejected" ||
+        meshVaultMono.status === "rejected"
+      ) {
+        logger.warn("Failed to load featured MeshVault Thunderstore metadata", {
+          il2cppError:
+            meshVaultIl2cpp.status === "rejected"
+              ? meshVaultIl2cpp.reason instanceof Error
+                ? meshVaultIl2cpp.reason.message
+                : String(meshVaultIl2cpp.reason)
+              : undefined,
+          monoError:
+            meshVaultMono.status === "rejected"
+              ? meshVaultMono.reason instanceof Error
+                ? meshVaultMono.reason.message
+                : String(meshVaultMono.reason)
+              : undefined,
+        });
+      }
+      setMeshVaultFeaturedPackage(
+        buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.meshvault, {
+          IL2CPP:
+            meshVaultIl2cpp.status === "fulfilled"
+              ? meshVaultIl2cpp.value || undefined
+              : undefined,
+          Mono:
+            meshVaultMono.status === "fulfilled"
+              ? meshVaultMono.value || undefined
+              : undefined,
+        }),
+      );
+
+      if (
+        s1mapiIl2cpp.status === "rejected" ||
+        s1mapiMono.status === "rejected"
+      ) {
+        logger.warn("Failed to load featured S1MAPI Thunderstore metadata", {
+          il2cppError:
+            s1mapiIl2cpp.status === "rejected"
+              ? s1mapiIl2cpp.reason instanceof Error
+                ? s1mapiIl2cpp.reason.message
+                : String(s1mapiIl2cpp.reason)
+              : undefined,
+          monoError:
+            s1mapiMono.status === "rejected"
+              ? s1mapiMono.reason instanceof Error
+                ? s1mapiMono.reason.message
+                : String(s1mapiMono.reason)
+              : undefined,
+        });
+      }
+      setS1mapiFeaturedPackage(
+        buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi, {
+          IL2CPP:
+            s1mapiIl2cpp.status === "fulfilled"
+              ? s1mapiIl2cpp.value || undefined
+              : undefined,
+          Mono:
+            s1mapiMono.status === "fulfilled"
+              ? s1mapiMono.value || undefined
+              : undefined,
+        }),
+      );
     };
 
     void loadFeaturedReleases();
-  }, [isOpen]);
+  }, [isOpen, findThunderstorePackageForRuntime]);
 
   const pickNexusFileForVersionAndRuntime = useCallback(
     (
@@ -2847,7 +3049,10 @@ export function ModLibraryOverlay({
               thunderstoreMissingRuntimes.push(runtime);
               continue;
             }
-            const latestVersion = getLatestThunderstorePackageVersion(pkg);
+            const latestVersion = getLatestThunderstorePackageVersion(
+              pkg,
+              sourceEntry.sourceId,
+            );
             if (!latestVersion?.uuid4) {
               thunderstoreMissingRuntimes.push(runtime);
               continue;
@@ -4233,6 +4438,36 @@ export function ModLibraryOverlay({
     );
   };
 
+  const handleDownloadFeaturedThunderstoreClick = (
+    featured:
+      (typeof FEATURED_THUNDERSTORE_DOWNLOADS)[keyof typeof FEATURED_THUNDERSTORE_DOWNLOADS],
+    pkg: ThunderstorePackageGroup | null,
+  ) => {
+    if (!pkg) {
+      showLibraryNotice(
+        `${featured.displayName} Unavailable`,
+        `The featured ${featured.displayName} package could not be resolved from Thunderstore. Try refreshing and retry the download.`,
+      );
+      return;
+    }
+
+    void handleDownloadThunderstore(pkg);
+  };
+
+  const handleDownloadMeshVaultClick = () => {
+    handleDownloadFeaturedThunderstoreClick(
+      FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
+      meshVaultFeaturedPackage,
+    );
+  };
+
+  const handleDownloadS1MapiClick = () => {
+    handleDownloadFeaturedThunderstoreClick(
+      FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
+      s1mapiFeaturedPackage,
+    );
+  };
+
   const storeLocalArchiveWithSecurity = useCallback(
     async (
       item: SelectedLibraryImportItem,
@@ -4247,7 +4482,7 @@ export function ModLibraryOverlay({
           source: "local",
           modName: stripFileExtension(item.fileName),
         },
-        "mods",
+        undefined,
         false,
         securityOverride,
       );
@@ -4265,7 +4500,7 @@ export function ModLibraryOverlay({
                 source: "local",
                 modName: stripFileExtension(item.fileName),
               },
-              "mods",
+              undefined,
               false,
               true,
             );
@@ -5894,6 +6129,182 @@ export function ModLibraryOverlay({
       ? "Update"
       : "Downloaded"
     : "Download";
+  const meshVaultActionLabel = meshVaultInLibrary
+    ? meshVaultNeedsUpdate
+      ? "Update"
+      : "Downloaded"
+    : "Download";
+  const s1mapiActionLabel = s1mapiInLibrary
+    ? s1mapiNeedsUpdate
+      ? "Update"
+      : "Downloaded"
+    : "Download";
+
+  const renderFeaturedThunderstoreCard = (
+    featured:
+      (typeof FEATURED_THUNDERSTORE_DOWNLOADS)[keyof typeof FEATURED_THUNDERSTORE_DOWNLOADS],
+    installedVersion: string | undefined,
+    latestVersion: string | undefined,
+    inLibrary: boolean,
+    needsUpdate: boolean,
+    actionLabel: string,
+    onClick: () => void,
+  ) => (
+    <div
+      className="mod-card featured-mod-card"
+      style={{
+        padding: "1rem",
+        backgroundColor: "#2a2a2a",
+        borderRadius: "8px",
+        border: "1px solid #3a3a3a",
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "flex-start",
+        gap: "1rem",
+      }}
+    >
+      <div style={{ flex: 1 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            marginBottom: "0.35rem",
+          }}
+        >
+          <strong style={{ fontSize: "1rem" }}>{featured.displayName}</strong>
+          {needsUpdate ? (
+            <span
+              style={{
+                fontSize: "0.7rem",
+                padding: "0.2rem 0.45rem",
+                borderRadius: "4px",
+                backgroundColor: "rgba(255, 170, 0, 0.15)",
+                color: "#ffaa00",
+                border: "1px solid rgba(255, 170, 0, 0.3)",
+              }}
+            >
+              <i className="fas fa-arrow-up" style={{ marginRight: "0.25rem" }}></i>
+              Update Available
+            </span>
+          ) : inLibrary ? (
+            <span
+              style={{
+                fontSize: "0.7rem",
+                padding: "0.2rem 0.45rem",
+                borderRadius: "4px",
+                backgroundColor: "rgba(74, 222, 128, 0.15)",
+                color: "#4ade80",
+                border: "1px solid rgba(74, 222, 128, 0.3)",
+              }}
+            >
+              <i className="fas fa-check" style={{ marginRight: "0.25rem" }}></i>
+              Up to Date
+            </span>
+          ) : (
+            <span
+              style={{
+                fontSize: "0.7rem",
+                padding: "0.2rem 0.45rem",
+                borderRadius: "4px",
+                backgroundColor: "rgba(74, 144, 226, 0.15)",
+                color: "#4a90e2",
+                border: "1px solid rgba(74, 144, 226, 0.3)",
+              }}
+            >
+              <i className="fas fa-star" style={{ marginRight: "0.25rem" }}></i>
+              Featured
+            </span>
+          )}
+        </div>
+        <p
+          style={{
+            margin: "0 0 0.75rem",
+            fontSize: "0.85rem",
+            color: "#b9c2d0",
+            lineHeight: 1.5,
+          }}
+        >
+          {featured.summary}
+        </p>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.75rem",
+            fontSize: "0.78rem",
+            color: "#9fb0c7",
+          }}
+        >
+          <span>
+            <i
+              className="fas fa-cloud-download-alt"
+              style={{ marginRight: "0.35rem", color: "#4a90e2" }}
+            ></i>
+            Thunderstore Package
+          </span>
+          <span>
+            <i
+              className="fas fa-folder-tree"
+              style={{ marginRight: "0.35rem", color: "#4a90e2" }}
+            ></i>
+            Installs to {featured.installBucketLabel}
+          </span>
+          {installedVersion && (
+            <span>
+              <i className="fas fa-tag" style={{ marginRight: "0.35rem" }}></i>
+              Installed: {formatVersionTag(installedVersion)}
+            </span>
+          )}
+          {latestVersion && (
+            <span style={needsUpdate ? { color: "#ffaa00" } : {}}>
+              <i className="fas fa-cloud" style={{ marginRight: "0.35rem" }}></i>
+              Latest: {formatVersionTag(latestVersion)}
+            </span>
+          )}
+        </div>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          gap: "0.5rem",
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+        }}
+      >
+        <button
+          className={`btn btn-small ${needsUpdate ? "btn-warning" : "btn-primary"}`}
+          onClick={onClick}
+          disabled={downloading === featured.key}
+          title={
+            needsUpdate
+              ? `Update ${featured.displayName} to the latest version`
+              : `Download ${featured.displayName} from Thunderstore to the library`
+          }
+        >
+          {downloading === featured.key ? (
+            <i className="fas fa-spinner fa-spin"></i>
+          ) : (
+            <>
+              <i className={`fas ${needsUpdate ? "fa-arrow-up" : "fa-download"}`}></i>
+              <span style={{ marginLeft: "0.5rem" }}>{actionLabel}</span>
+            </>
+          )}
+        </button>
+        <a
+          href={featured.packageUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn btn-secondary btn-small"
+          style={{ textDecoration: "none", textAlign: "center" }}
+          title="View on Thunderstore"
+        >
+          <i className="fas fa-external-link-alt"></i>
+          <span style={{ marginLeft: "0.5rem" }}>View</span>
+        </a>
+      </div>
+    </div>
+  );
 
   if (!isOpen) return null;
 
@@ -6597,6 +7008,24 @@ export function ModLibraryOverlay({
                       </a>
                     </div>
                   </div>
+                  {renderFeaturedThunderstoreCard(
+                    FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
+                    meshVaultInstalledVersion,
+                    meshVaultLatestVersion,
+                    meshVaultInLibrary,
+                    !!meshVaultNeedsUpdate,
+                    meshVaultActionLabel,
+                    handleDownloadMeshVaultClick,
+                  )}
+                  {renderFeaturedThunderstoreCard(
+                    FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
+                    s1mapiInstalledVersion,
+                    s1mapiLatestVersion,
+                    s1mapiInLibrary,
+                    !!s1mapiNeedsUpdate,
+                    s1mapiActionLabel,
+                    handleDownloadS1MapiClick,
+                  )}
                 </div>
               </div>
 
@@ -8375,6 +8804,34 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{mlvscanActionLabel}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="workspace-feature-card"
+                        onClick={handleDownloadMeshVaultClick}
+                      >
+                        <div>
+                          <strong>MeshVault</strong>
+                          <p>
+                            Thunderstore package that installs its runtime DLLs
+                            into Plugins.
+                          </p>
+                        </div>
+                        <span>{meshVaultActionLabel}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="workspace-feature-card"
+                        onClick={handleDownloadS1MapiClick}
+                      >
+                        <div>
+                          <strong>S1MAPI</strong>
+                          <p>
+                            Thunderstore package for shared Schedule I mapping
+                            APIs in UserLibs.
+                          </p>
+                        </div>
+                        <span>{s1mapiActionLabel}</span>
                       </button>
                     </div>
                   </section>

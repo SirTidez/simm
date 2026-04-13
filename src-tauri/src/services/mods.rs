@@ -134,6 +134,10 @@ impl ModsService {
         Path::new(output_dir).join("Plugins")
     }
 
+    fn get_userlibs_directory(&self, output_dir: &str) -> PathBuf {
+        Path::new(output_dir).join("UserLibs")
+    }
+
     fn normalize_path(path: &str) -> String {
         path.replace('/', "\\")
             .trim_end_matches(['\\', '/'])
@@ -4697,6 +4701,8 @@ impl ModsService {
 
         let mut installed_files = Vec::new();
         if file_ext == "dll" {
+            let bucket_target =
+                Self::resolve_direct_file_bucket_target(target.as_deref(), archive_path);
             let file_name = if !original_file_name.is_empty() {
                 original_file_name.to_string()
             } else {
@@ -4706,9 +4712,11 @@ impl ModsService {
                     .unwrap_or("mod.dll")
                     .to_string()
             };
-            let target_dir = match target.as_deref() {
-                Some("plugins") => &mod_storage_plugins,
-                _ => &mod_storage_mods,
+            let target_dir = match bucket_target {
+                FomodDestinationKind::Plugins => &mod_storage_plugins,
+                FomodDestinationKind::UserLibs => &mod_storage_userlibs,
+                FomodDestinationKind::UserData => &mod_storage_userdata,
+                FomodDestinationKind::Mods => &mod_storage_mods,
             };
 
             let dest_path = target_dir.join(&file_name);
@@ -7257,6 +7265,42 @@ impl ModsService {
             || path.to_ascii_lowercase().contains(&format!("/{bucket}/"))
     }
 
+    fn parse_bucket_target(target: Option<&str>) -> Option<FomodDestinationKind> {
+        match target.map(|value| value.trim().to_ascii_lowercase()) {
+            Some(value) if value == "mods" => Some(FomodDestinationKind::Mods),
+            Some(value) if value == "plugins" => Some(FomodDestinationKind::Plugins),
+            Some(value) if value == "userlibs" => Some(FomodDestinationKind::UserLibs),
+            Some(value) if value == "userdata" => Some(FomodDestinationKind::UserData),
+            _ => None,
+        }
+    }
+
+    fn infer_bucket_target_from_path(path: &Path) -> Option<FomodDestinationKind> {
+        path.components().find_map(|component| {
+            let value = component.as_os_str().to_string_lossy();
+            if value.eq_ignore_ascii_case("plugins") {
+                Some(FomodDestinationKind::Plugins)
+            } else if value.eq_ignore_ascii_case("userlibs") {
+                Some(FomodDestinationKind::UserLibs)
+            } else if value.eq_ignore_ascii_case("userdata") {
+                Some(FomodDestinationKind::UserData)
+            } else if value.eq_ignore_ascii_case("mods") {
+                Some(FomodDestinationKind::Mods)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn resolve_direct_file_bucket_target(
+        target: Option<&str>,
+        source_path: &Path,
+    ) -> FomodDestinationKind {
+        Self::parse_bucket_target(target)
+            .or_else(|| Self::infer_bucket_target_from_path(source_path))
+            .unwrap_or(FomodDestinationKind::Mods)
+    }
+
     fn strip_bucket_prefix(path: &str, bucket: &str) -> String {
         let parts: Vec<&str> = path
             .trim_matches('/')
@@ -7505,13 +7549,25 @@ impl ModsService {
         let mod_storage_dir = self.get_mods_storage_dir().await?;
         let mod_storage_base = mod_storage_dir.join(&mod_id);
         let mod_storage_mods = mod_storage_base.join("Mods");
+        let mod_storage_plugins = mod_storage_base.join("Plugins");
+        let mod_storage_userlibs = mod_storage_base.join("UserLibs");
         fs::create_dir_all(&mod_storage_mods)
             .await
             .context("Failed to create mod storage directory")?;
+        fs::create_dir_all(&mod_storage_plugins)
+            .await
+            .context("Failed to create plugin storage directory")?;
+        fs::create_dir_all(&mod_storage_userlibs)
+            .await
+            .context("Failed to create userlib storage directory")?;
 
         // Create game directory if it doesn't exist (for symlink)
         let mods_directory = self.get_mods_directory(game_dir);
+        let plugins_directory = self.get_plugins_directory(game_dir);
+        let userlibs_directory = self.get_userlibs_directory(game_dir);
         fs::create_dir_all(&mods_directory).await?;
+        fs::create_dir_all(&plugins_directory).await?;
+        fs::create_dir_all(&userlibs_directory).await?;
 
         let source_path = Path::new(dll_path);
         let file_name = source_path
@@ -7526,8 +7582,16 @@ impl ModsService {
             }));
         }
 
+        let bucket_target = Self::resolve_direct_file_bucket_target(None, source_path);
+
         // Copy DLL to mod storage
-        let storage_path = mod_storage_mods.join(file_name);
+        let (storage_root, install_root) = match bucket_target {
+            FomodDestinationKind::Plugins => (&mod_storage_plugins, &plugins_directory),
+            FomodDestinationKind::UserLibs => (&mod_storage_userlibs, &userlibs_directory),
+            FomodDestinationKind::UserData => (&mod_storage_mods, &mods_directory),
+            FomodDestinationKind::Mods => (&mod_storage_mods, &mods_directory),
+        };
+        let storage_path = storage_root.join(file_name);
         fs::copy(source_path, &storage_path)
             .await
             .context("Failed to copy DLL file to storage")?;
@@ -7537,7 +7601,7 @@ impl ModsService {
         );
 
         // Create symlink in game directory
-        let symlink_path = mods_directory.join(file_name);
+        let symlink_path = install_root.join(file_name);
 
         // Remove existing symlink/file if it exists
         if self.path_exists_or_symlink(&symlink_path).await {
@@ -11994,6 +12058,365 @@ mod tests {
         assert_eq!(fs::read(&installed_asset).await?, b"party");
         assert!(!output_dir.join("Mods").join("manifest.json").exists());
         assert!(!output_dir.join("Mods").join("README.md").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn store_mod_archive_preserves_plugin_and_userlib_buckets_for_thunderstore_packages(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let plugin_env_dir = temp.path().join("envs").join("env-meshvault-storage");
+        let plugin_env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                plugin_env_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let userlib_env_dir = temp.path().join("envs").join("env-s1mapi-storage");
+        let userlib_env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                userlib_env_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let meshvault_zip = temp.path().join("MeshVault.zip");
+        write_zip_fixture(
+            &meshvault_zip,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"MeshVault","version_number":"1.0.9","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("Plugins/MeshVault.Il2Cpp.dll", b"il2cpp"),
+                ("Plugins/MeshVault.Mono.dll", b"mono"),
+            ],
+        )?;
+
+        let meshvault_stored = service
+            .store_mod_archive(
+                meshvault_zip.to_string_lossy().as_ref(),
+                "MeshVault.zip",
+                Some(Runtime::Il2cpp),
+                Some(serde_json::json!({
+                    "source": "thunderstore",
+                    "sourceId": "hdlmrell/MeshVault",
+                    "sourceVersion": "1.0.9",
+                    "modName": "MeshVault"
+                })),
+                None,
+            )
+            .await?;
+
+        let meshvault_storage_id = meshvault_stored
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("meshvault storage id");
+        let meshvault_storage_base = service.get_mods_storage_dir().await?.join(meshvault_storage_id);
+        assert!(meshvault_storage_base.join("Plugins").join("MeshVault.Il2Cpp.dll").exists());
+        assert!(!meshvault_storage_base.join("Mods").join("MeshVault.Il2Cpp.dll").exists());
+
+        service
+            .install_storage_mod_to_envs(meshvault_storage_id, vec![plugin_env.id.clone()])
+            .await?;
+
+        assert!(
+            service
+                .path_exists_or_symlink(
+                    &plugin_env_dir.join("Plugins").join("MeshVault.Il2Cpp.dll"),
+                )
+                .await
+        );
+        assert!(
+            !service
+                .path_exists_or_symlink(
+                    &plugin_env_dir.join("Mods").join("MeshVault.Il2Cpp.dll"),
+                )
+                .await
+        );
+
+        let s1mapi_zip = temp.path().join("S1MAPI.zip");
+        write_zip_fixture(
+            &s1mapi_zip,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"S1MAPI","version_number":"1.0.0","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("UserLibs/S1MAPI_Il2Cpp.dll", b"il2cpp"),
+                ("UserLibs/S1MAPI_Mono.dll", b"mono"),
+            ],
+        )?;
+
+        let s1mapi_stored = service
+            .store_mod_archive(
+                s1mapi_zip.to_string_lossy().as_ref(),
+                "S1MAPI.zip",
+                Some(Runtime::Il2cpp),
+                Some(serde_json::json!({
+                    "source": "thunderstore",
+                    "sourceId": "ifBars/S1MAPI",
+                    "sourceVersion": "1.0.0",
+                    "modName": "S1MAPI"
+                })),
+                None,
+            )
+            .await?;
+
+        let s1mapi_storage_id = s1mapi_stored
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("s1mapi storage id");
+        let s1mapi_storage_base = service.get_mods_storage_dir().await?.join(s1mapi_storage_id);
+        assert!(s1mapi_storage_base.join("UserLibs").join("S1MAPI_Il2Cpp.dll").exists());
+        assert!(!s1mapi_storage_base.join("Mods").join("S1MAPI_Il2Cpp.dll").exists());
+
+        service
+            .install_storage_mod_to_envs(s1mapi_storage_id, vec![userlib_env.id.clone()])
+            .await?;
+
+        assert!(
+            service
+                .path_exists_or_symlink(
+                    &userlib_env_dir.join("UserLibs").join("S1MAPI_Il2Cpp.dll"),
+                )
+                .await
+        );
+        assert!(
+            !service
+                .path_exists_or_symlink(
+                    &userlib_env_dir.join("Mods").join("S1MAPI_Il2Cpp.dll"),
+                )
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_places_meshvault_plugins_in_plugins_directory() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-meshvault-nexus");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("MeshVault-Nexus.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"MeshVault","version_number":"1.0.9","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("Plugins/MeshVault.Il2Cpp.dll", b"il2cpp"),
+                ("Plugins/MeshVault.Mono.dll", b"mono"),
+            ],
+        )?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "MeshVault-Nexus.zip",
+                "IL2CPP",
+                "main",
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "schedule1/meshvault",
+                    "sourceVersion": "1.0.9",
+                    "modName": "MeshVault"
+                })),
+            )
+            .await?;
+
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            service
+                .path_exists_or_symlink(
+                    &output_dir.join("Plugins").join("MeshVault.Il2Cpp.dll"),
+                )
+                .await
+        );
+        assert!(
+            !service
+                .path_exists_or_symlink(
+                    &output_dir.join("Mods").join("MeshVault.Il2Cpp.dll"),
+                )
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_places_s1mapi_libraries_in_userlibs_directory() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-s1mapi-manual");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp.path().join("S1MAPI-Manual.zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"S1MAPI","version_number":"1.0.0","website_url":"","description":"fixture","dependencies":[]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("UserLibs/S1MAPI_Il2Cpp.dll", b"il2cpp"),
+                ("UserLibs/S1MAPI_Mono.dll", b"mono"),
+            ],
+        )?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "S1MAPI-Manual.zip",
+                "IL2CPP",
+                "main",
+                None,
+            )
+            .await?;
+
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            service
+                .path_exists_or_symlink(
+                    &output_dir.join("UserLibs").join("S1MAPI_Il2Cpp.dll"),
+                )
+                .await
+        );
+        assert!(
+            !service
+                .path_exists_or_symlink(
+                    &output_dir.join("Mods").join("S1MAPI_Il2Cpp.dll"),
+                )
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_dll_mod_infers_plugins_bucket_from_source_path() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool);
+
+        let game_dir = temp.path().join("env-dll-plugin");
+        fs::create_dir_all(&game_dir).await?;
+        let source_dir = temp.path().join("incoming").join("Plugins");
+        fs::create_dir_all(&source_dir).await?;
+        let source_dll = source_dir.join("MeshVault.Il2Cpp.dll");
+        fs::write(&source_dll, b"plugin").await?;
+
+        let result = service
+            .install_dll_mod(
+                game_dir.to_string_lossy().as_ref(),
+                source_dll.to_string_lossy().as_ref(),
+                "IL2CPP",
+                None,
+            )
+            .await?;
+
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(game_dir.join("Plugins").join("MeshVault.Il2Cpp.dll").exists());
+        assert!(!game_dir.join("Mods").join("MeshVault.Il2Cpp.dll").exists());
 
         Ok(())
     }

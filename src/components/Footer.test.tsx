@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
   getS1APILatestRelease: vi.fn(),
   getMLVScanLatestRelease: vi.fn(),
+  searchThunderstore: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -91,6 +92,7 @@ describe('Footer', () => {
     apiMocks.getModLibrary.mockReset();
     apiMocks.getS1APILatestRelease.mockReset();
     apiMocks.getMLVScanLatestRelease.mockReset();
+    apiMocks.searchThunderstore.mockReset();
     eventMocks.onModUpdatesChecked.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
 
@@ -117,6 +119,7 @@ describe('Footer', () => {
     });
     apiMocks.getS1APILatestRelease.mockResolvedValue(null);
     apiMocks.getMLVScanLatestRelease.mockResolvedValue(null);
+    apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
   });
 
   afterEach(() => {
@@ -198,6 +201,56 @@ describe('Footer', () => {
       published_at: '2026-04-04T07:27:38Z',
       prerelease: false,
       download_url: 'https://example.com/mlvscan.zip',
+    });
+
+    render(<Footer />);
+
+    expect(await screen.findByText(/1\s+Mod needs updating/i)).toBeTruthy();
+  });
+
+  it('counts featured Thunderstore downloads in the mod update summary', async () => {
+    mockStores([completedEnv]);
+    apiMocks.getModLibrary.mockResolvedValueOnce({
+      downloaded: [
+        {
+          storageId: 'meshvault-a',
+          displayName: 'MeshVault',
+          files: ['MeshVault.dll'],
+          source: 'thunderstore',
+          sourceId: 'hdlmrell/MeshVault',
+          sourceVersion: '1.0.0',
+          installedVersion: '1.0.0',
+          remoteVersion: undefined,
+          updateAvailable: false,
+          managed: true,
+          installedIn: ['env-1'],
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: {},
+          installedInByRuntime: { IL2CPP: ['env-1'] },
+          filesByRuntime: {},
+        },
+      ],
+    });
+    apiMocks.searchThunderstore.mockImplementation(async (_gameId, query) => {
+      if (String(query).toLowerCase().includes('meshvault')) {
+        return {
+          packages: [
+            {
+              owner: 'hdlmrell',
+              name: 'MeshVault',
+              full_name: 'hdlmrell-MeshVault',
+              versions: [
+                {
+                  version_number: '1.0.1',
+                  date_updated: '2026-04-10T00:00:00Z',
+                },
+              ],
+            },
+          ],
+        };
+      }
+
+      return { packages: [] };
     });
 
     render(<Footer />);
