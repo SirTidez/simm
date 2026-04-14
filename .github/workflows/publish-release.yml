@@ -83,33 +83,19 @@ jobs:
             throw "Expected exactly one NSIS setup executable, found $($setupSources.Count)."
           }
           $setupSource = $setupSources[0]
-
-          $updaterZips = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip')
-          if ($updaterZips.Count -ne 1) {
-            throw "Expected exactly one updater archive, found $($updaterZips.Count)."
+          $signaturePath = Join-Path $setupSource.DirectoryName "$($setupSource.Name).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "Updater signature '$signaturePath' was not generated for installer '$($setupSource.Name)'."
           }
-          $updaterZip = $updaterZips[0]
-
-          $signatureSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.nsis.zip.sig')
-          if ($signatureSources.Count -ne 1) {
-            throw "Expected exactly one updater archive signature, found $($signatureSources.Count)."
-          }
-          $signatureSource = $signatureSources[0]
-          if ($signatureSource.BaseName -ne $updaterZip.Name) {
-            throw "Updater signature '$($signatureSource.Name)' does not match updater archive '$($updaterZip.Name)'."
-          }
+          $signatureSource = Get-Item -LiteralPath $signaturePath
 
           $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
-
-          $updaterTarget = Join-Path 'artifacts' $updaterZip.Name
-          Copy-Item -LiteralPath $updaterZip.FullName -Destination $updaterTarget -Force
 
           $signatureTarget = Join-Path 'artifacts' $signatureSource.Name
           Copy-Item -LiteralPath $signatureSource.FullName -Destination $signatureTarget -Force
 
           "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "updater_file=$updaterTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "signature_file=$signatureTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload workflow artifact
@@ -118,7 +104,6 @@ jobs:
           name: SIMM_${{ steps.version.outputs.version }}_ReleaseAssets
           path: |
             ${{ steps.asset.outputs.setup_file }}
-            ${{ steps.asset.outputs.updater_file }}
             ${{ steps.asset.outputs.signature_file }}
           if-no-files-found: error
           retention-days: 14
@@ -130,17 +115,15 @@ jobs:
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
           $assetPath = '${{ steps.asset.outputs.setup_file }}'
-          $updaterAssetPath = '${{ steps.asset.outputs.updater_file }}'
           $signatureAssetPath = '${{ steps.asset.outputs.signature_file }}'
           $assetName = '${{ steps.version.outputs.asset_name }}'
-          $updaterAssetName = Split-Path -Path $updaterAssetPath -Leaf
           $signatureAssetName = Split-Path -Path $signatureAssetPath -Leaf
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" "$signatureAssetPath#$signatureAssetName" --clobber
+            gh release upload $tag "$assetPath#$assetName" "$signatureAssetPath#$signatureAssetName" --clobber
           } else {
-            gh release create $tag "$assetPath#$assetName" "$updaterAssetPath#$updaterAssetName" "$signatureAssetPath#$signatureAssetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
+            gh release create $tag "$assetPath#$assetName" "$signatureAssetPath#$signatureAssetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
           }
 
       - name: Generate stable updater manifest
@@ -149,11 +132,11 @@ jobs:
         shell: pwsh
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
-          $updaterAssetPath = '${{ steps.asset.outputs.updater_file }}'
+          $installerAssetPath = '${{ steps.asset.outputs.setup_file }}'
           $signaturePath = '${{ steps.asset.outputs.signature_file }}'
-          $updaterAssetName = Split-Path -Path $updaterAssetPath -Leaf
+          $installerAssetName = Split-Path -Path $installerAssetPath -Leaf
           $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
-          $assetUrl = "https://github.com/SirTidez/simm/releases/download/$tag/$updaterAssetName"
+          $assetUrl = "https://github.com/SirTidez/simm/releases/download/$tag/$installerAssetName"
 
           .\scripts\generate-updater-manifest.ps1 `
             -Version '${{ steps.version.outputs.version }}' `
@@ -168,8 +151,8 @@ jobs:
           if (-not $platform) {
             throw 'Stable updater manifest is missing the windows-x86_64 platform entry.'
           }
-          if (-not $platform.url.EndsWith('.nsis.zip')) {
-            throw "Stable updater manifest must point to the updater archive, got '$($platform.url)'."
+          if (-not $platform.url.EndsWith('.exe')) {
+            throw "Stable updater manifest must point to the signed installer, got '$($platform.url)'."
           }
           if (-not $platform.signature) {
             throw 'Stable updater manifest is missing the updater signature.'
