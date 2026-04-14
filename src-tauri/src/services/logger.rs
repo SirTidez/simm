@@ -43,10 +43,7 @@ pub struct LoggerService {
 
 impl LoggerService {
     fn runtime_log_level(configured_level: LogLevel) -> LogLevel {
-        match configured_level {
-            LogLevel::Error => LogLevel::Error,
-            LogLevel::Debug | LogLevel::Info | LogLevel::Warn => LogLevel::Warn,
-        }
+        configured_level
     }
 
     fn read_log_level() -> LogLevel {
@@ -522,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn logger_service_clamps_runtime_level_to_warn_or_error() -> Result<()> {
+    async fn logger_service_honors_runtime_log_level_configuration() -> Result<()> {
         let temp = tempdir()?;
         let _guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
 
@@ -532,10 +529,10 @@ mod tests {
         logger_a.set_log_level(LogLevel::Debug).await;
         logger_a.set_retention_days(14).await;
 
-        assert_eq!(LoggerService::current_log_level(), LogLevel::Warn);
+        assert_eq!(LoggerService::current_log_level(), LogLevel::Debug);
         assert_eq!(
             LoggerService::level_filter(LoggerService::current_log_level()),
-            LevelFilter::Warn
+            LevelFilter::Trace
         );
         assert_eq!(logger_b.get_retention_days().await, 14);
 

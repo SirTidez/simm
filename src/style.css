@@ -4710,6 +4710,7 @@ body::before {
 }
 
 .settings-toggle {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -4717,10 +4718,34 @@ body::before {
   min-height: 100%;
 }
 
+.settings-toggle-button {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.settings-toggle-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .settings-toggle input {
   position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
   opacity: 0;
   pointer-events: none;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .settings-toggle span {
@@ -4771,6 +4796,20 @@ body::before {
 }
 
 .settings-toggle input:focus-visible + .settings-toggle__control {
+  outline: 2px solid rgba(144, 193, 255, 0.85);
+  outline-offset: 2px;
+}
+
+.settings-toggle-button[aria-checked="true"] .settings-toggle__control {
+  border-color: rgba(122, 174, 236, 0.82);
+  background: linear-gradient(180deg, #4f92de, #3b6faf);
+}
+
+.settings-toggle-button[aria-checked="true"] .settings-toggle__control::after {
+  transform: translateX(0.98rem);
+}
+
+.settings-toggle-button:focus-visible .settings-toggle__control {
   outline: 2px solid rgba(144, 193, 255, 0.85);
   outline-offset: 2px;
 }

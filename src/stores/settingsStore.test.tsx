@@ -1,8 +1,9 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 import { SettingsStoreProvider, useSettingsStore } from './settingsStore';
 import type { CustomThemeDefinition, Settings } from '../types';
-import { THEME_STORAGE_KEY } from '../utils/theme';
+import { THEME_BASE_STORAGE_KEY, THEME_STORAGE_KEY } from '../utils/theme';
 
 const apiMocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
@@ -67,6 +68,77 @@ function Consumer() {
   );
 }
 
+function RefreshThemesConsumer() {
+  const { customThemes, themesDirectory, error, refreshThemes } = useSettingsStore();
+  return (
+    <div>
+      <div data-testid="custom-theme-count">{customThemes.length}</div>
+      <div data-testid="themes-directory">{themesDirectory ?? 'none'}</div>
+      <div data-testid="refresh-error">{error ?? ''}</div>
+      <button
+        data-testid="refresh-themes"
+        onClick={async () => {
+          try {
+            await refreshThemes();
+          } catch {
+            // The store exposes failure by rejecting; the test asserts the state.
+          }
+        }}
+      >
+        Refresh Themes
+      </button>
+    </div>
+  );
+}
+
+function RefreshThemesResultConsumer() {
+  const { refreshThemes } = useSettingsStore();
+  const [result, setResult] = React.useState('idle');
+
+  return (
+    <div>
+      <div data-testid="refresh-result">{result}</div>
+      <button
+        data-testid="refresh-themes-result"
+        onClick={() => {
+          void refreshThemes()
+            .then(() => setResult('resolved'))
+            .catch(() => setResult('rejected'));
+        }}
+      >
+        Refresh Themes Result
+      </button>
+    </div>
+  );
+}
+
+function RefreshSettingsFallbackConsumer() {
+  const { customThemes, themesDirectory, refreshSettings, refreshThemes } = useSettingsStore();
+
+  return (
+    <div>
+      <div data-testid="fallback-theme-count">{customThemes.length}</div>
+      <div data-testid="fallback-themes-directory">{themesDirectory ?? 'none'}</div>
+      <button
+        data-testid="trigger-refresh-themes"
+        onClick={() => {
+          void refreshThemes();
+        }}
+      >
+        Refresh Themes
+      </button>
+      <button
+        data-testid="trigger-refresh-settings"
+        onClick={() => {
+          void refreshSettings();
+        }}
+      >
+        Refresh Settings
+      </button>
+    </div>
+  );
+}
+
 describe('SettingsStore', () => {
   beforeEach(() => {
     apiMocks.getSettings.mockReset();
@@ -79,6 +151,7 @@ describe('SettingsStore', () => {
     document.documentElement.style.cssText = '';
     document.body.style.cssText = '';
     window.localStorage.removeItem(THEME_STORAGE_KEY);
+    window.localStorage.removeItem(THEME_BASE_STORAGE_KEY);
     apiMocks.getCustomThemes.mockResolvedValue([]);
     apiMocks.getThemesDirectory.mockResolvedValue('C:/SIMM/themes');
   });
@@ -107,6 +180,7 @@ describe('SettingsStore', () => {
     expect(document.documentElement.style.getPropertyValue('--card-bg-color')).toBe('#ffffff');
     expect(document.documentElement.style.getPropertyValue('--primary-btn-color')).toBe('#3f74c9');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('light');
   });
 
   it('updates settings and theme without full refresh', async () => {
@@ -133,6 +207,92 @@ describe('SettingsStore', () => {
     expect(apiMocks.saveSettings).toHaveBeenCalledWith({ theme: 'dark' });
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('dark');
+  });
+
+  it('merges nested app update settings without dropping existing fields', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({
+      ...baseSettings,
+      appUpdate: {
+        skippedVersionNormalized: '0.8.0',
+        channel: 'stable',
+      },
+    });
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+    apiMocks.saveSettings.mockResolvedValueOnce({ success: true });
+
+    function NestedConsumer() {
+      const { settings, updateSettings } = useSettingsStore();
+      return (
+        <div>
+          <div data-testid="update-channel">{settings?.appUpdate?.channel ?? 'none'}</div>
+          <div data-testid="skipped-version">{settings?.appUpdate?.skippedVersionNormalized ?? 'none'}</div>
+          <button
+            data-testid="update-channel-button"
+            onClick={() => updateSettings({ appUpdate: { channel: 'beta' } })}
+          >
+            Switch Channel
+          </button>
+        </div>
+      );
+    }
+
+    render(
+      <SettingsStoreProvider>
+        <NestedConsumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('update-channel').textContent).toBe('stable');
+    });
+
+    fireEvent.click(screen.getByTestId('update-channel-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('update-channel').textContent).toBe('beta');
+      expect(screen.getByTestId('skipped-version').textContent).toBe('0.8.0');
+    });
+  });
+
+  it('keeps the latest loaded theme state when a later settings refresh cannot read themes', async () => {
+    apiMocks.getSettings
+      .mockResolvedValueOnce({ ...baseSettings, theme: 'light' })
+      .mockResolvedValueOnce({ ...baseSettings, theme: 'light' });
+    apiMocks.getCustomThemes
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([sunsetTheme])
+      .mockRejectedValueOnce(new Error('theme read failed'));
+    apiMocks.getThemesDirectory
+      .mockResolvedValueOnce('C:/SIMM/themes')
+      .mockResolvedValueOnce('D:/AltThemes')
+      .mockRejectedValueOnce(new Error('dir read failed'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <RefreshSettingsFallbackConsumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('fallback-theme-count').textContent).toBe('0');
+      expect(screen.getByTestId('fallback-themes-directory').textContent).toBe('C:/SIMM/themes');
+    });
+
+    fireEvent.click(screen.getByTestId('trigger-refresh-themes'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('fallback-theme-count').textContent).toBe('1');
+      expect(screen.getByTestId('fallback-themes-directory').textContent).toBe('D:/AltThemes');
+    });
+
+    fireEvent.click(screen.getByTestId('trigger-refresh-settings'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('fallback-theme-count').textContent).toBe('1');
+      expect(screen.getByTestId('fallback-themes-directory').textContent).toBe('D:/AltThemes');
+    });
   });
 
   it('surfaces load errors', async () => {
@@ -218,6 +378,7 @@ describe('SettingsStore', () => {
     expect(document.documentElement.style.getPropertyValue('--app-bg-color')).toBe('#1b120f');
     expect(document.documentElement.style.getPropertyValue('--primary-btn-color')).toBe('#d96b3a');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('sunset');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('dark');
   });
 
   it('falls back legacy custom themes to modern blue', async () => {
@@ -238,5 +399,106 @@ describe('SettingsStore', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('modern-blue');
     expect(document.documentElement.style.getPropertyValue('--app-bg-color')).toBe('#0f141d');
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('modern-blue');
+  });
+
+  it('loads settings even when optional theme lookups fail', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce(baseSettings);
+    apiMocks.getCustomThemes.mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory.mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <Consumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('error').textContent).toBe('');
+    expect(screen.getByTestId('theme').textContent).toBe('light');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBe('light');
+    expect(screen.queryByText('theme failure')).toBeNull();
+  });
+
+  it('preserves a selected custom theme when optional theme lookups fail during load', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes.mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory.mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <Consumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('theme').textContent).toBe('sunset');
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(THEME_BASE_STORAGE_KEY)).toBeNull();
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBeNull();
+  });
+
+  it('rejects manual theme refresh failures without clearing the previous theme state', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes
+      .mockResolvedValueOnce([sunsetTheme])
+      .mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory
+      .mockResolvedValueOnce('C:/SIMM/themes')
+      .mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <RefreshThemesConsumer />
+      </SettingsStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('custom-theme-count').textContent).toBe('1');
+    });
+    expect(screen.getByTestId('themes-directory').textContent).toBe('C:/SIMM/themes');
+
+    fireEvent.click(screen.getByTestId('refresh-themes'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('refresh-error').textContent).toBe('theme failure');
+    });
+
+    expect(screen.getByTestId('custom-theme-count').textContent).toBe('1');
+    expect(screen.getByTestId('themes-directory').textContent).toBe('C:/SIMM/themes');
+    expect(document.documentElement.getAttribute('data-custom-theme')).toBe('sunset');
+  });
+
+  it('rejects refreshThemes so callers can surface failure UI', async () => {
+    apiMocks.getSettings.mockResolvedValueOnce({ ...baseSettings, theme: 'sunset' });
+    apiMocks.getCustomThemes
+      .mockResolvedValueOnce([sunsetTheme])
+      .mockRejectedValueOnce(new Error('theme failure'));
+    apiMocks.getThemesDirectory
+      .mockResolvedValueOnce('C:/SIMM/themes')
+      .mockRejectedValueOnce(new Error('dir failure'));
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: true });
+
+    render(
+      <SettingsStoreProvider>
+        <RefreshThemesResultConsumer />
+      </SettingsStoreProvider>
+    );
+
+    fireEvent.click(await screen.findByTestId('refresh-themes-result'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('refresh-result').textContent).toBe('rejected');
+    });
   });
 });

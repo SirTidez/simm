@@ -13,6 +13,8 @@ import { ConfirmOverlay } from './ConfirmOverlay';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
+import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
+import { logger } from '../services/logger';
 import {
   onAuthWaiting,
   onAuthSuccess,
@@ -29,6 +31,9 @@ import {
   onPluginsChanged,
   onUserLibsChanged
 } from '../services/events';
+
+type InstalledModsResponse = Awaited<ReturnType<typeof ApiService.getMods>>;
+type ModLibraryResponse = Awaited<ReturnType<typeof ApiService.getModLibrary>>;
 
 function safeExternalUrl(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
@@ -49,6 +54,28 @@ function getLatestStableMelonLoaderTag(
 
 function isSteamEnvironment(env: Pick<Environment, 'environmentType' | 'id'>): boolean {
   return env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+}
+
+function countUnmanagedLocalMods(installedMods: InstalledModsResponse | null | undefined): number {
+  return (installedMods?.mods || []).filter((mod) => !mod.managed && (mod.source === 'local' || !mod.source)).length;
+}
+
+async function buildEnvironmentCardModSnapshot(
+  environmentId: string,
+  library: ModLibraryResponse | null | undefined,
+  refreshInstalledMods: boolean = false,
+) {
+  const snapshot = buildEnvironmentModSnapshot(library, environmentId);
+
+  try {
+    const installedMods = await ApiService.getMods(environmentId, refreshInstalledMods);
+    return {
+      ...snapshot,
+      userMods: snapshot.userMods + countUnmanagedLocalMods(installedMods),
+    };
+  } catch {
+    return snapshot;
+  }
 }
 
 // Shared ref to track last update check time (accessible across components)
@@ -111,7 +138,7 @@ export function EnvironmentList({
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [modsCounts, setModsCounts] = useState<Map<string, number>>(new Map());
-  const [coreToolCounts, setCoreToolCounts] = useState<Map<string, number>>(new Map());
+  const [featuredDownloadCounts, setFeaturedDownloadCounts] = useState<Map<string, number>>(new Map());
   const [modUpdatesCounts, setModUpdatesCounts] = useState<Map<string, number>>(new Map());
   const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
   const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
@@ -130,6 +157,8 @@ export function EnvironmentList({
   }, [environments]);
   const initialUpdateCheckDoneRef = useRef(false);
   const melonLoaderPrefetchStartedRef = useRef(false);
+  const autoInstallMelonLoaderInFlightRef = useRef<Set<string>>(new Set());
+  const autoInstallMelonLoaderRef = useRef<((environmentId: string) => Promise<void>) | null>(null);
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;
@@ -411,38 +440,53 @@ export function EnvironmentList({
         });
 
         unlistenMelonLoaderInstalling = await onMelonLoaderInstalling((data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+          const env = environments.find(e => e.id === data.environmentId);
           if (env) {
-            console.log(`MelonLoader installing for ${data.downloadId}: ${data.message}`);
+            setInstallingMelonLoader((previous) => new Set(previous).add(data.environmentId));
+            console.log(`MelonLoader installing for ${data.environmentId}: ${data.message}`);
           }
         });
 
         unlistenMelonLoaderInstalled = await onMelonLoaderInstalled(async (data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+          const env = environments.find(e => e.id === data.environmentId);
           if (env) {
-            console.log(`MelonLoader installed for ${data.downloadId}: ${data.message}`);
+            console.log(`MelonLoader installed for ${data.environmentId}: ${data.message}`);
             try {
-              const statusResult = await ApiService.getMelonLoaderStatus(data.downloadId);
+              const statusResult = await ApiService.getMelonLoaderStatus(data.environmentId);
               setMelonLoaderStatus(prev => {
                 const next = new Map(prev);
-                next.set(data.downloadId, { installed: statusResult.installed, version: statusResult.version || data.version });
+                next.set(data.environmentId, { installed: statusResult.installed, version: statusResult.version || data.version });
                 return next;
               });
             } catch (err) {
               console.error('Failed to refresh MelonLoader status:', err);
+            } finally {
+              setInstallingMelonLoader((previous) => {
+                const next = new Set(previous);
+                next.delete(data.environmentId);
+                return next;
+              });
             }
           }
         });
 
         unlistenMelonLoaderError = await onMelonLoaderError((data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+          const env = environments.find(e => e.id === data.environmentId);
           if (env) {
+            setInstallingMelonLoader((previous) => {
+              const next = new Set(previous);
+              next.delete(data.environmentId);
+              return next;
+            });
             showMessage('MelonLoader Install Failed', data.message, 'error');
           }
         });
 
         unlistenComplete = await onCompleteEvent(async ({ downloadId }) => {
           const env = environments.find(e => e.id === downloadId);
+          if (env) {
+            void autoInstallMelonLoaderRef.current?.(downloadId);
+          }
           if (env && env.updateAvailable) {
             setTimeout(async () => {
               try {
@@ -522,16 +566,17 @@ export function EnvironmentList({
 
         unlistenModUpdatesChecked = await onModUpdatesChecked((data) => {
           void ApiService.getModLibrary()
-            .then((library) => {
-              const snapshot = buildEnvironmentModSnapshot(library, data.environmentId);
+            .then((library) => normalizeLibraryFeaturedDownloads(library))
+            .then((library) => buildEnvironmentCardModSnapshot(data.environmentId, library, true))
+            .then((snapshot) => {
               setModsCounts(prev => {
                 const next = new Map(prev);
                 next.set(data.environmentId, snapshot.userMods);
                 return next;
               });
-              setCoreToolCounts(prev => {
+              setFeaturedDownloadCounts(prev => {
                 const next = new Map(prev);
-                next.set(data.environmentId, snapshot.coreTools);
+                next.set(data.environmentId, snapshot.featuredDownloads);
                 return next;
               });
               setModUpdatesCounts(prev => {
@@ -540,8 +585,14 @@ export function EnvironmentList({
                 return next;
               });
             })
-            .catch(() => {
-              // Ignore summary refresh failures; counts will update on the next successful refresh.
+            .catch((error) => {
+              logger.warn(
+                'Failed to refresh environment mod summary after mod updates check',
+                {
+                  environmentId: data.environmentId,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              );
             });
         });
 
@@ -562,15 +613,16 @@ export function EnvironmentList({
             const timer = setTimeout(async () => {
               try {
                 const library = await ApiService.getModLibrary();
-                const snapshot = buildEnvironmentModSnapshot(library, data.environmentId);
+                const normalizedLibrary = await normalizeLibraryFeaturedDownloads(library);
+                const snapshot = await buildEnvironmentCardModSnapshot(data.environmentId, normalizedLibrary, true);
                 setModsCounts(prev => {
                   const next = new Map(prev);
                   next.set(data.environmentId, snapshot.userMods);
                   return next;
                 });
-                setCoreToolCounts(prev => {
+                setFeaturedDownloadCounts(prev => {
                   const next = new Map(prev);
-                  next.set(data.environmentId, snapshot.coreTools);
+                  next.set(data.environmentId, snapshot.featuredDownloads);
                   return next;
                 });
                 setModUpdatesCounts(prev => {
@@ -579,7 +631,10 @@ export function EnvironmentList({
                   return next;
                 });
               } catch (err) {
-                console.error('Failed to refresh mods count:', err);
+                logger.error('Failed to refresh environment mod counts after filesystem change', {
+                  environmentId: data.environmentId,
+                  error: err instanceof Error ? err.message : String(err),
+                });
               } finally {
                 modsRefreshTimers.current.delete(data.environmentId);
               }
@@ -839,22 +894,24 @@ export function EnvironmentList({
   useEffect(() => {
     const loadCounts = async () => {
       const modCounts = new Map<string, number>();
-      const coreToolCountsMap = new Map<string, number>();
+      const featuredDownloadCountsMap = new Map<string, number>();
       const modUpdatesCountsMap = new Map<string, number>();
       const pluginCounts = new Map<string, number>();
       const userLibsCounts = new Map<string, number>();
       const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
       let library = null;
       try {
-        library = await ApiService.getModLibrary();
+        library = await normalizeLibraryFeaturedDownloads(
+          await ApiService.getModLibrary(),
+        );
       } catch {
         library = null;
       }
       for (const env of environments) {
         if (env.status === 'completed') {
-          const modSnapshot = buildEnvironmentModSnapshot(library, env.id);
+          const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, library);
           modCounts.set(env.id, modSnapshot.userMods);
-          coreToolCountsMap.set(env.id, modSnapshot.coreTools);
+          featuredDownloadCountsMap.set(env.id, modSnapshot.featuredDownloads);
           modUpdatesCountsMap.set(env.id, modSnapshot.updateCount);
           try {
             const pluginResult = await ApiService.getPluginsCount(env.id);
@@ -877,7 +934,7 @@ export function EnvironmentList({
         }
       }
       setModsCounts(modCounts);
-      setCoreToolCounts(coreToolCountsMap);
+      setFeaturedDownloadCounts(featuredDownloadCountsMap);
       setModUpdatesCounts(modUpdatesCountsMap);
       setPluginsCounts(pluginCounts);
       setUserLibsCounts(userLibsCounts);
@@ -938,16 +995,17 @@ export function EnvironmentList({
       const env = environments.find(e => e.id === modsOverlay.envId);
       if (env && env.status === 'completed') {
         ApiService.getModLibrary()
-          .then((library) => {
-            const snapshot = buildEnvironmentModSnapshot(library, env.id);
+          .then((library) => normalizeLibraryFeaturedDownloads(library))
+          .then((library) => buildEnvironmentCardModSnapshot(env.id, library, true))
+          .then((snapshot) => {
             setModsCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, snapshot.userMods);
               return next;
             });
-            setCoreToolCounts(prev => {
+            setFeaturedDownloadCounts(prev => {
               const next = new Map(prev);
-              next.set(env.id, snapshot.coreTools);
+              next.set(env.id, snapshot.featuredDownloads);
               return next;
             });
             setModUpdatesCounts(prev => {
@@ -962,7 +1020,7 @@ export function EnvironmentList({
               next.set(env.id, 0);
               return next;
             });
-            setCoreToolCounts(prev => {
+            setFeaturedDownloadCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, 0);
               return next;
@@ -1129,6 +1187,72 @@ export function EnvironmentList({
     loadMelonLoaderReleases(env.id);
     setShowMelonLoaderVersionSelector(env.id);
   };
+
+  const autoInstallMelonLoader = useCallback(async (environmentId: string) => {
+    if (settings?.autoInstallMelonLoader === false) {
+      return;
+    }
+
+    if (autoInstallMelonLoaderInFlightRef.current.has(environmentId)) {
+      return;
+    }
+
+    if (melonLoaderStatus.get(environmentId)?.installed) {
+      return;
+    }
+
+    autoInstallMelonLoaderInFlightRef.current.add(environmentId);
+    setInstallingMelonLoader((previous) => new Set(previous).add(environmentId));
+
+    try {
+      let versionTag = settings?.melonLoaderVersion?.trim() || '';
+      if (!versionTag) {
+        const releases = await ApiService.getMelonLoaderReleases(environmentId);
+        versionTag = getLatestStableMelonLoaderTag(releases) ?? releases[0]?.tag_name ?? '';
+      }
+
+      if (!versionTag) {
+        console.warn(
+          `Skipping MelonLoader auto-install for ${environmentId}: no preferred version is configured`,
+        );
+        return;
+      }
+
+      const result = await ApiService.installMelonLoader(environmentId, versionTag);
+      if (!result.success) {
+        throw new Error(result.error || 'MelonLoader installation failed');
+      }
+
+      const statusResult = await ApiService.getMelonLoaderStatus(environmentId);
+      setMelonLoaderStatus((previous) => {
+        const next = new Map(previous);
+        next.set(environmentId, {
+          installed: statusResult.installed,
+          version: statusResult.version || result.version || versionTag,
+        });
+        return next;
+      });
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`Failed to auto-install MelonLoader for ${environmentId}:`, err);
+      showMessage(
+        'MelonLoader Install Failed',
+        `Failed to auto-install MelonLoader: ${errorMessage}`,
+        'error',
+      );
+    } finally {
+      autoInstallMelonLoaderInFlightRef.current.delete(environmentId);
+      setInstallingMelonLoader((previous) => {
+        const next = new Set(previous);
+        next.delete(environmentId);
+        return next;
+      });
+    }
+  }, [melonLoaderStatus, settings?.autoInstallMelonLoader, settings?.melonLoaderVersion, showMessage]);
+
+  useEffect(() => {
+    autoInstallMelonLoaderRef.current = autoInstallMelonLoader;
+  }, [autoInstallMelonLoader]);
 
   const closeMelonLoaderVersionSelector = useCallback(() => {
     setShowMelonLoaderVersionSelector(null);
@@ -1385,7 +1509,8 @@ export function EnvironmentList({
     const status = getDominantStatus(env);
     const launchMethod = preferredLaunchMethod.get(env.id) || 'steam';
     const modCount = modsCounts.get(env.id) ?? 0;
-    const coreToolCount = coreToolCounts.get(env.id) ?? 0;
+    const featuredDownloadCount = featuredDownloadCounts.get(env.id) ?? 0;
+    const totalModCount = modCount + featuredDownloadCount;
     const modUpdateCount = modUpdatesCounts.get(env.id) ?? 0;
     const pluginCount = pluginsCounts.get(env.id) ?? 0;
     const userLibsCount = userLibsCounts.get(env.id) ?? 0;
@@ -1395,13 +1520,11 @@ export function EnvironmentList({
       {
         label: 'Mods',
         value: isCompleted
-          ? `${modCount}${coreToolCount > 0 ? ` (+${coreToolCount} ${coreToolCount === 1 ? 'Tool' : 'Tools'})` : ''}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
+          ? `${totalModCount}${modUpdateCount > 0 ? ` (${modUpdateCount} ${modUpdateCount === 1 ? 'Update' : 'Updates'})` : ''}`
           : 'Unavailable',
         tone: modUpdateCount > 0 ? 'warning' : undefined,
         onClick: isCompleted && modUpdateCount > 0 ? () => handleOpenModUpdatesOverlay(env.id) : undefined,
-        title: coreToolCount > 0
-          ? `${modCount} user mods, ${coreToolCount} SIMM-managed core tool${coreToolCount === 1 ? '' : 's'}`
-          : undefined,
+        title: isCompleted ? `${totalModCount} total mods` : undefined,
       },
       { label: 'Plugins', value: isCompleted ? `${pluginCount}` : 'Unavailable' },
       { label: 'UserLibs', value: isCompleted ? `${userLibsCount}` : 'Unavailable' },

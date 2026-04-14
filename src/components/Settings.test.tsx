@@ -1,5 +1,7 @@
+import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -169,6 +171,7 @@ describe("Settings", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   it("opens the directory picker from the sidebar and browses the current path", async () => {
@@ -245,6 +248,85 @@ describe("Settings", () => {
     expect(customOptionValues).toEqual(["", "sunset"]);
     expect(screen.getByText(/drop json files here/i)).toBeTruthy();
     expect(screen.getByText(/sunset/i)).toBeTruthy();
+  });
+
+  it("keeps the settings page rendered after toggling auto-install and does not enter a save loop", async () => {
+    vi.useFakeTimers();
+
+    const updateSettingsSpy = vi.fn();
+
+    settingsStoreMocks.useSettingsStore.mockImplementation(() => {
+      const [settingsState, setSettingsState] = React.useState({
+        defaultDownloadDir: "C:\\Games",
+        maxConcurrentDownloads: 2,
+        theme: "modern-blue",
+        melonLoaderVersion: "",
+        autoInstallMelonLoader: true,
+        enableSecurityScanner: true,
+        autoInstallSecurityScanner: true,
+        blockCriticalScans: true,
+        promptOnHighScans: true,
+        showSecurityScanBadges: true,
+        updateCheckInterval: 60,
+        autoCheckUpdates: true,
+        logLevel: "info",
+        modIconCacheLimitMb: 500,
+        databaseBackupCount: 10,
+        appUpdate: { channel: "beta" as const },
+      });
+
+      return {
+        settings: settingsState,
+        customThemes: [],
+        themesDirectory: "C:\\Users\\SirTidez\\SIMM\\themes",
+        depotDownloader: null,
+        loading: false,
+        updateSettings: async (updates: any) => {
+          updateSettingsSpy(updates);
+          setSettingsState((previous) => ({
+            ...previous,
+            ...updates,
+            appUpdate: updates.appUpdate
+              ? {
+                  ...(previous.appUpdate ?? {}),
+                  ...updates.appUpdate,
+                }
+              : previous.appUpdate,
+          }));
+        },
+        refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+        refreshThemes: vi.fn().mockResolvedValue(undefined),
+      };
+    });
+
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    const toggle = screen.getByRole("switch", {
+      name: /auto-install after download/i,
+    });
+
+    fireEvent.click(toggle);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(updateSettingsSpy).toHaveBeenCalledTimes(1);
+
+    expect(
+      screen.getByText("Adjust appearance, downloads, updates, and tooling."),
+    ).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+
+    expect(updateSettingsSpy).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("switch", {
+        name: /auto-install after download/i,
+      }),
+    ).toBeTruthy();
   });
 
   it("creates a manual database backup from settings", async () => {

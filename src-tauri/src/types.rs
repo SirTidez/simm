@@ -161,6 +161,14 @@ pub struct AppUpdateSettings {
     pub last_resolved_url: Option<String>,
     pub snoozed_until: Option<String>,
     pub skipped_version_normalized: Option<String>,
+    pub channel: Option<AppUpdateChannel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AppUpdateChannel {
+    Stable,
+    Beta,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

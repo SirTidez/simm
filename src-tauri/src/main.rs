@@ -42,6 +42,8 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             log::info!("Tauri app starting - running setup");
@@ -153,7 +155,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             // App Init
-            commands::app_update::get_app_update_status,
+            commands::app_update::check_app_update,
+            commands::app_update::install_app_update,
             commands::app_init::was_simm_directory_just_created,
             commands::app_init::get_home_directory,
             // DepotDownloader

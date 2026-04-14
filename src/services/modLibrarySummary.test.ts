@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildDownloadedGroups, buildEnvironmentModSnapshot, compareVersionTokensDesc } from './modLibrarySummary';
+import {
+  applyFeaturedDownloadRemoteVersions,
+  areVersionsEquivalentForSource,
+  buildDownloadedGroups,
+  buildEnvironmentModSnapshot,
+  compareVersionTokensDesc,
+} from './modLibrarySummary';
 import type { ModLibraryEntry } from '../types';
 
 function makeEntry(overrides: Partial<ModLibraryEntry>): ModLibraryEntry {
@@ -84,5 +90,122 @@ describe('modLibrarySummary', () => {
         groupKey: 'nexusmods::split-runtime-mod',
       },
     ]);
+  });
+
+  it('includes featured GitHub downloads in environment update summaries', () => {
+    const snapshot = buildEnvironmentModSnapshot({
+      downloaded: [
+        makeEntry({
+          storageId: 'mlvscan-storage',
+          displayName: 'MLVScan',
+          source: 'github',
+          sourceId: 'ifBars/MLVScan',
+          sourceVersion: 'v2.0.1',
+          remoteVersion: 'v2.0.2',
+          updateAvailable: true,
+          availableRuntimes: ['IL2CPP'],
+          storageIdsByRuntime: { IL2CPP: 'mlvscan-storage' },
+          installedInByRuntime: { IL2CPP: ['env-main'] },
+          filesByRuntime: { IL2CPP: ['MLVScan.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, 'env-main');
+
+    expect(snapshot.featuredDownloads).toBe(1);
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates).toEqual([
+      {
+        modName: 'MLVScan',
+        currentVersion: 'v2.0.1',
+        latestVersion: 'v2.0.2',
+        source: 'github',
+        groupKey: 'github::ifbars/mlvscan',
+      },
+    ]);
+  });
+
+  it('treats S1API revision tags as newer featured-download releases', () => {
+    const library = applyFeaturedDownloadRemoteVersions({
+      downloaded: [
+        makeEntry({
+          storageId: 's1api-storage',
+          displayName: 'S1API',
+          source: 'github',
+          sourceId: 'ifBars/S1API',
+          sourceVersion: '3.0.22',
+          installedInByRuntime: { IL2CPP: ['env-main'] },
+          filesByRuntime: { IL2CPP: ['S1API.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, new Map([['ifbars/s1api', '3.0.3']]));
+
+    const snapshot = buildEnvironmentModSnapshot(library, 'env-main');
+
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates).toEqual([
+      {
+        modName: 'S1API',
+        currentVersion: '3.0.22',
+        latestVersion: '3.0.3',
+        source: 'github',
+        groupKey: 'github::ifbars/s1api',
+      },
+    ]);
+  });
+
+  it('keeps normal semver ordering for non-S1API featured downloads', () => {
+    const library = applyFeaturedDownloadRemoteVersions({
+      downloaded: [
+        makeEntry({
+          storageId: 'featured-storage',
+          displayName: 'Example Featured Tool',
+          source: 'github',
+          sourceId: 'example/tool',
+          sourceVersion: '1.0.9',
+          installedInByRuntime: { IL2CPP: ['env-main'] },
+          filesByRuntime: { IL2CPP: ['ExampleTool.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, new Map([['example/tool', '1.0.10']]));
+
+    const snapshot = buildEnvironmentModSnapshot(library, 'env-main');
+
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates[0]?.latestVersion).toBe('1.0.10');
+  });
+
+  it('treats S1API alias source ids as one downloaded group', () => {
+    const groups = buildDownloadedGroups([
+      makeEntry({
+        storageId: 's1api-forked-storage',
+        displayName: 'S1API',
+        source: 'github',
+        sourceId: 'ifBars/S1API_Forked',
+        sourceVersion: '3.0.22',
+      }),
+      makeEntry({
+        storageId: 's1api-storage',
+        displayName: 'S1API',
+        source: 'github',
+        sourceId: 'ifBars/S1API',
+        sourceVersion: 'v3.0.3',
+      }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.key).toBe('github::ifbars/s1api');
+    expect(groups[0]?.entries).toHaveLength(2);
+  });
+
+  it('uses S1API-aware equality for alias source ids', () => {
+    expect(
+      areVersionsEquivalentForSource('ifBars/S1API_Forked', '3.0.22', '3.0.3'),
+    ).toBe(false);
+    expect(
+      areVersionsEquivalentForSource('ifBars/S1API', 'v3.0.3', '3.0.3'),
+    ).toBe(true);
   });
 });

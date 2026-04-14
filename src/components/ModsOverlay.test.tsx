@@ -299,7 +299,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     expect(await screen.findByText('Select Mod Runtime')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Mono' }));
@@ -343,7 +343,7 @@ describe('ModsOverlay', () => {
     const initialLibraryCalls = apiMocks.getModLibrary.mock.calls.length;
     const initialUpdateSummaryCalls = apiMocks.getModUpdatesSummary.mock.calls.length;
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     await waitFor(() => {
       expect(apiMocks.uploadMod).toHaveBeenNthCalledWith(
@@ -391,7 +391,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     expect(await screen.findByText('Select Mod Runtime')).toBeTruthy();
     fireEvent.click(document.querySelector('.modal-close') as HTMLElement);
@@ -412,6 +412,33 @@ describe('ModsOverlay', () => {
     expect(screen.getAllByText(/Skipped: UnknownArchive\.zip \(Runtime selection canceled\.\)/i).length).toBeGreaterThan(0);
   });
 
+  it('treats a dismissed runtime mismatch warning as a successful upload', async () => {
+    openMock.mockResolvedValueOnce(['C:/mods/Mismatch-Mono.zip']);
+    apiMocks.uploadMod.mockResolvedValueOnce({
+      success: true,
+      runtimeMismatch: {
+        requiresConfirmation: true,
+        warning: 'Runtime mismatch detected.',
+      },
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
+
+    expect(await screen.findByText('Runtime Mismatch Warning')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Skipped: Mismatch-Mono\.zip/i)).toBeNull();
+  });
+
   it('continues after an upload failure and reports the failed file in the batch summary', async () => {
     openMock.mockResolvedValueOnce([
       'C:/mods/First-Mono.dll',
@@ -429,7 +456,7 @@ describe('ModsOverlay', () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Upload Mod' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Mod' }));
 
     await waitFor(() => {
       expect(apiMocks.uploadMod).toHaveBeenCalledTimes(2);

@@ -37,6 +37,38 @@ fn nexus_warn(message: impl Into<String>) -> String {
     message
 }
 
+enum OAuthRefreshFailure {
+    ReconnectRequired(String),
+    Error(String),
+}
+
+fn classify_oauth_refresh_failure(
+    status: reqwest::StatusCode,
+    value: &Value,
+) -> OAuthRefreshFailure {
+    let error_code = value
+        .get("error")
+        .and_then(|entry| entry.as_str())
+        .unwrap_or_default();
+
+    if status == reqwest::StatusCode::BAD_REQUEST
+        && error_code.eq_ignore_ascii_case("invalid_grant")
+    {
+        return OAuthRefreshFailure::ReconnectRequired(nexus_warn(
+            "Stored Nexus login could not be refreshed because Nexus rejected the saved refresh token. This usually means the previous login expired, was revoked, or was replaced. Reconnect Nexus if downloads stop working.",
+        ));
+    }
+
+    OAuthRefreshFailure::Error(nexus_error(format!(
+        "OAuth token refresh failed ({}): {}",
+        status, value
+    )))
+}
+
+async fn cleanup_temp_archive(path: &std::path::Path) {
+    let _ = tokio::fs::remove_file(path).await;
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingNexusManualDownload {
@@ -615,7 +647,7 @@ async fn oauth_refresh_token_local(
     client_id: &str,
     refresh_token: &str,
     scope: &str,
-) -> Result<Value, String> {
+) -> Result<Value, OAuthRefreshFailure> {
     let mut form: Vec<(&str, String)> = vec![
         ("grant_type", "refresh_token".to_string()),
         ("client_id", client_id.to_string()),
@@ -631,18 +663,19 @@ async fn oauth_refresh_token_local(
         .form(&form)
         .send()
         .await
-        .map_err(|e| nexus_error(format!("OAuth refresh request failed: {}", e)))?;
+        .map_err(|e| {
+            OAuthRefreshFailure::Error(nexus_error(format!("OAuth refresh request failed: {}", e)))
+        })?;
 
     let status = response.status();
-    let value = response
-        .json::<Value>()
-        .await
-        .map_err(|e| nexus_error(format!("Invalid OAuth refresh response: {}", e)))?;
+    let value = response.json::<Value>().await.map_err(|e| {
+        OAuthRefreshFailure::Error(nexus_error(format!(
+            "Invalid OAuth refresh response: {}",
+            e
+        )))
+    })?;
     if !status.is_success() {
-        return Err(nexus_error(format!(
-            "OAuth token refresh failed ({}): {}",
-            status, value
-        )));
+        return Err(classify_oauth_refresh_failure(status, &value));
     }
 
     Ok(value)
@@ -881,7 +914,7 @@ fn derive_account_summary(
     })
 }
 
-fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
+pub(crate) fn normalize_nexus_game_id(game_id: Option<&str>) -> String {
     let s = game_id.map(|s| s.trim()).unwrap_or("").to_string();
     if s.is_empty() {
         SUPPORTED_NEXUS_GAME_ID.to_string()
@@ -981,7 +1014,19 @@ async fn refresh_nexus_oauth_token_if_needed_inner(
 
     let client_id = oauth_client_id().map_err(nexus_error)?;
     let scope = oauth_scope();
-    let token = oauth_refresh_token_local(&client_id, &refresh_token, &scope).await?;
+    let token = match oauth_refresh_token_local(&client_id, &refresh_token, &scope).await {
+        Ok(token) => token,
+        Err(OAuthRefreshFailure::ReconnectRequired(message)) => {
+            if let Err(error) = settings.clear_nexus_oauth_session().await {
+                error_with_location(&format!(
+                    "Failed to clear revoked Nexus OAuth session after refresh rejection: {}",
+                    error
+                ));
+            }
+            return Err(message);
+        }
+        Err(OAuthRefreshFailure::Error(message)) => return Err(message),
+    };
 
     let next_access = token
         .get("access_token")
@@ -1268,6 +1313,41 @@ async fn complete_pending_nxm_download(
             let environment_id = install_target
                 .clone()
                 .ok_or_else(|| nexus_error("Pending Nexus install is missing an environment id"))?;
+            let env_service = EnvironmentService::new(db.clone())
+                .map_err(|e| nexus_error(format!("Failed to create environment service: {}", e)))?;
+            let environment = env_service
+                .get_environment(&environment_id)
+                .await
+                .map_err(|e| {
+                    nexus_error(format!(
+                        "Failed to load environment {}: {}",
+                        environment_id, e
+                    ))
+                })?
+                .ok_or_else(|| nexus_warn("Environment not found for manual Nexus install"))?;
+
+            if runtime
+                .as_ref()
+                .is_some_and(|requested| requested != &environment.runtime)
+            {
+                return Ok(json!({
+                    "success": true,
+                    "kind": "install",
+                    "environmentId": environment_id,
+                    "storageId": existing_mod_id,
+                    "fromStorage": true,
+                    "result": { "results": [] },
+                    "installedEnvironmentIds": [],
+                    "installedEnvironmentNames": [],
+                    "requestedKind": pending.map(|value| value.kind.clone()),
+                    "usedFallback": false,
+                    "downloadedToLibraryOnly": true,
+                    "skippedEnvironmentIds": [environment.id.clone()],
+                    "skippedEnvironmentNames": [environment.name.clone()],
+                    "skipReason": "no-compatible-environments",
+                }));
+            }
+
             let install_result = mods_service
                 .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
                 .await
@@ -1383,7 +1463,7 @@ async fn complete_pending_nxm_download(
         ),
     );
 
-    let store_result = mods_service
+    let store_result = match mods_service
         .store_mod_archive(
             &archive_path.to_string_lossy(),
             original_filename,
@@ -1397,13 +1477,17 @@ async fn complete_pending_nxm_download(
             None,
         )
         .await
-        .map_err(|e| {
-            nexus_error(format!(
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
                 "Failed to store manually downloaded Nexus archive: {}",
                 e
-            ))
-        })?;
-    let _ = tokio::fs::remove_file(&archive_path).await;
+            )));
+        }
+    };
+    cleanup_temp_archive(&archive_path).await;
 
     if install_target.is_none() {
         return Ok(json!({
@@ -1440,7 +1524,10 @@ async fn complete_pending_nxm_download(
         })?
         .ok_or_else(|| nexus_warn("Environment not found for manual Nexus install"))?;
 
-    if runtime.as_ref().is_some_and(|requested| requested != &environment.runtime) {
+    if runtime
+        .as_ref()
+        .is_some_and(|requested| requested != &environment.runtime)
+    {
         return Ok(json!({
             "success": true,
             "kind": "install",
@@ -2324,14 +2411,20 @@ pub async fn install_nexus_mods_mod(
 
     let metadata = Value::Object(metadata_obj);
 
-    let security_scan = crate::commands::mods::prepare_security_scan(
+    let security_scan = match crate::commands::mods::prepare_security_scan(
         db_pool.clone(),
         &zip_path_str,
         Some(metadata),
         security_override.unwrap_or(false),
     )
     .await
-    .map_err(|e| nexus_error(e.to_string()))?;
+    {
+        Ok(scan) => scan,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(e.to_string()));
+        }
+    };
 
     let (metadata, security_report) = match security_scan {
         crate::commands::mods::SecurityGateResult::Continue { metadata, report } => {
@@ -2343,7 +2436,7 @@ pub async fn install_nexus_mods_mod(
         }
     };
 
-    let store_result = mods_service
+    let store_result = match mods_service
         .store_mod_archive(
             &zip_path_str,
             original_filename,
@@ -2352,30 +2445,45 @@ pub async fn install_nexus_mods_mod(
             None,
         )
         .await
-        .map_err(|e| {
-            nexus_error(format!(
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
                 "Failed to store mod {} file {} before install: {}",
                 mod_id, file_id, e
-            ))
-        })?;
+            )));
+        }
+    };
 
-    let storage_id = store_result
+    let storage_id = match store_result
         .get("storageId")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| nexus_error("Stored Nexus archive did not return a storage ID"))?
-        .to_string();
+    {
+        Some(value) => value.to_string(),
+        None => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(
+                "Stored Nexus archive did not return a storage ID",
+            ));
+        }
+    };
 
-    let install_result = mods_service
+    let install_result = match mods_service
         .install_storage_mod_to_envs(&storage_id, vec![environment_id.clone()])
         .await
-        .map_err(|e| {
-            nexus_error(format!(
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
                 "Failed to install stored Nexus archive {} into environment {}: {}",
                 storage_id, environment_id, e
-            ))
-        })?;
+            )));
+        }
+    };
 
-    let _ = tokio::fs::remove_file(&archive_path).await;
+    cleanup_temp_archive(&archive_path).await;
 
     let installed_files = install_result
         .get("results")
@@ -2395,7 +2503,10 @@ pub async fn install_nexus_mods_mod(
         .get("alreadyStored")
         .and_then(|value| value.as_bool())
     {
-        response.insert("alreadyStored".to_string(), serde_json::json!(already_stored));
+        response.insert(
+            "alreadyStored".to_string(),
+            serde_json::json!(already_stored),
+        );
         response.insert("fromStorage".to_string(), serde_json::json!(already_stored));
     }
 
@@ -2410,7 +2521,10 @@ pub async fn install_nexus_mods_mod(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_jwt_payload, derive_account_flags};
+    use super::{
+        classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
+        OAuthRefreshFailure,
+    };
     use serde_json::json;
 
     fn build_test_jwt(payload: serde_json::Value) -> String {
@@ -2473,5 +2587,29 @@ mod tests {
         let (is_premium, is_supporter) = derive_account_flags(&userinfo, &token);
         assert!(!is_premium);
         assert!(is_supporter);
+    }
+
+    #[test]
+    fn oauth_refresh_invalid_grant_is_downgraded_to_warning_message() {
+        let failure = classify_oauth_refresh_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            &json!({
+                "error": "invalid_grant",
+                "error_description": "expired"
+            }),
+        );
+
+        match failure {
+            OAuthRefreshFailure::ReconnectRequired(message) => {
+                assert!(message.contains("Stored Nexus login could not be refreshed"));
+                assert!(!message.contains("OAuth token refresh failed"));
+            }
+            OAuthRefreshFailure::Error(message) => {
+                panic!(
+                    "expected reconnect-required outcome, got error: {}",
+                    message
+                );
+            }
+        }
     }
 }

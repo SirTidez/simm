@@ -43,7 +43,10 @@ pub async fn get_custom_themes(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<CustomThemeDefinition>, String> {
     let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service.list_custom_themes().await.map_err(|e| e.to_string())
+    service
+        .list_custom_themes()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

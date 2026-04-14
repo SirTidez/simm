@@ -69,19 +69,20 @@ async fn upload_mod_impl(
 
     let mods_service = ModsService::new(db.clone());
 
-    let (metadata, security_report) = match prepare_security_scan(
-        db,
-        &file_path,
-        metadata,
-        security_override.unwrap_or(false),
-    )
-    .await?
-    {
-        SecurityGateResult::Continue { metadata, report } => (metadata, report),
-        SecurityGateResult::EarlyResponse(response) => return Ok(response),
-    };
+    let upload_kind = detect_upload_kind(&file_path);
+    if matches!(upload_kind, UploadKind::Unsupported) {
+        return Err("Only .zip, .rar, and .dll files are supported".to_string());
+    }
 
-    let response = match detect_upload_kind(&file_path) {
+    let (metadata, security_report) =
+        match prepare_security_scan(db, &file_path, metadata, security_override.unwrap_or(false))
+            .await?
+        {
+            SecurityGateResult::Continue { metadata, report } => (metadata, report),
+            SecurityGateResult::EarlyResponse(response) => return Ok(response),
+        };
+
+    let response = match upload_kind {
         UploadKind::Archive => mods_service
             .install_zip_mod(
                 &env.output_dir,
@@ -98,7 +99,7 @@ async fn upload_mod_impl(
             .await
             .map_err(|e| e.to_string())?,
         UploadKind::Unsupported => {
-            return Err("Only .zip, .rar, and .dll files are supported".to_string())
+            unreachable!("unsupported uploads should return before scanning")
         }
     };
 
@@ -484,11 +485,7 @@ pub async fn get_local_mod_ownership_candidates(
 
     let mods_service = ModsService::new(db.inner().clone());
     mods_service
-        .get_local_mod_ownership_candidates(
-            &env.output_dir,
-            &file_name,
-            linked_name.as_deref(),
-        )
+        .get_local_mod_ownership_candidates(&env.output_dir, &file_name, linked_name.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -679,8 +676,14 @@ pub async fn check_mod_installed(
     }
 
     let mods_service = ModsService::new(db.inner().clone());
+    let requested_runtime = Some(env.runtime.clone());
     match mods_service
-        .find_existing_mod_installation(&env.output_dir, &source_id, &source_version, None)
+        .find_existing_mod_installation(
+            &env.output_dir,
+            &source_id,
+            &source_version,
+            requested_runtime,
+        )
         .await
     {
         Ok(Some(mod_storage_id)) => Ok(serde_json::json!({
@@ -1054,12 +1057,29 @@ pub async fn download_s1api_to_library(
         }))
     };
 
+    log::info!(
+        "Starting S1API library download for requested version {}",
+        version_tag
+    );
+
     let github_service = GitHubReleasesService::new();
 
     let releases = github_service
         .get_all_releases_with_latest("ifBars", "S1API", false)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            log::error!(
+                "Failed to fetch S1API release list while downloading {}: {}",
+                version_tag,
+                error
+            );
+            error.to_string()
+        })?;
+    log::debug!(
+        "Fetched {} S1API release entries while resolving {}",
+        releases.len(),
+        version_tag
+    );
 
     let release = match releases.iter().find(|r| {
         r.get("tag_name")
@@ -1068,12 +1088,29 @@ pub async fn download_s1api_to_library(
             .unwrap_or(false)
     }) {
         Some(release) => release,
-        None => return error_json(format!("S1API version {} not found", version_tag)),
+        None => {
+            log::warn!(
+                "Requested S1API version {} was not present in the fetched release list",
+                version_tag
+            );
+            return error_json(format!("S1API version {} not found", version_tag));
+        }
     };
 
     let zip_url = match github_service.get_zip_asset_url(release) {
-        Some(url) => url,
+        Some(url) => {
+            log::debug!(
+                "Selected S1API ZIP asset for {} from {}",
+                version_tag,
+                url
+            );
+            url
+        }
         None => {
+            log::error!(
+                "No ZIP asset was available for S1API version {}",
+                version_tag
+            );
             return error_json(format!(
                 "No ZIP asset found for S1API version {}",
                 version_tag
@@ -1095,6 +1132,12 @@ pub async fn download_s1api_to_library(
         .await
         .map_err(|e| {
             let message = e.to_string();
+            log::error!(
+                "Failed to download S1API asset for {} from {}: {}",
+                version_tag,
+                zip_url,
+                message
+            );
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1116,6 +1159,14 @@ pub async fn download_s1api_to_library(
         .await
         .map_err(|e| {
             let message = format!("Failed to save downloaded file: {}", e);
+            log::error!(
+                "Failed to save downloaded S1API archive for {} to {}: {}",
+                version_tag,
+                crate::services::logger::LoggerService::sanitize_log_text(
+                    temp_zip_path.to_string_lossy().as_ref()
+                ),
+                message
+            );
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1149,6 +1200,10 @@ pub async fn download_s1api_to_library(
     {
         SecurityGateResult::Continue { metadata, report } => (metadata, report),
         SecurityGateResult::EarlyResponse(response) => {
+            log::warn!(
+                "Security gate interrupted S1API library download for {}",
+                version_tag
+            );
             let _ = tokio::fs::remove_file(&temp_zip_path).await;
             return Ok(response);
         }
@@ -1160,7 +1215,23 @@ pub async fn download_s1api_to_library(
 
     let _ = tokio::fs::remove_file(&temp_zip_path).await;
 
-    let result = result.map_err(|e| e.to_string())?;
+    let result = result.map_err(|error| {
+        log::error!(
+            "Failed to store downloaded S1API archive for {} in the library: {}",
+            version_tag,
+            error
+        );
+        error.to_string()
+    })?;
+    let stored_storage_id = result
+        .get("storageId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("<unknown>");
+    log::info!(
+        "Stored downloaded S1API archive for {} in library storage {}",
+        version_tag,
+        stored_storage_id
+    );
     Ok(finalize_security_scan_response(
         &mods_service,
         result,
@@ -1184,12 +1255,29 @@ pub async fn download_mlvscan_to_library(
         }))
     };
 
+    log::info!(
+        "Starting MLVScan library download for requested version {}",
+        version_tag
+    );
+
     let github_service = GitHubReleasesService::new();
 
     let releases = github_service
         .get_all_releases_with_latest("ifBars", "MLVScan", false)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            log::error!(
+                "Failed to fetch MLVScan release list while downloading {}: {}",
+                version_tag,
+                error
+            );
+            error.to_string()
+        })?;
+    log::debug!(
+        "Fetched {} MLVScan release entries while resolving {}",
+        releases.len(),
+        version_tag
+    );
 
     let release = match releases.iter().find(|r| {
         r.get("tag_name")
@@ -1198,7 +1286,13 @@ pub async fn download_mlvscan_to_library(
             .unwrap_or(false)
     }) {
         Some(release) => release,
-        None => return error_json(format!("MLVScan version {} not found", version_tag)),
+        None => {
+            log::warn!(
+                "Requested MLVScan version {} was not present in the fetched release list",
+                version_tag
+            );
+            return error_json(format!("MLVScan version {} not found", version_tag));
+        }
     };
 
     let assets = release
@@ -1227,8 +1321,20 @@ pub async fn download_mlvscan_to_library(
         let url = asset.get("browser_download_url").and_then(|v| v.as_str());
         let name = asset.get("name").and_then(|v| v.as_str());
         match (url, name) {
-            (Some(url), Some(name)) => (url.to_string(), name.to_string(), None),
+            (Some(url), Some(name)) => {
+                log::debug!(
+                    "Selected MLVScan ZIP asset {} for {} from {}",
+                    name,
+                    version_tag,
+                    url
+                );
+                (url.to_string(), name.to_string(), None)
+            }
             _ => {
+                log::error!(
+                    "Invalid ZIP asset metadata for MLVScan version {}",
+                    version_tag
+                );
                 return error_json(format!(
                     "Invalid ZIP asset for MLVScan version {}",
                     version_tag
@@ -1238,12 +1344,23 @@ pub async fn download_mlvscan_to_library(
     } else if let Some(asset) = dll_asset {
         let url = asset.get("browser_download_url").and_then(|v| v.as_str());
         match url {
-            Some(url) => (
-                url.to_string(),
-                "MLVScan.dll".to_string(),
-                Some("plugins".to_string()),
-            ),
+            Some(url) => {
+                log::debug!(
+                    "Selected MLVScan DLL asset for {} from {}",
+                    version_tag,
+                    url
+                );
+                (
+                    url.to_string(),
+                    "MLVScan.dll".to_string(),
+                    Some("plugins".to_string()),
+                )
+            }
             None => {
+                log::error!(
+                    "Invalid DLL asset metadata for MLVScan version {}",
+                    version_tag
+                );
                 return error_json(format!(
                     "Invalid DLL asset for MLVScan version {}",
                     version_tag
@@ -1251,6 +1368,10 @@ pub async fn download_mlvscan_to_library(
             }
         }
     } else {
+        log::error!(
+            "No ZIP or DLL asset was available for MLVScan version {}",
+            version_tag
+        );
         return error_json(format!(
             "No ZIP or DLL asset found for MLVScan version {}",
             version_tag
@@ -1271,6 +1392,12 @@ pub async fn download_mlvscan_to_library(
         .await
         .map_err(|e| {
             let message = e.to_string();
+            log::error!(
+                "Failed to download MLVScan asset for {} from {}: {}",
+                version_tag,
+                asset_url,
+                message
+            );
             let _ = crate::services::tracked_downloads::emit(
                 &app,
                 crate::services::tracked_downloads::fail_file_download(
@@ -1290,6 +1417,14 @@ pub async fn download_mlvscan_to_library(
     let temp_path = temp_dir.join(format!("mlvscan-{}-{}", sanitized_tag, asset_name));
     tokio::fs::write(&temp_path, bytes).await.map_err(|e| {
         let message = format!("Failed to save downloaded file: {}", e);
+        log::error!(
+            "Failed to save downloaded MLVScan artifact for {} to {}: {}",
+            version_tag,
+            crate::services::logger::LoggerService::sanitize_log_text(
+                temp_path.to_string_lossy().as_ref()
+            ),
+            message
+        );
         let _ = crate::services::tracked_downloads::emit(
             &app,
             crate::services::tracked_downloads::fail_file_download(
@@ -1323,6 +1458,10 @@ pub async fn download_mlvscan_to_library(
     {
         SecurityGateResult::Continue { metadata, report } => (metadata, report),
         SecurityGateResult::EarlyResponse(response) => {
+            log::warn!(
+                "Security gate interrupted MLVScan library download for {}",
+                version_tag
+            );
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Ok(response);
         }
@@ -1334,7 +1473,23 @@ pub async fn download_mlvscan_to_library(
 
     let _ = tokio::fs::remove_file(&temp_path).await;
 
-    let result = result.map_err(|e| e.to_string())?;
+    let result = result.map_err(|error| {
+        log::error!(
+            "Failed to store downloaded MLVScan artifact for {} in the library: {}",
+            version_tag,
+            error
+        );
+        error.to_string()
+    })?;
+    let stored_storage_id = result
+        .get("storageId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("<unknown>");
+    log::info!(
+        "Stored downloaded MLVScan artifact for {} in library storage {}",
+        version_tag,
+        stored_storage_id
+    );
     Ok(finalize_security_scan_response(
         &mods_service,
         result,

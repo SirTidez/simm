@@ -219,11 +219,12 @@ impl EnvironmentService {
     }
 
     async fn environment_row_exists(&self, id: &str) -> Result<bool> {
-        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM environments WHERE id = ? LIMIT 1")
-            .bind(id)
-            .fetch_optional(&*self.pool)
-            .await
-            .context("Failed to query environment row existence")?;
+        let exists =
+            sqlx::query_scalar::<_, i64>("SELECT 1 FROM environments WHERE id = ? LIMIT 1")
+                .bind(id)
+                .fetch_optional(&*self.pool)
+                .await
+                .context("Failed to query environment row existence")?;
 
         Ok(exists.is_some())
     }
@@ -244,10 +245,12 @@ impl EnvironmentService {
         match result {
             Ok(id) => Ok(id),
             Err(err) if Self::is_missing_normalized_output_dir_column(&err) => {
-                let rows = sqlx::query_as::<_, (String, String)>("SELECT id, output_dir FROM environments")
-                    .fetch_all(&*self.pool)
-                    .await
-                    .context("Failed to query environments by output_dir fallback")?;
+                let rows = sqlx::query_as::<_, (String, String)>(
+                    "SELECT id, output_dir FROM environments",
+                )
+                .fetch_all(&*self.pool)
+                .await
+                .context("Failed to query environments by output_dir fallback")?;
 
                 Ok(rows
                     .into_iter()
@@ -1369,7 +1372,10 @@ mod tests {
             .await?
             .expect("stored environment");
         assert_eq!(stored.id, existing.id);
-        assert!(matches!(stored.environment_type, Some(EnvironmentType::Steam)));
+        assert!(matches!(
+            stored.environment_type,
+            Some(EnvironmentType::Steam)
+        ));
         assert!(matches!(stored.status, EnvironmentStatus::Completed));
 
         Ok(())

@@ -34,25 +34,45 @@ describe('ApiService', () => {
     });
   });
 
-  it('getAppUpdateStatus forwards the current app version to the backend', async () => {
+  it('checkAppUpdate forwards the selected channel to the backend', async () => {
     invokeMock.mockResolvedValueOnce({
-      currentVersionRaw: '0.7.8',
-      currentVersionNormalized: '0.7.8',
-      latestVersionRaw: '0.7.9-beta',
-      latestVersionNormalized: '0.7.9',
+      currentVersion: '0.7.8',
+      version: '0.7.9-beta',
+      versionNormalized: '0.7.9',
       updateAvailable: true,
-      targetUrl: 'https://www.nexusmods.com/schedule1/mods/999?tab=files&file_id=42',
-      fallbackFilesUrl: 'https://www.nexusmods.com/schedule1/mods/999?tab=files',
+      notes: 'Patch notes',
+      channel: 'beta',
+      manifestUrl: 'https://raw.githubusercontent.com/SirTidez/simm/main/updater/beta/latest-beta.json',
       checkedAt: '2026-03-27T12:00:00Z',
     });
 
-    const result = await ApiService.getAppUpdateStatus('0.7.8');
+    const result = await ApiService.checkAppUpdate('beta');
 
-    expect(invokeMock).toHaveBeenCalledWith('get_app_update_status', {
-      currentVersion: '0.7.8',
+    expect(invokeMock).toHaveBeenCalledWith('check_app_update', {
+      channel: 'beta',
     });
     expect(result.updateAvailable).toBe(true);
-    expect(result.latestVersionNormalized).toBe('0.7.9');
+    expect(result.versionNormalized).toBe('0.7.9');
+    expect(result.channel).toBe('beta');
+  });
+
+  it('installAppUpdate forwards the selected channel to the backend', async () => {
+    invokeMock.mockResolvedValueOnce({
+      installed: true,
+      version: '0.7.9',
+      channel: 'stable',
+    });
+
+    const result = await ApiService.installAppUpdate('stable');
+
+    expect(invokeMock).toHaveBeenCalledWith('install_app_update', {
+      channel: 'stable',
+    });
+    expect(result).toEqual({
+      installed: true,
+      version: '0.7.9',
+      channel: 'stable',
+    });
   });
 
   it('deleteEnvironment wraps boolean response', async () => {

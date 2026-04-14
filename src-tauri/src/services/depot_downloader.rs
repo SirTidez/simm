@@ -88,6 +88,16 @@ impl DepotDownloaderService {
         download_id: &str,
         app: &AppHandle<R>,
     ) -> Result<()> {
+        if self
+            .download_progress
+            .read()
+            .await
+            .get(download_id)
+            .is_some_and(|progress| matches!(progress.status, DownloadStatus::Cancelled))
+        {
+            return Ok(());
+        }
+
         let mut progress = {
             let map = self.download_progress.write().await;
             map.get(download_id)
@@ -419,11 +429,12 @@ impl DepotDownloaderService {
         let service_clone = Arc::new(self.clone());
 
         // Handle stdout
+        let mut stdout_task = None;
         if let Some(stdout) = child.stdout.take() {
             let app_stdout = app.clone();
             let download_id_stdout = download_id.clone();
             let service_stdout = service_clone.clone();
-            tokio::spawn(async move {
+            stdout_task = Some(tokio::spawn(async move {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -436,15 +447,16 @@ impl DepotDownloaderService {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Handle stderr
+        let mut stderr_task = None;
         if let Some(stderr) = child.stderr.take() {
             let app_stderr = app.clone();
             let download_id_stderr = download_id.clone();
             let service_stderr = service_clone.clone();
-            tokio::spawn(async move {
+            stderr_task = Some(tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -457,7 +469,7 @@ impl DepotDownloaderService {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Store child process
@@ -471,6 +483,8 @@ impl DepotDownloaderService {
         let download_id_complete = download_id.clone();
         let service_complete = service_clone.clone();
         tokio::spawn(async move {
+            let mut stdout_task = stdout_task;
+            let mut stderr_task = stderr_task;
             // Poll for process completion
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -480,6 +494,15 @@ impl DepotDownloaderService {
                         Ok(Some(status)) => {
                             map.remove(&download_id_complete);
                             drop(map);
+
+                            // Wait for stdout/stderr readers to flush the final
+                            // manifest/progress lines before we emit completion.
+                            if let Some(handle) = stdout_task.take() {
+                                let _ = handle.await;
+                            }
+                            if let Some(handle) = stderr_task.take() {
+                                let _ = handle.await;
+                            }
 
                             if status.success() {
                                 let mut progress_map =
@@ -945,6 +968,43 @@ mod tests {
             .await
             .expect("progress set");
         assert_eq!(progress.manifest_id.as_deref(), Some("3177164058227208309"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parse_progress_ignores_lines_after_cancellation() -> Result<()> {
+        let service = DepotDownloaderService::new();
+        let app = mock_app();
+        let handle = app.handle();
+
+        service.download_progress.write().await.insert(
+            "download-cancelled".to_string(),
+            DownloadProgress {
+                download_id: "download-cancelled".to_string(),
+                status: DownloadStatus::Cancelled,
+                progress: 12.0,
+                downloaded_files: Some(1),
+                total_files: Some(10),
+                speed: None,
+                eta: None,
+                message: Some("Download cancelled".to_string()),
+                error: None,
+                manifest_id: None,
+            },
+        );
+
+        service
+            .parse_progress("Downloading depot 123 (45%)", "download-cancelled", &handle)
+            .await?;
+
+        let progress = service
+            .get_progress("download-cancelled")
+            .await
+            .expect("progress retained");
+        assert!(matches!(progress.status, DownloadStatus::Cancelled));
+        assert_eq!(progress.progress, 12.0);
+        assert_eq!(progress.downloaded_files, Some(1));
 
         Ok(())
     }

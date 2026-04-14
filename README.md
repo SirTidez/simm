@@ -78,7 +78,14 @@ React component -> `ApiService` -> `invoke()` -> Rust command -> service -> resu
 ## Prerequisites (Windows)
 
 - **Rust (stable)**: https://rustup.rs/
-- **Node.js v18+**: https://nodejs.org/
+- **Node.js v22.12+**: https://nodejs.org/
+
+## Node.js Version
+
+The frontend toolchain is validated against Node 22 in CI and now requires Node 22.12 or newer locally.
+
+- If you use `nvm`, run `nvm use` at the repo root to pick up the checked-in `.nvmrc`
+- GitHub Actions uses Node 22 for all frontend jobs, so local validation should use the same baseline
 
 ## Windows Installer
 

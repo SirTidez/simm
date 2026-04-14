@@ -8,6 +8,7 @@ import {
   notifyBatchUpdateCheckStarted,
 } from "./EnvironmentList";
 import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
+import type { Settings as AppSettings } from "../types";
 
 type SettingsProps = {
   isOpen: boolean;
@@ -29,6 +30,7 @@ type SettingsFormData = {
   showSecurityScanBadges?: boolean;
   updateCheckInterval: number;
   autoCheckUpdates: boolean;
+  appUpdateChannel: "stable" | "beta";
   logLevel: "debug" | "info" | "warn" | "error";
   modIconCacheLimitMb: number;
   databaseBackupCount: number;
@@ -127,6 +129,75 @@ function extractReleaseApiLastUpdated(
   return null;
 }
 
+function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
+  return {
+    defaultDownloadDir: settings.defaultDownloadDir || "",
+    maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
+    platform: "windows",
+    language: "english",
+    theme: settings.theme || "modern-blue",
+    melonLoaderVersion: settings.melonLoaderVersion || "",
+    autoInstallMelonLoader: settings.autoInstallMelonLoader !== false,
+    enableSecurityScanner: settings.enableSecurityScanner ?? true,
+    autoInstallSecurityScanner: settings.autoInstallSecurityScanner ?? true,
+    blockCriticalScans: settings.blockCriticalScans ?? true,
+    promptOnHighScans: settings.promptOnHighScans ?? true,
+    showSecurityScanBadges: settings.showSecurityScanBadges ?? true,
+    updateCheckInterval: settings.updateCheckInterval || 60,
+    autoCheckUpdates: settings.autoCheckUpdates !== false,
+    appUpdateChannel: settings.appUpdate?.channel ?? "beta",
+    logLevel:
+      (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
+    modIconCacheLimitMb: normalizeModIconCacheLimitMb(
+      settings.modIconCacheLimitMb,
+    ),
+    databaseBackupCount: normalizeDatabaseBackupCount(
+      settings.databaseBackupCount,
+    ),
+  };
+}
+
+function areFormDataEqual(
+  left: SettingsFormData,
+  right: SettingsFormData,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+type SettingsToggleProps = {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+};
+
+function SettingsToggle({
+  label,
+  description,
+  checked,
+  onChange,
+  disabled = false,
+}: SettingsToggleProps) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      className="settings-toggle settings-toggle-button"
+      onClick={() => onChange(!checked)}
+      disabled={disabled}
+    >
+      <span className="settings-toggle__control" aria-hidden="true"></span>
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+    </button>
+  );
+}
+
 export function Settings({ isOpen, onClose }: SettingsProps) {
   const {
     settings,
@@ -163,7 +234,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     language: "english",
     theme: "modern-blue",
     melonLoaderVersion: "",
-    autoInstallMelonLoader: false,
+    autoInstallMelonLoader: true,
     enableSecurityScanner: true,
     autoInstallSecurityScanner: true,
     blockCriticalScans: true,
@@ -171,6 +242,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
+    appUpdateChannel: "beta",
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
@@ -242,30 +314,10 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
 
   useEffect(() => {
     if (settings) {
-      setFormData({
-        defaultDownloadDir: settings.defaultDownloadDir || "",
-        maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
-        platform: "windows" as "windows" | "macos" | "linux", // Always Windows
-        language: "english", // Always English
-        theme: settings.theme || "modern-blue",
-        melonLoaderVersion: settings.melonLoaderVersion || "",
-        autoInstallMelonLoader: settings.autoInstallMelonLoader || false,
-        enableSecurityScanner: settings.enableSecurityScanner,
-        autoInstallSecurityScanner: settings.autoInstallSecurityScanner,
-        blockCriticalScans: settings.blockCriticalScans,
-        promptOnHighScans: settings.promptOnHighScans,
-        showSecurityScanBadges: settings.showSecurityScanBadges,
-        updateCheckInterval: settings.updateCheckInterval || 60,
-        autoCheckUpdates: settings.autoCheckUpdates !== false,
-        logLevel:
-          (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
-        modIconCacheLimitMb: normalizeModIconCacheLimitMb(
-          settings.modIconCacheLimitMb,
-        ),
-        databaseBackupCount: normalizeDatabaseBackupCount(
-          settings.databaseBackupCount,
-        ),
-      });
+      const nextFormData = buildFormDataFromSettings(settings);
+      setFormData((current) =>
+        areFormDataEqual(current, nextFormData) ? current : nextFormData,
+      );
     }
   }, [settings]);
 
@@ -332,6 +384,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   useEffect(() => {
     if (!settings) return; // Don't save on initial load
 
+    const currentPersistedFormData = buildFormDataFromSettings(settings);
+    if (areFormDataEqual(formData, currentPersistedFormData)) {
+      return;
+    }
+
     // Clear existing timeout
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -343,7 +400,23 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
         setError(null);
         // Always set platform to 'windows' and language to 'english' since they're not user-configurable
         const normalizedFormData = {
-          ...formData,
+          defaultDownloadDir: formData.defaultDownloadDir,
+          maxConcurrentDownloads: formData.maxConcurrentDownloads,
+          theme: formData.theme,
+          melonLoaderVersion: formData.melonLoaderVersion,
+          autoInstallMelonLoader: formData.autoInstallMelonLoader,
+          enableSecurityScanner: formData.enableSecurityScanner,
+          autoInstallSecurityScanner: formData.autoInstallSecurityScanner,
+          blockCriticalScans: formData.blockCriticalScans,
+          promptOnHighScans: formData.promptOnHighScans,
+          showSecurityScanBadges: formData.showSecurityScanBadges,
+          updateCheckInterval: formData.updateCheckInterval,
+          autoCheckUpdates: formData.autoCheckUpdates,
+          appUpdate: {
+            ...(settings?.appUpdate ?? {}),
+            channel: formData.appUpdateChannel,
+          },
+          logLevel: formData.logLevel,
           modIconCacheLimitMb: normalizeModIconCacheLimitMb(
             formData.modIconCacheLimitMb,
           ),
@@ -883,29 +956,17 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     </div>
 
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.autoInstallMelonLoader || false}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              autoInstallMelonLoader: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Auto-install after download</strong>
-                          <small>
-                            Apply MelonLoader automatically when an environment
-                            finishes downloading.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Auto-install after download"
+                        description="Apply MelonLoader automatically when an environment finishes downloading."
+                        checked={formData.autoInstallMelonLoader || false}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            autoInstallMelonLoader: checked,
+                          })
+                        }
+                      />
                     </div>
                   </div>
 
@@ -956,29 +1017,17 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
 
                   <div className="settings-field-grid">
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.autoCheckUpdates !== false}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              autoCheckUpdates: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Automatically check for updates</strong>
-                          <small>
-                            Run background update checks using the interval
-                            below.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Automatically check for updates"
+                        description="Run background update checks using the interval below."
+                        checked={formData.autoCheckUpdates !== false}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            autoCheckUpdates: checked,
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="settings-field settings-field--compact">
@@ -996,6 +1045,25 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         max="1440"
                       />
                       <small>Allowed range: 1 to 1440 minutes.</small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>App update channel</label>
+                      <select
+                        value={formData.appUpdateChannel}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            appUpdateChannel: e.target.value as "stable" | "beta",
+                          })
+                        }
+                      >
+                        <option value="stable">Stable</option>
+                        <option value="beta">Beta</option>
+                      </select>
+                      <small>
+                        Stable uses production releases. Beta opts this app into prerelease updater manifests.
+                      </small>
                     </div>
 
                     <div className="settings-field settings-field--compact">
@@ -1093,6 +1161,15 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           : "Checks only run when you trigger them manually."}
                       </small>
                     </div>
+                    <div className="settings-inline-status">
+                      <span>App Update Channel</span>
+                      <strong>{formData.appUpdateChannel === "beta" ? "Beta" : "Stable"}</strong>
+                      <small>
+                        {formData.appUpdateChannel === "beta"
+                          ? "Checks the beta updater manifest and prerelease builds."
+                          : "Checks the stable updater manifest and production releases."}
+                      </small>
+                    </div>
                   </div>
 
                   <div className="settings-backup-panel">
@@ -1167,133 +1244,73 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
 
                   <div className="settings-field-grid">
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.enableSecurityScanner ?? true}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              enableSecurityScanner: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Enable download-time scanning</strong>
-                          <small>
-                            Run MLVScan against supported downloads before they
-                            enter the library.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Enable download-time scanning"
+                        description="Run MLVScan against supported downloads before they enter the library."
+                        checked={formData.enableSecurityScanner ?? true}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            enableSecurityScanner: checked,
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.autoInstallSecurityScanner ?? true}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              autoInstallSecurityScanner: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Auto-install scanner</strong>
-                          <small>
-                            Let SIMM acquire or repair the scanner when a
-                            protected download needs it.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Auto-install scanner"
+                        description="Let SIMM acquire or repair the scanner when a protected download needs it."
+                        checked={formData.autoInstallSecurityScanner ?? true}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            autoInstallSecurityScanner: checked,
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.blockCriticalScans ?? true}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              blockCriticalScans: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Block critical findings</strong>
-                          <small>
-                            Stop downloads automatically when MLVScan reports a
-                            critical risk.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Block critical findings"
+                        description="Stop downloads automatically when MLVScan reports a critical risk."
+                        checked={formData.blockCriticalScans ?? true}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            blockCriticalScans: checked,
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.promptOnHighScans ?? true}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              promptOnHighScans: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Prompt on high-risk results</strong>
-                          <small>
-                            Require manual confirmation before continuing when a
-                            scan needs review.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Prompt on high-risk results"
+                        description="Require manual confirmation before continuing when a scan needs review."
+                        checked={formData.promptOnHighScans ?? true}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            promptOnHighScans: checked,
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="settings-field settings-field--toggle">
-                      <label className="settings-toggle">
-                        <input
-                          type="checkbox"
-                          checked={formData.showSecurityScanBadges ?? true}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              showSecurityScanBadges: e.target.checked,
-                            })
-                          }
-                        />
-                        <span
-                          className="settings-toggle__control"
-                          aria-hidden="true"
-                        ></span>
-                        <span>
-                          <strong>Show scan badges</strong>
-                          <small>
-                            Display verified, review, and unavailable states
-                            across library and installed mod cards.
-                          </small>
-                        </span>
-                      </label>
+                      <SettingsToggle
+                        label="Show scan badges"
+                        description="Display verified, review, and unavailable states across library and installed mod cards."
+                        checked={formData.showSecurityScanBadges ?? true}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            showSecurityScanBadges: checked,
+                          })
+                        }
+                      />
                     </div>
                   </div>
 

@@ -3,11 +3,12 @@ import type { Environment, ModLibraryEntry } from '../types';
 interface Props {
   isOpen: boolean;
   title: string;
-  entry: ModLibraryEntry | null;
+  entries: ModLibraryEntry[];
   compatibleEnvironments: Environment[];
   excludedEnvironments: Environment[];
   lockedEnvironmentIds: string[];
   mode: 'select' | 'installed';
+  note?: string;
   selectedEnvironmentIds: Set<string>;
   onToggleEnvironment: (environmentId: string) => void;
   onSelectAllCompatible: () => void;
@@ -36,11 +37,12 @@ export function getNormalizedRuntime(environment: Pick<Environment, 'branch' | '
 export function InstallTargetsDialog({
   isOpen,
   title,
-  entry,
+  entries,
   compatibleEnvironments,
   excludedEnvironments,
   lockedEnvironmentIds,
   mode,
+  note,
   selectedEnvironmentIds,
   onToggleEnvironment,
   onSelectAllCompatible,
@@ -50,10 +52,11 @@ export function InstallTargetsDialog({
   onConfirm,
   installing,
 }: Props) {
-  if (!isOpen || !entry) {
+  if (!isOpen || entries.length === 0) {
     return null;
   }
 
+  const entry = entries[0];
   const compatibleCount = compatibleEnvironments.length;
   const selectedCount = selectedEnvironmentIds.size;
   const lockedIds = new Set(lockedEnvironmentIds);
@@ -74,9 +77,22 @@ export function InstallTargetsDialog({
         </div>
         <div className="workspace-install-dialog__body">
           <div className="workspace-install-dialog__summary">
-            <strong>{entry.displayName}</strong>
+            <strong>
+              {entries.length === 1 ? entry.displayName : `${entries.length} downloaded mods`}
+            </strong>
             <span>{compatibleCount} compatible environment{compatibleCount === 1 ? '' : 's'}</span>
           </div>
+
+          {entries.length > 1 && (
+            <div className="workspace-install-dialog__note">
+              {entries
+                .map((candidate) => candidate.displayName)
+                .filter((name, index, all) => all.indexOf(name) === index)
+                .join(', ')}
+            </div>
+          )}
+
+          {note && <div className="workspace-install-dialog__note">{note}</div>}
 
           {mode === 'installed' && (
             <div className="workspace-install-dialog__note">

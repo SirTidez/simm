@@ -81,6 +81,7 @@ pub async fn install_melon_loader(
     let _ = events::emit_melonloader_installing(
         &app,
         download_id.clone(),
+        environment_id.clone(),
         format!("Starting MelonLoader {} installation...", version_tag),
     );
 
@@ -257,6 +258,7 @@ pub async fn install_melon_loader(
                     let _ = events::emit_melonloader_installed(
                         &app,
                         download_id.clone(),
+                        environment_id.clone(),
                         format!("MelonLoader {} installed successfully", version_tag),
                         version,
                     );
@@ -271,6 +273,7 @@ pub async fn install_melon_loader(
                     let _ = events::emit_melonloader_error(
                         &app,
                         download_id.clone(),
+                        environment_id.clone(),
                         error_msg.clone(),
                     );
                 }
@@ -279,7 +282,12 @@ pub async fn install_melon_loader(
         }
         Err(e) => {
             let error_msg = format!("Installation failed: {}", e);
-            let _ = events::emit_melonloader_error(&app, download_id.clone(), error_msg.clone());
+            let _ = events::emit_melonloader_error(
+                &app,
+                download_id.clone(),
+                environment_id.clone(),
+                error_msg.clone(),
+            );
             error_json(error_msg)
         }
     }

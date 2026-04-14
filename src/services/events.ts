@@ -32,17 +32,20 @@ export interface AuthErrorEvent {
 
 export interface MelonLoaderInstallingEvent {
   downloadId: string;
+  environmentId: string;
   message: string;
 }
 
 export interface MelonLoaderInstalledEvent {
   downloadId: string;
+  environmentId: string;
   message: string;
   version?: string;
 }
 
 export interface MelonLoaderErrorEvent {
   downloadId: string;
+  environmentId: string;
   message: string;
 }
 

@@ -115,6 +115,10 @@ impl NexusModsService {
         Ok((resolved_id, domain))
     }
 
+    pub async fn resolve_game_identity(&self, game_input: &str) -> Result<(String, String)> {
+        self.resolve_game_by_input(game_input).await
+    }
+
     fn map_mod_node_to_legacy_shape(mod_node: &Value) -> Value {
         let author = mod_node
             .get("author")

@@ -5,6 +5,13 @@ import { resolve } from 'path'
 
 // Read package.json to get version
 const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf-8'))
+const tauriPlatform = (
+  process.env.TAURI_ENV_PLATFORM ??
+  process.env.TAURI_PLATFORM ??
+  ''
+).toLowerCase()
+const isWindowsBuild =
+  tauriPlatform === 'windows' || (!tauriPlatform && process.platform === 'win32')
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -29,12 +36,14 @@ export default defineConfig({
   // https://tauri.studio/v1/api/config#buildconfig.beforedevcommand
   envPrefix: ['VITE_', 'TAURI_'],
   build: {
-    // Tauri uses Chromium on Windows and WebKit on macOS and Linux
-    target: process.env.TAURI_PLATFORM == 'windows' ? 'chrome105' : 'safari13',
+    // Tauri uses Chromium on Windows and WebKit elsewhere. Vite 8 no longer
+    // supports transpiling down to the older Safari 13 target used by the
+    // original template, so keep Windows on the WebView2 baseline and use a
+    // modern WebKit baseline for non-Windows builds.
+    target: isWindowsBuild ? 'chrome105' : 'safari16.4',
     // don't minify for debug builds
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     // produce sourcemaps for debug builds
     sourcemap: !!process.env.TAURI_DEBUG,
   },
 })
-

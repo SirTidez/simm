@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
+import { confirm, message } from '@tauri-apps/plugin-dialog';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { EnvironmentList, type WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
@@ -30,14 +32,13 @@ import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { logger } from '../services/logger';
 import type {
+  AppUpdateChannel,
   AppUpdatePreferences,
   AppUpdateStatus,
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DownloadsPanel } from './DownloadsPanel';
 
-declare const __APP_VERSION__: string;
-const APP_VERSION = __APP_VERSION__;
 const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const normalizeVersionCore = (value: string) => {
@@ -119,7 +120,9 @@ function AppContent() {
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
   const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
+  const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
+  const updateSettingsRef = useRef(updateSettings);
   const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
@@ -372,33 +375,22 @@ function AppContent() {
     appUpdateSettingsRef.current = settings?.appUpdate ?? null;
   }, [settings?.appUpdate]);
 
+  useEffect(() => {
+    updateSettingsRef.current = updateSettings;
+  }, [updateSettings]);
+
   const persistAppUpdateSettings = useCallback(async (updates: Partial<AppUpdatePreferences>) => {
     const mergedSettings = {
       ...(appUpdateSettingsRef.current ?? {}),
       ...updates,
     };
     appUpdateSettingsRef.current = mergedSettings;
-    await updateSettings({
+    await updateSettingsRef.current({
       appUpdate: mergedSettings,
     });
-  }, [updateSettings]);
-
-  const openAppUpdateUrl = useCallback((url?: string | null) => {
-    const rawUrl = url?.trim();
-    if (!rawUrl) {
-      return;
-    }
-    try {
-      const parsed = new URL(rawUrl);
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        logger.warn('Refusing to open non-http app update URL', rawUrl);
-        return;
-      }
-      window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
-    } catch {
-      logger.warn('Refusing to open invalid app update URL', rawUrl);
-    }
   }, []);
+
+  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'beta';
 
   useEffect(() => {
     if (!hasSettings || showStartupSplash) {
@@ -413,7 +405,7 @@ function AppContent() {
           previous.status === 'available' ? previous : { status: 'checking', result: null },
         );
 
-        const result = await ApiService.getAppUpdateStatus(APP_VERSION);
+        const result = await ApiService.checkAppUpdate(appUpdateChannel);
         if (cancelled) {
           return;
         }
@@ -425,22 +417,23 @@ function AppContent() {
           && Date.parse(currentAppUpdateSettings.snoozedUntil) <= Date.now();
         const skippedVersionNormalized =
           currentAppUpdateSettings.skippedVersionNormalized
-            && result.latestVersionNormalized
-            && currentAppUpdateSettings.skippedVersionNormalized !== result.latestVersionNormalized
+            && result.versionNormalized
+            && currentAppUpdateSettings.skippedVersionNormalized !== result.versionNormalized
             && compareVersionCores(
               currentAppUpdateSettings.skippedVersionNormalized,
-              result.latestVersionNormalized,
+              result.versionNormalized,
             ) < 0
             ? null
             : currentAppUpdateSettings.skippedVersionNormalized ?? null;
 
         const nextSettings = {
           lastCheckedAt: result.checkedAt,
-          lastSeenVersionRaw: result.latestVersionRaw,
-          lastSeenVersionNormalized: result.latestVersionNormalized,
-          lastResolvedUrl: result.targetUrl || result.fallbackFilesUrl,
+          lastSeenVersionRaw: result.version,
+          lastSeenVersionNormalized: result.versionNormalized,
+          lastResolvedUrl: result.manifestUrl,
           snoozedUntil: expiredSnooze ? null : (currentAppUpdateSettings.snoozedUntil ?? null),
           skippedVersionNormalized,
+          channel: appUpdateChannel,
         };
 
         const previousSerialized = JSON.stringify({
@@ -450,6 +443,7 @@ function AppContent() {
           lastResolvedUrl: currentAppUpdateSettings.lastResolvedUrl ?? null,
           snoozedUntil: currentAppUpdateSettings.snoozedUntil ?? null,
           skippedVersionNormalized: currentAppUpdateSettings.skippedVersionNormalized ?? null,
+          channel: currentAppUpdateSettings.channel ?? null,
         });
         const nextSerialized = JSON.stringify(nextSettings);
         if (previousSerialized !== nextSerialized) {
@@ -459,7 +453,7 @@ function AppContent() {
         }
 
         setDismissedAppUpdateVersion((previous) =>
-          previous && previous !== result.latestVersionNormalized ? null : previous,
+          previous && previous !== result.versionNormalized ? null : previous,
         );
         setAppUpdateState(result.updateAvailable
           ? { status: 'available', result }
@@ -485,13 +479,13 @@ function AppContent() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [hasSettings, persistAppUpdateSettings, showStartupSplash]);
+  }, [appUpdateChannel, hasSettings, persistAppUpdateSettings, showStartupSplash]);
 
   const handleSkipAppUpdateVersion = useCallback(() => {
     if (appUpdateState.status !== 'available') {
       return;
     }
-    const latestVersionNormalized = appUpdateState.result.latestVersionNormalized;
+    const latestVersionNormalized = appUpdateState.result.versionNormalized;
     setDismissedAppUpdateVersion(latestVersionNormalized);
     void persistAppUpdateSettings({
       skippedVersionNormalized: latestVersionNormalized,
@@ -506,13 +500,55 @@ function AppContent() {
       return;
     }
     const snoozedUntil = new Date(Date.now() + (days * 24 * 60 * 60 * 1000)).toISOString();
-    setDismissedAppUpdateVersion(appUpdateState.result.latestVersionNormalized);
+    setDismissedAppUpdateVersion(appUpdateState.result.versionNormalized);
     void persistAppUpdateSettings({
       snoozedUntil,
     }).catch((error) => {
       logger.warn('Failed to persist app update snooze state', error);
     });
   }, [appUpdateState, persistAppUpdateSettings]);
+
+  const handleInstallAppUpdate = useCallback(async () => {
+    if (appUpdateState.status !== 'available' || installingAppUpdate) {
+      return;
+    }
+
+    const releaseChannelLabel = appUpdateState.result.channel === 'beta' ? 'beta' : 'stable';
+    const shouldInstall = await confirm(
+      `Download and install SIMM ${appUpdateState.result.version} from the ${releaseChannelLabel} channel now?`,
+      {
+        title: 'Install SIMM Update',
+        kind: 'info',
+        okLabel: 'Install',
+        cancelLabel: 'Cancel',
+      },
+    );
+
+    if (!shouldInstall) {
+      return;
+    }
+
+    try {
+      setInstallingAppUpdate(true);
+      const installResult = await ApiService.installAppUpdate(appUpdateState.result.channel);
+      if (!installResult.installed) {
+        throw new Error('Updater did not install an update.');
+      }
+
+      await relaunch();
+    } catch (error) {
+      logger.error('Failed to install SIMM app update', error);
+      await message(
+        error instanceof Error ? error.message : 'Failed to install the SIMM update.',
+        {
+          title: 'Update Failed',
+          kind: 'error',
+        },
+      );
+    } finally {
+      setInstallingAppUpdate(false);
+    }
+  }, [appUpdateState, installingAppUpdate]);
 
   const handleNexusOAuthCallback = useCallback(async (callbackUrl: string) => {
     if (!callbackUrl.startsWith('simm://oauth/nexus/callback')) {
@@ -889,21 +925,18 @@ function AppContent() {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
   };
 
-  const appUpdateTargetUrl = appUpdateState.status === 'available'
-    ? (appUpdateState.result.targetUrl || appUpdateState.result.fallbackFilesUrl)
-    : null;
   const appUpdatePreferences = settings?.appUpdate ?? null;
   const appUpdateSnoozedUntil = appUpdatePreferences?.snoozedUntil
     && Number.isFinite(Date.parse(appUpdatePreferences.snoozedUntil))
     ? Date.parse(appUpdatePreferences.snoozedUntil)
     : null;
-  const isAppUpdateSnoozed = !!appUpdateTargetUrl
+  const isAppUpdateSnoozed = appUpdateState.status === 'available'
     && appUpdateSnoozedUntil !== null
     && appUpdateSnoozedUntil > Date.now();
   const isAppUpdateSkipped = appUpdateState.status === 'available'
-    && appUpdatePreferences?.skippedVersionNormalized === appUpdateState.result.latestVersionNormalized;
+    && appUpdatePreferences?.skippedVersionNormalized === appUpdateState.result.versionNormalized;
   const isAppUpdateDismissedForSession = appUpdateState.status === 'available'
-    && dismissedAppUpdateVersion === appUpdateState.result.latestVersionNormalized;
+    && dismissedAppUpdateVersion === appUpdateState.result.versionNormalized;
   const showAppUpdateToast = appUpdateState.status === 'available'
     && !isAppUpdateSnoozed
     && !isAppUpdateSkipped
@@ -1050,18 +1083,18 @@ function AppContent() {
             },
           })}
           appUpdateAvailable={appUpdateState.status === 'available'}
-          onOpenAppUpdate={() => openAppUpdateUrl(appUpdateTargetUrl)}
+          onOpenAppUpdate={() => void handleInstallAppUpdate()}
         />
       </div>
 
       {showAppUpdateToast && appUpdateState.status === 'available' && (
         <AppUpdateToast
-          currentVersion={appUpdateState.result.currentVersionRaw}
-          latestVersion={appUpdateState.result.latestVersionRaw}
-          onUpdate={() => openAppUpdateUrl(appUpdateTargetUrl)}
+          currentVersion={appUpdateState.result.currentVersion}
+          latestVersion={appUpdateState.result.version}
+          onUpdate={() => void handleInstallAppUpdate()}
           onSkip={handleSkipAppUpdateVersion}
           onSnooze={handleSnoozeAppUpdate}
-          onDismiss={() => setDismissedAppUpdateVersion(appUpdateState.result.latestVersionNormalized)}
+          onDismiss={() => setDismissedAppUpdateVersion(appUpdateState.result.versionNormalized)}
         />
       )}
 

@@ -1,3 +1,4 @@
+use crate::commands::nexus_mods::normalize_nexus_game_id;
 use crate::events;
 use crate::services::environment::EnvironmentService;
 use crate::services::github_releases::GitHubReleasesService;
@@ -125,11 +126,18 @@ fn extract_package_uuid(package: &serde_json::Value) -> Option<String> {
         .map(|v| v.to_string())
 }
 
-fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
-    package
-        .get("versions")
-        .and_then(|v| v.as_array())
-        .and_then(|v| v.first())
+fn is_s1api_thunderstore_source_id(source_id: Option<&str>) -> bool {
+    matches!(
+        source_id.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if value == "ifbars/s1api" || value == "ifbars/s1api_forked"
+    )
+}
+
+fn extract_thunderstore_icon(
+    package: &serde_json::Value,
+    source_id: Option<&str>,
+) -> Option<String> {
+    select_latest_thunderstore_version(package, source_id)
         .and_then(|v| v.get("icon"))
         .and_then(|v| v.as_str())
         .or_else(|| {
@@ -141,6 +149,191 @@ fn extract_thunderstore_icon(package: &serde_json::Value) -> Option<String> {
         .or_else(|| package.get("icon").and_then(|v| v.as_str()))
         .or_else(|| package.get("icon_url").and_then(|v| v.as_str()))
         .map(|v| v.to_string())
+}
+
+fn extract_numeric_version_parts(value: &str) -> Vec<u32> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let core = value
+        .trim_start_matches(['v', 'V'])
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default();
+
+    for ch in core.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            parts.push(current.parse::<u32>().unwrap_or(0));
+            current.clear();
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current.parse::<u32>().unwrap_or(0));
+    }
+
+    parts
+}
+
+fn compare_standard_thunderstore_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = extract_numeric_version_parts(left);
+    let right_parts = extract_numeric_version_parts(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        match left_parts
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right_parts.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    let left_lower = left.to_ascii_lowercase();
+    let right_lower = right.to_ascii_lowercase();
+    let has_prerelease = |value: &str| {
+        [
+            "alpha",
+            "beta",
+            "preview",
+            "pre",
+            "rc",
+            "nightly",
+            "experimental",
+            "dev",
+            "test",
+        ]
+        .iter()
+        .any(|marker| value.contains(marker))
+    };
+
+    match (has_prerelease(&left_lower), has_prerelease(&right_lower)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => left
+            .trim_start_matches(['v', 'V'])
+            .cmp(right.trim_start_matches(['v', 'V'])),
+    }
+}
+
+fn compare_s1api_revision_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let expand = |value: &str| {
+        let normalized = value.trim_start_matches(['v', 'V']).to_string();
+        let core = normalized.split(['-', '+']).next().unwrap_or_default();
+        let mut segments = core.split('.').collect::<Vec<_>>();
+        if let Some(patch) = segments.get(2).copied() {
+            if patch.len() > 1 && patch.chars().all(|ch| ch.is_ascii_digit()) {
+                let mut expanded = Vec::with_capacity(segments.len() + 1);
+                expanded.extend(segments.iter().take(2).copied());
+                expanded.push(&patch[..1]);
+                expanded.push(&patch[1..]);
+                expanded.extend(segments.iter().skip(3).copied());
+                segments = expanded;
+            }
+        }
+
+        segments
+            .into_iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| segment.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<u32>>()
+    };
+
+    let left_parts = expand(left);
+    let right_parts = expand(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        match left_parts
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .cmp(&right_parts.get(index).copied().unwrap_or(0))
+        {
+            std::cmp::Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    let left_lower = left.to_ascii_lowercase();
+    let right_lower = right.to_ascii_lowercase();
+    let has_prerelease = |value: &str| {
+        [
+            "alpha",
+            "beta",
+            "preview",
+            "pre",
+            "rc",
+            "nightly",
+            "experimental",
+            "dev",
+            "test",
+        ]
+        .iter()
+        .any(|marker| value.contains(marker))
+    };
+
+    match (has_prerelease(&left_lower), has_prerelease(&right_lower)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => left
+            .trim_start_matches(['v', 'V'])
+            .cmp(right.trim_start_matches(['v', 'V'])),
+    }
+}
+
+fn compare_thunderstore_versions(
+    source_id: Option<&str>,
+    left: &str,
+    right: &str,
+) -> std::cmp::Ordering {
+    if is_s1api_thunderstore_source_id(source_id) {
+        return compare_s1api_revision_versions(left, right);
+    }
+
+    compare_standard_thunderstore_versions(left, right)
+}
+
+fn select_latest_thunderstore_version<'a>(
+    package: &'a serde_json::Value,
+    source_id: Option<&str>,
+) -> Option<&'a serde_json::Value> {
+    package
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .and_then(|versions| {
+            versions.iter().max_by(|left, right| {
+                let left_version = left
+                    .get("version_number")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let right_version = right
+                    .get("version_number")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                match compare_thunderstore_versions(source_id, left_version, right_version) {
+                    std::cmp::Ordering::Equal => {
+                        let left_updated = left
+                            .get("date_updated")
+                            .or_else(|| left.get("date_created"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let right_updated = right
+                            .get("date_updated")
+                            .or_else(|| right.get("date_created"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        left_updated.cmp(right_updated)
+                    }
+                    ordering => ordering,
+                }
+            })
+        })
 }
 
 async fn resolve_thunderstore_package_by_source_id(
@@ -317,6 +510,7 @@ pub async fn check_all_updates(
         .await
         .map_err(|e| e.to_string())?;
     let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
+    let nexus_game_id = normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref());
     let now = chrono::Utc::now();
     let envs_to_check: Vec<_> = if manual {
         envs.clone()
@@ -385,7 +579,7 @@ pub async fn check_all_updates(
     }
 
     let mut seen_storage_ids = HashSet::new();
-    let mut library_thunderstore_targets: Vec<(String, String)> = Vec::new();
+    let mut library_thunderstore_targets: Vec<(String, String, Option<String>)> = Vec::new();
     if let Ok(library) = mods_service.get_mod_library().await {
         for entry in library.downloaded {
             if !matches!(entry.source, Some(ModSource::Thunderstore)) {
@@ -405,7 +599,11 @@ pub async fn check_all_updates(
             };
 
             if seen_storage_ids.insert(entry.storage_id.clone()) {
-                library_thunderstore_targets.push((entry.storage_id, source_id));
+                library_thunderstore_targets.push((
+                    entry.storage_id,
+                    source_id,
+                    entry.source_version.clone(),
+                ));
             }
         }
     }
@@ -430,6 +628,7 @@ pub async fn check_all_updates(
             let thunderstore_service = thunderstore_service.clone();
             let nexus_mods_service = nexus_mods_service.clone();
             let github_service = github_service.clone();
+            let nexus_game_id = nexus_game_id.clone();
             let refresh_counter = refresh_counter.clone();
 
             tokio::spawn(async move {
@@ -440,6 +639,7 @@ pub async fn check_all_updates(
                         mods_service.as_ref(),
                         &thunderstore_service,
                         &nexus_mods_service,
+                        &nexus_game_id,
                         &github_service,
                     )
                     .await
@@ -485,12 +685,12 @@ pub async fn check_all_updates(
     }
 
     // Backfill missing Thunderstore metadata/icons for downloaded library entries
-    for (storage_id, source_id) in library_thunderstore_targets {
+    for (storage_id, source_id, source_version) in library_thunderstore_targets {
         if let Some(package) =
             resolve_thunderstore_package_by_source_id(&thunderstore_service, &source_id).await
         {
             let now = chrono::Utc::now();
-            let icon_url = extract_thunderstore_icon(&package);
+            let icon_url = extract_thunderstore_icon(&package, Some(&source_id));
             let icon_cache_path = mods_service
                 .cache_icon_for_metadata(icon_url.as_deref())
                 .await;
@@ -498,13 +698,7 @@ pub async fn check_all_updates(
             let metadata_update = ModMetadata {
                 source: Some(ModSource::Thunderstore),
                 source_id: Some(source_id.clone()),
-                source_version: package
-                    .get("versions")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
-                    .and_then(|v| v.get("version_number"))
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
+                source_version,
                 author: package
                     .get("owner")
                     .and_then(|v| v.as_str())
@@ -517,10 +711,7 @@ pub async fn check_all_updates(
                     .get("package_url")
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
-                summary: package
-                    .get("versions")
-                    .and_then(|v| v.as_array())
-                    .and_then(|v| v.first())
+                summary: select_latest_thunderstore_version(&package, Some(&source_id))
                     .and_then(|v| v.get("description"))
                     .and_then(|v| v.as_str())
                     .map(|v| v.to_string()),
@@ -632,7 +823,10 @@ pub async fn get_update_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_mod_updates_payload, extract_mod_name_for_event, get_github_service};
+    use super::{
+        build_mod_updates_payload, compare_thunderstore_versions, extract_mod_name_for_event,
+        get_github_service, select_latest_thunderstore_version,
+    };
     use crate::db::initialize_pool;
     use serial_test::serial;
     use std::sync::Arc;
@@ -731,6 +925,93 @@ mod tests {
         assert_eq!(
             updates[0].get("source").and_then(|v| v.as_str()),
             Some("github")
+        );
+    }
+
+    #[test]
+    fn compare_thunderstore_versions_uses_revision_suffix_ordering_for_s1api() {
+        assert_eq!(
+            compare_thunderstore_versions(Some("ifBars/S1API"), "3.0.22", "3.0.3"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_thunderstore_versions(Some("ifBars/S1API"), "3.0.32", "3.0.4"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_thunderstore_versions(Some("ifBars/S1API"), "3.0.4", "3.0.32"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_thunderstore_versions_keeps_semver_for_non_s1api_packages() {
+        assert_eq!(
+            compare_thunderstore_versions(Some("example/mod"), "1.0.9", "1.0.10"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_thunderstore_versions(Some("example/mod"), "1.0.10", "1.0.9"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_uses_revision_suffix_ordering_for_s1api() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "r2",
+                    "version_number": "3.0.22",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "r3",
+                    "version_number": "3.0.3",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                },
+                {
+                    "uuid4": "r2-next",
+                    "version_number": "3.0.32",
+                    "date_updated": "2026-04-03T00:00:00Z"
+                },
+                {
+                    "uuid4": "r4",
+                    "version_number": "3.0.4",
+                    "date_updated": "2026-04-04T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = select_latest_thunderstore_version(&package, Some("ifBars/S1API"))
+            .expect("selected version");
+
+        assert_eq!(selected.get("uuid4").and_then(|v| v.as_str()), Some("r4"));
+    }
+
+    #[test]
+    fn select_latest_thunderstore_version_keeps_semver_for_non_s1api_packages() {
+        let package = serde_json::json!({
+            "versions": [
+                {
+                    "uuid4": "stable-9",
+                    "version_number": "1.0.9",
+                    "date_updated": "2026-04-01T00:00:00Z"
+                },
+                {
+                    "uuid4": "stable-10",
+                    "version_number": "1.0.10",
+                    "date_updated": "2026-04-02T00:00:00Z"
+                }
+            ]
+        });
+
+        let selected = select_latest_thunderstore_version(&package, Some("example/mod"))
+            .expect("selected version");
+
+        assert_eq!(
+            selected.get("uuid4").and_then(|v| v.as_str()),
+            Some("stable-10")
         );
     }
 }
