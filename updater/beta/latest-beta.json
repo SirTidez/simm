@@ -1,0 +1,11 @@
+{
+  "version": "0.8.1",
+  "notes": "## What's Changed\n* Update mod management flows and release tooling for 0.8.1 by @SirTidez in https://github.com/SirTidez/simm/pull/17\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.0-beta...v0.8.1-beta",
+  "pub_date": "04/14/2026 01:59:29",
+  "platforms": {
+    "windows-x86_64": {
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.1-beta/SIMM_0.8.1_Setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5clhXclNzaTlsMEdTa2poYXQ2WVYxUnhyUGRGcDRXMjZHUlJkeVNXbGM2cGNHdStJcXZZTTNUdENqUHVLOWM2UDRFWkY1ajhNa0w0aklJSGsvOVhHV1FrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc2MTMxOTUzCWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguMV94NjQtc2V0dXAuZXhlClJoSkpURFNKT1ArcU9pVGhOd1d5RnVVNDllanhuS2FWQnRTemFzYW10YW9JMytPUW0zdmJyRE9tUzh6RTQyYVdEM3pINXBmbTEzQkc0L09sNVRSWEFRPT0K"
+    }
+  }
+}
