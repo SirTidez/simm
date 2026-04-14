@@ -53,9 +53,9 @@ jobs:
         shell: pwsh
         run: |
           $configPath = 'src-tauri/tauri.conf.json'
-          $config = Get-Content $configPath -Raw | ConvertFrom-Json
-          if (-not $config.bundle) {
-            $config | Add-Member -NotePropertyName bundle -NotePropertyValue ([ordered]@{}) -Force
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+          if (-not $config.ContainsKey('bundle') -or $null -eq $config.bundle) {
+            $config.bundle = @{}
           }
           $config.bundle.createUpdaterArtifacts = $true
           $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
