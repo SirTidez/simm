@@ -19,6 +19,37 @@ impl AuthService {
         Self
     }
 
+    fn build_auth_args(username: String, steam_guard: Option<String>) -> Vec<String> {
+        let config = crate::types::schedule_i_config();
+        let auth_branch = config
+            .branches
+            .iter()
+            .find(|branch| branch.requires_auth)
+            .map(|branch| branch.name.clone())
+            .unwrap_or_else(|| "main".to_string());
+
+        let mut args = vec![
+            "-app".to_string(),
+            config.app_id,
+            "-username".to_string(),
+            username,
+            "-manifest-only".to_string(),
+            "-branch".to_string(),
+            auth_branch,
+        ];
+
+        if cfg!(target_os = "windows") {
+            args.push("-remember-password".to_string());
+        }
+
+        if let Some(sg) = steam_guard {
+            args.push("-steamguard".to_string());
+            args.push(sg);
+        }
+
+        args
+    }
+
     pub async fn authenticate(
         &self,
         username: String,
@@ -38,24 +69,7 @@ impl AuthService {
         }
 
         let executable_path = detector_info.path.unwrap();
-        let mut args = vec![
-            "-app".to_string(),
-            "3164500".to_string(), // Schedule I AppID
-            "-username".to_string(),
-            username,
-            "-manifest-only".to_string(),
-            "-branch".to_string(),
-            "public".to_string(),
-        ];
-
-        if cfg!(target_os = "windows") {
-            args.push("-remember-password".to_string());
-        }
-
-        if let Some(ref sg) = steam_guard {
-            args.push("-steamguard".to_string());
-            args.push(sg.clone());
-        }
+        let args = Self::build_auth_args(username, steam_guard);
 
         // Get depots directory from SIMM folder
         let depots_dir = crate::utils::directory_init::get_depots_dir()
@@ -261,5 +275,18 @@ mod tests {
         assert_eq!(result.requires_steam_guard, None);
 
         Ok(())
+    }
+
+    #[test]
+    fn build_auth_args_uses_a_configured_schedule_i_branch() {
+        let args = AuthService::build_auth_args(
+            "steam-user".to_string(),
+            Some("guard".to_string()),
+        );
+
+        assert!(args.windows(2).any(|window| {
+            window[0] == "-branch" && window[1] == crate::types::schedule_i_config().branches[0].name
+        }));
+        assert!(!args.iter().any(|arg| arg == "public"));
     }
 }

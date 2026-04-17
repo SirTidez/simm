@@ -84,4 +84,28 @@ describe('AuthenticationModal', () => {
     expect(screen.getByText('Approve the Steam login')).toBeTruthy();
     expect(screen.getByText('Approve this login in Steam Guard')).toBeTruthy();
   });
+
+  it('shows backend auth errors from the command contract', async () => {
+    apiMocks.authenticate.mockResolvedValue({
+      success: false,
+      error: 'Authentication failed: Branch main not found',
+    });
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={() => {}}
+        required={false}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
+
+    expect(
+      await screen.findByText('Authentication failed: Branch main not found')
+    ).toBeTruthy();
+  });
 });

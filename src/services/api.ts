@@ -182,7 +182,7 @@ export class ApiService {
     password: string,
     steamGuard?: string,
     saveCredentials?: boolean
-  ): Promise<{ success: boolean; message?: string; requiresSteamGuard?: boolean }> {
+  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean }> {
     return invoke('authenticate', {
       username,
       password,

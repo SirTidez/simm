@@ -72,7 +72,7 @@ export function AuthenticationModal({
         }
       } else {
         if (isMountedRef.current) {
-          setError(result.message || 'Authentication failed');
+          setError(result.error || result.message || 'Authentication failed');
         }
       }
     } catch (err) {
