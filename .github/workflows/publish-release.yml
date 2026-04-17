@@ -137,6 +137,7 @@ jobs:
           $installerAssetName = Split-Path -Path $installerAssetPath -Leaf
           $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
           $assetUrl = "https://github.com/SirTidez/simm/releases/download/$tag/$installerAssetName"
+          $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { '' }
 
           .\scripts\generate-updater-manifest.ps1 `
             -Version '${{ steps.version.outputs.version }}' `
@@ -144,7 +145,7 @@ jobs:
             -SignaturePath $signaturePath `
             -OutputPath 'updater/stable/latest.json' `
             -Notes ($release.body ?? '') `
-            -PubDate ($release.publishedAt ?? '')
+            -PubDate $publishedAtIso
 
           $manifest = Get-Content 'updater/stable/latest.json' -Raw | ConvertFrom-Json
           $platform = $manifest.platforms.'windows-x86_64'
