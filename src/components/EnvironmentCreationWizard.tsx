@@ -95,6 +95,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [installingSecurityScanner, setInstallingSecurityScanner] = useState(false);
   const [securityScannerError, setSecurityScannerError] = useState<string | null>(null);
   const previousDerivedNameRef = useRef('');
+  const autoDepotInstallAttemptedRef = useRef(false);
+  const autoSecurityScannerInstallAttemptedRef = useRef(false);
 
   const hasSteamEnvironment = environments.some(
     env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
@@ -343,6 +345,45 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       setInstallingSecurityScanner(false);
     }
   };
+
+  useEffect(() => {
+    if (wizardMode !== 'download-select') {
+      return;
+    }
+
+    if (
+      depotDownloaderInstalled === false &&
+      !depotDownloaderDetectionError &&
+      !depotDownloaderPromptError &&
+      !installingDepotDownloader &&
+      !autoDepotInstallAttemptedRef.current
+    ) {
+      autoDepotInstallAttemptedRef.current = true;
+      void handleAutoInstallDepotDownloader();
+    }
+
+    if (
+      securityScannerStatus &&
+      securityScannerStatus.installed !== true &&
+      !securityScannerError &&
+      !loadingSecurityScannerStatus &&
+      !installingSecurityScanner &&
+      !autoSecurityScannerInstallAttemptedRef.current
+    ) {
+      autoSecurityScannerInstallAttemptedRef.current = true;
+      void handleInstallSecurityScanner();
+    }
+  }, [
+    wizardMode,
+    depotDownloaderInstalled,
+    depotDownloaderDetectionError,
+    depotDownloaderPromptError,
+    installingDepotDownloader,
+    securityScannerStatus,
+    securityScannerError,
+    loadingSecurityScannerStatus,
+    installingSecurityScanner,
+  ]);
 
   const handleBranchSelect = (branch: BranchConfig) => {
     if (depotDownloaderInstalled !== true) return;

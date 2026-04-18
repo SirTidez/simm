@@ -206,6 +206,24 @@ describe('EnvironmentCreationWizard', () => {
     });
   });
 
+  it('automatically installs missing setup prerequisites when branch downloads are opened', async () => {
+    apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: false });
+    apiMocks.getSecurityScannerStatus.mockResolvedValueOnce({
+      enabled: true,
+      autoInstall: true,
+      installed: false,
+    });
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
+      expect(apiMocks.installSecurityScanner).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('refreshes the auto-derived name when switching branches but preserves user edits', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
