@@ -1,4 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  Suspense,
+  lazy,
+  startTransition,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+} from 'react';
+import type { ComponentType } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -8,21 +17,6 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { EnvironmentList, type WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
-import { EnvironmentCreationWizard } from './EnvironmentCreationWizard';
-import { ModLibraryOverlay, type ModLibraryNavigationState } from './ModLibraryOverlay';
-import { Settings } from './Settings';
-import { SteamAccountOverlay } from './SteamAccountOverlay';
-import { HelpOverlay } from './HelpOverlay';
-import { WelcomeOverlay } from './WelcomeOverlay';
-import { ModsOverlay, type ModsOverlayNavigationState } from './ModsOverlay';
-import { PluginsOverlay } from './PluginsOverlay';
-import { UserLibsOverlay } from './UserLibsOverlay';
-import { LogsOverlay } from './LogsOverlay';
-import { ConfigurationOverlay } from './ConfigurationOverlay';
-import {
-  SecurityScanReportPage,
-  type SecurityReportWorkspaceRequest,
-} from './SecurityScanReportPage';
 import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
@@ -38,8 +32,79 @@ import type {
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DownloadsPanel } from './DownloadsPanel';
+import { Icon } from './Icon';
+import type { ModLibraryNavigationState } from './ModLibraryOverlay';
+import type { ModsOverlayNavigationState } from './ModsOverlay';
+import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 
 const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const lazyNamed = <T,>(
+  loader: () => Promise<T>,
+  select: (module: T) => ComponentType<any>,
+) => lazy(async () => ({
+  default: select(await loader()),
+}));
+
+const EnvironmentCreationWizard = lazyNamed(
+  () => import('./EnvironmentCreationWizard'),
+  (module) => module.EnvironmentCreationWizard,
+);
+const ModLibraryOverlay = lazyNamed(
+  () => import('./ModLibraryOverlay'),
+  (module) => module.ModLibraryOverlay,
+);
+const Settings = lazyNamed(
+  () => import('./Settings'),
+  (module) => module.Settings,
+);
+const SteamAccountOverlay = lazyNamed(
+  () => import('./SteamAccountOverlay'),
+  (module) => module.SteamAccountOverlay,
+);
+const HelpOverlay = lazyNamed(
+  () => import('./HelpOverlay'),
+  (module) => module.HelpOverlay,
+);
+const WelcomeOverlay = lazyNamed(
+  () => import('./WelcomeOverlay'),
+  (module) => module.WelcomeOverlay,
+);
+const ModsOverlay = lazyNamed(
+  () => import('./ModsOverlay'),
+  (module) => module.ModsOverlay,
+);
+const PluginsOverlay = lazyNamed(
+  () => import('./PluginsOverlay'),
+  (module) => module.PluginsOverlay,
+);
+const UserLibsOverlay = lazyNamed(
+  () => import('./UserLibsOverlay'),
+  (module) => module.UserLibsOverlay,
+);
+const LogsOverlay = lazyNamed(
+  () => import('./LogsOverlay'),
+  (module) => module.LogsOverlay,
+);
+const ConfigurationOverlay = lazyNamed(
+  () => import('./ConfigurationOverlay'),
+  (module) => module.ConfigurationOverlay,
+);
+const SecurityScanReportPage = lazyNamed(
+  () => import('./SecurityScanReportPage'),
+  (module) => module.SecurityScanReportPage,
+);
+
+function WorkspacePanelFallback() {
+  return (
+    <div className="workspace-panel-fallback" role="status" aria-live="polite">
+      <div className="workspace-panel-fallback__header">
+        <strong>Loading workspace panel...</strong>
+        <span>Getting this workspace ready.</span>
+      </div>
+    </div>
+  );
+}
 
 const normalizeVersionCore = (value: string) => {
   const match = value.trim().match(/\d+(?:\.\d+)*/i);
@@ -153,40 +218,46 @@ function AppContent() {
   }, []);
 
   const pushWorkspace = useCallback((route: Exclude<WorkspaceRoute, { view: 'home' }>, seed?: Partial<WorkspaceEntry>) => {
-    setWorkspaceStack((previous) => {
-      const current = previous[previous.length - 1];
-      if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
-        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
-          return previous;
+    startTransition(() => {
+      setWorkspaceStack((previous) => {
+        const current = previous[previous.length - 1];
+        if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
+          if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+            return previous;
+          }
+          return [
+            ...previous.slice(0, -1),
+            {
+              ...current,
+              route,
+              libraryState: seed?.libraryState ?? current.libraryState,
+              modsState: seed?.modsState ?? current.modsState,
+              securityReportState: seed?.securityReportState ?? current.securityReportState,
+            },
+          ];
         }
-        return [
-          ...previous.slice(0, -1),
-          {
-            ...current,
-            route,
-            libraryState: seed?.libraryState ?? current.libraryState,
-            modsState: seed?.modsState ?? current.modsState,
-            securityReportState: seed?.securityReportState ?? current.securityReportState,
-          },
-        ];
-      }
-      return [...previous, createWorkspaceEntry(route, seed)];
+        return [...previous, createWorkspaceEntry(route, seed)];
+      });
     });
   }, [createWorkspaceEntry, isSameWorkspaceRoute]);
 
   const popWorkspace = useCallback(() => {
-    setWorkspaceStack((previous) => {
-      if (previous.length <= 1) {
-        return previous;
-      }
-      return previous.slice(0, -1);
+    startTransition(() => {
+      setWorkspaceStack((previous) => {
+        if (previous.length <= 1) {
+          return previous;
+        }
+        return previous.slice(0, -1);
+      });
     });
   }, []);
 
   const goHome = useCallback(() => {
-    setWorkspaceStack((previous) => {
-      const homeEntry = previous.find((entry) => entry.route.view === 'home');
-      return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
+    startTransition(() => {
+      setWorkspaceStack((previous) => {
+        const homeEntry = previous.find((entry) => entry.route.view === 'home');
+        return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
+      });
     });
   }, [createWorkspaceEntry]);
 
@@ -266,32 +337,34 @@ function AppContent() {
   }, [activeWorkspace.view]);
 
   const handleWorkspaceEnvironmentSelect = useCallback((environmentId: string) => {
-    setWorkspaceStack((previous) => {
-      const next = [...previous];
-      const current = next[next.length - 1];
-      if (!current) {
-        return previous;
-      }
+    startTransition(() => {
+      setWorkspaceStack((previous) => {
+        const next = [...previous];
+        const current = next[next.length - 1];
+        if (!current) {
+          return previous;
+        }
 
-      if (!('environmentId' in current.route)) {
+        if (!('environmentId' in current.route)) {
+          next[next.length - 1] = {
+            ...current,
+            route: {
+              view: lastEnvironmentWorkspaceView,
+              environmentId,
+            },
+          };
+          return next;
+        }
+
         next[next.length - 1] = {
           ...current,
           route: {
-            view: lastEnvironmentWorkspaceView,
+            ...current.route,
             environmentId,
           },
         };
         return next;
-      }
-
-      next[next.length - 1] = {
-        ...current,
-        route: {
-          ...current.route,
-          environmentId,
-        },
-      };
-      return next;
+      });
     });
   }, [lastEnvironmentWorkspaceView]);
 
@@ -808,7 +881,7 @@ function AppContent() {
             navigationState={entry.libraryState ?? (workspace.initialTab ? {
               libraryTab: workspace.initialTab,
             } : undefined)}
-            onNavigationStateChange={(navigationState) => {
+            onNavigationStateChange={(navigationState: ModLibraryNavigationState) => {
               lastLibraryNavigationStateRef.current = navigationState;
               updateWorkspaceEntry(entry.key, (current) => ({
                 ...current,
@@ -865,7 +938,7 @@ function AppContent() {
             navigationState={entry.modsState ?? (workspace.initialTab ? {
               modsTab: workspace.initialTab,
             } : undefined)}
-            onNavigationStateChange={(navigationState) => {
+            onNavigationStateChange={(navigationState: ModsOverlayNavigationState) => {
               updateWorkspaceEntry(entry.key, (current) => ({
                 ...current,
                 modsState: navigationState,
@@ -875,7 +948,7 @@ function AppContent() {
             onOpenModLibrary={() => openLibraryWorkspace()}
             onOpenConfig={() => pushWorkspace({ view: 'config', environmentId: workspace.environmentId })}
             onOpenSecurityReport={openSecurityReportWorkspace}
-            onModUpdatesChecked={(count) => {
+            onModUpdatesChecked={(count: number) => {
               window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: workspace.environmentId, count } }));
             }}
           />
@@ -963,7 +1036,7 @@ function AppContent() {
               title="Open Mod Library"
               aria-pressed={isToolbarWorkspaceActive('library')}
             >
-              <i className="fas fa-layer-group"></i>
+              <Icon name="layerGroup" />
               Mod Library
             </button>
             <button
@@ -972,7 +1045,7 @@ function AppContent() {
               title="Download/Import New Game"
               aria-pressed={isToolbarWorkspaceActive('wizard')}
             >
-              <i className="fas fa-plus"></i>
+              <Icon name="plus" />
               New Game
             </button>
             <button
@@ -981,7 +1054,7 @@ function AppContent() {
               title="Manage connected accounts"
               aria-pressed={isToolbarWorkspaceActive('accounts')}
             >
-              <i className="fas fa-user-circle"></i>
+              <Icon name="userCircle" />
               Accounts
             </button>
             <button
@@ -990,7 +1063,7 @@ function AppContent() {
               title="Open help and guides"
               aria-pressed={isToolbarWorkspaceActive('help')}
             >
-              <i className="fas fa-question-circle"></i>
+              <Icon name="questionCircle" />
               Help
             </button>
             <button
@@ -999,7 +1072,7 @@ function AppContent() {
               title="Open settings"
               aria-pressed={isToolbarWorkspaceActive('settings')}
             >
-              <i className="fas fa-cog"></i>
+              <Icon name="cog" />
               Settings
             </button>
           </div>
@@ -1011,7 +1084,7 @@ function AppContent() {
               title="Minimize"
               aria-label="Minimize"
             >
-              <i className="fas fa-minus"></i>
+              <Icon name="minus" />
             </button>
             <button
               onClick={handleToggleMaximize}
@@ -1019,7 +1092,7 @@ function AppContent() {
               title={isMaximized ? 'Restore Down' : 'Maximize'}
               aria-label={isMaximized ? 'Restore Down' : 'Maximize'}
             >
-              <i className={`far ${isMaximized ? 'fa-window-restore' : 'fa-square'}`}></i>
+              <Icon name={isMaximized ? 'windowRestore' : 'square'} />
             </button>
             <button
               onClick={handleCloseWindow}
@@ -1027,7 +1100,7 @@ function AppContent() {
               title="Close"
               aria-label="Close"
             >
-              <i className="fas fa-times"></i>
+              <Icon name="times" />
             </button>
           </div>
         </header>
@@ -1052,11 +1125,11 @@ function AppContent() {
                       className="btn btn-secondary app-workspace-home-button"
                       disabled={!canGoBack}
                     >
-                      <i className="fas fa-arrow-left"></i>
+                      <Icon name="arrowLeft" />
                       Back
                     </button>
                     <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
-                      <i className="fas fa-house"></i>
+                      <Icon name="house" />
                       Home
                     </button>
                   </div>
@@ -1068,7 +1141,9 @@ function AppContent() {
                   <DownloadsPanel />
                 </aside>
                 <main className="app-main workspace-main app-workspace-main">
-                  {renderWorkspacePanel()}
+                  <Suspense fallback={<WorkspacePanelFallback />}>
+                    {renderWorkspacePanel()}
+                  </Suspense>
                 </main>
               </div>
             )}
@@ -1108,7 +1183,7 @@ function AppContent() {
               onClick={() => setAppNotice(null)}
               aria-label="Dismiss notice"
             >
-              <i className="fas fa-times"></i>
+              <Icon name="times" />
             </button>
           </div>
           <span className="app-notice__body">{appNotice}</span>
@@ -1125,7 +1200,7 @@ function AppContent() {
             <div className="app-dialog__body app-runtime-dialog__body">
               <div className="app-dialog__callout app-dialog__callout--info">
                 <div className="app-dialog__icon">
-                  <i className="fas fa-microchip" aria-hidden="true"></i>
+                  <Icon name="microchip" />
                 </div>
                 <div className="app-dialog__meta">
                   <strong>Runtime selection required</strong>

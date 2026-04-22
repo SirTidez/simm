@@ -228,8 +228,12 @@ export interface NexusMod {
   summary: string;
   description: string;
   picture_url?: string;
+  thumbnail_url?: string;
   version: string;
   author: string;
+  uploader?: string;
+  uploader_member_id?: number;
+  original_author?: string;
   uploaded_time: string;
   updated_time: string;
   category_id: number;

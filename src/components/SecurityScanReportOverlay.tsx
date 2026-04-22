@@ -7,6 +7,7 @@ import type {
   ThreatFamily,
 } from '../types';
 import { getSecurityDispositionBadgeConfig } from './securityScanHelpers';
+import { Icon } from './Icon';
 
 interface SecurityScanReportOverlayProps {
   isOpen: boolean;
@@ -300,7 +301,7 @@ export function SecurityScanReportView({
                 gap: '0.4rem',
               }}
             >
-              <i className={`fas ${summaryStyle.icon}`}></i>
+              <Icon name={`fas ${summaryStyle.icon}`} />
               {summaryStyle.label}
             </span>
           </h2>
@@ -404,7 +405,7 @@ export function SecurityScanReportView({
                             gap: '0.35rem',
                           }}
                         >
-                          <i className={`fas ${optionStyle.icon}`}></i>
+                          <Icon name={`fas ${optionStyle.icon}`} />
                           {optionStyle.label}
                         </span>
                       </div>

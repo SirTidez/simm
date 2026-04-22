@@ -103,7 +103,11 @@ describe('ApiService', () => {
         endorsements: 12,
         downloads: 34,
         version: '1.0.0',
-        author: 'Tester',
+        author: 'OriginalCreator',
+        uploader: {
+          name: 'ActualUploader',
+          memberId: 99,
+        },
         updatedAt: '2024-01-01',
         createdAt: '2023-01-01',
       },
@@ -117,6 +121,10 @@ describe('ApiService', () => {
         thumbnail_url: 'thumb.png',
         endorsement_count: 12,
         mod_downloads: 34,
+        author: 'ActualUploader',
+        uploader: 'ActualUploader',
+        uploader_member_id: 99,
+        original_author: 'OriginalCreator',
         updated_at: '2024-01-01',
         created_at: '2023-01-01',
       })

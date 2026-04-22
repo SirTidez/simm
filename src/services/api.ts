@@ -850,23 +850,41 @@ export class ApiService {
   }
 
   private static transformNexusMods(mods: any[]): any[] {
-    return mods.map((mod: any) => ({
-      mod_id: mod.modId ?? mod.mod_id,
-      name: mod.name,
-      summary: mod.summary,
-      picture_url: mod.pictureUrl ?? mod.picture_url,
-      thumbnail_url: mod.thumbnailUrl ?? mod.thumbnail_url,
-      endorsement_count: mod.endorsements ?? mod.endorsement_count,
-      mod_downloads: mod.downloads ?? mod.mod_downloads,
-      unique_downloads:
-        mod.downloads ?? mod.unique_downloads ?? mod.mod_downloads,
-      version: mod.version,
-      author: mod.author || mod.uploader?.name,
-      updated_at: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
-      created_at: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
-      updated_time: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
-      uploaded_time: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
-    }));
+    return mods.map((mod: any) => {
+      const originalAuthor =
+        mod.originalAuthor ?? mod.original_author ?? mod.author;
+      const uploaderName =
+        mod.uploader?.name ??
+        mod.uploaderName ??
+        mod.uploader_name ??
+        mod.uploader;
+      const uploaderMemberId =
+        mod.uploader?.memberId ??
+        mod.uploader?.member_id ??
+        mod.uploaderMemberId ??
+        mod.uploader_member_id;
+
+      return {
+        mod_id: mod.modId ?? mod.mod_id,
+        name: mod.name,
+        summary: mod.summary,
+        picture_url: mod.pictureUrl ?? mod.picture_url,
+        thumbnail_url: mod.thumbnailUrl ?? mod.thumbnail_url,
+        endorsement_count: mod.endorsements ?? mod.endorsement_count,
+        mod_downloads: mod.downloads ?? mod.mod_downloads,
+        unique_downloads:
+          mod.downloads ?? mod.unique_downloads ?? mod.mod_downloads,
+        version: mod.version,
+        author: uploaderName || originalAuthor || "Unknown",
+        uploader: uploaderName,
+        uploader_member_id: uploaderMemberId,
+        original_author: originalAuthor,
+        updated_at: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
+        created_at: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
+        updated_time: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
+        uploaded_time: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
+      };
+    });
   }
 
   static async getNexusModsLatestUpdated(gameId: string): Promise<{ mods: any[] }> {

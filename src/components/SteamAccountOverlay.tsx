@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSettingsStore } from '../stores/settingsStore';
 import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
+import { Icon } from './Icon';
 
 interface NexusOAuthStatus {
   connected: boolean;
@@ -193,7 +194,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             <div className="account-service-card__header">
               <div className="account-service-card__identity">
                 <div className="account-service-card__icon">
-                  <i className="fab fa-steam-symbol"></i>
+                  <Icon name="fab fa-steam-symbol" />
                 </div>
                 <div>
                   <span className="accounts-eyebrow">Steam Account</span>
@@ -205,15 +206,15 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
             <div className="account-inline-pills">
               <span className={`account-status-pill account-status-pill--${steamConnected ? 'connected' : 'disconnected'}`}>
-                <i className={steamConnected ? 'fas fa-check-circle' : 'fas fa-exclamation-circle'}></i>
+                <Icon name={steamConnected ? 'fas fa-check-circle' : 'fas fa-exclamation-circle'} />
                 {steamConnected ? 'Connected' : 'Not connected'}
               </span>
               <span className="account-capability-pill">
-                <i className="fab fa-steam-symbol"></i>
+                <Icon name="fab fa-steam-symbol" />
                 Protected branch access
               </span>
               <span className="account-capability-pill">
-                <i className="fas fa-lock"></i>
+                <Icon name="fas fa-lock" />
                 Encrypted local storage
               </span>
             </div>
@@ -226,7 +227,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
             <div className="account-service-card__actions">
               <button onClick={() => setShowAuthModal(true)} className="btn btn-primary">
-                <i className={steamConnected ? 'fas fa-sync-alt' : 'fas fa-sign-in-alt'}></i>
+                <Icon name={steamConnected ? 'fas fa-sync-alt' : 'fas fa-sign-in-alt'} />
                 {steamConnected ? 'Refresh Steam Access' : 'Authenticate with Steam'}
               </button>
               <span className="account-action-note">{steamActionNote}</span>
@@ -237,7 +238,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             <div className="account-service-card__header">
               <div className="account-service-card__identity">
                 <div className="account-service-card__icon">
-                  <i className="fas fa-download"></i>
+                  <Icon name="fas fa-download" />
                 </div>
                 <div>
                   <span className="accounts-eyebrow">Nexus Mods</span>
@@ -249,26 +250,26 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
             <div className="account-inline-pills">
               <span className={`account-status-pill account-status-pill--${nexusStatus.connected ? 'connected' : 'disconnected'}`}>
-                <i className={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'}></i>
+                <Icon name={nexusStatus.connected ? 'fas fa-user-check' : 'fas fa-user-slash'} />
                 {nexusStatus.connected ? 'Connected' : 'Disconnected'}
               </span>
               <span className="account-capability-pill">
-                <i className="fas fa-id-badge"></i>
+                <Icon name="fas fa-id-badge" />
                 {tierLabel}
               </span>
               <span className="account-capability-pill">
-                <i className={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'}></i>
+                <Icon name={nexusStatus.account?.canDirectDownload ? 'fas fa-bolt' : 'fas fa-globe'} />
                 {capabilityLabel}
               </span>
               {typeof nexusStatus.account?.memberId === 'number' && (
                 <span className="account-capability-pill">
-                  <i className="fas fa-hashtag"></i>
+                  <Icon name="fas fa-hashtag" />
                   Member {nexusStatus.account.memberId}
                 </span>
               )}
               {nexusExpiry && (
                 <span className="account-capability-pill">
-                  <i className="fas fa-clock"></i>
+                  <Icon name="fas fa-clock" />
                   Expires {nexusExpiry}
                 </span>
               )}
@@ -285,12 +286,12 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             <div className="account-service-card__actions">
               {nexusStatus.connected ? (
                 <button onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy}>
-                  <i className={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-out-alt'}></i>
+                  <Icon name={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-out-alt'} spin={nexusBusy} />
                   {nexusBusy ? 'Working...' : 'Logout from Nexus'}
                 </button>
               ) : (
                 <button onClick={handleNexusLogin} className="btn btn-primary" disabled={nexusBusy}>
-                  <i className={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-in-alt'}></i>
+                  <Icon name={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-in-alt'} spin={nexusBusy} />
                   {nexusBusy ? 'Waiting for Nexus authorization...' : 'Login with Nexus'}
                 </button>
               )}
@@ -302,7 +303,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
           <section className="account-note-card">
             <div className="account-note-card__icon">
-              <i className="fas fa-shield-alt"></i>
+              <Icon name="fas fa-shield-alt" />
             </div>
             <div className="account-note-card__content">
               <span className="accounts-eyebrow">Security & Storage</span>

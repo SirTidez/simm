@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 
 import type { TrackedDownload } from '../types';
 import { useDownloadStatusStore } from '../stores/downloadStatusStore';
+import { Icon } from './Icon';
+import type { IconName } from './icons';
 
 function statusLabel(status: TrackedDownload['status']) {
   switch (status) {
@@ -37,18 +39,18 @@ function kindLabel(kind: TrackedDownload['kind']) {
   }
 }
 
-function kindIcon(kind: TrackedDownload['kind']) {
+function kindIcon(kind: TrackedDownload['kind']): IconName {
   switch (kind) {
     case 'game':
-      return 'fas fa-gamepad';
+      return 'gamepad';
     case 'mod':
-      return 'fas fa-puzzle-piece';
+      return 'puzzlePiece';
     case 'plugin':
-      return 'fas fa-plug';
+      return 'plug';
     case 'framework':
-      return 'fas fa-cubes';
+      return 'cubes';
     default:
-      return 'fas fa-file';
+      return 'file';
   }
 }
 
@@ -94,7 +96,7 @@ function renderDownloadRow(download: TrackedDownload) {
 
       <div className="downloads-panel__row-meta">
         <span className="downloads-panel__kind">
-          <i className={kindIcon(download.kind)} aria-hidden="true"></i>
+          <Icon name={kindIcon(download.kind)} />
           {kindLabel(download.kind)}
         </span>
         <span className={`downloads-panel__status downloads-panel__status--${download.status}`}>

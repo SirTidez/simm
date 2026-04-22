@@ -2538,6 +2538,35 @@ impl ModsService {
         vec![RUNTIME_IL2CPP.to_string(), RUNTIME_MONO.to_string()]
     }
 
+    fn detect_zip_available_runtimes(&self, zip_path: &Path) -> Option<Vec<String>> {
+        let file = File::open(zip_path).ok()?;
+        let mut archive = ZipArchive::new(file).ok()?;
+        let mut runtime_detection_files = Vec::new();
+
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index).ok()?;
+            let name = entry.name();
+            if name.to_ascii_lowercase().ends_with(".dll") {
+                runtime_detection_files.push(name.to_string());
+            }
+        }
+
+        Some(self.detect_available_runtimes(&runtime_detection_files, None))
+    }
+
+    fn build_archive_runtime_mismatch_error(
+        archive_name: &str,
+        requested_runtime: &str,
+        available_runtimes: &[String],
+    ) -> String {
+        format!(
+            "{} does not contain files for the selected environment runtime ({}). The archive appears to support {}. Pick an environment with a matching runtime or use the matching archive for this environment.",
+            archive_name,
+            requested_runtime,
+            available_runtimes.join(" and ")
+        )
+    }
+
     fn runtime_detection_files<'a>(&self, summary: &'a StoragePayloadSummary) -> &'a [String] {
         if summary.primary_files.is_empty() {
             &summary.attached_userlibs
@@ -5164,6 +5193,126 @@ impl ModsService {
         Ok(())
     }
 
+    fn warning_indicates_locked_target(warning: &str) -> bool {
+        let lower = warning.to_ascii_lowercase();
+        lower.contains("being used by another process")
+            || lower.contains("sharing violation")
+            || lower.contains("access is denied")
+            || lower.contains("permission denied")
+            || lower.contains("resource busy")
+            || lower.contains("text file busy")
+            || lower.contains("os error 32")
+            || lower.contains("os error 5")
+    }
+
+    fn environment_game_process_is_running(env_output_dir: &Path) -> bool {
+        let target = env_output_dir.to_string_lossy().to_string();
+        if target.trim().is_empty() {
+            return false;
+        }
+
+        #[cfg(windows)]
+        {
+            let script = r#"
+$target = $env:SIMM_ENV_OUTPUT_DIR
+if (-not $target) { exit 1 }
+$target = [System.IO.Path]::GetFullPath($target)
+$processes = Get-CimInstance Win32_Process -Filter "Name = 'Schedule I.exe'" -ErrorAction SilentlyContinue
+foreach ($process in $processes) {
+  $path = $process.ExecutablePath
+  if (-not $path) { continue }
+  $dir = Split-Path -Parent $path
+  if (-not $dir) { continue }
+  if ([System.StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($dir), $target)) {
+    exit 0
+  }
+}
+exit 1
+"#;
+
+            return std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("SIMM_ENV_OUTPUT_DIR", &target)
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+        }
+
+        #[cfg(unix)]
+        {
+            return std::process::Command::new("pgrep")
+                .args(["-f", &target])
+                .output()
+                .map(|output| output.status.success() && !output.stdout.is_empty())
+                .unwrap_or(false);
+        }
+
+        #[cfg(not(any(windows, unix)))]
+        {
+            false
+        }
+    }
+
+    fn build_storage_install_failure_message(
+        storage_id: &str,
+        env: &Environment,
+        warnings: &[String],
+        storage_mods_exists: bool,
+        storage_plugins_exists: bool,
+        storage_userlibs_exists: bool,
+        storage_userdata_exists: bool,
+        environment_running: bool,
+    ) -> String {
+        let first_warning = warnings.first().cloned().unwrap_or_default();
+        let locked_warnings: Vec<&String> = warnings
+            .iter()
+            .filter(|warning| Self::warning_indicates_locked_target(warning))
+            .collect();
+
+        if !locked_warnings.is_empty() {
+            let running_reason = if environment_running {
+                format!(
+                    " Schedule I is currently running for {}.",
+                    env.name
+                )
+            } else {
+                format!(
+                    " This usually means Schedule I is still running for {}.",
+                    env.name
+                )
+            };
+
+            return format!(
+                "Failed to install this mod into {} because SIMM could not replace one or more files in that environment. Windows reported that the destination files are in use.{} Close the game and then try again. Other possible causes include an open MelonLoader console, another tool watching the Mods folder, File Explorer or an IDE holding the file, or antivirus scanning the environment.\n\nFirst file error: {}",
+                env.name,
+                running_reason,
+                first_warning
+            );
+        }
+
+        if !warnings.is_empty() {
+            return format!(
+                "Failed to install this mod into {}. SIMM tried to copy files from storage {}, but every install step was skipped.\n\nFirst file error: {}\n\nChecked storage folders: Mods(exists={}), Plugins(exists={}), UserLibs(exists={}), UserData(exists={}).",
+                env.name,
+                storage_id,
+                first_warning,
+                storage_mods_exists,
+                storage_plugins_exists,
+                storage_userlibs_exists,
+                storage_userdata_exists
+            );
+        }
+
+        format!(
+            "No mod files found in storage {}. Checked: Mods(exists={}), Plugins(exists={}), UserLibs(exists={}), UserData(exists={}). This usually means the mod archive was empty or contained no supported mod files.",
+            storage_id,
+            storage_mods_exists,
+            storage_plugins_exists,
+            storage_userlibs_exists,
+            storage_userdata_exists
+        )
+    }
+
     pub async fn install_storage_mod_to_envs(
         &self,
         storage_id: &str,
@@ -5361,14 +5510,18 @@ impl ModsService {
             .await?;
 
             if installed_files.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "No mod files found in storage {}. Checked: Mods(exists={}), Plugins(exists={}), UserLibs(exists={}), UserData(exists={}). This usually means the mod archive was empty or contained no .dll files.",
+                let environment_running =
+                    Self::environment_game_process_is_running(Path::new(&env.output_dir));
+                return Err(anyhow::anyhow!(Self::build_storage_install_failure_message(
                     storage_id,
+                    &env,
+                    &warnings,
                     storage_mods.exists(),
                     storage_plugins.exists(),
                     storage_userlibs.exists(),
-                    storage_userdata.exists()
-                ));
+                    storage_userdata.exists(),
+                    environment_running,
+                )));
             }
 
             eprintln!(
@@ -5875,6 +6028,23 @@ impl ModsService {
 
         // Check for Thunderstore manifest.json
         let archive_path = Path::new(zip_path);
+        if let Some(available_runtimes) = self.detect_zip_available_runtimes(archive_path) {
+            if !available_runtimes
+                .iter()
+                .any(|runtime| runtime == normalized_runtime_label)
+            {
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "error": Self::build_archive_runtime_mismatch_error(
+                        _file_name,
+                        normalized_runtime_label,
+                        &available_runtimes,
+                    )
+                }));
+            }
+        }
+
         let thunderstore_manifest = self.extract_thunderstore_manifest(archive_path);
 
         // If we found a Thunderstore manifest, log it and prepare to use it
@@ -8112,6 +8282,51 @@ mod tests {
             Some("https://example.com/alias.png")
         );
         assert_eq!(parsed.downloads, Some(42));
+    }
+
+    #[test]
+    fn build_storage_install_failure_message_describes_locked_environment() {
+        let env = Environment {
+            id: "env-alt".to_string(),
+            name: "Alternate".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "alternate".to_string(),
+            output_dir: r"C:\Games\Alternate".to_string(),
+            runtime: Runtime::Mono,
+            status: crate::types::EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: None,
+        };
+
+        let message = ModsService::build_storage_install_failure_message(
+            "storage-1",
+            &env,
+            &[String::from(
+                r"Skipped C:\Games\Alternate\Mods\Example.dll: failed to replace existing destination (The process cannot access the file because it is being used by another process. (os error 32))",
+            )],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+
+        assert!(message.contains("Alternate"));
+        assert!(message.contains("currently running"));
+        assert!(message.contains("being used by another process"));
+        assert!(message.contains("MelonLoader"));
     }
 
     #[tokio::test]
@@ -12058,6 +12273,82 @@ mod tests {
         assert_eq!(fs::read(&installed_asset).await?, b"party");
         assert!(!output_dir.join("Mods").join("manifest.json").exists());
         assert!(!output_dir.join("Mods").join("README.md").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_reports_runtime_mismatch_for_mono_only_manual_archive_on_il2cpp_env(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-il2cpp-manual-mismatch");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let zip_path = temp
+            .path()
+            .join("DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip");
+        write_zip_fixture(
+            &zip_path,
+            &[
+                (
+                    "manifest.json",
+                    br#"{"name":"DomsExpandedIngredientsAndEffects","version_number":"1.2.0","website_url":"https://github.com/dommakarov1/DomsExpandedIngredientsAndEffects","description":"fixture","dependencies":["LavaGang-MelonLoader-0.7.2"]}"#,
+                ),
+                ("README.md", b"readme"),
+                ("DomsExpandedIngredientsAndEffects-Mono.dll", b"mono"),
+                ("DomsCustomEffects/Icons/Airhorn.png", b"airhorn"),
+                ("DomsCustomEffects/Sounds/Party.wav", b"party"),
+            ],
+        )?;
+
+        let result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                zip_path.to_string_lossy().as_ref(),
+                "DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip",
+                "IL2CPP",
+                "main",
+                None,
+            )
+            .await?;
+
+        assert_eq!(
+            result.get("success").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        let error = result
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(error.contains("Mono"));
+        assert!(error.contains("IL2CPP"));
+        assert!(error.contains("DomsExpandedIngredientsAndEffects"));
 
         Ok(())
     }

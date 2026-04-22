@@ -537,7 +537,9 @@ describe("ModLibraryOverlay", () => {
             description: "Carry more stuff.",
             picture_url: "https://example.com/packrat.png",
             version: "1.0.0",
-            author: "ExampleAuthor",
+            author: "ActualUploader",
+            uploader: "ActualUploader",
+            original_author: "ExampleAuthor",
             uploaded_time: "2025-01-01",
             updated_time: "2025-01-02",
             category_id: 1,
@@ -569,6 +571,9 @@ describe("ModLibraryOverlay", () => {
     });
 
     expect(await screen.findByText("Nexus Results")).toBeTruthy();
+    expect(
+      screen.getByText("ActualUploader • Original creator: ExampleAuthor"),
+    ).toBeTruthy();
     expect(apiMocks.getNexusModsModFiles).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Pack Rat/i }));
@@ -580,6 +585,11 @@ describe("ModLibraryOverlay", () => {
         1629,
       );
     });
+    expect(
+      screen.getByText(
+        "Nexus Mods • ActualUploader • Original creator: ExampleAuthor",
+      ),
+    ).toBeTruthy();
   });
 
   it("ignores stale Nexus file responses after search results are pruned", async () => {

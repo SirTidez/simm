@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { ApiService } from '../services/api';
+import { Icon } from './Icon';
+import type { IconName } from './icons';
 
 interface WelcomeOverlayProps {
   isOpen: boolean;
@@ -11,26 +13,26 @@ interface WelcomeOverlayProps {
 
 const storageCards = [
   {
-    icon: 'fas fa-download',
+    icon: 'download',
     title: 'Downloads',
     body: 'Temporary game payloads and shared mod assets are staged here before they are applied.',
   },
   {
-    icon: 'fas fa-box-archive',
+    icon: 'boxArchive',
     title: 'Backups',
     body: 'Recovery snapshots and support files stay here so environment changes remain reversible.',
   },
   {
-    icon: 'fas fa-file-lines',
+    icon: 'fileLines',
     title: 'Logs',
     body: 'Application and troubleshooting logs live here for support, diagnostics, and export workflows.',
   },
   {
-    icon: 'fas fa-sliders',
+    icon: 'sliders',
     title: 'App Data',
     body: 'Settings, cache, and supporting SIMM data stay organized outside the game directory.',
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string }>;
 
 export function WelcomeOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings }: WelcomeOverlayProps) {
   const [homePath, setHomePath] = useState<string | null>(null);
@@ -145,7 +147,7 @@ export function WelcomeOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings }
 
               <div className="welcome-panel__inline-actions">
                 <button type="button" className="btn btn-secondary" onClick={() => void handleOpenSimmFolder()} disabled={!canOpenSimmFolder}>
-                  <i className="fas fa-folder-open" aria-hidden="true"></i>
+                  <Icon name="folderOpen" />
                   Open SIMM Folder
                 </button>
                 {homePathLookupFailed && (
@@ -166,7 +168,7 @@ export function WelcomeOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings }
                 {storageCards.map((card) => (
                   <article key={card.title} className="welcome-panel__storage-card">
                     <div className="welcome-panel__storage-icon">
-                      <i className={card.icon} aria-hidden="true"></i>
+                      <Icon name={card.icon} />
                     </div>
                     <div>
                       <h5>{card.title}</h5>
@@ -198,15 +200,15 @@ export function WelcomeOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings }
 
               <div className="welcome-panel__actions">
                 <button type="button" className="btn btn-primary" onClick={onOpenWizard}>
-                  <i className="fas fa-plus-circle" aria-hidden="true"></i>
+                  <Icon name="plusCircle" />
                   Create Environment
                 </button>
                 <button type="button" className="btn btn-secondary" onClick={() => void handleOpenSimmFolder()} disabled={!canOpenSimmFolder}>
-                  <i className="fas fa-folder-open" aria-hidden="true"></i>
+                  <Icon name="folderOpen" />
                   Open SIMM Folder
                 </button>
                 <button type="button" className="btn btn-secondary" onClick={onOpenSettings}>
-                  <i className="fas fa-sliders" aria-hidden="true"></i>
+                  <Icon name="sliders" />
                   Open Settings
                 </button>
               </div>

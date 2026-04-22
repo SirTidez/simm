@@ -21,6 +21,7 @@ import type {
   SecurityScanSummary,
 } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
+import { Icon } from './Icon';
 
 interface ModInfo {
   name: string;
@@ -89,6 +90,18 @@ interface ConfirmDialog {
   onConfirm: () => Promise<void> | void;
   readyAt?: number;
 }
+
+const getErrorMessage = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  return fallback;
+};
 
 export interface ModsOverlayNavigationState {
   modsTab?: ModsTab;
@@ -572,8 +585,8 @@ export function ModsOverlay({
     : 0;
 
   const uploadButtonBusyLabel = uploadBatchTotal > 1
-    ? `Uploading ${Math.max(currentUploadProgress, 1)}/${uploadBatchTotal}...`
-    : 'Uploading...';
+    ? `Adding ${Math.max(currentUploadProgress, 1)}/${uploadBatchTotal}...`
+    : 'Adding...';
 
   const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
     if (onOpenSecurityReport) {
@@ -1233,7 +1246,7 @@ export function ModsOverlay({
         onModsChanged();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to install downloaded mod');
+      setError(getErrorMessage(err, 'Failed to install downloaded mod'));
     } finally {
       setInstallingDownloaded(null);
     }
@@ -1433,7 +1446,7 @@ export function ModsOverlay({
       details.push(`Skipped: ${skipped.map((result) => `${result.fileName} (${result.message})`).join('; ')}`);
     }
 
-    return [`Upload batch finished: ${counts}.`, details.join(' ')].filter(Boolean).join(' ');
+    return [`Add batch finished: ${counts}.`, details.join(' ')].filter(Boolean).join(' ');
   };
 
   const finalizeUploadBatch = async (results: ManualUploadBatchResult[]) => {
@@ -1484,7 +1497,9 @@ export function ModsOverlay({
 
     try {
       const sourceInfo = await detectModSource(nextItem.fileName);
-      const detectedRuntime = detectRuntimeFromFileName(nextItem.fileName);
+      const detectedRuntime =
+        detectRuntimeFromFileName(nextItem.fileName) ||
+        (isArchiveFile(nextItem.fileName) ? environment?.runtime ?? null : null);
 
       if (!detectedRuntime) {
         setPendingRuntimeSelection({
@@ -1579,7 +1594,7 @@ export function ModsOverlay({
           {
             fileName: item.fileName,
             status: 'failed',
-            message: result.error || 'Failed to upload mod',
+            message: result.error || 'Failed to add mod',
           },
           remainingQueue,
         );
@@ -1608,7 +1623,7 @@ export function ModsOverlay({
         {
           fileName: item.fileName,
           status: 'failed',
-          message: err instanceof Error ? err.message : 'Failed to upload mod',
+          message: err instanceof Error ? err.message : 'Failed to add mod',
         },
         remainingQueue,
       );
@@ -1651,7 +1666,7 @@ export function ModsOverlay({
       setPendingRuntimeSelection(null);
       await continueUploadBatch(selectedItems);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload mod');
+      setError(err instanceof Error ? err.message : 'Failed to add mod');
       setUploading(false);
     }
   };
@@ -1662,6 +1677,8 @@ export function ModsOverlay({
     if (lower.includes('il2cpp')) return 'IL2CPP';
     return null;
   };
+
+  const isArchiveFile = (fileName: string): boolean => /\.(zip|rar)$/i.test(fileName);
 
   const handleRuntimeSelectionConfirm = async (selectedRuntime: 'IL2CPP' | 'Mono') => {
     if (!pendingRuntimeSelection) return;
@@ -1906,7 +1923,7 @@ export function ModsOverlay({
       setShowSearchResults(false);
       setSearchQuery('');
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to install mod';
+      const errorMsg = getErrorMessage(err, 'Failed to install mod');
       console.error(`Error installing mod ${pkg.name}:`, err);
       setError(errorMsg);
     } finally {
@@ -2108,7 +2125,7 @@ export function ModsOverlay({
       console.error(`Error type:`, typeof err);
       console.error(`Error keys:`, err ? Object.keys(err) : 'null');
 
-      const errorMsg = err instanceof Error ? err.message : (typeof err === 'string' ? err : 'Failed to install mod');
+      const errorMsg = getErrorMessage(err, 'Failed to install mod');
       console.error(`Extracted error message:`, errorMsg);
       setError(errorMsg);
     } finally {
@@ -2558,7 +2575,7 @@ export function ModsOverlay({
     if (!source) {
       return (
         <div className={`${className} mod-card-icon-fallback`}>
-          <i className="fas fa-puzzle-piece"></i>
+          <Icon name="fas fa-puzzle-piece" />
         </div>
       );
     }
@@ -2704,7 +2721,7 @@ export function ModsOverlay({
               className="btn btn-secondary btn-small"
               title="Browse mods from Thunderstore/NexusMods"
             >
-              <i className="fas fa-compass" style={{ marginRight: '0.45rem' }}></i>
+              <Icon name="fas fa-compass" style={{ marginRight: '0.45rem' }} />
               {showSearchInOverlay ? 'Hide Browse' : 'Browse Mods'}
             </button>
             <button
@@ -2715,12 +2732,12 @@ export function ModsOverlay({
             >
               {checkingModUpdates ? (
                 <>
-                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }}></i>
+                  <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }} />
                   Checking...
                 </>
               ) : (
                 <>
-                  <i className="fas fa-sync-alt" style={{ marginRight: '0.45rem' }}></i>
+                  <Icon name="fas fa-sync-alt" style={{ marginRight: '0.45rem' }} />
                   Check Updates
                 </>
               )}
@@ -2733,12 +2750,12 @@ export function ModsOverlay({
             >
               {updatingAllMods ? (
                 <>
-                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }}></i>
+                  <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }} />
                   Updating...
                 </>
               ) : (
                 <>
-                  <i className="fas fa-arrow-up" style={{ marginRight: '0.45rem' }}></i>
+                  <Icon name="fas fa-arrow-up" style={{ marginRight: '0.45rem' }} />
                   Update All ({totalUpdatesAvailable})
                 </>
               )}
@@ -2747,16 +2764,16 @@ export function ModsOverlay({
               onClick={handleUploadClick}
               className="btn btn-primary btn-small"
               disabled={uploading}
-              title="Upload one or more mod files (.dll, .zip, or .rar)"
+              title="Add one or more mod files (.dll, .zip, or .rar)"
             >
               {uploading ? (
                 <>
-                  <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }}></i>
+                  <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }} />
                   {uploadButtonBusyLabel}
                 </>
               ) : (
                 <>
-                  <i className="fas fa-upload" style={{ marginRight: '0.45rem' }}></i>
+                  <Icon name="fas fa-upload" style={{ marginRight: '0.45rem' }} />
                   Add Mod
                 </>
               )}
@@ -2792,7 +2809,7 @@ export function ModsOverlay({
                     fontSize: '0.875rem'
                   }}
                 >
-                  <i className="fas fa-cloud-download-alt" style={{ marginRight: '0.5rem' }}></i>
+                  <Icon name="fas fa-cloud-download-alt" style={{ marginRight: '0.5rem' }} />
                   Thunderstore
                 </button>
                 <button
@@ -2811,7 +2828,7 @@ export function ModsOverlay({
                     fontSize: '0.875rem'
                   }}
                 >
-                  <i className="fas fa-download" style={{ marginRight: '0.5rem' }}></i>
+                  <Icon name="fas fa-download" style={{ marginRight: '0.5rem' }} />
                   NexusMods
                 </button>
               </div>
@@ -2843,8 +2860,7 @@ export function ModsOverlay({
                       fontSize: '0.875rem'
                     }}
                   />
-                  <i
-                    className="fas fa-search"
+                  <Icon name="fas fa-search"
                     style={{
                       position: 'absolute',
                       right: '0.75rem',
@@ -2854,7 +2870,7 @@ export function ModsOverlay({
                       cursor: 'pointer'
                     }}
                     onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
-                  ></i>
+                   />
                 </div>
                 <button
                   onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
@@ -2865,12 +2881,12 @@ export function ModsOverlay({
                 >
                   {(searchSource === 'thunderstore' ? searching : searchingNexusMods) ? (
                     <>
-                      <i className="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }}></i>
+                      <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }} />
                       Searching...
                     </>
                   ) : (
                     <>
-                      <i className="fas fa-search" style={{ marginRight: '0.5rem' }}></i>
+                      <Icon name="fas fa-search" style={{ marginRight: '0.5rem' }} />
                       Search
                     </>
                   )}
@@ -2888,7 +2904,7 @@ export function ModsOverlay({
                     className="btn btn-secondary"
                     style={{ whiteSpace: 'nowrap' }}
                   >
-                    <i className="fas fa-times" style={{ marginRight: '0.5rem' }}></i>
+                    <Icon name="fas fa-times" style={{ marginRight: '0.5rem' }} />
                     Close
                   </button>
                 )}
@@ -2904,7 +2920,7 @@ export function ModsOverlay({
           {/* Search Results - Loading State */}
           {(searching || searchingNexusMods) && (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <Icon name="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
               <p>Searching {searchSource === 'thunderstore' ? 'Thunderstore' : 'NexusMods'}...</p>
             </div>
           )}
@@ -2975,10 +2991,10 @@ export function ModsOverlay({
                               </p>
                             )}
                             <div className="mod-card-meta-row" style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                              <span><i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>{totalDownloads.toLocaleString()}</span>
-                              <span><i className="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }}></i>{(pkg.rating_score || 0).toLocaleString()}</span>
+                              <span><Icon name="fas fa-download" style={{ marginRight: '0.25rem' }} />{totalDownloads.toLocaleString()}</span>
+                              <span><Icon name="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }} />{(pkg.rating_score || 0).toLocaleString()}</span>
                               {latestVersion?.version_number && (
-                                <span><i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>v{latestVersion.version_number}</span>
+                                <span><Icon name="fas fa-tag" style={{ marginRight: '0.25rem' }} />v{latestVersion.version_number}</span>
                               )}
                             </div>
                           </div>
@@ -3005,7 +3021,7 @@ export function ModsOverlay({
 
           {!searching && showSearchResults && searchResults.length === 0 && (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <i className="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <Icon name="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
               <p>No mods found matching your search</p>
             </div>
           )}
@@ -3013,7 +3029,7 @@ export function ModsOverlay({
           {/* NexusMods Search Results - Loading State */}
           {searchingNexusMods && (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <Icon name="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
               <p>Searching NexusMods...</p>
             </div>
           )}
@@ -3060,7 +3076,7 @@ export function ModsOverlay({
                     color: '#ffd7a3',
                     fontSize: '0.85rem'
                   }}>
-                    <i className="fas fa-info-circle" style={{ marginRight: '0.5rem' }}></i>
+                    <Icon name="fas fa-info-circle" style={{ marginRight: '0.5rem' }} />
                     Browsing is available without login. Downloading requires Nexus Login.
                   </div>
                 )}
@@ -3148,10 +3164,10 @@ export function ModsOverlay({
                               </p>
                             )}
                             <div className="mod-card-meta-row" style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                              <span><i className="fas fa-download" style={{ marginRight: '0.25rem' }}></i>{(mod.mod_downloads || 0).toLocaleString()}</span>
-                              <span><i className="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }}></i>{(mod.endorsement_count || 0).toLocaleString()}</span>
+                              <span><Icon name="fas fa-download" style={{ marginRight: '0.25rem' }} />{(mod.mod_downloads || 0).toLocaleString()}</span>
+                              <span><Icon name="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }} />{(mod.endorsement_count || 0).toLocaleString()}</span>
                               {mod.version && (
-                                <span><i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>v{mod.version}</span>
+                                <span><Icon name="fas fa-tag" style={{ marginRight: '0.25rem' }} />v{mod.version}</span>
                               )}
                             </div>
                           </div>
@@ -3190,7 +3206,7 @@ export function ModsOverlay({
             </div>
             ) : (
               <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                <i className="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+                <Icon name="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
                 <p>No compatible mods found for {environment?.runtime} runtime</p>
               </div>
             );
@@ -3198,7 +3214,7 @@ export function ModsOverlay({
 
           {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length === 0 && (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <i className="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <Icon name="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
               <p>No mods found matching your search</p>
             </div>
           )}
@@ -3207,7 +3223,7 @@ export function ModsOverlay({
             <div style={{ flex: 1, minWidth: 0 }}>
               {modsDirectory && (
                 <p style={{ margin: 0, color: '#888', fontSize: '0.875rem', wordBreak: 'break-all' }}>
-                  <i className="fas fa-folder" style={{ marginRight: '0.5rem' }}></i>
+                  <Icon name="fas fa-folder" style={{ marginRight: '0.5rem' }} />
                   {modsDirectory}
                 </p>
               )}
@@ -3220,13 +3236,13 @@ export function ModsOverlay({
               className="btn btn-secondary btn-small"
               title="Open mods folder in file explorer"
             >
-              <i className="fas fa-folder-open"></i>
+              <Icon name="fas fa-folder-open" />
             </button>
           </div>
 
           {!showSearchResults && loading ? (
             <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+              <Icon name="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
               <p>Loading mods...</p>
             </div>
           ) : !showSearchResults && (
@@ -3242,7 +3258,7 @@ export function ModsOverlay({
                         onClick={() => void loadDownloadedLibrary()}
                         title="Refresh library list (e.g. after downloading in Library view)"
                       >
-                        <i className="fas fa-sync-alt" style={{ marginRight: '0.25rem' }}></i>
+                        <Icon name="fas fa-sync-alt" style={{ marginRight: '0.25rem' }} />
                         Refresh
                       </button>
                     </div>
@@ -3326,7 +3342,7 @@ export function ModsOverlay({
                                     }}
                                     title="Click to view security report"
                                   >
-                                    <i className={`fas ${getSecurityBadgeConfig(entry.securityScan)?.icon}`} style={{ marginRight: '0.15rem', fontSize: '0.64rem' }}></i>
+                                    <Icon name={`fas ${getSecurityBadgeConfig(entry.securityScan)?.icon}`} style={{ marginRight: '0.15rem', fontSize: '0.64rem' }} />
                                     {getSecurityBadgeConfig(entry.securityScan)?.label}
                                   </button>
                                 )}
@@ -3354,12 +3370,12 @@ export function ModsOverlay({
                           </div>
                           <div className="mod-card-meta-row mod-card-meta-row--footer" style={{ fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.65rem', alignItems: 'center', flexWrap: 'wrap' }}>
                             <span>
-                              <i className="fas fa-file-code" style={{ marginRight: '0.25rem' }}></i>
+                              <Icon name="fas fa-file-code" style={{ marginRight: '0.25rem' }} />
                               {primaryFile}{extraFiles > 0 ? ` +${extraFiles}` : ''}
                             </span>
                             {activeVersion && (
                               <span>
-                                <i className="fas fa-tag" style={{ marginRight: '0.25rem' }}></i>
+                                <Icon name="fas fa-tag" style={{ marginRight: '0.25rem' }} />
                                 {activeVersion}
                               </span>
                             )}
@@ -3373,7 +3389,7 @@ export function ModsOverlay({
                                 color: getSourceColor(entry.source),
                                 border: `1px solid ${getSourceColor(entry.source)}40`
                               }}>
-                                <i className="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }}></i>
+                                <Icon name="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }} />
                                 {getSourceLabel(entry.source)}
                               </span>
                             )}
@@ -3403,7 +3419,7 @@ export function ModsOverlay({
 
                 {filteredMods.length === 0 ? (
                   <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                    <i className="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }}></i>
+                    <Icon name="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
                     <p>No mods match this filter</p>
                     <p style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
                       Mods should be placed in the Mods directory as .dll files
@@ -3500,10 +3516,10 @@ export function ModsOverlay({
                           title={`Update ${mod.name}`}
                         >
                           {updatingMod === mod.fileName ? (
-                            <i className="fas fa-spinner fa-spin"></i>
+                            <Icon name="fas fa-spinner fa-spin" />
                           ) : (
                             <>
-                              <i className="fas fa-arrow-up"></i>
+                              <Icon name="fas fa-arrow-up" />
                               <span style={{ marginLeft: '0.5rem' }}>Update</span>
                             </>
                           )}
@@ -3520,10 +3536,10 @@ export function ModsOverlay({
                           title={`Enable ${mod.name}`}
                         >
                           {enablingMod === mod.fileName ? (
-                            <i className="fas fa-spinner fa-spin"></i>
+                            <Icon name="fas fa-spinner fa-spin" />
                           ) : (
                             <>
-                              <i className="fas fa-check"></i>
+                              <Icon name="fas fa-check" />
                               <span style={{ marginLeft: '0.5rem' }}>Enable</span>
                             </>
                           )}
@@ -3539,10 +3555,10 @@ export function ModsOverlay({
                           title={`Disable ${mod.name}`}
                         >
                           {disablingMod === mod.fileName ? (
-                            <i className="fas fa-spinner fa-spin"></i>
+                            <Icon name="fas fa-spinner fa-spin" />
                           ) : (
                             <>
-                              <i className="fas fa-ban"></i>
+                              <Icon name="fas fa-ban" />
                               <span style={{ marginLeft: '0.5rem' }}>Disable</span>
                             </>
                           )}
@@ -3559,10 +3575,10 @@ export function ModsOverlay({
                         title={`Delete ${mod.name}`}
                       >
                         {deletingMod === mod.fileName ? (
-                          <i className="fas fa-spinner fa-spin"></i>
+                          <Icon name="fas fa-spinner fa-spin" />
                         ) : (
                           <>
-                            <i className="fas fa-trash"></i>
+                            <Icon name="fas fa-trash" />
                             <span style={{ marginLeft: '0.5rem' }}>Delete</span>
                           </>
                         )}
@@ -3571,7 +3587,7 @@ export function ModsOverlay({
                     </div>
                     <div className="mod-card-meta-row mod-card-meta-row--footer" style={{ display: 'flex', gap: '0.65rem', alignItems: 'center', fontSize: '0.78rem', color: '#8f9cb0', flexWrap: 'wrap' }}>
                       <span>
-                        <i className="fas fa-file-code" style={{ marginRight: '0.25rem' }}></i>
+                        <Icon name="fas fa-file-code" style={{ marginRight: '0.25rem' }} />
                         {mod.fileName}
                       </span>
                       {mod.version && (() => {
@@ -3587,7 +3603,7 @@ export function ModsOverlay({
 
                         return (
                           <span>
-                            <i className="fas fa-tag" style={{ marginRight: '0.25rem', color: versionColor }}></i>
+                            <Icon name="fas fa-tag" style={{ marginRight: '0.25rem', color: versionColor }} />
                             <span style={{ color: versionColor, fontWeight: versionColor !== '#888' ? 'bold' : 'normal' }}>
                               {mod.version}
                             </span>
@@ -3609,7 +3625,7 @@ export function ModsOverlay({
                           color: getSourceColor(mod.source),
                           border: `1px solid ${getSourceColor(mod.source)}40`
                         }}>
-                          <i className="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }}></i>
+                          <Icon name="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }} />
                           {getSourceLabel(mod.source)}
                         </span>
                       )}
@@ -3642,11 +3658,11 @@ export function ModsOverlay({
           >
             <div className="modal-header" style={{ borderBottom: '1px solid #2f3a4f' }}>
               <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <i className="fas fa-cube"></i>
+                <Icon name="fas fa-cube" />
                 Mod View
               </h2>
               <button className="btn btn-secondary btn-small" onClick={closeModView}>
-                <i className="fas fa-arrow-left" style={{ marginRight: '0.45rem' }}></i>
+                <Icon name="fas fa-arrow-left" style={{ marginRight: '0.45rem' }} />
                 Back
               </button>
             </div>
@@ -3668,7 +3684,7 @@ export function ModsOverlay({
                     />
                   ) : (
                     <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: '#7d8fa9' }}>
-                      <i className="fas fa-puzzle-piece" style={{ fontSize: '1.6rem' }}></i>
+                      <Icon name="fas fa-puzzle-piece" style={{ fontSize: '1.6rem' }} />
                     </div>
                   )}
                 </div>
@@ -3694,7 +3710,7 @@ export function ModsOverlay({
                           lineHeight: 1,
                         }}
                       >
-                        <i className={`fas ${activeModViewSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                        <Icon name={`fas ${activeModViewSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }} />
                         {activeModViewSecurityBadge.label}
                       </span>
                     </div>
@@ -3744,7 +3760,7 @@ export function ModsOverlay({
                     className="btn btn-secondary btn-small"
                     onClick={() => void openStoredSecurityReport(activeModView.storageId!, `Security Report - ${activeModView.name}`)}
                   >
-                    <i className="fas fa-shield-alt" style={{ marginRight: '0.45rem' }}></i>
+                    <Icon name="fas fa-shield-alt" style={{ marginRight: '0.45rem' }} />
                     Security Report
                   </button>
                 )}
@@ -3756,7 +3772,7 @@ export function ModsOverlay({
                     className="btn btn-secondary btn-small"
                     style={{ textDecoration: 'none' }}
                   >
-                    <i className="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }}></i>
+                    <Icon name="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }} />
                     Open Source Page
                   </a>
                 )}
@@ -3863,7 +3879,7 @@ export function ModsOverlay({
                       className={`workspace-collection__rail-button ${modsTab === tab ? 'workspace-collection__rail-button--active' : ''}`}
                       onClick={() => setModsTab(tab)}
                     >
-                      <i className={icon}></i>
+                      <Icon name={icon} />
                       <span>{label}</span>
                     </button>
                   ))}
@@ -3917,7 +3933,12 @@ export function ModsOverlay({
                   <button onClick={handleCheckModUpdates} className="btn btn-secondary btn-small" disabled={checkingModUpdates}>
                     {checkingModUpdates ? 'Checking...' : 'Check Updates'}
                   </button>
-                  <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
+                  <button
+                    onClick={handleUploadClick}
+                    className="btn btn-primary btn-small"
+                    disabled={uploading}
+                    title="Add one or more mod files (.dll, .zip, or .rar)"
+                  >
                     {uploading ? uploadButtonBusyLabel : 'Add Mod'}
                   </button>
                   <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
@@ -4486,7 +4507,7 @@ export function ModsOverlay({
                             lineHeight: 1,
                           }}
                         >
-                          <i className={`fas ${selectedInstalledSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }}></i>
+                          <Icon name={`fas ${selectedInstalledSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }} />
                           {selectedInstalledSecurityBadge.label}
                         </span>
                       </div>

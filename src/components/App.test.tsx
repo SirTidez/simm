@@ -17,6 +17,23 @@ const settingsStoreMocks = vi.hoisted(() => ({
 }));
 const modLibraryOverlayMocks = vi.hoisted(() => ({
   lastNavigationState: null as any,
+  suspendOnRender: false,
+  suspendPromise: null as Promise<void> | null,
+  resolveSuspend: null as (() => void) | null,
+  prepareSuspense() {
+    this.suspendOnRender = true;
+    this.suspendPromise = new Promise<void>((resolve) => {
+      this.resolveSuspend = () => {
+        this.suspendOnRender = false;
+        this.resolveSuspend = null;
+        this.suspendPromise = null;
+        resolve();
+      };
+    });
+  },
+  releaseSuspense() {
+    this.resolveSuspend?.();
+  },
 }));
 const dialogMocks = vi.hoisted(() => ({
   confirm: vi.fn(),
@@ -111,41 +128,47 @@ vi.mock('./ModLibraryOverlay', () => ({
     onNavigationStateChange?: (state: any) => void;
     onOpenSecurityReport?: (state: any) => void;
   }) =>
-    isOpen ? (
-      <div>
-        <span>Mod Library Overlay</span>
-        <span>Active Library Tab: {navigationState?.libraryTab ?? 'discover'}</span>
-        <button onClick={() => onNavigationStateChange?.({ libraryTab: 'library', searchQuery: 'pack rat' })}>
-          Save Library State
-        </button>
-        <button
-          onClick={() =>
-            onOpenSecurityReport?.({
-              title: 'Security Findings - Pack Rat',
-              report: {
-                summary: {
-                  state: 'verified',
-                  verified: true,
-                  totalFindings: 0,
-                  threatFamilyCount: 0,
+    isOpen ? (() => {
+      if (modLibraryOverlayMocks.suspendOnRender && modLibraryOverlayMocks.suspendPromise) {
+        throw modLibraryOverlayMocks.suspendPromise;
+      }
+
+      return (
+        <div>
+          <span>Mod Library Overlay</span>
+          <span>Active Library Tab: {navigationState?.libraryTab ?? 'discover'}</span>
+          <button onClick={() => onNavigationStateChange?.({ libraryTab: 'library', searchQuery: 'pack rat' })}>
+            Save Library State
+          </button>
+          <button
+            onClick={() =>
+              onOpenSecurityReport?.({
+                title: 'Security Findings - Pack Rat',
+                report: {
+                  summary: {
+                    state: 'verified',
+                    verified: true,
+                    totalFindings: 0,
+                    threatFamilyCount: 0,
+                  },
+                  policy: {
+                    enabled: true,
+                    requiresConfirmation: false,
+                    blocked: false,
+                    promptOnHighFindings: false,
+                    blockCriticalFindings: false,
+                  },
+                  files: [],
                 },
-                policy: {
-                  enabled: true,
-                  requiresConfirmation: false,
-                  blocked: false,
-                  promptOnHighFindings: false,
-                  blockCriticalFindings: false,
-                },
-                files: [],
-              },
-            })
-          }
-        >
-          Open Security Report
-        </button>
-        <button onClick={onClose}>Close Mod Library</button>
-      </div>
-    ) : null,
+              })
+            }
+          >
+            Open Security Report
+          </button>
+          <button onClick={onClose}>Close Mod Library</button>
+        </div>
+      );
+    })() : null,
 }));
 
 vi.mock('./SecurityScanReportPage', () => ({
@@ -245,6 +268,9 @@ vi.mock('./DownloadsPanel', () => ({
 describe('App', () => {
   beforeEach(() => {
     modLibraryOverlayMocks.lastNavigationState = null;
+    modLibraryOverlayMocks.suspendOnRender = false;
+    modLibraryOverlayMocks.suspendPromise = null;
+    modLibraryOverlayMocks.resolveSuspend = null;
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
     deepLinkMocks.getCurrent.mockReset();
@@ -318,6 +344,21 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('keeps the workspace shell interactive while a workspace panel is loading', async () => {
+    modLibraryOverlayMocks.prepareSuspense();
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
+
+    expect(await screen.findByText('Loading workspace panel...')).toBeTruthy();
+    expect(screen.getByText('Downloads Panel')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
+
+    modLibraryOverlayMocks.releaseSuspense();
+
+    expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
   });
 
   it('reuses the last mod library navigation state when reopening from the toolbar', async () => {

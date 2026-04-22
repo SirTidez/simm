@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 
 import { ApiService } from '../services/api';
 import { useSettingsStore } from '../stores/settingsStore';
+import { Icon } from './Icon';
 
 interface Props {
   isOpen: boolean;
@@ -119,15 +120,15 @@ export function AuthenticationModal({
 
         <div className="auth-modal__status-strip" aria-hidden={waitingForAuth}>
           <div className="auth-modal__status-pill">
-            <i className="fas fa-shield-halved"></i>
+            <Icon name="fas fa-shield-halved" />
             Protected branches
           </div>
           <div className="auth-modal__status-pill">
-            <i className="fas fa-lock"></i>
+            <Icon name="fas fa-lock" />
             Stored locally
           </div>
           <div className="auth-modal__status-pill">
-            <i className="fas fa-mobile-screen-button"></i>
+            <Icon name="fas fa-mobile-screen-button" />
             Steam Guard may be required
           </div>
         </div>
@@ -254,7 +255,7 @@ export function AuthenticationModal({
                   </button>
                 )}
                 <button type="submit" className="btn btn-primary" disabled={loading || !username || !password}>
-                  <i className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-right-to-bracket'}></i>
+                  <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-right-to-bracket'} spin={loading} />
                   {loading ? 'Authenticating…' : 'Authenticate with Steam'}
                 </button>
               </div>

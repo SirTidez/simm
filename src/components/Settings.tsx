@@ -9,6 +9,7 @@ import {
 } from "./EnvironmentList";
 import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
 import type { Settings as AppSettings } from "../types";
+import { Icon } from './Icon';
 
 type SettingsProps = {
   isOpen: boolean;
@@ -670,15 +671,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
                   title={releaseApiError || undefined}
                 >
-                  <i
-                    className={
+                  <Icon name={
                       checkingReleaseApi
                         ? "fas fa-spinner fa-spin"
                         : releaseApiError
                           ? "fas fa-exclamation-circle"
                           : "fas fa-check-circle"
                     }
-                  ></i>
+                   />
                   GitHub API {releaseApiLabel}
                 </span>
               </div>
@@ -693,7 +693,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         Interface
                       </span>
                       <h3>
-                        <i className="fas fa-sliders"></i> App defaults
+                        <Icon name="fas fa-sliders" /> App defaults
                       </h3>
                     </div>
                     <p>
@@ -866,7 +866,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         Install Defaults
                       </span>
                       <h3>
-                        <i className="fas fa-folder-tree"></i> Downloads,
+                        <Icon name="fas fa-folder-tree" /> Downloads,
                         storage, and loader setup
                       </h3>
                     </div>
@@ -1005,7 +1005,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         Updates & Maintenance
                       </span>
                       <h3>
-                        <i className="fas fa-rotate"></i> Cadence, cache, and
+                        <Icon name="fas fa-rotate" /> Cadence, cache, and
                         service state
                       </h3>
                     </div>
@@ -1136,15 +1136,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
                           title={releaseApiError || undefined}
                         >
-                          <i
-                            className={
+                          <Icon name={
                               checkingReleaseApi
                                 ? "fas fa-spinner fa-spin"
                                 : releaseApiError
                                   ? "fas fa-exclamation-circle"
                                   : "fas fa-check-circle"
                             }
-                          ></i>
+                           />
                           {releaseApiLabel}
                         </span>
                       </strong>
@@ -1231,7 +1230,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     <div>
                       <span className="settings-section__eyebrow">MLVScan</span>
                       <h3>
-                        <i className="fas fa-shield-virus"></i> Security
+                        <Icon name="fas fa-shield-virus" /> Security
                         scanning and trust signals
                       </h3>
                     </div>
@@ -1475,14 +1474,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     className="btn btn-secondary"
                     disabled={browsing}
                   >
-                    <i
-                      className={
+                    <Icon name={
                         browsing
                           ? "fas fa-spinner fa-spin"
                           : "fas fa-location-crosshairs"
                       }
                       aria-hidden="true"
-                    ></i>
+                     />
                     {browsing ? "Loading…" : "Go to Path"}
                   </button>
                 </div>
@@ -1514,14 +1512,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       creatingFolder || !newFolderName.trim() || !directoryPath
                     }
                   >
-                    <i
-                      className={
+                    <Icon name={
                         creatingFolder
                           ? "fas fa-spinner fa-spin"
                           : "fas fa-folder-plus"
                       }
                       aria-hidden="true"
-                    ></i>
+                     />
                     {creatingFolder ? "Creating…" : "Create Folder"}
                   </button>
                 </div>
@@ -1530,7 +1527,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               <div className="wizard-directory-dialog__list" role="list">
                 {browsing ? (
                   <div className="wizard-empty-card">
-                    <i className="fas fa-spinner fa-spin"></i>
+                    <Icon name="fas fa-spinner fa-spin" />
                     <strong>Loading directories</strong>
                     <p>SIMM is reading the current folder contents.</p>
                   </div>
@@ -1544,13 +1541,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           void loadDirectory(getParentPath(directoryPath) || "")
                         }
                       >
-                        <i className="fas fa-arrow-up"></i>
+                        <Icon name="fas fa-arrow-up" />
                         <span>Parent Directory</span>
                       </button>
                     )}
                     {directoryList.length === 0 ? (
                       <div className="wizard-empty-card">
-                        <i className="fas fa-folder-open"></i>
+                        <Icon name="fas fa-folder-open" />
                         <strong>No subdirectories found</strong>
                         <p>
                           This location does not contain any folders that SIMM
@@ -1565,7 +1562,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           className="wizard-directory-row"
                           onClick={() => void loadDirectory(dir.path)}
                         >
-                          <i className="fas fa-folder"></i>
+                          <Icon name="fas fa-folder" />
                           <span>{dir.name}</span>
                         </button>
                       ))

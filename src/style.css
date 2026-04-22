@@ -832,7 +832,8 @@ body::before {
   min-width: 0;
 }
 
-.environment-actions-grid .btn i {
+.environment-actions-grid .btn i,
+.environment-actions-grid .btn svg {
   font-size: 0.875rem;
   flex-shrink: 0;
 }
@@ -2479,7 +2480,8 @@ body::before {
   text-decoration: underline;
 }
 
-.melonloader-dialog__release-link i {
+.melonloader-dialog__release-link i,
+.melonloader-dialog__release-link svg {
   font-size: 0.7rem;
 }
 
@@ -2638,7 +2640,8 @@ body::before {
   padding: 1.3rem 1rem;
 }
 
-.wizard-empty-card i {
+.wizard-empty-card i,
+.wizard-empty-card svg {
   font-size: 1.35rem;
   color: #8cb3ee;
 }
@@ -2674,11 +2677,13 @@ body::before {
   padding: 0.8rem 0.9rem;
 }
 
-.wizard-directory-row i {
+.wizard-directory-row i,
+.wizard-directory-row svg {
   color: #8cb4f2;
 }
 
-.wizard-directory-row--parent i {
+.wizard-directory-row--parent i,
+.wizard-directory-row--parent svg {
   color: #b7ccef;
 }
 
@@ -4123,7 +4128,8 @@ body::before {
   color: #9fb5d1;
 }
 
-.logs-panel__toolbar-group--search i {
+.logs-panel__toolbar-group--search i,
+.logs-panel__toolbar-group--search svg {
   font-size: 0.78rem;
 }
 
@@ -6003,7 +6009,8 @@ body {
   white-space: nowrap;
 }
 
-.downloads-panel__kind i {
+.downloads-panel__kind i,
+.downloads-panel__kind svg {
   font-size: 0.72rem;
   color: var(--workspace-icon-surface);
 }
@@ -7059,12 +7066,37 @@ body {
     0 10px 22px rgba(6, 14, 26, 0.22);
 }
 
-.workspace-collection__toolbar-select-wrap i {
+.workspace-collection__toolbar-select-wrap i,
+.workspace-collection__toolbar-select-wrap svg {
   position: absolute;
   right: 0.82rem;
   color: var(--workspace-eyebrow-color);
   font-size: 0.72rem;
   pointer-events: none;
+}
+
+.workspace-panel-fallback {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 1.5rem;
+}
+
+.workspace-panel-fallback__header {
+  display: grid;
+  gap: 0.28rem;
+  justify-items: center;
+  text-align: center;
+  padding: 1.1rem 1.25rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--workspace-stroke, var(--card-border-color, #2b3950));
+  background: var(--workspace-surface-card, var(--card-bg-color, #1a2433));
+  color: var(--workspace-copy-color, var(--text-secondary, #9fb5d2));
+}
+
+.workspace-panel-fallback__header strong {
+  color: var(--workspace-title-color, var(--app-text-color, #eef5ff));
+  font-size: 0.95rem;
 }
 
 .workspace-collection__toolbar-select-wrap:hover {

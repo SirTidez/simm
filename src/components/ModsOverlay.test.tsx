@@ -316,6 +316,35 @@ describe('ModsOverlay', () => {
     });
   });
 
+  it('adds Nexus-style archives without a runtime prompt by using the environment runtime', async () => {
+    openMock.mockResolvedValueOnce('C:/mods/DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip');
+    apiMocks.uploadMod.mockResolvedValue({ success: true });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    const addButton = await screen.findByRole('button', { name: 'Add Mod' });
+    expect(addButton.getAttribute('title')).toContain('Add one or more mod files');
+    fireEvent.click(addButton);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Select Mod Runtime')).toBeNull();
+      expect(apiMocks.uploadMod).toHaveBeenCalledWith(
+        'env-1',
+        'C:/mods/DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip',
+        'DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip',
+        'IL2CPP',
+        expect.objectContaining({ detectedRuntime: 'IL2CPP', source: 'unknown' }),
+        false,
+      );
+    });
+  });
+
   it('uploads multiple selected files in order and refreshes collections once after the batch completes', async () => {
     openMock.mockResolvedValueOnce([
       'C:/mods/Alpha-Mono.zip',
@@ -373,12 +402,12 @@ describe('ModsOverlay', () => {
       expect(onModsChanged).toHaveBeenCalledTimes(1);
     });
 
-    expect((await screen.findAllByText(/Upload batch finished: 2 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 2 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
   });
 
   it('skips an unresolved file when runtime selection is canceled and continues with the remaining uploads', async () => {
     openMock.mockResolvedValueOnce([
-      'C:/mods/UnknownArchive.zip',
+      'C:/mods/UnknownFile.dll',
       'C:/mods/Known-Mono.dll',
     ]);
     apiMocks.uploadMod.mockResolvedValue({ success: true });
@@ -408,8 +437,8 @@ describe('ModsOverlay', () => {
       );
     });
 
-    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 0 failed, 1 skipped\./i)).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Skipped: UnknownArchive\.zip \(Runtime selection canceled\.\)/i).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 1 succeeded, 0 failed, 1 skipped\./i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Skipped: UnknownFile\.dll \(Runtime selection canceled\.\)/i).length).toBeGreaterThan(0);
   });
 
   it('treats a dismissed runtime mismatch warning as a successful upload', async () => {
@@ -435,7 +464,7 @@ describe('ModsOverlay', () => {
     expect(await screen.findByText('Runtime Mismatch Warning')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 1 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Skipped: Mismatch-Mono\.zip/i)).toBeNull();
   });
 
@@ -462,7 +491,7 @@ describe('ModsOverlay', () => {
       expect(apiMocks.uploadMod).toHaveBeenCalledTimes(2);
     });
 
-    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 1 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 1 succeeded, 1 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Failed: First-Mono\.dll \(broken archive\)/i).length).toBeGreaterThan(0);
   });
 

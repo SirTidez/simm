@@ -4,6 +4,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
+import { Icon } from './Icon';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
 
@@ -887,19 +888,19 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             </div>
             <div className="logs-panel__header-actions">
               <button type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void ApiService.openPath(selectedFilePath)} disabled={!selectedLogFile}>
-                <i className="fas fa-file-lines"></i>
+                <Icon name="fas fa-file-lines" />
                 Open File
               </button>
               <button type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void ApiService.revealPath(selectedFilePath)} disabled={!selectedLogFile}>
-                <i className="fas fa-folder-open"></i>
+                <Icon name="fas fa-folder-open" />
                 Open Folder
               </button>
               <button type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void reloadSelectedLogFile(selectedLogFile.path)} disabled={!selectedLogFile || loading}>
-                <i className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'}></i>
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
                 Reload
               </button>
               <button type="button" className="btn btn-primary" onClick={() => void handleExport()} disabled={!selectedLogFile || exporting}>
-                <i className={exporting ? 'fas fa-spinner fa-spin' : 'fas fa-download'}></i>
+                <Icon name={exporting ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
                 {exporting ? 'Exporting…' : 'Export'}
               </button>
             </div>
@@ -908,7 +909,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
           <div className="logs-panel__utility-bar">
             <div className="logs-panel__toolbar">
               <div className="logs-panel__toolbar-group logs-panel__toolbar-group--search">
-                <i className="fas fa-search"></i>
+                <Icon name="fas fa-search" />
                 <input
                   type="text"
                   value={searchQuery}
@@ -969,7 +970,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
               {selectedModTag && (
                 <button type="button" className="logs-panel__active-filter" onClick={() => setSelectedModTag(null)} style={getModAccentStyle(selectedModTag)}>
                   <span>Mod: {selectedModTag}</span>
-                  <i className="fas fa-times"></i>
+                  <Icon name="fas fa-times" />
                 </button>
               )}
 
@@ -985,7 +986,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     jumpToLive();
                   }}
                 >
-                  <i className={`fas ${autoScroll ? 'fa-pause' : 'fa-play'}`}></i>
+                  <Icon name={`fas ${autoScroll ? 'fa-pause' : 'fa-play'}`} />
                   {autoScroll ? 'Pause Live' : 'Follow Live'}
                 </button>
               )}
@@ -1036,25 +1037,25 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             >
               {error ? (
                 <div className="logs-panel__empty-state logs-panel__empty-state--error">
-                  <i className="fas fa-triangle-exclamation"></i>
+                  <Icon name="fas fa-triangle-exclamation" />
                   <strong>Failed to load logs</strong>
                   <p>{error}</p>
                 </div>
               ) : loading && logLines.length === 0 ? (
                 <div className="logs-panel__empty-state">
-                  <i className="fas fa-spinner fa-spin"></i>
+                  <Icon name="fas fa-spinner fa-spin" />
                   <strong>Loading log file</strong>
                   <p>Fetching the latest lines for this environment.</p>
                 </div>
               ) : !selectedLogFile ? (
                 <div className="logs-panel__empty-state">
-                  <i className="fas fa-file-lines"></i>
+                  <Icon name="fas fa-file-lines" />
                   <strong>Select a log source</strong>
                   <p>Choose a live or archived log from the rail to begin reviewing output.</p>
                 </div>
               ) : visibleLines.length === 0 ? (
                 <div className="logs-panel__empty-state">
-                  <i className={`fas ${logLines.length === 0 ? 'fa-wave-square' : 'fa-filter-circle-xmark'}`}></i>
+                  <Icon name={`fas ${logLines.length === 0 ? 'fa-wave-square' : 'fa-filter-circle-xmark'}`} />
                   <strong>{logLines.length === 0 ? 'No log content yet' : 'No lines match the current filters'}</strong>
                   <p>
                     {logLines.length === 0
@@ -1099,7 +1100,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                             {getLevelLabel(effectiveLevel)}
                           </span>
                           <span className={`logs-panel__line-category logs-panel__line-category--${line.category}`}>
-                            <i className={`fas ${getCategoryIcon(line.category)}`}></i>
+                            <Icon name={`fas ${getCategoryIcon(line.category)}`} />
                             {getCategoryLabel(line.category)}
                           </span>
                         </div>
@@ -1127,7 +1128,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             {!isAtBottom && isLiveFile && (
               <div className="logs-panel__jump-live-overlay">
                 <button type="button" className="logs-panel__jump-live-button" onClick={jumpToLive}>
-                  <i className="fas fa-arrow-down"></i>
+                  <Icon name="fas fa-arrow-down" />
                   Jump to Live
                 </button>
               </div>
@@ -1145,7 +1146,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                 onClick={() => setIsInspectorCollapsed((current) => !current)}
                 aria-label={showCollapsedInspector ? 'Expand Inspector' : 'Collapse Inspector'}
               >
-                <i className={`fas ${showCollapsedInspector ? 'fa-angles-left' : 'fa-angles-right'}`}></i>
+                <Icon name={`fas ${showCollapsedInspector ? 'fa-angles-left' : 'fa-angles-right'}`} />
                 {showCollapsedInspector ? 'Expand' : 'Collapse'}
               </button>
             )}
@@ -1250,7 +1251,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                 )}
                 <div className="logs-panel__quick-actions logs-panel__quick-actions--compact">
                   <button type="button" className="btn btn-secondary" onClick={() => void handleCopySelectedLine()} disabled={!selectedLine}>
-                    <i className="fas fa-copy"></i>
+                    <Icon name="fas fa-copy" />
                     Copy Line
                   </button>
                   <button
@@ -1259,15 +1260,15 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     onClick={() => selectedLine?.modTag && setSelectedModTag(selectedLine.modTag)}
                     disabled={!selectedLine?.modTag}
                   >
-                    <i className="fas fa-filter"></i>
+                    <Icon name="fas fa-filter" />
                     Filter to Mod
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={() => setSelectedModTag(null)} disabled={!selectedModTag}>
-                    <i className="fas fa-filter-circle-xmark"></i>
+                    <Icon name="fas fa-filter-circle-xmark" />
                     Clear Filter
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={handleJumpToNewestRelevantLine} disabled={visibleLines.length === 0}>
-                    <i className="fas fa-arrow-down"></i>
+                    <Icon name="fas fa-arrow-down" />
                     Jump to Live
                   </button>
                 </div>
@@ -1313,7 +1314,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                           onClick={() => void handleOpenModLibraryView(selectedModContext.modTag)}
                           disabled={openingModView || !onOpenModLibraryView}
                         >
-                          <i className="fas fa-layer-group"></i>
+                          <Icon name="fas fa-layer-group" />
                           {openingModView ? 'Opening…' : 'Open in Mod Library'}
                         </button>
                       </div>

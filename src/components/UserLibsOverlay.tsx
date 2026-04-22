@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
+import { Icon } from './Icon';
 
 interface UserLibInfo {
   name: string;
@@ -165,19 +166,19 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
         {
           key: userLib.disabled ? 'enable' : 'disable',
           label: userLib.disabled ? 'Enable' : 'Disable',
-          icon: userLib.disabled ? 'fas fa-toggle-on' : 'fas fa-toggle-off',
+          icon: userLib.disabled ? 'toggleOn' : 'toggleOff',
           onSelect: () => void handleToggleUserLib(userLib),
         },
         {
           key: 'open-folder',
           label: 'Open Folder',
-          icon: 'fas fa-folder-open',
+          icon: 'folderOpen',
           onSelect: () => void handleOpenFolder(),
         },
         {
           key: 'reload',
           label: 'Reload',
-          icon: 'fas fa-rotate',
+          icon: 'rotate',
           onSelect: () => void loadUserLibs(),
         },
       ],
@@ -274,7 +275,7 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
                       onContextMenu={(event) => openContextMenu(event, userLib)}
                     >
                       <div className="workspace-file-row__icon">
-                        <i className={userLib.isDirectory ? 'fas fa-folder-tree' : 'fas fa-file-code'} aria-hidden="true"></i>
+                        <Icon name={userLib.isDirectory ? 'folderTree' : 'fileCode'} />
                       </div>
                       <div className="workspace-collection__row-body">
                         <div className="workspace-collection__row-title">{userLib.name}</div>
@@ -304,11 +305,11 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
             </div>
           )}
           {selectedUserLib && (
-            <div className="workspace-inspector-card">
-              <div className="workspace-inspector-card__header workspace-inspector-card__header--file">
-                <div className="workspace-file-row__icon workspace-file-row__icon--large">
-                  <i className={selectedUserLib.isDirectory ? 'fas fa-folder-tree' : 'fas fa-file-code'} aria-hidden="true"></i>
-                </div>
+              <div className="workspace-inspector-card">
+                <div className="workspace-inspector-card__header workspace-inspector-card__header--file">
+                  <div className="workspace-file-row__icon workspace-file-row__icon--large">
+                    <Icon name={selectedUserLib.isDirectory ? 'folderTree' : 'fileCode'} />
+                  </div>
                 <div>
                   <h3>{selectedUserLib.name}</h3>
                   <div className="workspace-inspector-card__subtle">

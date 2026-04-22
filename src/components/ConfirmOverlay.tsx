@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useId, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { Icon } from './Icon';
 
 interface ConfirmOverlayProps {
   isOpen: boolean;
@@ -87,7 +88,7 @@ export function ConfirmOverlay({
         <div className="app-dialog__body">
           <div className={`app-dialog__callout app-dialog__callout--${resolvedTone}`}>
             <div className="app-dialog__icon" aria-hidden="true">
-              <i className={resolvedTone === 'danger' ? 'fas fa-triangle-exclamation' : 'fas fa-circle-question'}></i>
+              <Icon name={resolvedTone === 'danger' ? 'triangleExclamation' : 'circleQuestion'} />
             </div>
             <div className="app-dialog__meta">
               <strong>{resolvedTone === 'danger' ? 'Review before continuing' : 'Confirm to continue'}</strong>

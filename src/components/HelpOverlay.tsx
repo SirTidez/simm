@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import { Icon } from './Icon';
+import type { IconName } from './icons';
 
 interface HelpOverlayProps {
   isOpen: boolean;
@@ -10,25 +12,25 @@ interface HelpOverlayProps {
 
 const quickStartSteps = [
   {
-    icon: 'fas fa-plus-circle',
+    icon: 'plusCircle',
     title: 'Create an install',
     body: 'Use New Game to choose a branch, confirm the target folder, and create a managed environment.',
   },
   {
-    icon: 'fas fa-user-circle',
+    icon: 'userCircle',
     title: 'Authenticate when needed',
     body: 'Reconnect Steam for protected branch downloads and link Nexus when you want manager download support.',
   },
   {
-    icon: 'fas fa-download',
+    icon: 'download',
     title: 'Download and maintain',
     body: 'Track updates, install mods, and manage support tools from each environment workspace.',
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string }>;
 
 const primaryHelpCards = [
   {
-    icon: 'fas fa-hard-drive',
+    icon: 'hardDrive',
     title: 'Manage Game Installs',
     copy: 'Use install actions from the Home workspace to keep each environment healthy and easy to launch.',
     items: [
@@ -40,7 +42,7 @@ const primaryHelpCards = [
     ],
   },
   {
-    icon: 'fas fa-user-gear',
+    icon: 'userGear',
     title: 'Settings and Accounts',
     copy: 'Use the utility panes for environment defaults, tools, update cadence, and linked service access.',
     items: [
@@ -50,7 +52,7 @@ const primaryHelpCards = [
     ],
   },
   {
-    icon: 'fas fa-boxes-stacked',
+    icon: 'boxesStacked',
     title: 'Mods, Plugins, and UserLibs',
     copy: 'SIMM separates global acquisition from per-environment management so you can browse once and manage locally.',
     items: [
@@ -60,7 +62,7 @@ const primaryHelpCards = [
     ],
   },
   {
-    icon: 'fas fa-triangle-exclamation',
+    icon: 'triangleExclamation',
     title: 'Troubleshooting',
     copy: 'Start with the most common causes before assuming the install itself is broken.',
     items: [
@@ -70,11 +72,11 @@ const primaryHelpCards = [
       'Use Logs and Settings together when you need deeper diagnostics.',
     ],
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; copy: string; items: readonly string[] }>;
 
 const referenceCards = [
   {
-    icon: 'fas fa-pen-to-square',
+    icon: 'penToSquare',
     title: 'Edit Install Details',
     items: [
       'Rename installs when you want clearer environment labels.',
@@ -82,7 +84,7 @@ const referenceCards = [
     ],
   },
   {
-    icon: 'fas fa-rotate',
+    icon: 'rotate',
     title: 'Update Checks',
     items: [
       'Automatic checks run on the interval configured in Settings.',
@@ -91,7 +93,7 @@ const referenceCards = [
     ],
   },
   {
-    icon: 'fas fa-puzzle-piece',
+    icon: 'puzzlePiece',
     title: 'MelonLoader',
     items: [
       'Preferred MelonLoader versions are managed from Settings.',
@@ -99,28 +101,28 @@ const referenceCards = [
       'Per-install loader state is tracked with the environment.',
     ],
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; items: readonly string[] }>;
 
 const quickActions = [
   {
-    icon: 'fas fa-plus-circle',
+    icon: 'plusCircle',
     title: 'Create Environment',
     body: 'Start a new managed install or import an existing folder into SIMM.',
     action: 'wizard' as const,
   },
   {
-    icon: 'fas fa-user-gear',
+    icon: 'userGear',
     title: 'Open Accounts',
     body: 'Reconnect Steam or Nexus when protected downloads or manager support need attention.',
     action: 'accounts' as const,
   },
   {
-    icon: 'fas fa-sliders',
+    icon: 'sliders',
     title: 'Open Settings',
     body: 'Adjust paths, update cadence, theme, tools, and logging behavior.',
     action: 'settings' as const,
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string; action: 'wizard' | 'accounts' | 'settings' }>;
 
 export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onOpenAccounts }: HelpOverlayProps) {
   useEffect(() => {
@@ -189,13 +191,13 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   onClick={handleClick}
                 >
                   <div className="help-card-header__icon">
-                    <i className={actionCard.icon}></i>
+                    <Icon name={actionCard.icon} />
                   </div>
                   <div className="help-action-card__content">
                     <h4>{actionCard.title}</h4>
                     <p>{actionCard.body}</p>
                   </div>
-                  <i className="fas fa-arrow-right help-action-card__chevron" aria-hidden="true"></i>
+                  <Icon name="arrowRight" className="help-action-card__chevron" />
                 </button>
               );
             })}
@@ -207,7 +209,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
             <section className="help-hero-card">
               <div className="help-card-header">
                 <div className="help-card-header__icon">
-                  <i className="fas fa-circle-info"></i>
+                  <Icon name="circleInfo" />
                 </div>
                 <div>
                   <span className="help-eyebrow">Quick Start</span>
@@ -222,7 +224,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                     <span className="help-step-card__index">{index + 1}</span>
                     <div className="help-step-card__body">
                       <h4>
-                        <i className={step.icon}></i>
+                        <Icon name={step.icon} />
                         {step.title}
                       </h4>
                       <p>{step.body}</p>
@@ -243,7 +245,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   <article key={card.title} className="help-task-card">
                     <div className="help-task-card__header">
                       <div className="help-card-header__icon">
-                        <i className={card.icon}></i>
+                        <Icon name={card.icon} />
                       </div>
                       <div>
                         <h4>{card.title}</h4>
@@ -264,7 +266,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
           <aside className="help-layout__secondary">
             <section className="help-reference-card help-reference-card--summary">
               <div className="help-reference-card__header">
-                <i className="fas fa-compass"></i>
+                <Icon name="compass" />
                 <h4>Where to Start</h4>
               </div>
               <ul className="help-list help-list--compact">
@@ -284,7 +286,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                 {referenceCards.map((card) => (
                   <article key={card.title} className="help-reference-card">
                     <div className="help-reference-card__header">
-                      <i className={card.icon}></i>
+                      <Icon name={card.icon} />
                       <h4>{card.title}</h4>
                     </div>
                     <ul className="help-list help-list--compact">
@@ -300,7 +302,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
             <section className="help-callout-card">
               <div className="help-card-header">
                 <div className="help-card-header__icon">
-                  <i className="fas fa-wrench"></i>
+                  <Icon name="wrench" />
                 </div>
                 <div>
                   <span className="help-eyebrow">Repair Hint</span>
