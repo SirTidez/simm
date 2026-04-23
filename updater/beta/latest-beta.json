@@ -1,11 +1,11 @@
 {
-  "version": "0.8.2",
-  "notes": "**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.1-beta...v0.8.2-beta",
-  "pub_date": "2026-04-17T21:23:30.0000000+00:00",
+  "version": "0.8.3",
+  "notes": "## What's Changed\n* 0.8.3 - Fix Thunderstore API Calls, refactor workspace panels, enhance Nexus Mods integration, and update UI by @SirTidez in https://github.com/SirTidez/simm/pull/18\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.2-beta...v0.8.3-beta",
+  "pub_date": "2026-04-23T04:41:43.0000000+00:00",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.2-beta/SIMM_0.8.2_Setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cldVWXM5bFhPSDlqamJucUFta0Vnb2trMlM0dVVNYnl5cWljZXFyeGFjZnRJR2VRK3hERjRNdE1lR1o1KzlBdGtzTTMxVXBBWnZ0eTQ3ZE9oeWk1dUFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc2NDYwOTc5CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguMl94NjQtc2V0dXAuZXhlCklpUnZwUW1RWlNkbytkMWhIOFF5N0gybGd5YzJBb2FDNk54VCtMMTh5Ukc4WE9aWHNGT29hRTFOSUcwNUpqTjNiVjBjdVlxeUxKNkdwWUJKdjg3dEN3PT0K"
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.3-beta/SIMM_0.8.3_Setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmYzcjlQVEhSc0pNeWdxbll1K21IQWZHZThTTFRWT1ZKS3RmNi9odWdTVXJiTW5POFFNR3J0YUhZSzV5RUFSZFNiMFhtdmR2Vy9PT0ZTakZNZVNTb3dNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc2OTE5Mjg3CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguM194NjQtc2V0dXAuZXhlCmczUTJ2QWQrTDE4VnoxNjM4UG14aWlQNU05TVBJcDdIbU45VUNkS1NpM0NRZWU1MnJXUkFoay9OMk1MaTc3c1R5Y29zNWpZM2JrNkhvNm1kZ3dxeURBPT0K"
     }
   }
 }
