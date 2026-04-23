@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
   getS1APILatestRelease: vi.fn(),
   getMLVScanLatestRelease: vi.fn(),
   searchThunderstore: vi.fn(),
+  searchThunderstoreByRuntime: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -93,6 +94,7 @@ describe('Footer', () => {
     apiMocks.getS1APILatestRelease.mockReset();
     apiMocks.getMLVScanLatestRelease.mockReset();
     apiMocks.searchThunderstore.mockReset();
+    apiMocks.searchThunderstoreByRuntime.mockReset();
     eventMocks.onModUpdatesChecked.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
 
@@ -120,6 +122,9 @@ describe('Footer', () => {
     apiMocks.getS1APILatestRelease.mockResolvedValue(null);
     apiMocks.getMLVScanLatestRelease.mockResolvedValue(null);
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
+    apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
+      packagesByRuntime: { IL2CPP: [], Mono: [] },
+    });
   });
 
   afterEach(() => {
@@ -231,26 +236,20 @@ describe('Footer', () => {
         },
       ],
     });
-    apiMocks.searchThunderstore.mockImplementation(async (_gameId, query) => {
-      if (String(query).toLowerCase().includes('meshvault')) {
-        return {
-          packages: [
+    apiMocks.searchThunderstore.mockResolvedValue({
+      packages: [
+        {
+          owner: 'hdlmrell',
+          name: 'MeshVault',
+          full_name: 'hdlmrell-MeshVault',
+          versions: [
             {
-              owner: 'hdlmrell',
-              name: 'MeshVault',
-              full_name: 'hdlmrell-MeshVault',
-              versions: [
-                {
-                  version_number: '1.0.1',
-                  date_updated: '2026-04-10T00:00:00Z',
-                },
-              ],
+              version_number: '1.0.1',
+              date_updated: '2026-04-10T00:00:00Z',
             },
           ],
-        };
-      }
-
-      return { packages: [] };
+        },
+      ],
     });
 
     render(<Footer />);

@@ -1,13 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { Suspense, lazy, useState, useEffect, useRef, useCallback } from 'react';
+import type { ComponentType } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import type { Environment } from '../types';
 import { AuthenticationModal } from './AuthenticationModal';
-import { ModsOverlay } from './ModsOverlay';
-import { PluginsOverlay } from './PluginsOverlay';
-import { UserLibsOverlay } from './UserLibsOverlay';
-import { LogsOverlay } from './LogsOverlay';
-import { ConfigurationOverlay } from './ConfigurationOverlay';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
@@ -15,6 +11,7 @@ import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import { logger } from '../services/logger';
+import { Icon } from './Icon';
 import {
   onAuthWaiting,
   onAuthSuccess,
@@ -50,6 +47,45 @@ function getLatestStableMelonLoaderTag(
   releases: Array<{ tag_name: string; prerelease: boolean; isNightly?: boolean }>
 ): string | undefined {
   return releases.find((release) => !release.isNightly && !release.prerelease)?.tag_name ?? releases[0]?.tag_name;
+}
+
+const lazyNamed = <T,>(
+  loader: () => Promise<T>,
+  select: (module: T) => ComponentType<any>,
+) => lazy(async () => ({
+  default: select(await loader()),
+}));
+
+const ModsOverlay = lazyNamed(
+  () => import('./ModsOverlay'),
+  (module) => module.ModsOverlay,
+);
+const PluginsOverlay = lazyNamed(
+  () => import('./PluginsOverlay'),
+  (module) => module.PluginsOverlay,
+);
+const UserLibsOverlay = lazyNamed(
+  () => import('./UserLibsOverlay'),
+  (module) => module.UserLibsOverlay,
+);
+const LogsOverlay = lazyNamed(
+  () => import('./LogsOverlay'),
+  (module) => module.LogsOverlay,
+);
+const ConfigurationOverlay = lazyNamed(
+  () => import('./ConfigurationOverlay'),
+  (module) => module.ConfigurationOverlay,
+);
+
+function OverlayFallback() {
+  return (
+    <div className="workspace-panel-fallback" role="status" aria-live="polite">
+      <div className="workspace-panel-fallback__header">
+        <strong>Loading workspace panel...</strong>
+        <span>Getting this workspace ready.</span>
+      </div>
+    </div>
+  );
 }
 
 function isSteamEnvironment(env: Pick<Environment, 'environmentType' | 'id'>): boolean {
@@ -1346,36 +1382,14 @@ export function EnvironmentList({
     setModsOverlay({ isOpen: false, envId: null });
   };
 
-  // Component for Steam icon with text fallback
+  // Component for Steam badge
   const SteamBadge = () => {
-    const iconRef = useRef<HTMLElement>(null);
-    const [showFallback, setShowFallback] = useState(false);
-
-    useEffect(() => {
-      // Check if FontAwesome icon loaded by verifying it has content/width
-      if (iconRef.current) {
-        const checkIcon = () => {
-          const style = window.getComputedStyle(iconRef.current!);
-          const width = parseFloat(style.width);
-          const fontFamily = style.fontFamily;
-          // FontAwesome icons should have a width > 0 and font-family containing "Font Awesome"
-          const faLoaded = (width > 0 || fontFamily.includes('Font Awesome') || fontFamily.includes('FontAwesome'));
-          setShowFallback(!faLoaded);
-        };
-
-        // Check after a short delay to allow FontAwesome to load
-        const timeout = setTimeout(checkIcon, 150);
-        return () => clearTimeout(timeout);
-      }
-    }, []);
-
     return (
       <span
         className="badge badge-blue environment-card__steam-badge"
         title="Steam-managed installation"
       >
-        {!showFallback && <i ref={iconRef} className="fab fa-steam"></i>}
-        {showFallback && <span>Steam</span>}
+        <Icon name="fab fa-steam" />
       </span>
     );
   };
@@ -1564,10 +1578,10 @@ export function EnvironmentList({
               />
               <div className="name-actions">
                 <button onClick={() => handleSaveName(env.id)} className="btn btn-primary btn-small" title="Save name">
-                  <i className="fas fa-check"></i>
+                  <Icon name="fas fa-check" />
                 </button>
                 <button onClick={handleCancelEditName} className="btn btn-secondary btn-small" title="Cancel">
-                  <i className="fas fa-times"></i>
+                  <Icon name="fas fa-times" />
                 </button>
               </div>
             </div>
@@ -1577,12 +1591,12 @@ export function EnvironmentList({
                 <div className="name-display environment-card__title-group">
                   <h3>{env.name}</h3>
                   <button onClick={() => handleStartEditName(env)} className="btn-edit-name" title="Rename environment">
-                    <i className="fas fa-edit"></i>
+                    <Icon name="fas fa-edit" />
                   </button>
                 </div>
                 <div className="environment-card__header-actions">
                   <span className={`environment-state-pill environment-state-pill--${status.tone}`}>
-                    <i className={status.icon}></i>
+                    <Icon name={status.icon} />
                     {status.label}
                   </span>
                   <button
@@ -1594,7 +1608,7 @@ export function EnvironmentList({
                     }}
                     aria-label={`More actions for ${env.name}`}
                   >
-                    <i className="fas fa-ellipsis-h"></i>
+                    <Icon name="fas fa-ellipsis-h" />
                   </button>
                 </div>
               </div>
@@ -1622,10 +1636,10 @@ export function EnvironmentList({
               />
               <div className="description-actions">
                 <button onClick={() => handleSaveDescription(env.id)} className="btn btn-primary btn-small" title="Save description">
-                  <i className="fas fa-check"></i>
+                  <Icon name="fas fa-check" />
                 </button>
                 <button onClick={handleCancelEditDescription} className="btn btn-secondary btn-small" title="Cancel">
-                  <i className="fas fa-times"></i>
+                  <Icon name="fas fa-times" />
                 </button>
               </div>
             </div>
@@ -1635,7 +1649,7 @@ export function EnvironmentList({
                 {env.description || <span className="description-placeholder">No description</span>}
               </span>
               <button onClick={() => handleStartEditDescription(env)} className="btn-edit-description" title="Edit description">
-                <i className="fas fa-edit"></i>
+                <Icon name="fas fa-edit" />
               </button>
             </div>
           )}
@@ -1648,6 +1662,7 @@ export function EnvironmentList({
               className={`environment-metric ${metric.tone ? `environment-metric--${metric.tone}` : ''}`}
               role={metric.onClick ? 'button' : undefined}
               tabIndex={metric.onClick ? 0 : undefined}
+              aria-label={`${metric.label}: ${metric.value}`}
               onClick={metric.onClick}
               onKeyDown={metric.onClick ? (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -1661,7 +1676,11 @@ export function EnvironmentList({
             </div>
           ))}
           {env.updateAvailable && env.updateGameVersion && (
-            <div className="environment-metric environment-metric--warning">
+            <div
+              className="environment-metric environment-metric--warning"
+              aria-label={`Available update: ${env.updateGameVersion}`}
+              title={`Available update: ${env.updateGameVersion}`}
+            >
               <span>Available update</span>
               <strong>{env.updateGameVersion}</strong>
             </div>
@@ -1672,7 +1691,7 @@ export function EnvironmentList({
           {!isDownloading && !isCompleted && (
             <div className="environment-card__action-row environment-card__action-row--single">
               <button onClick={() => handleStartDownload(env)} className="btn btn-primary">
-                <i className="fas fa-download"></i>
+                <Icon name="fas fa-download" />
                 <span>Download</span>
               </button>
             </div>
@@ -1681,7 +1700,7 @@ export function EnvironmentList({
           {isDownloading && (
             <div className="environment-card__action-row environment-card__action-row--single">
               <button onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
-                <i className="fas fa-ban"></i>
+                <Icon name="fas fa-ban" />
                 <span>Cancel Download</span>
               </button>
             </div>
@@ -1692,46 +1711,50 @@ export function EnvironmentList({
               <div className="environment-card__action-row environment-card__action-row--primary">
                 <button
                   onClick={() => handleLaunchGame(env, launchMethod)}
-                  className="btn btn-primary"
+                  className="btn btn-primary environment-card__hero-action"
                   title={`Launch the game via ${launchMethod === 'direct' ? 'Local Install' : 'Steam'}`}
                 >
-                  <i className="fas fa-play"></i>
+                  <Icon name="fas fa-play" />
                   <span>Launch</span>
                 </button>
-                <button onClick={() => handleOpenModsOverlay(env.id)} className="btn btn-secondary" title="Open installed mods">
-                  <i className="fas fa-puzzle-piece"></i>
+                <button
+                  onClick={() => handleOpenModsOverlay(env.id)}
+                  className="btn btn-secondary environment-card__hero-action environment-card__hero-action--mods"
+                  title="Open installed mods"
+                >
+                  <Icon name="fas fa-puzzle-piece" />
                   <span>Mods</span>
-                </button>
-                <button onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary" title="Edit mod configuration">
-                  <i className="fas fa-cog"></i>
-                  <span>Config</span>
-                </button>
-                <button onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary" title="View MelonLoader logs">
-                  <i className="fas fa-file-alt"></i>
-                  <span>Logs</span>
                 </button>
               </div>
 
               <div className="environment-card__action-row environment-card__action-row--secondary">
-                <button onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary" title="View installed plugins">
-                  <i className="fas fa-plug"></i>
+                <button onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="Edit mod configuration">
+                  <Icon name="fas fa-cog" />
+                  <span>Config</span>
+                </button>
+                <button onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View MelonLoader logs">
+                  <Icon name="fas fa-file-alt" />
+                  <span>Logs</span>
+                </button>
+                <button onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View installed plugins">
+                  <Icon name="fas fa-plug" />
                   <span>Plugins</span>
                 </button>
-                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary" title="View UserLibs">
-                  <i className="fas fa-book"></i>
+                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View UserLibs">
+                  <Icon name="fas fa-book" />
                   <span>UserLibs</span>
                 </button>
-                <button onClick={() => handleOpenFolder(env)} className="btn btn-secondary" title="Open folder in file explorer">
-                  <i className="fas fa-folder-open"></i>
-                  <span>Open Folder</span>
+                <button onClick={() => handleOpenFolder(env)} className="btn btn-secondary environment-card__command-btn" title="Open folder in file explorer">
+                  <Icon name="fas fa-folder-open" />
+                  <span>Folder</span>
                 </button>
                 <button
                   onClick={() => handleUpdateAction(env)}
-                  className={`btn ${env.updateAvailable && !isSteam ? 'btn-primary' : 'btn-secondary'}`}
+                  className={`btn btn-secondary environment-card__command-btn ${env.updateAvailable && !isSteam ? 'environment-card__command-btn--warning' : ''}`}
                   disabled={isCheckingUpdate}
                   title={isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
                 >
-                  <i className={isCheckingUpdate ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-rotate'}></i>
+                  <Icon name={isCheckingUpdate ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-rotate'} />
                   <span>{isCheckingUpdate ? 'Checking…' : 'Update'}</span>
                 </button>
               </div>
@@ -1753,13 +1776,13 @@ export function EnvironmentList({
 
           <div className="environment-card__footer">
             <div className="environment-card__path" title={env.outputDir}>
-              <i className="fas fa-folder-open"></i>
+              <Icon name="fas fa-folder-open" />
               <span>{env.outputDir}</span>
             </div>
             {isCompleted && (
               <div className="environment-card__footer-meta">
                 <span className="environment-footer-chip">
-                  <i className={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'}></i>
+                  <Icon name={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'} />
                   {launchMethod === 'direct' ? 'Local launch' : 'Steam launch'}
                 </span>
                 <button
@@ -1769,7 +1792,7 @@ export function EnvironmentList({
                   disabled={installingMelonLoader.has(env.id)}
                   title={mlStatus?.installed ? 'Change MelonLoader version' : 'Install MelonLoader'}
                 >
-                  <i className={installingMelonLoader.has(env.id) ? 'fas fa-spinner fa-spin' : 'fas fa-download'}></i>
+                  <Icon name={installingMelonLoader.has(env.id) ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
                   <span>{mlStatus?.installed ? 'MelonLoader' : 'Install ML'}</span>
                 </button>
               </div>
@@ -1856,65 +1879,67 @@ export function EnvironmentList({
         authMessage={authModal.message}
       />
 
-      {modsOverlay.envId && (
-        <ModsOverlay
-          isOpen={modsOverlay.isOpen}
-          onClose={handleCloseModsOverlay}
-          environmentId={modsOverlay.envId}
-          onModsChanged={handleModsChanged}
-          onModUpdatesChecked={(count) => {
-            const envId = modsOverlay.envId!;
-            setModUpdatesCounts(prev => {
-              const next = new Map(prev);
-              next.set(envId, count);
-              return next;
-            });
-            window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: envId, count } }));
-          }}
-        />
-      )}
-
-      {pluginsOverlay.envId && (
-        <PluginsOverlay
-          isOpen={pluginsOverlay.isOpen}
-          onClose={handleClosePluginsOverlay}
-          environmentId={pluginsOverlay.envId}
-          onPluginsChanged={handlePluginsChanged}
-        />
-      )}
-
-      {userLibsOverlay.envId && (
-        <UserLibsOverlay
-          isOpen={userLibsOverlay.isOpen}
-          onClose={handleCloseUserLibsOverlay}
-          environmentId={userLibsOverlay.envId}
-          onUserLibsChanged={handleUserLibsChanged}
-        />
-      )}
-
-      {logsOverlay.envId && (() => {
-        const env = environments.find(e => e.id === logsOverlay.envId);
-        return env ? (
-          <LogsOverlay
-            isOpen={logsOverlay.isOpen}
-            onClose={handleCloseLogsOverlay}
-            environmentId={logsOverlay.envId}
-            environment={env}
+      <Suspense fallback={<OverlayFallback />}>
+        {modsOverlay.envId && (
+          <ModsOverlay
+            isOpen={modsOverlay.isOpen}
+            onClose={handleCloseModsOverlay}
+            environmentId={modsOverlay.envId}
+            onModsChanged={handleModsChanged}
+            onModUpdatesChecked={(count: number) => {
+              const envId = modsOverlay.envId!;
+              setModUpdatesCounts(prev => {
+                const next = new Map(prev);
+                next.set(envId, count);
+                return next;
+              });
+              window.dispatchEvent(new CustomEvent('mod-updates-checked', { detail: { environmentId: envId, count } }));
+            }}
           />
-        ) : null;
-      })()}
+        )}
 
-      {configOverlay.envId && (() => {
-        const env = environments.find(e => e.id === configOverlay.envId);
-        return env ? (
-          <ConfigurationOverlay
-            isOpen={configOverlay.isOpen}
-            onClose={handleCloseConfigOverlay}
-            environmentId={configOverlay.envId}
-            environment={env}
+        {pluginsOverlay.envId && (
+          <PluginsOverlay
+            isOpen={pluginsOverlay.isOpen}
+            onClose={handleClosePluginsOverlay}
+            environmentId={pluginsOverlay.envId}
+            onPluginsChanged={handlePluginsChanged}
           />
-        ) : null;
-      })()}
+        )}
+
+        {userLibsOverlay.envId && (
+          <UserLibsOverlay
+            isOpen={userLibsOverlay.isOpen}
+            onClose={handleCloseUserLibsOverlay}
+            environmentId={userLibsOverlay.envId}
+            onUserLibsChanged={handleUserLibsChanged}
+          />
+        )}
+
+        {logsOverlay.envId && (() => {
+          const env = environments.find(e => e.id === logsOverlay.envId);
+          return env ? (
+            <LogsOverlay
+              isOpen={logsOverlay.isOpen}
+              onClose={handleCloseLogsOverlay}
+              environmentId={logsOverlay.envId}
+              environment={env}
+            />
+          ) : null;
+        })()}
+
+        {configOverlay.envId && (() => {
+          const env = environments.find(e => e.id === configOverlay.envId);
+          return env ? (
+            <ConfigurationOverlay
+              isOpen={configOverlay.isOpen}
+              onClose={handleCloseConfigOverlay}
+              environmentId={configOverlay.envId}
+              environment={env}
+            />
+          ) : null;
+        })()}
+      </Suspense>
 
       <ConfirmOverlay
         isOpen={confirmOverlay.isOpen}
@@ -2010,7 +2035,7 @@ export function EnvironmentList({
 
               {loadingMelonLoaderReleases.has(showMelonLoaderVersionSelector) ? (
                 <div className="melonloader-dialog__empty">
-                  <i className="fas fa-spinner fa-spin melonloader-dialog__empty-icon"></i>
+                  <Icon name="fas fa-spinner fa-spin melonloader-dialog__empty-icon" />
                   <p>Loading releases...</p>
                 </div>
               ) : melonLoaderSelectorReleases.length === 0 ? (
@@ -2080,7 +2105,7 @@ export function EnvironmentList({
                                 className="melonloader-dialog__release-link"
                                 title={release.isNightly ? "View GitHub Actions" : "View release page and changelog"}
                               >
-                                <i className="fas fa-external-link-alt"></i>
+                                <Icon name="fas fa-external-link-alt" />
                                 {release.isNightly ? 'View Actions' : 'View Release & Changelog'}
                               </a>
                             </div>
@@ -2104,12 +2129,12 @@ export function EnvironmentList({
                     >
                       {installingMelonLoader.has(showMelonLoaderVersionSelector) ? (
                         <>
-                          <i className="fas fa-spinner fa-spin"></i>
+                          <Icon name="fas fa-spinner fa-spin" />
                           Installing...
                         </>
                       ) : (
                         <>
-                          <i className="fas fa-download"></i>
+                          <Icon name="fas fa-download" />
                           {currentMelonLoaderVersion === 'Not installed' ? 'Install' : 'Change Version'}
                         </>
                       )}

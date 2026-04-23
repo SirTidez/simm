@@ -1,4 +1,6 @@
 import { useEffect } from 'react';
+import { Icon } from './Icon';
+import type { IconName } from './icons';
 
 interface HelpOverlayProps {
   isOpen: boolean;
@@ -10,37 +12,40 @@ interface HelpOverlayProps {
 
 const quickStartSteps = [
   {
-    icon: 'fas fa-plus-circle',
-    title: 'Create an install',
-    body: 'Use New Game to choose a branch, confirm the target folder, and create a managed environment.',
+    icon: 'plusCircle',
+    title: 'Add a game',
+    body: 'SIMM usually finds your Steam install automatically. Use Add Game to link it, or import a folder only if detection misses it.',
   },
   {
-    icon: 'fas fa-user-circle',
+    icon: 'userCircle',
     title: 'Authenticate when needed',
-    body: 'Reconnect Steam for protected branch downloads and link Nexus when you want manager download support.',
+    body: 'You do not need to sign in to Steam for your normal Steam install. Authenticate only when SIMM needs authorization for advanced Schedule I installs.',
   },
   {
-    icon: 'fas fa-download',
+    icon: 'download',
     title: 'Download and maintain',
     body: 'Track updates, install mods, and manage support tools from each environment workspace.',
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string }>;
 
 const primaryHelpCards = [
   {
-    icon: 'fas fa-hard-drive',
+    icon: 'hardDrive',
     title: 'Manage Game Installs',
     copy: 'Use install actions from the Home workspace to keep each environment healthy and easy to launch.',
     items: [
-      'Download new builds into the selected directory.',
-      'Run Check Updates when you want an immediate refresh.',
-      'Use Update to apply the newest available branch build.',
-      'Launch Game and Open Folder for quick verification and support work.',
+      'Start with the detected Steam install. Import a folder only if automatic detection does not find it.',
+      'The Steam install stays managed by Steam. SIMM manages mods, plugins, tools, and support actions around it.',
+      'Power User mode can add separate Steam branches when you need test or alternate installs.',
+      'Steam handles updates for the Steam install. SIMM updates the separate installs it creates or imports.',
+      'Run Check Updates when you want an immediate refresh for SIMM-managed installs.',
+      'Use Update to apply the newest available build to a SIMM-managed install.',
+      'Use Launch and Folder for quick verification and support work.',
       'Delete only removes the SIMM entry. Files remain on disk.',
     ],
   },
   {
-    icon: 'fas fa-user-gear',
+    icon: 'userGear',
     title: 'Settings and Accounts',
     copy: 'Use the utility panes for environment defaults, tools, update cadence, and linked service access.',
     items: [
@@ -50,7 +55,7 @@ const primaryHelpCards = [
     ],
   },
   {
-    icon: 'fas fa-boxes-stacked',
+    icon: 'boxesStacked',
     title: 'Mods, Plugins, and UserLibs',
     copy: 'SIMM separates global acquisition from per-environment management so you can browse once and manage locally.',
     items: [
@@ -60,21 +65,22 @@ const primaryHelpCards = [
     ],
   },
   {
-    icon: 'fas fa-triangle-exclamation',
+    icon: 'triangleExclamation',
     title: 'Troubleshooting',
     copy: 'Start with the most common causes before assuming the install itself is broken.',
     items: [
-      'Download failures usually point to Steam auth or network issues.',
+      'If your Steam install is missing, refresh detection first. Import the folder only when detection still misses it.',
+      'Advanced Steam install failures usually point to Steam sign-in, Steam Guard, or network issues.',
       'Launch failures usually mean the executable path or loader setup needs review.',
-      'If DepotDownloader is missing, repair prerequisites or install it manually with winget.',
+      'If DepotDownloader is missing, SIMM can install it automatically before advanced branch installs.',
       'Use Logs and Settings together when you need deeper diagnostics.',
     ],
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; copy: string; items: readonly string[] }>;
 
 const referenceCards = [
   {
-    icon: 'fas fa-pen-to-square',
+    icon: 'penToSquare',
     title: 'Edit Install Details',
     items: [
       'Rename installs when you want clearer environment labels.',
@@ -82,16 +88,17 @@ const referenceCards = [
     ],
   },
   {
-    icon: 'fas fa-rotate',
+    icon: 'rotate',
     title: 'Update Checks',
     items: [
       'Automatic checks run on the interval configured in Settings.',
       'Manual checks bypass the wait and refresh status immediately.',
+      'Steam installs update through Steam. SIMM only applies game updates to SIMM-managed installs.',
       'Update badges show when a newer version is available.',
     ],
   },
   {
-    icon: 'fas fa-puzzle-piece',
+    icon: 'puzzlePiece',
     title: 'MelonLoader',
     items: [
       'Preferred MelonLoader versions are managed from Settings.',
@@ -99,28 +106,28 @@ const referenceCards = [
       'Per-install loader state is tracked with the environment.',
     ],
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; items: readonly string[] }>;
 
 const quickActions = [
   {
-    icon: 'fas fa-plus-circle',
-    title: 'Create Environment',
-    body: 'Start a new managed install or import an existing folder into SIMM.',
+    icon: 'plusCircle',
+    title: 'Add Game',
+    body: 'Link the detected Steam install first, import a folder if needed, or open advanced branch installs in Power User mode.',
     action: 'wizard' as const,
   },
   {
-    icon: 'fas fa-user-gear',
+    icon: 'userGear',
     title: 'Open Accounts',
-    body: 'Reconnect Steam or Nexus when protected downloads or manager support need attention.',
+    body: 'Steam sign-in is not needed for the normal Steam install. Use Accounts for advanced Steam authorization or Nexus manager downloads.',
     action: 'accounts' as const,
   },
   {
-    icon: 'fas fa-sliders',
+    icon: 'sliders',
     title: 'Open Settings',
     body: 'Adjust paths, update cadence, theme, tools, and logging behavior.',
     action: 'settings' as const,
   },
-];
+] as const satisfies ReadonlyArray<{ icon: IconName; title: string; body: string; action: 'wizard' | 'accounts' | 'settings' }>;
 
 export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onOpenAccounts }: HelpOverlayProps) {
   useEffect(() => {
@@ -189,13 +196,13 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   onClick={handleClick}
                 >
                   <div className="help-card-header__icon">
-                    <i className={actionCard.icon}></i>
+                    <Icon name={actionCard.icon} />
                   </div>
                   <div className="help-action-card__content">
                     <h4>{actionCard.title}</h4>
                     <p>{actionCard.body}</p>
                   </div>
-                  <i className="fas fa-arrow-right help-action-card__chevron" aria-hidden="true"></i>
+                  <Icon name="arrowRight" className="help-action-card__chevron" />
                 </button>
               );
             })}
@@ -207,7 +214,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
             <section className="help-hero-card">
               <div className="help-card-header">
                 <div className="help-card-header__icon">
-                  <i className="fas fa-circle-info"></i>
+                  <Icon name="circleInfo" />
                 </div>
                 <div>
                   <span className="help-eyebrow">Quick Start</span>
@@ -222,7 +229,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                     <span className="help-step-card__index">{index + 1}</span>
                     <div className="help-step-card__body">
                       <h4>
-                        <i className={step.icon}></i>
+                        <Icon name={step.icon} />
                         {step.title}
                       </h4>
                       <p>{step.body}</p>
@@ -243,7 +250,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   <article key={card.title} className="help-task-card">
                     <div className="help-task-card__header">
                       <div className="help-card-header__icon">
-                        <i className={card.icon}></i>
+                        <Icon name={card.icon} />
                       </div>
                       <div>
                         <h4>{card.title}</h4>
@@ -264,12 +271,14 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
           <aside className="help-layout__secondary">
             <section className="help-reference-card help-reference-card--summary">
               <div className="help-reference-card__header">
-                <i className="fas fa-compass"></i>
+                <Icon name="compass" />
                 <h4>Where to Start</h4>
               </div>
               <ul className="help-list help-list--compact">
-                <li>Create or import an environment first.</li>
-                <li>Use Accounts when Steam or Nexus access becomes a blocker.</li>
+                <li>Let SIMM detect your Steam install first.</li>
+                <li>Use Import only when detection does not find the folder.</li>
+                <li>Let Steam update the Steam install; use SIMM updates for SIMM-managed installs.</li>
+                <li>Use Accounts when Steam or Nexus sign-in becomes a blocker.</li>
                 <li>Open Logs and Config together when deeper diagnostics are needed.</li>
               </ul>
             </section>
@@ -284,7 +293,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                 {referenceCards.map((card) => (
                   <article key={card.title} className="help-reference-card">
                     <div className="help-reference-card__header">
-                      <i className={card.icon}></i>
+                      <Icon name={card.icon} />
                       <h4>{card.title}</h4>
                     </div>
                     <ul className="help-list help-list--compact">
@@ -300,12 +309,12 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
             <section className="help-callout-card">
               <div className="help-card-header">
                 <div className="help-card-header__icon">
-                  <i className="fas fa-wrench"></i>
+                  <Icon name="wrench" />
                 </div>
                 <div>
                   <span className="help-eyebrow">Repair Hint</span>
-                  <h3>DepotDownloader is required for Steam depot workflows.</h3>
-                  <p>If SIMM reports that DepotDownloader is missing, repair prerequisites or install it manually before retrying a protected branch download.</p>
+                  <h3>DepotDownloader powers advanced Steam branch installs.</h3>
+                  <p>If SIMM reports that DepotDownloader is missing, let SIMM install it automatically or repair prerequisites before retrying the branch install.</p>
                 </div>
               </div>
               <code>winget install --exact --id SteamRE.DepotDownloader</code>

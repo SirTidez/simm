@@ -19,6 +19,7 @@ import type {
   LocalModSourcePreview,
   CustomThemeDefinition,
   AppUpdateChannel,
+  AppStartupState,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -41,6 +42,10 @@ export class ApiService {
   // App Init
   static async getHomeDirectory(): Promise<string> {
     return invoke('get_home_directory');
+  }
+
+  static async getStartupState(): Promise<AppStartupState> {
+    return invoke('get_app_startup_state');
   }
 
   static async checkAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateStatus> {
@@ -850,23 +855,41 @@ export class ApiService {
   }
 
   private static transformNexusMods(mods: any[]): any[] {
-    return mods.map((mod: any) => ({
-      mod_id: mod.modId ?? mod.mod_id,
-      name: mod.name,
-      summary: mod.summary,
-      picture_url: mod.pictureUrl ?? mod.picture_url,
-      thumbnail_url: mod.thumbnailUrl ?? mod.thumbnail_url,
-      endorsement_count: mod.endorsements ?? mod.endorsement_count,
-      mod_downloads: mod.downloads ?? mod.mod_downloads,
-      unique_downloads:
-        mod.downloads ?? mod.unique_downloads ?? mod.mod_downloads,
-      version: mod.version,
-      author: mod.author || mod.uploader?.name,
-      updated_at: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
-      created_at: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
-      updated_time: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
-      uploaded_time: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
-    }));
+    return mods.map((mod: any) => {
+      const originalAuthor =
+        mod.originalAuthor ?? mod.original_author ?? mod.author;
+      const uploaderName =
+        mod.uploader?.name ??
+        mod.uploaderName ??
+        mod.uploader_name ??
+        mod.uploader;
+      const uploaderMemberId =
+        mod.uploader?.memberId ??
+        mod.uploader?.member_id ??
+        mod.uploaderMemberId ??
+        mod.uploader_member_id;
+
+      return {
+        mod_id: mod.modId ?? mod.mod_id,
+        name: mod.name,
+        summary: mod.summary,
+        picture_url: mod.pictureUrl ?? mod.picture_url,
+        thumbnail_url: mod.thumbnailUrl ?? mod.thumbnail_url,
+        endorsement_count: mod.endorsements ?? mod.endorsement_count,
+        mod_downloads: mod.downloads ?? mod.mod_downloads,
+        unique_downloads:
+          mod.downloads ?? mod.unique_downloads ?? mod.mod_downloads,
+        version: mod.version,
+        author: uploaderName || originalAuthor || "Unknown",
+        uploader: uploaderName,
+        uploader_member_id: uploaderMemberId,
+        original_author: originalAuthor,
+        updated_at: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
+        created_at: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
+        updated_time: mod.updatedAt ?? mod.updated_at ?? mod.updated_time,
+        uploaded_time: mod.createdAt ?? mod.created_at ?? mod.uploaded_time,
+      };
+    });
   }
 
   static async getNexusModsLatestUpdated(gameId: string): Promise<{ mods: any[] }> {
@@ -882,6 +905,17 @@ export class ApiService {
   static async getNexusModsLatestAdded(gameId: string): Promise<{ mods: any[] }> {
     const mods = await invoke<any[]>('get_nexus_mods_latest_added', { gameId });
     return { mods: this.transformNexusMods(mods) };
+  }
+
+  static async getNexusRateLimits(): Promise<{
+    hourly_limit?: number;
+    hourly_remaining?: number;
+    hourly_reset?: number;
+    daily_limit?: number;
+    daily_remaining?: number;
+    daily_reset?: number;
+  } | null> {
+    return invoke('get_nexus_rate_limits');
   }
 
   static async getNexusModsMod(gameId: string, modId: number): Promise<any> {
@@ -943,6 +977,10 @@ export class ApiService {
     error?: string;
     errorCode?: string;
     requiresManualDownload?: boolean;
+    gameId?: string;
+    modId?: number;
+    fileId?: number;
+    runtime?: 'IL2CPP' | 'Mono';
     recoveryUrl?: string;
     alreadyUpToDate?: boolean;
   }> {
@@ -1197,7 +1235,7 @@ export class ApiService {
   static async searchThunderstore(
     gameId: string,
     query: string,
-    runtime: 'IL2CPP' | 'Mono'
+    runtime: 'IL2CPP' | 'Mono' | 'unknown' = 'unknown'
   ): Promise<{
     packages: Array<any>;
   }> {
@@ -1207,6 +1245,57 @@ export class ApiService {
       query,
     });
     return { packages };
+  }
+
+  static async searchThunderstoreByRuntime(
+    gameId: string,
+    query: string,
+  ): Promise<{
+    packagesByRuntime: Partial<Record<'IL2CPP' | 'Mono', Array<any>>>;
+  }> {
+    const packagesByRuntime = await invoke<Partial<Record<'IL2CPP' | 'Mono', Array<any>>>>(
+      'search_thunderstore_packages_by_runtime',
+      {
+        gameId,
+        query,
+      },
+    );
+    return { packagesByRuntime };
+  }
+
+  static async getThunderstoreRequestStats(): Promise<{
+    listingIndexRequests: number;
+    listingChunkRequests: number;
+    packageDetailRequests: number;
+    downloadRequests: number;
+    conditionalNotModified: number;
+    memoryCacheHits: number;
+    diskCacheHits: number;
+    staleDiskFallbacks: number;
+    forbiddenResponses: number;
+    rateLimitedResponses: number;
+  }> {
+    return invoke('get_thunderstore_request_stats');
+  }
+
+  static async refreshThunderstorePackageCache(gameId: string): Promise<{
+    packageCount: number;
+    manualRefreshThrottled?: boolean;
+    retryAfterSeconds?: number | null;
+    stats: {
+      listingIndexRequests: number;
+      listingChunkRequests: number;
+      packageDetailRequests: number;
+      downloadRequests: number;
+      conditionalNotModified: number;
+      memoryCacheHits: number;
+      diskCacheHits: number;
+      staleDiskFallbacks: number;
+      forbiddenResponses: number;
+      rateLimitedResponses: number;
+    };
+  }> {
+    return invoke('refresh_thunderstore_package_cache', { gameId });
   }
 
   static async installThunderstoreMod(
@@ -1407,46 +1496,22 @@ export class ApiService {
     fileId: number,
     runtime?: 'IL2CPP' | 'Mono',
     securityOverride?: boolean,
-  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
+  ): Promise<{
+    success: boolean;
+    storageId?: string;
+    alreadyStored?: boolean;
+    requiresManualDownload?: boolean;
+    modUrl?: string;
+    error?: string;
+  } & SecurityGateResponse> {
     const gameId = 'schedule1';
-    const modInfo = await invoke<any>('get_nexus_mods_mod', { gameId, modId });
-    const files = await invoke<any[]>('get_nexus_mods_mod_files', { gameId, modId });
-    const fileInfo = files.find(f => f.file_id === fileId || f.file_id === Number(fileId));
-
-    if (!fileInfo) {
-      throw new Error(`File ${fileId} not found for mod ${modId}`);
-    }
-
-    const version = fileInfo.version || fileInfo.mod_version || '1.0.0';
-    const sourceUrl = `https://www.nexusmods.com/${gameId}/mods/${modId}`;
-    const zipPath = await invoke<string>('download_nexus_mods_mod_file', {
-      gameId,
+    return invoke('download_nexus_mod_to_library', {
+      game_id_param: gameId,
       modId,
       fileId,
-    });
-
-    return this.storeModArchive(
-      zipPath,
-      fileInfo.file_name || `nexusmods-${modId}-${fileId}.zip`,
-      runtime,
-      {
-        source: 'nexusmods',
-        sourceId: modId.toString(),
-        sourceVersion: version,
-        sourceUrl,
-        modName: modInfo?.name || 'Unknown Mod',
-        author: modInfo?.author || 'Unknown',
-        summary: modInfo?.summary || '',
-        iconUrl: modInfo?.picture_url || modInfo?.pictureUrl || '',
-        downloads: Number(modInfo?.mod_downloads || modInfo?.downloads || 0),
-        likesOrEndorsements: Number(modInfo?.endorsement_count || modInfo?.endorsements || 0),
-        updatedAt: modInfo?.updated_at || modInfo?.updatedAt || '',
-        tags: Array.isArray(modInfo?.tags) ? modInfo.tags : (Array.isArray(modInfo?.tag_list) ? modInfo.tag_list : []),
-      },
-      undefined,
-      true,
+      runtime: runtime ?? null,
       securityOverride,
-    );
+    });
   }
 
   static async downloadS1APIToLibrary(

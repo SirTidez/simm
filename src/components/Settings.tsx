@@ -9,10 +9,14 @@ import {
 } from "./EnvironmentList";
 import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
 import type { Settings as AppSettings } from "../types";
+import type { ExperienceMode } from "../types";
+import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
+import { Icon } from './Icon';
 
 type SettingsProps = {
   isOpen: boolean;
   onClose: () => void;
+  onRunSetupGuide?: () => void;
 };
 
 type SettingsFormData = {
@@ -34,6 +38,8 @@ type SettingsFormData = {
   logLevel: "debug" | "info" | "warn" | "error";
   modIconCacheLimitMb: number;
   databaseBackupCount: number;
+  experienceMode: ExperienceMode;
+  showAdvancedGameTools: boolean;
 };
 
 const MIN_MOD_ICON_CACHE_LIMIT_MB = 100;
@@ -154,6 +160,8 @@ function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
     databaseBackupCount: normalizeDatabaseBackupCount(
       settings.databaseBackupCount,
     ),
+    experienceMode: resolveExperienceMode(settings),
+    showAdvancedGameTools: resolveShowAdvancedGameTools(settings),
   };
 }
 
@@ -198,7 +206,7 @@ function SettingsToggle({
   );
 }
 
-export function Settings({ isOpen, onClose }: SettingsProps) {
+export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const {
     settings,
     customThemes,
@@ -246,6 +254,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
+    experienceMode: "powerUser",
+    showAdvancedGameTools: true,
   });
   const [error, setError] = useState<string | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
@@ -423,6 +433,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
           databaseBackupCount: normalizeDatabaseBackupCount(
             formData.databaseBackupCount,
           ),
+          experienceMode: formData.experienceMode,
+          showAdvancedGameTools: formData.showAdvancedGameTools,
+          setupGuideCompleted: true,
           platform: "windows" as const,
           language: "english",
         };
@@ -543,8 +556,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   const depotStatusDetail = depotDownloader
     ? depotDownloader.method
       ? `Managed via ${depotDownloader.method}`
-      : "Managed automatically for protected branches"
-    : "Installed automatically when protected downloads need it";
+      : "Managed automatically for advanced branch installs"
+    : "Installed automatically when advanced branch installs need it";
   const releaseApiDetail = checkingReleaseApi
     ? "Checking release metadata"
     : releaseApiError
@@ -670,15 +683,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                   className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
                   title={releaseApiError || undefined}
                 >
-                  <i
-                    className={
+                  <Icon name={
                       checkingReleaseApi
                         ? "fas fa-spinner fa-spin"
                         : releaseApiError
                           ? "fas fa-exclamation-circle"
                           : "fas fa-check-circle"
                     }
-                  ></i>
+                   />
                   GitHub API {releaseApiLabel}
                 </span>
               </div>
@@ -693,7 +705,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         Interface
                       </span>
                       <h3>
-                        <i className="fas fa-sliders"></i> App defaults
+                        <Icon name="fas fa-sliders" /> App defaults
                       </h3>
                     </div>
                     <p>
@@ -772,6 +784,65 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         troubleshooting.
                       </small>
                     </div>
+
+                    <div className="settings-field">
+                      <label>App mode</label>
+                      <select
+                        value={formData.experienceMode}
+                        onChange={(e) => {
+                          const nextMode = e.target.value as ExperienceMode;
+                          setFormData({
+                            ...formData,
+                            experienceMode: nextMode,
+                            showAdvancedGameTools:
+                              nextMode === "powerUser"
+                                ? true
+                                : formData.showAdvancedGameTools,
+                          });
+                        }}
+                        disabled={loading}
+                      >
+                        <option value="player">Player</option>
+                        <option value="powerUser">Power User</option>
+                      </select>
+                      <small>
+                        Player keeps common mod-management actions prominent.
+                        Power User keeps separate branch installs and tooling visible.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <SettingsToggle
+                        label="Show advanced Steam branch installs"
+                        description="Show separate Steam branch install options inside Add Game."
+                        checked={formData.showAdvancedGameTools}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            showAdvancedGameTools: checked,
+                            experienceMode: checked ? "powerUser" : formData.experienceMode,
+                          })
+                        }
+                      />
+                    </div>
+
+                    {onRunSetupGuide && (
+                      <div className="settings-field settings-field--span">
+                        <label>Setup guide</label>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={onRunSetupGuide}
+                        >
+                          <Icon name="sliders" />
+                          Run setup guide again
+                        </button>
+                        <small>
+                          Revisit Player and Power User choices without changing
+                          installed mods or environments.
+                        </small>
+                      </div>
+                    )}
                   </div>
 
                   <div className="settings-inline-status-grid">
@@ -866,7 +937,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         Install Defaults
                       </span>
                       <h3>
-                        <i className="fas fa-folder-tree"></i> Downloads,
+                        <Icon name="fas fa-folder-tree" /> Downloads,
                         storage, and loader setup
                       </h3>
                     </div>
@@ -1005,7 +1076,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         Updates & Maintenance
                       </span>
                       <h3>
-                        <i className="fas fa-rotate"></i> Cadence, cache, and
+                        <Icon name="fas fa-rotate" /> Cadence, cache, and
                         service state
                       </h3>
                     </div>
@@ -1136,15 +1207,14 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           className={`settings-status-pill settings-status-pill--${releaseApiTone}`}
                           title={releaseApiError || undefined}
                         >
-                          <i
-                            className={
+                          <Icon name={
                               checkingReleaseApi
                                 ? "fas fa-spinner fa-spin"
                                 : releaseApiError
                                   ? "fas fa-exclamation-circle"
                                   : "fas fa-check-circle"
                             }
-                          ></i>
+                           />
                           {releaseApiLabel}
                         </span>
                       </strong>
@@ -1231,7 +1301,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     <div>
                       <span className="settings-section__eyebrow">MLVScan</span>
                       <h3>
-                        <i className="fas fa-shield-virus"></i> Security
+                        <Icon name="fas fa-shield-virus" /> Security
                         scanning and trust signals
                       </h3>
                     </div>
@@ -1260,7 +1330,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     <div className="settings-field settings-field--toggle">
                       <SettingsToggle
                         label="Auto-install scanner"
-                        description="Let SIMM acquire or repair the scanner when a protected download needs it."
+                        description="Let SIMM acquire or repair the scanner when download safety checks need it."
                         checked={formData.autoInstallSecurityScanner ?? true}
                         onChange={(checked) =>
                           setFormData({
@@ -1327,7 +1397,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       <small>
                         {securityScannerStatus?.installedVersion
                           ? `Installed ${securityScannerStatus.installedVersion}`
-                          : "Install the scanner to enforce protected download checks."}
+                          : "Install the scanner to enforce download safety checks."}
                       </small>
                     </div>
                     <div className="settings-inline-status">
@@ -1343,11 +1413,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     </div>
                     <div className="settings-inline-status settings-inline-status--action">
                       <span>Scanner Management</span>
-                      <strong>Managed during setup</strong>
+                      <strong>Prepared by setup guide</strong>
                       <small>
-                        Install or repair MLVScan from the setup wizard
-                        prerequisites first. Use the fallback action here if
-                        setup failed or the scanner is still missing.
+                        The first-run guide installs MLVScan automatically.
+                        Use the fallback action here if setup failed or the
+                        scanner is still missing.
                       </small>
                       <div className="settings-backup-panel__actions">
                         <button
@@ -1475,14 +1545,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     className="btn btn-secondary"
                     disabled={browsing}
                   >
-                    <i
-                      className={
+                    <Icon name={
                         browsing
                           ? "fas fa-spinner fa-spin"
                           : "fas fa-location-crosshairs"
                       }
                       aria-hidden="true"
-                    ></i>
+                     />
                     {browsing ? "Loading…" : "Go to Path"}
                   </button>
                 </div>
@@ -1514,14 +1583,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                       creatingFolder || !newFolderName.trim() || !directoryPath
                     }
                   >
-                    <i
-                      className={
+                    <Icon name={
                         creatingFolder
                           ? "fas fa-spinner fa-spin"
                           : "fas fa-folder-plus"
                       }
                       aria-hidden="true"
-                    ></i>
+                     />
                     {creatingFolder ? "Creating…" : "Create Folder"}
                   </button>
                 </div>
@@ -1530,7 +1598,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
               <div className="wizard-directory-dialog__list" role="list">
                 {browsing ? (
                   <div className="wizard-empty-card">
-                    <i className="fas fa-spinner fa-spin"></i>
+                    <Icon name="fas fa-spinner fa-spin" />
                     <strong>Loading directories</strong>
                     <p>SIMM is reading the current folder contents.</p>
                   </div>
@@ -1544,13 +1612,13 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           void loadDirectory(getParentPath(directoryPath) || "")
                         }
                       >
-                        <i className="fas fa-arrow-up"></i>
+                        <Icon name="fas fa-arrow-up" />
                         <span>Parent Directory</span>
                       </button>
                     )}
                     {directoryList.length === 0 ? (
                       <div className="wizard-empty-card">
-                        <i className="fas fa-folder-open"></i>
+                        <Icon name="fas fa-folder-open" />
                         <strong>No subdirectories found</strong>
                         <p>
                           This location does not contain any folders that SIMM
@@ -1565,7 +1633,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                           className="wizard-directory-row"
                           onClick={() => void loadDirectory(dir.path)}
                         >
-                          <i className="fas fa-folder"></i>
+                          <Icon name="fas fa-folder" />
                           <span>{dir.name}</span>
                         </button>
                       ))

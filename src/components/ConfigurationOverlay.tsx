@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent as R
 
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
+import { Icon } from './Icon';
 import type {
   ConfigDocument,
   ConfigEditOperation,
@@ -765,7 +766,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           </div>
 
           <div className="config-explorer__search">
-            <i className="fas fa-search"></i>
+            <Icon name="fas fa-search" />
             <input
               type="text"
               value={fileFilter}
@@ -777,7 +778,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           <div className="config-explorer__list">
             {loadingCatalog ? (
               <div className="config-editor__empty">
-                <i className="fas fa-spinner fa-spin"></i>
+                <Icon name="fas fa-spinner fa-spin" />
                 <strong>Loading configuration catalog</strong>
               </div>
             ) : (
@@ -829,7 +830,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                                 className={`config-explorer__subentry ${editorMode === 'raw' ? 'config-explorer__subentry--active' : ''}`}
                                 onClick={() => handleSelectFile(file, 'raw')}
                               >
-                                <i className="fas fa-code"></i>
+                                <Icon name="fas fa-code" />
                                 <span>Raw Editor</span>
                                 {!file.supportsStructuredEdit && <span className="settings-chip settings-chip--muted">Default</span>}
                               </button>
@@ -879,7 +880,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                                   className={`config-explorer__subentry ${editorMode === 'raw' ? 'config-explorer__subentry--active' : ''}`}
                                   onClick={() => handleSelectFile(file, 'raw')}
                                 >
-                                  <i className="fas fa-code"></i>
+                                  <Icon name="fas fa-code" />
                                   <span>Raw Editor</span>
                                   {!file.supportsStructuredEdit && <span className="settings-chip settings-chip--muted">Default</span>}
                                 </button>
@@ -894,7 +895,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
                 {!loadingCatalog && filteredCatalog.length === 0 && (
                   <div className="config-editor__empty">
-                    <i className="fas fa-file-circle-question"></i>
+                    <Icon name="fas fa-file-circle-question" />
                     <strong>No config files found</strong>
                     <p>Try a different search term or verify that this environment has generated config files.</p>
                   </div>
@@ -907,13 +908,13 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
         <section className={`config-workspace ${activeDocument?.parseWarnings.length ? 'config-workspace--with-warning' : ''}`}>
           {!selectedFilePath ? (
             <div className="config-editor__empty config-editor__empty--workspace">
-              <i className="fas fa-sliders"></i>
+              <Icon name="fas fa-sliders" />
               <strong>Select a configuration file</strong>
               <p>Choose a file from the explorer to inspect and edit its current settings.</p>
             </div>
           ) : loadingDocument && !activeDocument ? (
             <div className="config-editor__empty config-editor__empty--workspace">
-              <i className="fas fa-spinner fa-spin"></i>
+              <Icon name="fas fa-spinner fa-spin" />
               <strong>Loading configuration file</strong>
             </div>
           ) : activeDocument && activeDraft ? (
@@ -947,23 +948,23 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
                 <div className="config-workspace__actions">
                   <button type="button" className="btn btn-secondary" onClick={() => void ApiService.openPath(activeDocument.summary.path)}>
-                    <i className="fas fa-file-lines"></i>
+                    <Icon name="fas fa-file-lines" />
                     Open File
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={() => void ApiService.revealPath(activeDocument.summary.path)}>
-                    <i className="fas fa-folder-open"></i>
+                    <Icon name="fas fa-folder-open" />
                     Open Folder
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={() => void handleReload()} disabled={loadingDocument || saving}>
-                    <i className={loadingDocument ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'}></i>
+                    <Icon name={loadingDocument ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
                     Reload
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={handleDiscard} disabled={!activeDraft.dirty || saving}>
-                    <i className="fas fa-rotate-left"></i>
+                    <Icon name="fas fa-rotate-left" />
                     Discard Draft
                   </button>
                   <button type="button" className="btn btn-primary" onClick={() => void handleSave()} disabled={!activeDraft.dirty || saving}>
-                    <i className={saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'}></i>
+                    <Icon name={saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'} />
                     {saving ? 'Saving…' : 'Save'}
                   </button>
                 </div>
@@ -980,7 +981,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                           aria-label="Show earlier sections"
                           onClick={() => scrollSectionTabs(-240)}
                         >
-                          <i className="fas fa-chevron-left"></i>
+                          <Icon name="fas fa-chevron-left" />
                         </button>
                       )}
                       <div
@@ -1015,14 +1016,14 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                           aria-label="Show later sections"
                           onClick={() => scrollSectionTabs(240)}
                         >
-                          <i className="fas fa-chevron-right"></i>
+                          <Icon name="fas fa-chevron-right" />
                         </button>
                       )}
                     </div>
                   </div>
 
                   <div className="config-editor__search config-editor__search--workspace">
-                    <i className="fas fa-search"></i>
+                    <Icon name="fas fa-search" />
                     <input
                       type="text"
                       value={sectionFilter}
@@ -1045,7 +1046,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
               {activeDocument.parseWarnings.length > 0 && (
                 <div className="config-editor__warning">
-                  <i className="fas fa-triangle-exclamation"></i>
+                  <Icon name="fas fa-triangle-exclamation" />
                   <span className="settings-chip">
                     Raw Fallback
                   </span>
@@ -1078,7 +1079,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                       <div className="config-structured__sections">
                         {visibleSections.length === 0 ? (
                           <div className="config-editor__empty config-editor__empty--workspace">
-                            <i className="fas fa-sliders"></i>
+                            <Icon name="fas fa-sliders" />
                             <strong>No matching settings</strong>
                             <p>Adjust the search or switch sections to widen the result set.</p>
                           </div>
@@ -1092,11 +1093,11 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                                 </div>
                                 <div className="config-section-card__header-actions">
                                   <button type="button" className="btn btn-secondary btn-small" onClick={() => handleAddEntry(section.id)}>
-                                    <i className="fas fa-plus"></i>
+                                    <Icon name="fas fa-plus" />
                                     Add Entry
                                   </button>
                                   <button type="button" className="btn btn-secondary btn-small" onClick={() => handleDeleteSection(section.id)}>
-                                    <i className="fas fa-trash"></i>
+                                    <Icon name="fas fa-trash" />
                                     Remove Section
                                   </button>
                                 </div>
@@ -1160,7 +1161,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                                           aria-label={`Delete ${entry.key || 'entry'}`}
                                           onClick={() => handleDeleteEntry(section.id, entry.id)}
                                         >
-                                          <i className="fas fa-trash"></i>
+                                          <Icon name="fas fa-trash" />
                                         </button>
                                       </div>
                                     </div>

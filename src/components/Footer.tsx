@@ -6,6 +6,7 @@ import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/eve
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from './EnvironmentList';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
+import { Icon } from './Icon';
 
 interface ModUpdatesEntry {
   count: number;
@@ -295,7 +296,7 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
             type="button"
             aria-label="Check for updates"
           >
-            <i className={`fas ${checkingAll ? 'fa-sync-alt fa-spin' : 'fa-sync-alt'}`}></i>
+            <Icon name="syncAlt" spin={checkingAll} />
           </button>
         )}
         <span className={`statusbar-stat ${isOnline ? 'statusbar-stat-ok' : 'statusbar-stat-warn'}`}>

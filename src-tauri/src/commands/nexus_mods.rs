@@ -1,5 +1,6 @@
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
+use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
@@ -327,8 +328,9 @@ async fn get_nxm_download_links(
     let response = client
         .get(&url)
         .bearer_auth(access_token)
-        .header("Application-Name", "Schedule I Mod Manager")
-        .header("Application-Version", env!("CARGO_PKG_VERSION"))
+        .header(reqwest::header::USER_AGENT, http_identity::user_agent())
+        .header("Application-Name", http_identity::APP_NAME)
+        .header("Application-Version", http_identity::APP_VERSION)
         .send()
         .await
         .map_err(|e| {
@@ -866,7 +868,7 @@ fn derive_account_summary(
         )
     };
 
-    let requires_site_confirmation = !(flags.0 || flags.1);
+    let requires_site_confirmation = !flags.0;
 
     let name = token_identity
         .as_ref()
@@ -910,7 +912,7 @@ fn derive_account_summary(
         "isPremium": flags.0,
         "isSupporter": flags.1,
         "requiresSiteConfirmation": requires_site_confirmation,
-        "canDirectDownload": !requires_site_confirmation,
+        "canDirectDownload": flags.0,
     })
 }
 
@@ -1410,7 +1412,8 @@ async fn complete_pending_nxm_download(
     );
     let _ = crate::services::tracked_downloads::emit(app, tracked_download.clone());
 
-    let downloaded = nexus_api::download_from_url(&first_url, None)
+    let downloaded = nexus_service
+        .download_from_url(&first_url, None)
         .await
         .map_err(|e| {
             let message = nexus_error(format!(
@@ -1438,7 +1441,7 @@ async fn complete_pending_nxm_download(
         "nexusmods-manual-{}-{}-{}",
         nxm.mod_id, nxm.file_id, original_filename
     ));
-    tokio::fs::write(&archive_path, downloaded.bytes)
+    tokio::fs::write(&archive_path, downloaded)
         .await
         .map_err(|e| {
             let message = nexus_error(format!(
@@ -1965,6 +1968,12 @@ pub async fn get_nexus_mods_games(_db: State<'_, Arc<SqlitePool>>) -> Result<Vec
 }
 
 #[tauri::command]
+pub async fn get_nexus_rate_limits(_db: State<'_, Arc<SqlitePool>>) -> Result<Value, String> {
+    let service = get_nexus_mods_service().await?;
+    serde_json::to_value(service.latest_rate_limits().await).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn search_nexus_mods_mods(
     db: State<'_, Arc<SqlitePool>>,
     game_id: String,
@@ -2153,6 +2162,242 @@ pub async fn check_nexus_mods_for_updates(
 }
 
 #[tauri::command]
+pub async fn download_nexus_mod_to_library(
+    app: AppHandle,
+    db: State<'_, Arc<SqlitePool>>,
+    game_id_param: Option<String>,
+    mod_id: u32,
+    file_id: u32,
+    runtime: Option<String>,
+    security_override: Option<bool>,
+) -> Result<Value, String> {
+    use crate::services::mods::ModsService;
+
+    let access_token = get_valid_nexus_access_token(db.inner().clone())
+        .await
+        .map_err(nexus_error)?;
+
+    let db_pool = db.inner().clone();
+    let game_id = if let Some(ref id) = game_id_param {
+        normalize_nexus_game_id(Some(id))
+    } else {
+        let mut settings_service = SettingsService::new(db_pool.clone())
+            .map_err(|e| nexus_error(format!("Failed to create settings service: {}", e)))?;
+        let settings = settings_service.load_settings().await.map_err(|e| {
+            nexus_error(format!(
+                "Failed to load settings for Nexus library download: {}",
+                e
+            ))
+        })?;
+        normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
+    };
+
+    let requested_runtime = parse_runtime_label(runtime.as_deref());
+    let nexus_service = get_nexus_mods_service().await?;
+    let mod_info = nexus_service.get_mod(&game_id, mod_id).await.map_err(|e| {
+        nexus_error(format!(
+            "Failed to fetch mod info for mod {}: {}",
+            mod_id, e
+        ))
+    })?;
+
+    let files = nexus_service
+        .get_mod_files(&game_id, mod_id)
+        .await
+        .map_err(|e| nexus_error(format!("Failed to fetch files for mod {}: {}", mod_id, e)))?;
+
+    let file_info = files
+        .iter()
+        .find(|f| f.get("file_id").and_then(|id| id.as_u64()) == Some(file_id as u64))
+        .ok_or_else(|| nexus_warn(format!("File {} not found in mod {}", file_id, mod_id)))?;
+
+    let version = file_info
+        .get("version")
+        .and_then(|v| v.as_str())
+        .or_else(|| file_info.get("mod_version").and_then(|v| v.as_str()))
+        .unwrap_or("1.0.0")
+        .to_string();
+
+    let mods_service = ModsService::new(db_pool.clone());
+    match mods_service
+        .find_existing_mod_storage_by_source_version(
+            &mod_id.to_string(),
+            &version,
+            requested_runtime.clone(),
+        )
+        .await
+    {
+        Ok(Some(existing_mod_id)) => {
+            return Ok(json!({
+                "success": true,
+                "fromStorage": true,
+                "alreadyStored": true,
+                "storageId": existing_mod_id,
+            }));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            nexus_warn(format!(
+                "Failed to check existing Nexus mod storage for mod {} version {}: {}",
+                mod_id, version, error
+            ));
+        }
+    }
+
+    let links = match nexus_service
+        .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
+        .await
+    {
+        Ok(links) => links,
+        Err(error) if should_require_manual_nexus_download(&error.to_string()) => {
+            nexus_warn(format!(
+                "Nexus library download for mod {} file {} requires website confirmation: {}",
+                mod_id, file_id, error
+            ));
+            return Ok(json!({
+                "success": false,
+                "requiresManualDownload": true,
+                "modUrl": build_nexus_files_page_url(&game_id, mod_id, file_id),
+                "error": "This Nexus account must confirm downloads on Nexus Mods website.",
+            }));
+        }
+        Err(error) => {
+            return Err(nexus_error(format!(
+                "Failed to request Nexus OAuth download links for mod {} file {}: {}",
+                mod_id, file_id, error
+            )));
+        }
+    };
+
+    let first_url = links
+        .first()
+        .ok_or_else(|| nexus_error("No Nexus download links returned"))?
+        .clone();
+    let default_filename = format!("nexusmods-{}-{}.zip", mod_id, file_id);
+    let original_filename = file_info
+        .get("file_name")
+        .and_then(|f| f.as_str())
+        .unwrap_or(&default_filename);
+    let tracked_download = crate::services::tracked_downloads::start_file_download(
+        crate::services::tracked_downloads::new_download_id("nexus-library"),
+        crate::types::TrackedDownloadKind::Mod,
+        original_filename.to_string(),
+        "Nexus Mods",
+        Some("Downloading archive".to_string()),
+    );
+    let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
+
+    let downloaded = nexus_service
+        .download_from_url(&first_url, None)
+        .await
+        .map_err(|e| {
+            let message = nexus_error(format!(
+                "Failed to download file {} from mod {}: {}",
+                file_id, mod_id, e
+            ));
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+
+    let archive_path = std::env::temp_dir().join(format!(
+        "nexusmods-library-{}-{}-{}",
+        mod_id, file_id, original_filename
+    ));
+    tokio::fs::write(&archive_path, downloaded)
+        .await
+        .map_err(|e| {
+            let message = nexus_error(format!("Failed to save downloaded file: {}", e));
+            let _ = crate::services::tracked_downloads::emit(
+                &app,
+                crate::services::tracked_downloads::fail_file_download(
+                    &tracked_download,
+                    message.clone(),
+                    Some("Download failed".to_string()),
+                ),
+            );
+            message
+        })?;
+    let _ = crate::services::tracked_downloads::emit(
+        &app,
+        crate::services::tracked_downloads::complete_file_download(
+            &tracked_download,
+            Some("Archive downloaded".to_string()),
+        ),
+    );
+
+    let zip_path_str = archive_path.to_string_lossy().to_string();
+    let metadata = build_nexus_mod_metadata(&mod_info, &game_id, mod_id, &version);
+    let security_scan = match crate::commands::mods::prepare_security_scan(
+        db_pool.clone(),
+        &zip_path_str,
+        Some(metadata),
+        security_override.unwrap_or(false),
+    )
+    .await
+    {
+        Ok(scan) => scan,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(e.to_string()));
+        }
+    };
+
+    let (metadata, security_report) = match security_scan {
+        crate::commands::mods::SecurityGateResult::Continue { metadata, report } => {
+            (metadata, report)
+        }
+        crate::commands::mods::SecurityGateResult::EarlyResponse(response) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Ok(response);
+        }
+    };
+
+    let store_result = match mods_service
+        .store_mod_archive(
+            &zip_path_str,
+            original_filename,
+            requested_runtime,
+            metadata,
+            None,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            cleanup_temp_archive(&archive_path).await;
+            return Err(nexus_error(format!(
+                "Failed to store mod {} file {} in the library: {}",
+                mod_id, file_id, e
+            )));
+        }
+    };
+
+    cleanup_temp_archive(&archive_path).await;
+
+    let response = json!({
+        "success": true,
+        "source": "nexusmods",
+        "storageId": store_result.get("storageId").cloned().unwrap_or(Value::Null),
+        "alreadyStored": store_result.get("alreadyStored").and_then(|value| value.as_bool()).unwrap_or(false),
+    });
+
+    Ok(crate::commands::mods::finalize_security_scan_response(
+        &mods_service,
+        response,
+        security_report.as_ref(),
+        "downloading a Nexus mod archive",
+    )
+    .await)
+}
+
+#[tauri::command]
 pub async fn install_nexus_mods_mod(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
@@ -2300,7 +2545,8 @@ pub async fn install_nexus_mods_mod(
     );
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
 
-    let downloaded = nexus_api::download_from_url(&first_url, None)
+    let downloaded = nexus_service
+        .download_from_url(&first_url, None)
         .await
         .map_err(|e| {
             let message = nexus_error(format!(
@@ -2323,7 +2569,7 @@ pub async fn install_nexus_mods_mod(
         "nexusmods-{}-{}-{}",
         mod_id, file_id, original_filename
     ));
-    tokio::fs::write(&archive_path, downloaded.bytes)
+    tokio::fs::write(&archive_path, downloaded)
         .await
         .map_err(|e| {
             let message = nexus_error(format!("Failed to save downloaded file: {}", e));
@@ -2523,7 +2769,7 @@ pub async fn install_nexus_mods_mod(
 mod tests {
     use super::{
         classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
-        OAuthRefreshFailure,
+        derive_account_summary, OAuthRefreshFailure,
     };
     use serde_json::json;
 
@@ -2587,6 +2833,26 @@ mod tests {
         let (is_premium, is_supporter) = derive_account_flags(&userinfo, &token);
         assert!(!is_premium);
         assert!(is_supporter);
+    }
+
+    #[test]
+    fn supporter_accounts_still_require_site_confirmation_for_downloads() {
+        let token = build_test_jwt(json!({
+            "user": {
+                "id": 12345,
+                "username": "SupporterOnly"
+            }
+        }));
+        let userinfo = json!({
+            "membershipRoles": ["supporter"]
+        });
+
+        let account = derive_account_summary(Some(&token), Some(&userinfo), None);
+
+        assert_eq!(account["isPremium"], json!(false));
+        assert_eq!(account["isSupporter"], json!(true));
+        assert_eq!(account["requiresSiteConfirmation"], json!(true));
+        assert_eq!(account["canDirectDownload"], json!(false));
     }
 
     #[test]

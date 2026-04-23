@@ -279,13 +279,12 @@ mod tests {
 
     #[test]
     fn build_auth_args_uses_a_configured_schedule_i_branch() {
-        let args = AuthService::build_auth_args(
-            "steam-user".to_string(),
-            Some("guard".to_string()),
-        );
+        let args =
+            AuthService::build_auth_args("steam-user".to_string(), Some("guard".to_string()));
 
         assert!(args.windows(2).any(|window| {
-            window[0] == "-branch" && window[1] == crate::types::schedule_i_config().branches[0].name
+            window[0] == "-branch"
+                && window[1] == crate::types::schedule_i_config().branches[0].name
         }));
         assert!(!args.iter().any(|arg| arg == "public"));
     }

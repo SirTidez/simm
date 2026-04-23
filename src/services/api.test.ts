@@ -103,7 +103,11 @@ describe('ApiService', () => {
         endorsements: 12,
         downloads: 34,
         version: '1.0.0',
-        author: 'Tester',
+        author: 'OriginalCreator',
+        uploader: {
+          name: 'ActualUploader',
+          memberId: 99,
+        },
         updatedAt: '2024-01-01',
         createdAt: '2023-01-01',
       },
@@ -117,6 +121,10 @@ describe('ApiService', () => {
         thumbnail_url: 'thumb.png',
         endorsement_count: 12,
         mod_downloads: 34,
+        author: 'ActualUploader',
+        uploader: 'ActualUploader',
+        uploader_member_id: 99,
+        original_author: 'OriginalCreator',
         updated_at: '2024-01-01',
         created_at: '2023-01-01',
       })
@@ -324,6 +332,7 @@ describe('ApiService', () => {
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
+    ['refreshThunderstorePackageCache', () => ApiService.refreshThunderstorePackageCache('schedule-i'), 'refresh_thunderstore_package_cache', { gameId: 'schedule-i' }],
     ['openPath', () => ApiService.openPath('C:/test/file.cfg'), 'open_path', { path: 'C:/test/file.cfg' }],
     ['revealPath', () => ApiService.revealPath('C:/test/file.cfg'), 'reveal_path', { path: 'C:/test/file.cfg' }],
   ])('%s invokes correct command contract', async (_label, call, command, payload) => {

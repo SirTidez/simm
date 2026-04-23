@@ -5,6 +5,7 @@ import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
+import { Icon } from './Icon';
 
 interface PluginInfo {
   name: string;
@@ -262,25 +263,25 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
         {
           key: plugin.disabled ? 'enable' : 'disable',
           label: plugin.disabled ? 'Enable' : 'Disable',
-          icon: plugin.disabled ? 'fas fa-toggle-on' : 'fas fa-toggle-off',
+          icon: plugin.disabled ? 'toggleOn' : 'toggleOff',
           onSelect: () => void handleTogglePlugin(plugin),
         },
         {
           key: 'open-folder',
           label: 'Open Folder',
-          icon: 'fas fa-folder-open',
+          icon: 'folderOpen',
           onSelect: () => void handleOpenFolder(),
         },
         {
           key: 'reload',
           label: 'Reload',
-          icon: 'fas fa-rotate',
+          icon: 'rotate',
           onSelect: () => void loadPlugins(),
         },
         {
           key: 'delete',
           label: 'Delete',
-          icon: 'fas fa-trash',
+          icon: 'trash',
           danger: true,
           onSelect: () => setPendingDelete(plugin),
         },
@@ -404,11 +405,11 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
                             setSelectedPluginKey(pluginKey);
                           }
                         }}
-                        onContextMenu={(event) => openContextMenu(event, plugin)}
-                      >
-                        <div className="workspace-file-row__icon">
-                          <i className="fas fa-plug" aria-hidden="true"></i>
-                        </div>
+                      onContextMenu={(event) => openContextMenu(event, plugin)}
+                    >
+                      <div className="workspace-file-row__icon">
+                        <Icon name="plug" />
+                      </div>
                         <div className="workspace-collection__row-body">
                           <div className="workspace-collection__row-title">{plugin.name}</div>
                           <div className="workspace-collection__row-meta">
@@ -441,7 +442,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
               <div className="workspace-inspector-card">
                 <div className="workspace-inspector-card__header workspace-inspector-card__header--file">
                   <div className="workspace-file-row__icon workspace-file-row__icon--large">
-                    <i className="fas fa-plug" aria-hidden="true"></i>
+                    <Icon name="plug" />
                   </div>
                   <div>
                     <h3>{selectedPlugin.name}</h3>

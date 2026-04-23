@@ -171,6 +171,20 @@ pub enum AppUpdateChannel {
     Beta,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExperienceMode {
+    Player,
+    PowerUser,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStartupState {
+    pub simm_directory_created: bool,
+    pub database_created: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -202,6 +216,9 @@ pub struct Settings {
     pub database_backup_count: Option<u32>,
     pub log_retention_days: Option<u32>, // Number of days to keep log files (default: 7)
     pub app_update: Option<AppUpdateSettings>,
+    pub experience_mode: Option<ExperienceMode>,
+    pub show_advanced_game_tools: Option<bool>,
+    pub setup_guide_completed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -472,6 +472,9 @@ impl SettingsService {
                 skipped_version_normalized: None,
                 channel: Some(AppUpdateChannel::Beta),
             }),
+            experience_mode: Some(crate::types::ExperienceMode::Player),
+            show_advanced_game_tools: Some(false),
+            setup_guide_completed: Some(false),
         };
 
         Ok(default_settings)

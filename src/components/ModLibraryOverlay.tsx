@@ -21,6 +21,7 @@ import {
   SecurityScanReportOverlay,
   type SecurityScanReportOption,
 } from "./SecurityScanReportOverlay";
+import { Icon } from './Icon';
 import { type SecurityReportWorkspaceRequest } from "./SecurityScanReportPage";
 import {
   AnchoredContextMenu,
@@ -291,6 +292,8 @@ export interface LibraryModViewState {
   name: string;
   source: string;
   author?: string;
+  uploader?: string;
+  originalAuthor?: string;
   summary?: string;
   iconUrl?: string;
   iconCachePath?: string;
@@ -538,6 +541,18 @@ const normalizeDateString = (value: DateLike): string | undefined => {
   return timestamp ? new Date(timestamp).toISOString() : undefined;
 };
 
+const getErrorMessage = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+
+  return fallback;
+};
+
 const parseTimestamp = (value?: DateLike): number => normalizeDateLike(value);
 
 const getThunderstorePackageUpdatedAt = (
@@ -706,15 +721,19 @@ const isNexusFomodInstaller = (
 
 const getNexusFileDisplayKind = (
   file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
-): "FOMOD Installer" | "IL2CPP" | "Mono" | "Unknown" => {
+): "All-in-One" | "IL2CPP" | "Mono" | "Unknown" => {
   if (isNexusFomodInstaller(file)) {
-    return "FOMOD Installer";
+    return "All-in-One";
   }
   return inferNexusFileRuntime(file);
 };
 
 const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
   return [...files].sort((left, right) => {
+    if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
+      return left.is_primary ? -1 : 1;
+    }
+
     const versionDelta = compareVersionTokensDesc(
       left.version || left.mod_version || "",
       right.version || right.mod_version || "",
@@ -741,10 +760,6 @@ const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
     const rightInstaller = isNexusFomodInstaller(right);
     if (leftInstaller !== rightInstaller) {
       return leftInstaller ? 1 : -1;
-    }
-
-    if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
-      return left.is_primary ? -1 : 1;
     }
 
     return (left.file_name || left.name || "").localeCompare(
@@ -888,11 +903,59 @@ const matchesNexusQueryLocally = (mod: NexusMod, query: string): boolean => {
     return true;
   }
 
-  const haystacks = [mod.name, mod.summary, mod.author];
+  const haystacks = [
+    mod.name,
+    mod.summary,
+    mod.author,
+    mod.uploader,
+    mod.original_author,
+  ];
 
   return haystacks.some((value) =>
     normalizeSearchText(value).includes(normalizedQuery),
   );
+};
+
+const normalizeAttributionName = (value?: string | null): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+const getNexusModAttribution = (mod: {
+  author?: string;
+  uploader?: string;
+  original_author?: string;
+}): string => {
+  const primary =
+    normalizeAttributionName(mod.uploader) ||
+    normalizeAttributionName(mod.author) ||
+    "Unknown";
+  const originalAuthor = normalizeAttributionName(mod.original_author);
+
+  if (
+    originalAuthor &&
+    originalAuthor.localeCompare(primary, undefined, {
+      sensitivity: "accent",
+    }) !== 0
+  ) {
+    return `${primary} • Original creator: ${originalAuthor}`;
+  }
+
+  return primary;
+};
+
+const getActiveModViewAttribution = (
+  activeModView: LibraryModViewState,
+): string | undefined => {
+  if (activeModView.kind !== "nexusmods") {
+    return normalizeAttributionName(activeModView.author);
+  }
+
+  return getNexusModAttribution({
+    author: activeModView.author,
+    uploader: activeModView.uploader,
+    original_author: activeModView.originalAuthor,
+  });
 };
 
 const sortThunderstoreGroups = (
@@ -1690,6 +1753,27 @@ export function ModLibraryOverlay({
     [closeConfirmOverlay],
   );
 
+  const handleRefreshLibrary = useCallback(async () => {
+    setLoadingLibrary(true);
+    try {
+      await ApiService.refreshThunderstorePackageCache("schedule-i");
+      await refreshLibrary();
+      await refreshEnvironments();
+    } catch (error) {
+      logger.warn("Failed to refresh Thunderstore package cache", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      showLibraryNotice(
+        "Thunderstore Refresh Failed",
+        error instanceof Error
+          ? error.message
+          : "SIMM could not refresh Thunderstore right now. Local library data is still available.",
+      );
+    } finally {
+      setLoadingLibrary(false);
+    }
+  }, [refreshEnvironments, refreshLibrary, showLibraryNotice]);
+
   const openSecurityReport = useCallback(
     (request: SecurityReportWorkspaceRequest) => {
       if (onOpenSecurityReport) {
@@ -2219,10 +2303,11 @@ export function ModLibraryOverlay({
       setNexusModsSearchResults([]);
       setActiveModView(null);
       try {
-        const [il2cppResult, monoResult] = await Promise.all([
-          ApiService.searchThunderstore("schedule-i", trimmedQuery, "IL2CPP"),
-          ApiService.searchThunderstore("schedule-i", trimmedQuery, "Mono"),
-        ]);
+        const { packagesByRuntime } =
+          await ApiService.searchThunderstoreByRuntime(
+            "schedule-i",
+            trimmedQuery,
+          );
 
         const merged = new Map<string, ThunderstorePackageGroup>();
         const addRuntime = (
@@ -2254,10 +2339,10 @@ export function ModLibraryOverlay({
           });
         };
 
-        (il2cppResult.packages || []).forEach((pkg: ThunderstorePackage) =>
+        (packagesByRuntime.IL2CPP || []).forEach((pkg: ThunderstorePackage) =>
           addRuntime(pkg, "IL2CPP"),
         );
-        (monoResult.packages || []).forEach((pkg: ThunderstorePackage) =>
+        (packagesByRuntime.Mono || []).forEach((pkg: ThunderstorePackage) =>
           addRuntime(pkg, "Mono"),
         );
 
@@ -2273,12 +2358,19 @@ export function ModLibraryOverlay({
         setShowSearchResults(true);
       } catch (err) {
         console.error("Error searching Thunderstore:", err);
+        showLibraryNotice(
+          "Thunderstore API Issue",
+          getErrorMessage(
+            err,
+            "Thunderstore API is having issues. Please try again later.",
+          ),
+        );
         setSearchResults([]);
       } finally {
         setSearching(false);
       }
     },
-    [discoverSort],
+    [discoverSort, showLibraryNotice],
   );
 
   const runNexusSearch = useCallback(
@@ -2300,23 +2392,11 @@ export function ModLibraryOverlay({
                 : await ApiService.getNexusModsLatestUpdated("schedule1");
           mods = result.mods || [];
         } else {
-          const [searchResult, supplementalBrowse] = await Promise.all([
-            ApiService.searchNexusMods("schedule1", trimmedQuery),
-            ApiService.getNexusModsLatestUpdated("schedule1"),
-          ]);
-          const merged = new Map<string, NexusMod>();
-          for (const mod of searchResult.mods || []) {
-            merged.set(String(mod.mod_id), mod);
-          }
-          for (const mod of supplementalBrowse.mods || []) {
-            if (matchesNexusQueryLocally(mod, trimmedQuery)) {
-              merged.set(
-                String(mod.mod_id),
-                merged.get(String(mod.mod_id)) || mod,
-              );
-            }
-          }
-          mods = Array.from(merged.values()).filter((mod) =>
+          const searchResult = await ApiService.searchNexusMods(
+            "schedule1",
+            trimmedQuery,
+          );
+          mods = (searchResult.mods || []).filter((mod) =>
             matchesNexusQueryLocally(mod, trimmedQuery),
           );
         }
@@ -2787,97 +2867,84 @@ export function ModLibraryOverlay({
         setMlvscanFeaturedRelease(null);
       }
 
-      const [
-        meshVaultIl2cpp,
-        meshVaultMono,
-        s1mapiIl2cpp,
-        s1mapiMono,
-      ] = await Promise.allSettled([
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
-          "IL2CPP",
-        ),
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
-          "Mono",
-        ),
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
-          "IL2CPP",
-        ),
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
-          "Mono",
-        ),
+      const thunderstoreFeatured = await Promise.allSettled([
+        ApiService.searchThunderstoreByRuntime("schedule-i", ""),
       ]);
-
-      if (
-        meshVaultIl2cpp.status === "rejected" ||
-        meshVaultMono.status === "rejected"
-      ) {
-        logger.warn("Failed to load featured MeshVault Thunderstore metadata", {
-          il2cppError:
-            meshVaultIl2cpp.status === "rejected"
-              ? meshVaultIl2cpp.reason instanceof Error
-                ? meshVaultIl2cpp.reason.message
-                : String(meshVaultIl2cpp.reason)
-              : undefined,
-          monoError:
-            meshVaultMono.status === "rejected"
-              ? meshVaultMono.reason instanceof Error
-                ? meshVaultMono.reason.message
-                : String(meshVaultMono.reason)
-              : undefined,
+      const packagesByRuntime =
+        thunderstoreFeatured[0].status === "fulfilled"
+          ? thunderstoreFeatured[0].value.packagesByRuntime
+          : {};
+      if (thunderstoreFeatured[0].status === "rejected") {
+        logger.warn("Failed to load featured Thunderstore metadata", {
+          error:
+            thunderstoreFeatured[0].reason instanceof Error
+              ? thunderstoreFeatured[0].reason.message
+              : String(thunderstoreFeatured[0].reason),
         });
       }
+
+      const findFeaturedPackage = (
+        sourceId: string,
+        runtime: ThunderstoreRuntime,
+      ): ThunderstorePackage | null => {
+        const parsed = parseThunderstoreSourceId(sourceId);
+        if (!parsed.owner || !parsed.name) {
+          return null;
+        }
+        const targetOwner = parsed.owner.toLowerCase();
+        const targetName = normalizeThunderstoreName(parsed.name).toLowerCase();
+        const packages = (packagesByRuntime[runtime] || []) as ThunderstorePackage[];
+
+        return (
+          packages.find((pkg) => {
+            const pkgOwner = (pkg.owner || "").toLowerCase();
+            const pkgName = normalizeThunderstoreName(
+              pkg.name || pkg.full_name || "",
+            ).toLowerCase();
+            return pkgOwner === targetOwner && pkgName === targetName;
+          }) ||
+          packages.find((pkg) => {
+            const pkgOwner = (pkg.owner || "").toLowerCase();
+            const pkgName = (pkg.name || "").toLowerCase();
+            return pkgOwner === targetOwner && pkgName === parsed.name.toLowerCase();
+          }) ||
+          null
+        );
+      };
+
       setMeshVaultFeaturedPackage(
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.meshvault, {
           IL2CPP:
-            meshVaultIl2cpp.status === "fulfilled"
-              ? meshVaultIl2cpp.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              "IL2CPP",
+            ) || undefined,
           Mono:
-            meshVaultMono.status === "fulfilled"
-              ? meshVaultMono.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              "Mono",
+            ) || undefined,
         }),
       );
 
-      if (
-        s1mapiIl2cpp.status === "rejected" ||
-        s1mapiMono.status === "rejected"
-      ) {
-        logger.warn("Failed to load featured S1MAPI Thunderstore metadata", {
-          il2cppError:
-            s1mapiIl2cpp.status === "rejected"
-              ? s1mapiIl2cpp.reason instanceof Error
-                ? s1mapiIl2cpp.reason.message
-                : String(s1mapiIl2cpp.reason)
-              : undefined,
-          monoError:
-            s1mapiMono.status === "rejected"
-              ? s1mapiMono.reason instanceof Error
-                ? s1mapiMono.reason.message
-                : String(s1mapiMono.reason)
-              : undefined,
-        });
-      }
       setS1mapiFeaturedPackage(
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi, {
           IL2CPP:
-            s1mapiIl2cpp.status === "fulfilled"
-              ? s1mapiIl2cpp.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              "IL2CPP",
+            ) || undefined,
           Mono:
-            s1mapiMono.status === "fulfilled"
-              ? s1mapiMono.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              "Mono",
+            ) || undefined,
         }),
       );
     };
 
     void loadFeaturedReleases();
-  }, [isOpen, findThunderstorePackageForRuntime]);
+  }, [isOpen]);
 
   const pickNexusFileForVersionAndRuntime = useCallback(
     (
@@ -4205,9 +4272,7 @@ export function ModLibraryOverlay({
         } catch (error) {
           showLibraryNotice(
             "Install Failed",
-            error instanceof Error
-              ? error.message
-              : "Failed to install this mod.",
+            getErrorMessage(error, "Failed to install this mod."),
           );
         } finally {
           setInstallingTargets(false);
@@ -4277,9 +4342,7 @@ export function ModLibraryOverlay({
     } catch (error) {
       showLibraryNotice(
         "Install Failed",
-        error instanceof Error
-          ? error.message
-          : "Failed to install the selected environments.",
+        getErrorMessage(error, "Failed to install the selected environments."),
       );
     } finally {
       setInstallingTargets(false);
@@ -5726,6 +5789,8 @@ export function ModLibraryOverlay({
         name: mod.name,
         source: "nexusmods",
         author: mod.author,
+        uploader: mod.uploader,
+        originalAuthor: mod.original_author,
         summary: mod.summary,
         iconUrl: mod.picture_url,
         sourceUrl: `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`,
@@ -5800,7 +5865,7 @@ export function ModLibraryOverlay({
       if (!source) {
         return (
           <div className={`${className} mod-card-icon-fallback`}>
-            <i className="fas fa-puzzle-piece"></i>
+            <Icon name="fas fa-puzzle-piece" />
           </div>
         );
       }
@@ -6184,7 +6249,7 @@ export function ModLibraryOverlay({
                 border: "1px solid rgba(255, 170, 0, 0.3)",
               }}
             >
-              <i className="fas fa-arrow-up" style={{ marginRight: "0.25rem" }}></i>
+              <Icon name="fas fa-arrow-up" style={{ marginRight: "0.25rem" }} />
               Update Available
             </span>
           ) : inLibrary ? (
@@ -6198,7 +6263,7 @@ export function ModLibraryOverlay({
                 border: "1px solid rgba(74, 222, 128, 0.3)",
               }}
             >
-              <i className="fas fa-check" style={{ marginRight: "0.25rem" }}></i>
+              <Icon name="fas fa-check" style={{ marginRight: "0.25rem" }} />
               Up to Date
             </span>
           ) : (
@@ -6212,7 +6277,7 @@ export function ModLibraryOverlay({
                 border: "1px solid rgba(74, 144, 226, 0.3)",
               }}
             >
-              <i className="fas fa-star" style={{ marginRight: "0.25rem" }}></i>
+              <Icon name="fas fa-star" style={{ marginRight: "0.25rem" }} />
               Featured
             </span>
           )}
@@ -6237,28 +6302,26 @@ export function ModLibraryOverlay({
           }}
         >
           <span>
-            <i
-              className="fas fa-cloud-download-alt"
+            <Icon name="fas fa-cloud-download-alt"
               style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-            ></i>
+             />
             Thunderstore Package
           </span>
           <span>
-            <i
-              className="fas fa-folder-tree"
+            <Icon name="fas fa-folder-tree"
               style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-            ></i>
+             />
             Installs to {featured.installBucketLabel}
           </span>
           {installedVersion && (
             <span>
-              <i className="fas fa-tag" style={{ marginRight: "0.35rem" }}></i>
+              <Icon name="fas fa-tag" style={{ marginRight: "0.35rem" }} />
               Installed: {formatVersionTag(installedVersion)}
             </span>
           )}
           {latestVersion && (
             <span style={needsUpdate ? { color: "#ffaa00" } : {}}>
-              <i className="fas fa-cloud" style={{ marginRight: "0.35rem" }}></i>
+              <Icon name="fas fa-cloud" style={{ marginRight: "0.35rem" }} />
               Latest: {formatVersionTag(latestVersion)}
             </span>
           )}
@@ -6283,10 +6346,10 @@ export function ModLibraryOverlay({
           }
         >
           {downloading === featured.key ? (
-            <i className="fas fa-spinner fa-spin"></i>
+            <Icon name="fas fa-spinner fa-spin" />
           ) : (
             <>
-              <i className={`fas ${needsUpdate ? "fa-arrow-up" : "fa-download"}`}></i>
+              <Icon name={`fas ${needsUpdate ? "fa-arrow-up" : "fa-download"}`} />
               <span style={{ marginLeft: "0.5rem" }}>{actionLabel}</span>
             </>
           )}
@@ -6299,7 +6362,7 @@ export function ModLibraryOverlay({
           style={{ textDecoration: "none", textAlign: "center" }}
           title="View on Thunderstore"
         >
-          <i className="fas fa-external-link-alt"></i>
+          <Icon name="fas fa-external-link-alt" />
           <span style={{ marginLeft: "0.5rem" }}>View</span>
         </a>
       </div>
@@ -6475,22 +6538,20 @@ export function ModLibraryOverlay({
                 onClick={() => setShowDiscovery((prev) => !prev)}
                 title="Show or hide discovery results"
               >
-                <i
-                  className={`fas ${showDiscovery ? "fa-chevron-up" : "fa-chevron-down"}`}
+                <Icon name={`fas ${showDiscovery ? "fa-chevron-up" : "fa-chevron-down"}`}
                   style={{ marginRight: "0.4rem" }}
-                ></i>
+                 />
                 {showDiscovery ? "Hide Browse" : "Browse Mods"}
               </button>
               <button
                 className="btn btn-secondary btn-small"
-                onClick={refreshLibrary}
+                onClick={handleRefreshLibrary}
                 disabled={loadingLibrary}
                 title="Refresh library entries"
               >
-                <i
-                  className={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
+                <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
                   style={{ marginRight: "0.4rem" }}
-                ></i>
+                 />
                 Refresh
               </button>
             </div>
@@ -6539,10 +6600,9 @@ export function ModLibraryOverlay({
                       fontSize: "0.875rem",
                     }}
                   >
-                    <i
-                      className="fas fa-cloud-download-alt"
+                    <Icon name="fas fa-cloud-download-alt"
                       style={{ marginRight: "0.5rem" }}
-                    ></i>
+                     />
                     Thunderstore
                   </button>
                   <button
@@ -6562,10 +6622,9 @@ export function ModLibraryOverlay({
                       fontSize: "0.875rem",
                     }}
                   >
-                    <i
-                      className="fas fa-download"
+                    <Icon name="fas fa-download"
                       style={{ marginRight: "0.5rem" }}
-                    ></i>
+                     />
                     NexusMods
                   </button>
                 </div>
@@ -6613,8 +6672,7 @@ export function ModLibraryOverlay({
                         fontSize: "0.875rem",
                       }}
                     />
-                    <i
-                      className="fas fa-search"
+                    <Icon name="fas fa-search"
                       style={{
                         position: "absolute",
                         right: "0.75rem",
@@ -6628,7 +6686,7 @@ export function ModLibraryOverlay({
                           ? handleSearch
                           : handleSearchNexusMods
                       }
-                    ></i>
+                     />
                   </div>
                   <button
                     onClick={
@@ -6653,18 +6711,16 @@ export function ModLibraryOverlay({
                         : searchingNexusMods
                     ) ? (
                       <>
-                        <i
-                          className="fas fa-spinner fa-spin"
+                        <Icon name="fas fa-spinner fa-spin"
                           style={{ marginRight: "0.5rem" }}
-                        ></i>
+                         />
                         Searching...
                       </>
                     ) : (
                       <>
-                        <i
-                          className="fas fa-search"
+                        <Icon name="fas fa-search"
                           style={{ marginRight: "0.5rem" }}
-                        ></i>
+                         />
                         Search
                       </>
                     )}
@@ -6724,10 +6780,9 @@ export function ModLibraryOverlay({
                               border: "1px solid rgba(255, 170, 0, 0.3)",
                             }}
                           >
-                            <i
-                              className="fas fa-arrow-up"
+                            <Icon name="fas fa-arrow-up"
                               style={{ marginRight: "0.25rem" }}
-                            ></i>
+                             />
                             Update Available
                           </span>
                         ) : s1apiInLibrary ? (
@@ -6741,10 +6796,9 @@ export function ModLibraryOverlay({
                               border: "1px solid rgba(74, 222, 128, 0.3)",
                             }}
                           >
-                            <i
-                              className="fas fa-check"
+                            <Icon name="fas fa-check"
                               style={{ marginRight: "0.25rem" }}
-                            ></i>
+                             />
                             Up to Date
                           </span>
                         ) : (
@@ -6772,18 +6826,16 @@ export function ModLibraryOverlay({
                         }}
                       >
                         <span>
-                          <i
-                            className="fas fa-box-open"
+                          <Icon name="fas fa-box-open"
                             style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-                          ></i>
+                           />
                           GitHub Release
                         </span>
                         {s1apiInstalledVersion && (
                           <span>
-                            <i
-                              className="fas fa-tag"
+                            <Icon name="fas fa-tag"
                               style={{ marginRight: "0.35rem" }}
-                            ></i>
+                             />
                             Installed: {formatVersionTag(s1apiInstalledVersion)}
                           </span>
                         )}
@@ -6791,10 +6843,9 @@ export function ModLibraryOverlay({
                           <span
                             style={s1apiNeedsUpdate ? { color: "#ffaa00" } : {}}
                           >
-                            <i
-                              className="fas fa-cloud"
+                            <Icon name="fas fa-cloud"
                               style={{ marginRight: "0.35rem" }}
-                            ></i>
+                             />
                             Latest: {formatVersionTag(s1apiLatestVersion)}
                           </span>
                         )}
@@ -6819,12 +6870,11 @@ export function ModLibraryOverlay({
                         }
                       >
                         {downloading === FEATURED_DOWNLOADS.s1api.key ? (
-                          <i className="fas fa-spinner fa-spin"></i>
+                          <Icon name="fas fa-spinner fa-spin" />
                         ) : (
                           <>
-                            <i
-                              className={`fas ${s1apiNeedsUpdate ? "fa-arrow-up" : "fa-download"}`}
-                            ></i>
+                            <Icon name={`fas ${s1apiNeedsUpdate ? "fa-arrow-up" : "fa-download"}`}
+                             />
                             <span style={{ marginLeft: "0.5rem" }}>
                               {s1apiActionLabel}
                             </span>
@@ -6839,7 +6889,7 @@ export function ModLibraryOverlay({
                         style={{ textDecoration: "none", textAlign: "center" }}
                         title="View on GitHub"
                       >
-                        <i className="fas fa-external-link-alt"></i>
+                        <Icon name="fas fa-external-link-alt" />
                         <span style={{ marginLeft: "0.5rem" }}>View</span>
                       </a>
                     </div>
@@ -6868,10 +6918,9 @@ export function ModLibraryOverlay({
                         }}
                       >
                         <strong style={{ fontSize: "1rem" }}>
-                          <i
-                            className="fas fa-shield-alt"
+                          <Icon name="fas fa-shield-alt"
                             style={{ color: "#4a90e2", marginRight: "0.35rem" }}
-                          ></i>
+                           />
                           MLVScan
                         </strong>
                         {mlvscanNeedsUpdate ? (
@@ -6885,10 +6934,9 @@ export function ModLibraryOverlay({
                               border: "1px solid rgba(255, 170, 0, 0.3)",
                             }}
                           >
-                            <i
-                              className="fas fa-arrow-up"
+                            <Icon name="fas fa-arrow-up"
                               style={{ marginRight: "0.25rem" }}
-                            ></i>
+                             />
                             Update Available
                           </span>
                         ) : mlvscanInLibrary ? (
@@ -6902,10 +6950,9 @@ export function ModLibraryOverlay({
                               border: "1px solid rgba(74, 222, 128, 0.3)",
                             }}
                           >
-                            <i
-                              className="fas fa-check"
+                            <Icon name="fas fa-check"
                               style={{ marginRight: "0.25rem" }}
-                            ></i>
+                             />
                             Up to Date
                           </span>
                         ) : (
@@ -6933,18 +6980,16 @@ export function ModLibraryOverlay({
                         }}
                       >
                         <span>
-                          <i
-                            className="fas fa-box-open"
+                          <Icon name="fas fa-box-open"
                             style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-                          ></i>
+                           />
                           GitHub Release
                         </span>
                         {mlvscanInstalledVersion && (
                           <span>
-                            <i
-                              className="fas fa-tag"
+                            <Icon name="fas fa-tag"
                               style={{ marginRight: "0.35rem" }}
-                            ></i>
+                             />
                             Installed:{" "}
                             {formatVersionTag(mlvscanInstalledVersion)}
                           </span>
@@ -6955,10 +7000,9 @@ export function ModLibraryOverlay({
                               mlvscanNeedsUpdate ? { color: "#ffaa00" } : {}
                             }
                           >
-                            <i
-                              className="fas fa-cloud"
+                            <Icon name="fas fa-cloud"
                               style={{ marginRight: "0.35rem" }}
-                            ></i>
+                             />
                             Latest: {formatVersionTag(mlvscanLatestVersion)}
                           </span>
                         )}
@@ -6983,12 +7027,11 @@ export function ModLibraryOverlay({
                         }
                       >
                         {downloading === FEATURED_DOWNLOADS.mlvscan.key ? (
-                          <i className="fas fa-spinner fa-spin"></i>
+                          <Icon name="fas fa-spinner fa-spin" />
                         ) : (
                           <>
-                            <i
-                              className={`fas ${mlvscanNeedsUpdate ? "fa-arrow-up" : "fa-download"}`}
-                            ></i>
+                            <Icon name={`fas ${mlvscanNeedsUpdate ? "fa-arrow-up" : "fa-download"}`}
+                             />
                             <span style={{ marginLeft: "0.5rem" }}>
                               {mlvscanActionLabel}
                             </span>
@@ -7003,7 +7046,7 @@ export function ModLibraryOverlay({
                         style={{ textDecoration: "none", textAlign: "center" }}
                         title="View on GitHub"
                       >
-                        <i className="fas fa-external-link-alt"></i>
+                        <Icon name="fas fa-external-link-alt" />
                         <span style={{ marginLeft: "0.5rem" }}>View</span>
                       </a>
                     </div>
@@ -7183,27 +7226,24 @@ export function ModLibraryOverlay({
                                       }}
                                     >
                                       <span>
-                                        <i
-                                          className="fas fa-download"
+                                        <Icon name="fas fa-download"
                                           style={{ marginRight: "0.25rem" }}
-                                        ></i>
+                                         />
                                         {totalDownloads.toLocaleString()}
                                       </span>
                                       <span>
-                                        <i
-                                          className="fas fa-thumbs-up"
+                                        <Icon name="fas fa-thumbs-up"
                                           style={{ marginRight: "0.25rem" }}
-                                        ></i>
+                                         />
                                         {(
                                           representative?.rating_score || 0
                                         ).toLocaleString()}
                                       </span>
                                       {latestVersion?.version_number && (
                                         <span>
-                                          <i
-                                            className="fas fa-tag"
+                                          <Icon name="fas fa-tag"
                                             style={{ marginRight: "0.25rem" }}
-                                          ></i>
+                                           />
                                           v{latestVersion.version_number}
                                         </span>
                                       )}
@@ -7321,7 +7361,7 @@ export function ModLibraryOverlay({
                                         color: "#9aa4b2",
                                       }}
                                     >
-                                      {mod.author}
+                                      {getNexusModAttribution(mod)}
                                     </div>
                                     <div
                                       style={{
@@ -7394,29 +7434,26 @@ export function ModLibraryOverlay({
                                       }}
                                     >
                                       <span>
-                                        <i
-                                          className="fas fa-download"
+                                        <Icon name="fas fa-download"
                                           style={{ marginRight: "0.25rem" }}
-                                        ></i>
+                                         />
                                         {(
                                           mod.mod_downloads || 0
                                         ).toLocaleString()}
                                       </span>
                                       <span>
-                                        <i
-                                          className="fas fa-thumbs-up"
+                                        <Icon name="fas fa-thumbs-up"
                                           style={{ marginRight: "0.25rem" }}
-                                        ></i>
+                                         />
                                         {(
                                           mod.endorsement_count || 0
                                         ).toLocaleString()}
                                       </span>
                                       {mod.version && (
                                         <span>
-                                          <i
-                                            className="fas fa-tag"
+                                          <Icon name="fas fa-tag"
                                             style={{ marginRight: "0.25rem" }}
-                                          ></i>
+                                           />
                                           v{mod.version}
                                         </span>
                                       )}
@@ -7750,10 +7787,9 @@ export function ModLibraryOverlay({
                                   lineHeight: 1,
                                 }}
                               >
-                                <i
-                                  className={`fas ${securityBadge.icon}`}
+                                <Icon name={`fas ${securityBadge.icon}`}
                                   style={{ fontSize: "0.7rem" }}
-                                ></i>
+                                 />
                                 {securityBadge.label}
                               </button>
                             )}
@@ -7779,18 +7815,16 @@ export function ModLibraryOverlay({
                               >
                                 {updatingGroup === group.key ? (
                                   <>
-                                    <i
-                                      className="fas fa-spinner fa-spin"
+                                    <Icon name="fas fa-spinner fa-spin"
                                       style={{ marginRight: "0.35rem" }}
-                                    ></i>
+                                     />
                                     Updating...
                                   </>
                                 ) : (
                                   <>
-                                    <i
-                                      className="fas fa-arrow-up"
+                                    <Icon name="fas fa-arrow-up"
                                       style={{ marginRight: "0.35rem" }}
-                                    ></i>
+                                     />
                                     Update
                                   </>
                                 )}
@@ -7856,10 +7890,9 @@ export function ModLibraryOverlay({
                                   }}
                                   title="Older version"
                                 >
-                                  <i
-                                    className="fas fa-chevron-left"
+                                  <Icon name="fas fa-chevron-left"
                                     style={{ fontSize: "0.62rem" }}
-                                  ></i>
+                                   />
                                 </button>
                               )}
                               <button
@@ -7920,10 +7953,9 @@ export function ModLibraryOverlay({
                                   }}
                                   title="Newer version"
                                 >
-                                  <i
-                                    className="fas fa-chevron-right"
+                                  <Icon name="fas fa-chevron-right"
                                     style={{ fontSize: "0.62rem" }}
-                                  ></i>
+                                   />
                                 </button>
                               )}
                             </div>
@@ -8009,34 +8041,30 @@ export function ModLibraryOverlay({
                       >
                         {group.author && (
                           <span>
-                            <i
-                              className="fas fa-user"
+                            <Icon name="fas fa-user"
                               style={{ marginRight: "0.25rem", opacity: 0.7 }}
-                            ></i>
+                             />
                             {group.author}
                           </span>
                         )}
                         <span>
-                          <i
-                            className="fas fa-tag"
+                          <Icon name="fas fa-tag"
                             style={{ marginRight: "0.25rem", opacity: 0.7 }}
-                          ></i>
+                           />
                           Active {formatVersionTag(activeVersionLabel)}
                         </span>
                         {groupHasUpdate && group.remoteVersion && (
                           <span className="mod-card-update-hint-inline">
-                            <i
-                              className="fas fa-arrow-up"
+                            <Icon name="fas fa-arrow-up"
                               style={{ marginRight: "0.25rem", opacity: 0.8 }}
-                            ></i>
+                             />
                             Latest {formatVersionTag(group.remoteVersion)}
                           </span>
                         )}
                         <span>
-                          <i
-                            className="fas fa-folder"
+                          <Icon name="fas fa-folder"
                             style={{ marginRight: "0.25rem", opacity: 0.7 }}
-                          ></i>
+                           />
                           {group.installedIn.length
                             ? group.installedIn.length
                             : "0"}{" "}
@@ -8087,7 +8115,7 @@ export function ModLibraryOverlay({
               <h2
                 style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}
               >
-                <i className="fas fa-cube"></i>
+                <Icon name="fas fa-cube" />
                 Mod View
                 {openedFromLogs.active && (
                   <span
@@ -8100,7 +8128,7 @@ export function ModLibraryOverlay({
                       padding: "0.12rem 0.5rem",
                     }}
                   >
-                    <i className="fas fa-file-alt"></i> Opened from Logs
+                    <Icon name="fas fa-file-alt" /> Opened from Logs
                     {openedFromLogs.modTag ? `: ${openedFromLogs.modTag}` : ""}
                   </span>
                 )}
@@ -8109,10 +8137,9 @@ export function ModLibraryOverlay({
                 className="btn btn-secondary btn-small"
                 onClick={closeModView}
               >
-                <i
-                  className="fas fa-arrow-left"
+                <Icon name="fas fa-arrow-left"
                   style={{ marginRight: "0.45rem" }}
-                ></i>
+                 />
                 Back
               </button>
             </div>
@@ -8177,10 +8204,9 @@ export function ModLibraryOverlay({
                         color: "#7d8fa9",
                       }}
                     >
-                      <i
-                        className="fas fa-puzzle-piece"
+                      <Icon name="fas fa-puzzle-piece"
                         style={{ fontSize: "1.6rem" }}
-                      ></i>
+                       />
                     </div>
                   )}
                 </div>
@@ -8194,7 +8220,9 @@ export function ModLibraryOverlay({
                     }}
                   >
                     Source: {activeModView.source}{" "}
-                    {activeModView.author ? `• ${activeModView.author}` : ""}
+                    {getActiveModViewAttribution(activeModView)
+                      ? `• ${getActiveModViewAttribution(activeModView)}`
+                      : ""}
                   </div>
                   {settings?.showSecurityScanBadges !== false &&
                     getSecurityBadgeConfig(activeModView.securityScan) && (
@@ -8225,10 +8253,9 @@ export function ModLibraryOverlay({
                             lineHeight: 1,
                           }}
                         >
-                          <i
-                            className={`fas ${getSecurityBadgeConfig(activeModView.securityScan)?.icon}`}
+                          <Icon name={`fas ${getSecurityBadgeConfig(activeModView.securityScan)?.icon}`}
                             style={{ fontSize: "0.7rem" }}
-                          ></i>
+                           />
                           {
                             getSecurityBadgeConfig(activeModView.securityScan)
                               ?.label
@@ -8337,10 +8364,9 @@ export function ModLibraryOverlay({
                       )
                     }
                   >
-                    <i
-                      className="fas fa-shield-alt"
+                    <Icon name="fas fa-shield-alt"
                       style={{ marginRight: "0.45rem" }}
-                    ></i>
+                     />
                     Security Report
                   </button>
                 )}
@@ -8352,10 +8378,9 @@ export function ModLibraryOverlay({
                     className="btn btn-secondary btn-small"
                     style={{ textDecoration: "none" }}
                   >
-                    <i
-                      className="fas fa-external-link-alt"
+                    <Icon name="fas fa-external-link-alt"
                       style={{ marginRight: "0.45rem" }}
-                    ></i>
+                     />
                     Open Source Page
                   </a>
                 )}
@@ -8551,7 +8576,7 @@ export function ModLibraryOverlay({
                       className={`workspace-collection__rail-button ${libraryTab === tab ? "workspace-collection__rail-button--active" : ""}`}
                       onClick={() => setLibraryTab(tab)}
                     >
-                      <i className={icon}></i>
+                      <Icon name={icon} />
                       <span>{label}</span>
                     </button>
                   ))}
@@ -8698,21 +8723,19 @@ export function ModLibraryOverlay({
                             <option value="popularity">Popularity</option>
                             <option value="newest">Newest</option>
                           </select>
-                          <i
-                            className="fas fa-chevron-down"
+                          <Icon name="fas fa-chevron-down"
                             aria-hidden="true"
-                          ></i>
+                           />
                         </span>
                       </label>
                     </div>
                     <button
                       className="btn btn-secondary btn-small"
-                      onClick={refreshLibrary}
+                      onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
                     >
-                      <i
-                        className={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
-                      ></i>
+                      <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
+                       />
                       <span>Refresh</span>
                     </button>
                   </>
@@ -8742,9 +8765,8 @@ export function ModLibraryOverlay({
                         onClick={handleAddFilesClick}
                         disabled={downloading === "library-import"}
                       >
-                        <i
-                          className={`fas ${downloading === "library-import" ? "fa-spinner fa-spin" : "fa-plus"}`}
-                        ></i>
+                        <Icon name={`fas ${downloading === "library-import" ? "fa-spinner fa-spin" : "fa-plus"}`}
+                         />
                         <span>
                           {downloading === "library-import"
                             ? "Adding..."
@@ -8754,12 +8776,11 @@ export function ModLibraryOverlay({
                     ) : null}
                     <button
                       className="btn btn-secondary btn-small"
-                      onClick={refreshLibrary}
+                      onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
                     >
-                      <i
-                        className={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
-                      ></i>
+                      <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
+                       />
                       <span>Refresh</span>
                     </button>
                   </>
@@ -8958,7 +8979,7 @@ export function ModLibraryOverlay({
                                   {mod.name}
                                 </div>
                                 <div className="workspace-collection__row-meta">
-                                  <span>{mod.author}</span>
+                                  <span>{getNexusModAttribution(mod)}</span>
                                   <span className="workspace-pill workspace-pill--source">
                                     Nexus Mods
                                   </span>
@@ -9171,10 +9192,9 @@ export function ModLibraryOverlay({
                               lineHeight: 1,
                             }}
                           >
-                            <i
-                              className={`fas ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.icon}`}
+                            <Icon name={`fas ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.icon}`}
                               style={{ fontSize: "0.7rem" }}
-                            ></i>
+                             />
                             {
                               getSecurityBadgeConfig(
                                 selectedDownloadedEntry.securityScan,
@@ -9607,7 +9627,7 @@ export function ModLibraryOverlay({
                   <div>
                     <h3>{selectedNexusResult.name}</h3>
                     <div className="workspace-inspector-card__subtle">
-                      Nexus Mods • {selectedNexusResult.author}
+                      Nexus Mods • {getNexusModAttribution(selectedNexusResult)}
                       {downloadedGroupForSelectedNexus
                         ? ` • ${downloadedGroupForSelectedNexus.installedIn.length} env${downloadedGroupForSelectedNexus.installedIn.length === 1 ? "" : "s"}`
                         : ""}

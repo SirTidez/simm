@@ -108,6 +108,8 @@ export interface AppUpdatePreferences {
 
 export type AppUpdateChannel = 'stable' | 'beta';
 
+export type ExperienceMode = 'player' | 'powerUser';
+
 export interface Settings {
   defaultDownloadDir: string;
   depotDownloaderPath?: string;
@@ -136,6 +138,14 @@ export interface Settings {
   databaseBackupCount?: number;
   logRetentionDays?: number;
   appUpdate?: AppUpdatePreferences | null;
+  experienceMode?: ExperienceMode | null;
+  showAdvancedGameTools?: boolean | null;
+  setupGuideCompleted?: boolean | null;
+}
+
+export interface AppStartupState {
+  simmDirectoryCreated: boolean;
+  databaseCreated: boolean;
 }
 
 export interface CustomThemeDefinition {
@@ -228,8 +238,12 @@ export interface NexusMod {
   summary: string;
   description: string;
   picture_url?: string;
+  thumbnail_url?: string;
   version: string;
   author: string;
+  uploader?: string;
+  uploader_member_id?: number;
+  original_author?: string;
   uploaded_time: string;
   updated_time: string;
   category_id: number;

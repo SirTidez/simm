@@ -10,10 +10,13 @@ const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
   checkModUpdates: vi.fn(),
   getModUpdatesSummary: vi.fn(),
+  updateMod: vi.fn(),
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
+  beginNexusManualDownloadSession: vi.fn(),
   searchThunderstore: vi.fn(),
+  searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
   uploadMod: vi.fn(),
 }));
@@ -58,10 +61,13 @@ describe('ModsOverlay', () => {
     apiMocks.getModLibrary.mockReset();
     apiMocks.checkModUpdates.mockReset();
     apiMocks.getModUpdatesSummary.mockReset();
+    apiMocks.updateMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
+    apiMocks.beginNexusManualDownloadSession.mockReset();
     apiMocks.searchThunderstore.mockReset();
+    apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
     apiMocks.uploadMod.mockReset();
     eventMocks.onModsChanged.mockReset();
@@ -78,10 +84,15 @@ describe('ModsOverlay', () => {
     apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
     apiMocks.checkModUpdates.mockResolvedValue([]);
     apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 0, updates: [] });
+    apiMocks.updateMod.mockResolvedValue({ success: true });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.getModSecurityScanReport.mockResolvedValue(null);
     apiMocks.getNexusOAuthStatus.mockResolvedValue({ connected: false, account: { canDirectDownload: false, requiresSiteConfirmation: true } });
+    apiMocks.beginNexusManualDownloadSession.mockResolvedValue({ success: true });
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
+    apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
+      packagesByRuntime: { IL2CPP: [], Mono: [] },
+    });
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
     apiMocks.uploadMod.mockResolvedValue({ success: false, error: 'test' });
     eventMocks.onModsChanged.mockResolvedValue(() => {});
@@ -316,6 +327,35 @@ describe('ModsOverlay', () => {
     });
   });
 
+  it('adds Nexus-style archives without a runtime prompt by using the environment runtime', async () => {
+    openMock.mockResolvedValueOnce('C:/mods/DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip');
+    apiMocks.uploadMod.mockResolvedValue({ success: true });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    const addButton = await screen.findByRole('button', { name: 'Add Mod' });
+    expect(addButton.getAttribute('title')).toContain('Add one or more mod files');
+    fireEvent.click(addButton);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Select Mod Runtime')).toBeNull();
+      expect(apiMocks.uploadMod).toHaveBeenCalledWith(
+        'env-1',
+        'C:/mods/DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip',
+        'DomsExpandedIngredientsAndEffects-1777-1-2-0-1775557696 (1).zip',
+        'IL2CPP',
+        expect.objectContaining({ detectedRuntime: 'IL2CPP', source: 'unknown' }),
+        false,
+      );
+    });
+  });
+
   it('uploads multiple selected files in order and refreshes collections once after the batch completes', async () => {
     openMock.mockResolvedValueOnce([
       'C:/mods/Alpha-Mono.zip',
@@ -373,12 +413,12 @@ describe('ModsOverlay', () => {
       expect(onModsChanged).toHaveBeenCalledTimes(1);
     });
 
-    expect((await screen.findAllByText(/Upload batch finished: 2 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 2 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
   });
 
   it('skips an unresolved file when runtime selection is canceled and continues with the remaining uploads', async () => {
     openMock.mockResolvedValueOnce([
-      'C:/mods/UnknownArchive.zip',
+      'C:/mods/UnknownFile.dll',
       'C:/mods/Known-Mono.dll',
     ]);
     apiMocks.uploadMod.mockResolvedValue({ success: true });
@@ -408,8 +448,8 @@ describe('ModsOverlay', () => {
       );
     });
 
-    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 0 failed, 1 skipped\./i)).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Skipped: UnknownArchive\.zip \(Runtime selection canceled\.\)/i).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 1 succeeded, 0 failed, 1 skipped\./i)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Skipped: UnknownFile\.dll \(Runtime selection canceled\.\)/i).length).toBeGreaterThan(0);
   });
 
   it('treats a dismissed runtime mismatch warning as a successful upload', async () => {
@@ -435,7 +475,7 @@ describe('ModsOverlay', () => {
     expect(await screen.findByText('Runtime Mismatch Warning')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 1 succeeded, 0 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Skipped: Mismatch-Mono\.zip/i)).toBeNull();
   });
 
@@ -462,8 +502,70 @@ describe('ModsOverlay', () => {
       expect(apiMocks.uploadMod).toHaveBeenCalledTimes(2);
     });
 
-    expect((await screen.findAllByText(/Upload batch finished: 1 succeeded, 1 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Add batch finished: 1 succeeded, 1 failed, 0 skipped\./i)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Failed: First-Mono\.dll \(broken archive\)/i).length).toBeGreaterThan(0);
+  });
+
+  it('starts a pending Nexus install session when a mod update requires website confirmation', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Nexus Update Mod',
+          fileName: 'Nexus.Update.Mod.dll',
+          path: 'C:/env/Mods/Nexus.Update.Mod.dll',
+          source: 'nexusmods',
+          managed: true,
+          disabled: false,
+          version: '1.0.0',
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 1,
+      updates: [
+        {
+          modFileName: 'Nexus.Update.Mod.dll',
+          currentVersion: '1.0.0',
+          latestVersion: '1.1.0',
+        },
+      ],
+    });
+    apiMocks.updateMod.mockResolvedValue({
+      success: false,
+      requiresManualDownload: true,
+      recoveryUrl: 'https://www.nexusmods.com/schedule1/mods/1777?tab=files',
+      modId: 1777,
+      fileId: 42,
+      gameId: 'schedule1',
+      runtime: 'IL2CPP',
+      error: 'This Nexus account must confirm the update on Nexus Mods.',
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details for Nexus Update Mod' }));
+    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Update' }));
+
+    await waitFor(() => {
+      expect(apiMocks.beginNexusManualDownloadSession).toHaveBeenCalledWith({
+        kind: 'install',
+        modId: 1777,
+        fileId: 42,
+        gameId: 'schedule1',
+        environmentId: 'env-1',
+        runtime: 'IL2CPP',
+      });
+    });
+    expect(screen.queryByText('Manual Download Required')).toBeNull();
   });
 
   it('renders the environment grid layout and no list-mode container', async () => {

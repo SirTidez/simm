@@ -1,5 +1,7 @@
 import { useEffect, useId } from 'react';
 import { createPortal } from 'react-dom';
+import { Icon } from './Icon';
+import type { IconName } from './icons';
 
 interface MessageOverlayProps {
   isOpen: boolean;
@@ -13,23 +15,28 @@ interface MessageOverlayProps {
 const typeConfig = {
   success: {
     eyebrow: 'Completed',
-    icon: 'fas fa-circle-check',
+    icon: 'circleCheck',
     tone: 'success',
     headline: 'The requested action completed successfully.',
   },
   error: {
     eyebrow: 'Attention Required',
-    icon: 'fas fa-circle-exclamation',
+    icon: 'circleExclamation',
     tone: 'danger',
     headline: 'Something needs review before you continue.',
   },
   info: {
     eyebrow: 'Information',
-    icon: 'fas fa-circle-info',
+    icon: 'circleInfo',
     tone: 'info',
     headline: 'Review this message before continuing.',
   },
-} as const;
+} as const satisfies Record<MessageOverlayProps['type'] extends infer T ? Exclude<T, undefined> : never, {
+  eyebrow: string;
+  icon: IconName;
+  tone: string;
+  headline: string;
+}>;
 
 export function MessageOverlay({
   isOpen,
@@ -86,7 +93,7 @@ export function MessageOverlay({
         <div className="app-dialog__body">
           <div className={`app-dialog__callout app-dialog__callout--${config.tone}`}>
             <div className="app-dialog__icon" aria-hidden="true">
-              <i className={config.icon}></i>
+              <Icon name={config.icon} />
             </div>
             <div className="app-dialog__meta">
               <strong>{config.headline}</strong>

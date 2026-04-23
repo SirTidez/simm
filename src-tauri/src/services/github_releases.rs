@@ -331,8 +331,7 @@ mod tests {
             "/releases/s1api/latest"
         );
         assert_eq!(
-            GitHubReleasesService::all_endpoint("ifBars", "S1API")
-                .expect("all endpoint"),
+            GitHubReleasesService::all_endpoint("ifBars", "S1API").expect("all endpoint"),
             "/releases/s1api/all"
         );
     }

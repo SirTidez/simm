@@ -1,12 +1,7 @@
-use crate::services::thunderstore::ThunderStoreService;
-use once_cell::sync::Lazy;
+use crate::services::thunderstore::{shared_thunderstore_service, ThunderStoreService};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
-use tokio::sync::Mutex as AsyncMutex;
-
-static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> =
-    Lazy::new(|| AsyncMutex::new(None));
 
 fn sanitize_temp_component(value: &str) -> String {
     let sanitized: String = value
@@ -30,11 +25,7 @@ fn sanitize_temp_component(value: &str) -> String {
 
 async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
     let _ = db;
-    let mut service = THUNDERSTORE_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(ThunderStoreService::new()));
-    }
-    Ok(service.as_ref().unwrap().clone())
+    Ok(shared_thunderstore_service())
 }
 
 #[tauri::command]
@@ -49,6 +40,37 @@ pub async fn search_thunderstore_packages(
         .search_packages_filtered_by_runtime(&game_id, &runtime, query.as_deref())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn search_thunderstore_packages_by_runtime(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    query: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let service = get_thunderstore_service(db.inner().clone()).await?;
+    service
+        .search_packages_grouped_by_runtime(&game_id, query.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_thunderstore_package_cache(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+) -> Result<serde_json::Value, String> {
+    let service = get_thunderstore_service(db.inner().clone()).await?;
+    let refresh = service
+        .refresh_community_cache_manually(&game_id, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "packageCount": refresh.packages.len(),
+        "manualRefreshThrottled": refresh.manually_throttled,
+        "retryAfterSeconds": refresh.retry_after_seconds,
+        "stats": service.request_stats().await,
+    }))
 }
 
 #[tauri::command]
@@ -73,17 +95,15 @@ pub async fn download_thunderstore_package(
     version_uuid: Option<String>,
 ) -> Result<String, String> {
     let service = get_thunderstore_service(db.inner().clone()).await?;
-    let label = service
+    let package = service
         .get_package(&package_uuid, game_id.as_deref())
         .await
-        .ok()
-        .flatten()
-        .and_then(|package| {
-            package
-                .get("name")
-                .and_then(|value| value.as_str())
-                .map(|name| format!("{}.zip", name))
-        })
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Package not found".to_string())?;
+    let label = package
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(|name| format!("{}.zip", name))
         .unwrap_or_else(|| format!("{}.zip", package_uuid));
     let tracked_download = crate::services::tracked_downloads::start_file_download(
         crate::services::tracked_downloads::new_download_id("thunderstore"),
@@ -95,7 +115,7 @@ pub async fn download_thunderstore_package(
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
 
     let bytes = service
-        .download_package(&package_uuid, game_id.as_deref(), version_uuid.as_deref())
+        .download_package_version(&package, version_uuid.as_deref())
         .await
         .map_err(|e| {
             let _ = crate::services::tracked_downloads::emit(
@@ -141,4 +161,12 @@ pub async fn download_thunderstore_package(
     );
 
     Ok(temp_file.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn get_thunderstore_request_stats(
+    db: State<'_, Arc<SqlitePool>>,
+) -> Result<serde_json::Value, String> {
+    let service = get_thunderstore_service(db.inner().clone()).await?;
+    serde_json::to_value(service.request_stats().await).map_err(|e| e.to_string())
 }

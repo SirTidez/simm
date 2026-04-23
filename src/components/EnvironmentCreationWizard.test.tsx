@@ -61,6 +61,9 @@ describe('EnvironmentCreationWizard', () => {
       settings: {
         defaultDownloadDir: 'C:\\Games\\Default Install',
         steamUsername: 'tester',
+        experienceMode: 'powerUser',
+        showAdvancedGameTools: true,
+        setupGuideCompleted: true,
       },
       refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
     });
@@ -116,10 +119,13 @@ describe('EnvironmentCreationWizard', () => {
     vi.clearAllMocks();
   });
 
-  const clickBranchCard = (label: string) => {
-    const heading = screen.getByText(label);
+  const clickBranchCard = async (label: string) => {
+    const heading = await screen.findByText(label);
     const button = heading.closest('button');
     expect(button).toBeTruthy();
+    await waitFor(() => {
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    });
     fireEvent.click(button!);
   };
 
@@ -131,8 +137,8 @@ describe('EnvironmentCreationWizard', () => {
   it('derives the install folder from the default download directory and environment name', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
-    clickBranchCard('Beta');
+    fireEvent.click(await screen.findByRole('button', { name: /download separate branch/i }));
+    await clickBranchCard('Beta');
 
     const installFolderInput = await screen.findByLabelText(/install folder/i);
     expect((installFolderInput as HTMLInputElement).value).toBe('C:\\Games\\Default Install\\beta');
@@ -151,8 +157,8 @@ describe('EnvironmentCreationWizard', () => {
   it('keeps a manually selected install folder when the user browses for a different location', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
-    clickBranchCard('Beta');
+    fireEvent.click(await screen.findByRole('button', { name: /download separate branch/i }));
+    await clickBranchCard('Beta');
 
     expect((await screen.findByLabelText(/install folder/i) as HTMLInputElement).value).toBe(
       'C:\\Games\\Default Install\\beta'
@@ -183,7 +189,7 @@ describe('EnvironmentCreationWizard', () => {
     });
   });
 
-  it('installs MLVScan from the wizard prerequisite instead of requiring Settings', async () => {
+  it('does not surface MLVScan as an Add Game prerequisite', async () => {
     apiMocks.getSecurityScannerStatus.mockResolvedValueOnce({
       enabled: true,
       autoInstall: true,
@@ -192,21 +198,15 @@ describe('EnvironmentCreationWizard', () => {
 
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /download separate branch/i }));
 
-    const requirementHeading = await screen.findByText(/MLVScan is installed during setup/i);
-    const requirementCard = requirementHeading.closest('.wizard-prerequisite-card');
-    expect(requirementCard).toBeTruthy();
-    const installButton = requirementCard?.querySelector('.btn.btn-primary') as HTMLButtonElement | null;
-    expect(installButton).toBeTruthy();
-    fireEvent.click(installButton!);
-
-    await waitFor(() => {
-      expect(apiMocks.installSecurityScanner).toHaveBeenCalledTimes(1);
-    });
+    expect(screen.queryByText(/MLVScan is installed during setup/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /install mlvscan/i })).toBeNull();
+    expect(apiMocks.getSecurityScannerStatus).not.toHaveBeenCalled();
+    expect(apiMocks.installSecurityScanner).not.toHaveBeenCalled();
   });
 
-  it('automatically installs missing setup prerequisites when branch downloads are opened', async () => {
+  it('automatically installs missing DepotDownloader when branch downloads are opened', async () => {
     apiMocks.detectDepotDownloader.mockResolvedValueOnce({ installed: false });
     apiMocks.getSecurityScannerStatus.mockResolvedValueOnce({
       enabled: true,
@@ -216,25 +216,25 @@ describe('EnvironmentCreationWizard', () => {
 
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /download separate branch/i }));
 
     await waitFor(() => {
       expect(apiMocks.installDepotDownloader).toHaveBeenCalledTimes(1);
-      expect(apiMocks.installSecurityScanner).toHaveBeenCalledTimes(1);
     });
+    expect(apiMocks.installSecurityScanner).not.toHaveBeenCalled();
   });
 
   it('refreshes the auto-derived name when switching branches but preserves user edits', async () => {
     render(<EnvironmentCreationWizard onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /download new branch/i }));
-    clickBranchCard('Beta');
+    fireEvent.click(await screen.findByRole('button', { name: /download separate branch/i }));
+    await clickBranchCard('Beta');
 
     const nameInput = await screen.findByLabelText(/^name$/i);
     expect((nameInput as HTMLInputElement).value).toBe('Beta');
 
     clickConfigureBack();
-    clickBranchCard('Alternate Beta');
+    await clickBranchCard('Alternate Beta');
     await waitFor(() => {
       expect((screen.getByLabelText(/^name$/i) as HTMLInputElement).value).toBe('Alternate Beta');
     });
@@ -244,9 +244,28 @@ describe('EnvironmentCreationWizard', () => {
     });
 
     clickConfigureBack();
-    clickBranchCard('Beta');
+    await clickBranchCard('Beta');
     await waitFor(() => {
       expect((screen.getByLabelText(/^name$/i) as HTMLInputElement).value).toBe('My Custom Install');
     });
+  });
+
+  it('hides branch downloads in Player mode while keeping import available', async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        defaultDownloadDir: 'C:\\Games\\Default Install',
+        steamUsername: 'tester',
+        experienceMode: 'player',
+        showAdvancedGameTools: false,
+        setupGuideCompleted: true,
+      },
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<EnvironmentCreationWizard onClose={vi.fn()} />);
+
+    expect(await screen.findByRole('button', { name: /import existing folder/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /download separate branch/i })).toBeNull();
+    expect(apiMocks.detectDepotDownloader).not.toHaveBeenCalled();
   });
 });

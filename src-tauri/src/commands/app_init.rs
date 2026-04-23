@@ -1,13 +1,18 @@
 use tauri::State;
-use tokio::sync::Mutex as AsyncMutex;
 
 /// Check if the SIMM directory was just created on this app launch
 #[tauri::command]
 pub async fn was_simm_directory_just_created(
-    was_created: State<'_, AsyncMutex<bool>>,
+    startup_state: State<'_, crate::types::AppStartupState>,
 ) -> Result<bool, String> {
-    let flag = was_created.lock().await;
-    Ok(*flag)
+    Ok(startup_state.simm_directory_created)
+}
+
+#[tauri::command]
+pub async fn get_app_startup_state(
+    startup_state: State<'_, crate::types::AppStartupState>,
+) -> Result<crate::types::AppStartupState, String> {
+    Ok(startup_state.inner().clone())
 }
 
 /// Get the user's home directory path

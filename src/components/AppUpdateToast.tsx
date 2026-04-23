@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Icon } from './Icon';
 
 type AppUpdateToastProps = {
   currentVersion: string;
@@ -35,7 +36,7 @@ export function AppUpdateToast({
           onClick={onDismiss}
           aria-label="Dismiss app update notice"
         >
-          <i className="fas fa-times"></i>
+          <Icon name="times" />
         </button>
       </header>
 

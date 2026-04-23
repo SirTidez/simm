@@ -1,20 +1,60 @@
+use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::Result;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
+
+const NEXUS_GRAPHQL_ENDPOINT: &str = "https://api.nexusmods.com/v2/graphql";
+const NEXUS_WEB_BASE: &str = "https://www.nexusmods.com";
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const BROWSE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const MOD_INFO_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const MOD_FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const GAME_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const GAMES_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone)]
 pub struct NexusModsService {
+    client: reqwest::Client,
     api_key: Arc<RwLock<Option<String>>>,
+    request_locks: Arc<AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    game_identity_cache: Arc<RwLock<HashMap<String, CachedValue<(String, String)>>>>,
+    games_cache: Arc<RwLock<Option<CachedValue<Vec<Value>>>>>,
+    search_cache: Arc<RwLock<HashMap<String, CachedValue<Vec<Value>>>>>,
+    browse_cache: Arc<RwLock<HashMap<String, CachedValue<Vec<Value>>>>>,
+    mod_cache: Arc<RwLock<HashMap<String, CachedValue<Value>>>>,
+    mod_files_cache: Arc<RwLock<HashMap<String, CachedValue<Vec<Value>>>>>,
+    latest_rate_limits: Arc<RwLock<Option<nexus_api::RateLimits>>>,
+}
+
+#[derive(Clone)]
+struct CachedValue<T> {
+    loaded_at: Instant,
+    value: T,
 }
 
 impl NexusModsService {
     pub fn new() -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(http_identity::user_agent())
+            .build()
+            .expect("failed to build Nexus Mods HTTP client");
+
         Self {
+            client,
             api_key: Arc::new(RwLock::new(None)),
+            request_locks: Arc::new(AsyncMutex::new(HashMap::new())),
+            game_identity_cache: Arc::new(RwLock::new(HashMap::new())),
+            games_cache: Arc::new(RwLock::new(None)),
+            search_cache: Arc::new(RwLock::new(HashMap::new())),
+            browse_cache: Arc::new(RwLock::new(HashMap::new())),
+            mod_cache: Arc::new(RwLock::new(HashMap::new())),
+            mod_files_cache: Arc::new(RwLock::new(HashMap::new())),
+            latest_rate_limits: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -30,20 +70,176 @@ impl NexusModsService {
         self.api_key.read().await.clone()
     }
 
+    pub async fn latest_rate_limits(&self) -> Option<nexus_api::RateLimits> {
+        self.latest_rate_limits.read().await.clone()
+    }
+
+    async fn request_lock(&self, key: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.request_locks.lock().await;
+        locks
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    async fn cached_map_get<T: Clone>(
+        cache: &RwLock<HashMap<String, CachedValue<T>>>,
+        key: &str,
+        ttl: Duration,
+    ) -> Option<T> {
+        cache.read().await.get(key).and_then(|entry| {
+            if entry.loaded_at.elapsed() < ttl {
+                Some(entry.value.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    async fn cached_map_set<T>(
+        cache: &RwLock<HashMap<String, CachedValue<T>>>,
+        key: String,
+        value: T,
+    ) {
+        cache.write().await.insert(
+            key,
+            CachedValue {
+                loaded_at: Instant::now(),
+                value,
+            },
+        );
+    }
+
+    fn parse_u32_header(headers: &reqwest::header::HeaderMap, names: &[&str]) -> Option<u32> {
+        names.iter().find_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u32>().ok())
+        })
+    }
+
+    fn parse_u64_header(headers: &reqwest::header::HeaderMap, names: &[&str]) -> Option<u64> {
+        names.iter().find_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+    }
+
+    fn parse_rate_limits(headers: &reqwest::header::HeaderMap) -> Option<nexus_api::RateLimits> {
+        let hourly_limit =
+            Self::parse_u32_header(headers, &["x-rl-hourly-limit", "x-ratelimit-hourly-limit"]);
+        let hourly_remaining = Self::parse_u32_header(
+            headers,
+            &["x-rl-hourly-remaining", "x-ratelimit-hourly-remaining"],
+        );
+        let hourly_reset =
+            Self::parse_u64_header(headers, &["x-rl-hourly-reset", "x-ratelimit-hourly-reset"]);
+        let daily_limit =
+            Self::parse_u32_header(headers, &["x-rl-daily-limit", "x-ratelimit-daily-limit"]);
+        let daily_remaining = Self::parse_u32_header(
+            headers,
+            &["x-rl-daily-remaining", "x-ratelimit-daily-remaining"],
+        );
+        let daily_reset =
+            Self::parse_u64_header(headers, &["x-rl-daily-reset", "x-ratelimit-daily-reset"]);
+
+        if hourly_limit.is_none()
+            && hourly_remaining.is_none()
+            && hourly_reset.is_none()
+            && daily_limit.is_none()
+            && daily_remaining.is_none()
+            && daily_reset.is_none()
+        {
+            None
+        } else {
+            Some(nexus_api::RateLimits {
+                hourly_limit,
+                hourly_remaining,
+                hourly_reset,
+                daily_limit,
+                daily_remaining,
+                daily_reset,
+            })
+        }
+    }
+
     async fn graphql_request(&self, query: &str, variables: Value) -> Result<Value> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(anyhow::anyhow!("Nexus GraphQL query is empty"));
+        }
+
         let api_key = self.get_api_key_optional().await;
-        let response = nexus_api::execute_graphql(api_key.as_deref(), query, Some(&variables))
+        let mut request = self
+            .client
+            .post(NEXUS_GRAPHQL_ENDPOINT)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::USER_AGENT, http_identity::user_agent())
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION);
+
+        if let Some(key) = api_key.as_deref().filter(|key| !key.trim().is_empty()) {
+            request = request.bearer_auth(key).header("apikey", key);
+        }
+
+        let response = request
+            .json(&serde_json::json!({
+                "query": query,
+                "variables": variables,
+            }))
+            .send()
             .await
             .map_err(|e| {
-                let message = format!("Nexus GraphQL crate request failed: {}", e);
+                let message = format!("Nexus GraphQL request failed: {}", e);
                 error_with_location(&message);
                 anyhow::anyhow!(message)
             })?;
 
-        Ok(response.data.unwrap_or_else(|| serde_json::json!({})))
+        let status = response.status();
+        if let Some(rate_limits) = Self::parse_rate_limits(response.headers()) {
+            *self.latest_rate_limits.write().await = Some(rate_limits);
+        }
+
+        let text = response.text().await.map_err(|e| {
+            let message = format!("Failed to read Nexus GraphQL response: {}", e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
+        })?;
+        let result: nexus_api::GraphQLResponse = if text.trim().is_empty() {
+            nexus_api::GraphQLResponse::default()
+        } else {
+            serde_json::from_str(&text).map_err(|e| {
+                let message = format!("Invalid Nexus GraphQL response: {}", e);
+                error_with_location(&message);
+                anyhow::anyhow!(message)
+            })?
+        };
+
+        if !status.is_success()
+            || result
+                .errors
+                .as_ref()
+                .is_some_and(|errors| !errors.is_empty())
+        {
+            let message = result
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.first())
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| status.to_string());
+            let message = format!("Nexus GraphQL request failed ({}): {}", status, message);
+            error_with_location(&message);
+            return Err(anyhow::anyhow!(message));
+        }
+
+        Ok(result.data.unwrap_or_else(|| serde_json::json!({})))
     }
 
-    async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
+    async fn resolve_game_by_input_uncached(&self, game_input: &str) -> Result<(String, String)> {
         if let Ok(id) = game_input.parse::<u32>() {
             let data = self
                 .graphql_request(
@@ -113,6 +309,49 @@ impl NexusModsService {
             .unwrap_or(game_input)
             .to_string();
         Ok((resolved_id, domain))
+    }
+
+    async fn resolve_game_by_input(&self, game_input: &str) -> Result<(String, String)> {
+        let cache_key = game_input.trim().to_ascii_lowercase();
+        if let Some(value) = Self::cached_map_get(
+            &self.game_identity_cache,
+            &cache_key,
+            GAME_IDENTITY_CACHE_TTL,
+        )
+        .await
+        {
+            return Ok(value);
+        }
+
+        let lock = self
+            .request_lock(&format!("game-identity:{}", cache_key))
+            .await;
+        let _guard = lock.lock().await;
+        if let Some(value) = Self::cached_map_get(
+            &self.game_identity_cache,
+            &cache_key,
+            GAME_IDENTITY_CACHE_TTL,
+        )
+        .await
+        {
+            return Ok(value);
+        }
+
+        let resolved = self.resolve_game_by_input_uncached(game_input).await?;
+        Self::cached_map_set(&self.game_identity_cache, cache_key, resolved.clone()).await;
+        Self::cached_map_set(
+            &self.game_identity_cache,
+            resolved.0.to_ascii_lowercase(),
+            resolved.clone(),
+        )
+        .await;
+        Self::cached_map_set(
+            &self.game_identity_cache,
+            resolved.1.to_ascii_lowercase(),
+            resolved.clone(),
+        )
+        .await;
+        Ok(resolved)
     }
 
     pub async fn resolve_game_identity(&self, game_input: &str) -> Result<(String, String)> {
@@ -240,6 +479,28 @@ impl NexusModsService {
 
     /// Get list of all games supported by NexusMods
     pub async fn get_games(&self) -> Result<Vec<Value>> {
+        if let Some(cached) = self.games_cache.read().await.as_ref().and_then(|entry| {
+            if entry.loaded_at.elapsed() < GAMES_CACHE_TTL {
+                Some(entry.value.clone())
+            } else {
+                None
+            }
+        }) {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock("games").await;
+        let _guard = lock.lock().await;
+        if let Some(cached) = self.games_cache.read().await.as_ref().and_then(|entry| {
+            if entry.loaded_at.elapsed() < GAMES_CACHE_TTL {
+                Some(entry.value.clone())
+            } else {
+                None
+            }
+        }) {
+            return Ok(cached);
+        }
+
         let data = self
             .graphql_request(
                 r#"
@@ -267,7 +528,7 @@ impl NexusModsService {
             .cloned()
             .unwrap_or_default();
 
-        Ok(games
+        let mapped = games
             .into_iter()
             .map(|game| {
                 serde_json::json!({
@@ -279,13 +540,39 @@ impl NexusModsService {
                     "collections": game.get("collectionCount")
                 })
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        *self.games_cache.write().await = Some(CachedValue {
+            loaded_at: Instant::now(),
+            value: mapped.clone(),
+        });
+
+        Ok(mapped)
     }
 
     /// Search for mods on NexusMods using GraphQL API v2
     /// Note: Runtime filtering is not done at search time since NexusMods uses separate files
     /// for different runtimes rather than tags. Files should be filtered by runtime when displayed.
     pub async fn search_mods(&self, game_domain: &str, query: &str) -> Result<Vec<Value>> {
+        let cache_key = format!(
+            "search:{}:{}",
+            game_domain.trim().to_ascii_lowercase(),
+            query.trim().to_ascii_lowercase()
+        );
+        if let Some(cached) =
+            Self::cached_map_get(&self.search_cache, &cache_key, SEARCH_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.search_cache, &cache_key, SEARCH_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
         let gql = r#"
             query SearchMods($filter: ModsFilter, $offset: Int, $count: Int) {
                 mods(filter: $filter, offset: $offset, count: $count) {
@@ -354,15 +641,33 @@ impl NexusModsService {
             }
         }
 
-        Ok(merged
+        let result = merged
             .into_iter()
             .filter(|mod_entry| Self::matches_query_locally(mod_entry, query))
-            .collect())
+            .collect::<Vec<_>>();
+
+        Self::cached_map_set(&self.search_cache, cache_key, result.clone()).await;
+        Ok(result)
     }
 
     /// Get latest added mods using GraphQL API v2
     pub async fn get_latest_added_mods(&self, game_id: &str) -> Result<Vec<Value>> {
         let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let cache_key = format!("latest-added:{}", domain_name.to_ascii_lowercase());
+        if let Some(cached) =
+            Self::cached_map_get(&self.browse_cache, &cache_key, BROWSE_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.browse_cache, &cache_key, BROWSE_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
         let data = self
             .graphql_request(
                 r#"
@@ -398,15 +703,32 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(nodes
+        let result = nodes
             .into_iter()
             .map(|n| Self::map_mod_node_to_legacy_shape(&n))
-            .collect())
+            .collect::<Vec<_>>();
+        Self::cached_map_set(&self.browse_cache, cache_key, result.clone()).await;
+        Ok(result)
     }
 
     /// Get latest updated mods using GraphQL API v2
     pub async fn get_latest_updated_mods(&self, game_id: &str) -> Result<Vec<Value>> {
         let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let cache_key = format!("latest-updated:{}", domain_name.to_ascii_lowercase());
+        if let Some(cached) =
+            Self::cached_map_get(&self.browse_cache, &cache_key, BROWSE_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.browse_cache, &cache_key, BROWSE_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
         let data = self
             .graphql_request(
                 r#"
@@ -442,15 +764,32 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(nodes
+        let result = nodes
             .into_iter()
             .map(|n| Self::map_mod_node_to_legacy_shape(&n))
-            .collect())
+            .collect::<Vec<_>>();
+        Self::cached_map_set(&self.browse_cache, cache_key, result.clone()).await;
+        Ok(result)
     }
 
     /// Get trending mods using GraphQL API v2
     pub async fn get_trending_mods(&self, game_id: &str) -> Result<Vec<Value>> {
         let (_resolved_id, domain_name) = self.resolve_game_by_input(game_id).await?;
+        let cache_key = format!("trending:{}", domain_name.to_ascii_lowercase());
+        if let Some(cached) =
+            Self::cached_map_get(&self.browse_cache, &cache_key, BROWSE_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.browse_cache, &cache_key, BROWSE_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
         let data = self
             .graphql_request(
                 r#"
@@ -486,15 +825,32 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(nodes
+        let result = nodes
             .into_iter()
             .map(|n| Self::map_mod_node_to_legacy_shape(&n))
-            .collect())
+            .collect::<Vec<_>>();
+        Self::cached_map_set(&self.browse_cache, cache_key, result.clone()).await;
+        Ok(result)
     }
 
     /// Get mod details by ID
     pub async fn get_mod(&self, game_id: &str, mod_id: u32) -> Result<Value> {
         let (resolved_game_id, _domain_name) = self.resolve_game_by_input(game_id).await?;
+        let cache_key = format!("mod:{}:{}", resolved_game_id, mod_id);
+        if let Some(cached) =
+            Self::cached_map_get(&self.mod_cache, &cache_key, MOD_INFO_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.mod_cache, &cache_key, MOD_INFO_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
         let data = self
             .graphql_request(
                 r#"
@@ -528,12 +884,29 @@ impl NexusModsService {
             .get("mod")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
-        Ok(Self::map_mod_node_to_legacy_shape(&mod_node))
+        let result = Self::map_mod_node_to_legacy_shape(&mod_node);
+        Self::cached_map_set(&self.mod_cache, cache_key, result.clone()).await;
+        Ok(result)
     }
 
     /// Get mod files by mod ID
     pub async fn get_mod_files(&self, game_id: &str, mod_id: u32) -> Result<Vec<Value>> {
         let (resolved_game_id, _domain_name) = self.resolve_game_by_input(game_id).await?;
+        let cache_key = format!("mod-files:{}:{}", resolved_game_id, mod_id);
+        if let Some(cached) =
+            Self::cached_map_get(&self.mod_files_cache, &cache_key, MOD_FILES_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
+        let lock = self.request_lock(&cache_key).await;
+        let _guard = lock.lock().await;
+        if let Some(cached) =
+            Self::cached_map_get(&self.mod_files_cache, &cache_key, MOD_FILES_CACHE_TTL).await
+        {
+            return Ok(cached);
+        }
+
         let data = self
             .graphql_request(
                 r#"
@@ -562,10 +935,12 @@ impl NexusModsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(files
+        let result = files
             .into_iter()
             .map(|f| Self::map_file_node_to_legacy_shape(&f))
-            .collect())
+            .collect::<Vec<_>>();
+        Self::cached_map_set(&self.mod_files_cache, cache_key, result.clone()).await;
+        Ok(result)
     }
 
     /// Check if a mod has an update available
@@ -638,25 +1013,7 @@ impl NexusModsService {
         mod_id: u32,
         file_id: u32,
     ) -> Result<Vec<String>> {
-        let (resolved_game_id, _) = self.resolve_game_by_input(game_id).await?;
-        let game_id_i64 = resolved_game_id.parse::<i64>().map_err(|e| {
-            let message = format!("Invalid resolved game id '{}': {}", resolved_game_id, e);
-            error_with_location(&message);
-            anyhow::anyhow!(message)
-        })?;
-
-        let game_query = r#"query($id: ID) { game(id: $id) { domainName } }"#;
-        let game_vars = serde_json::json!({ "id": game_id_i64.to_string() });
-        let game_data = self.graphql_request(game_query, game_vars).await?;
-        let domain = game_data
-            .get("game")
-            .and_then(|g| g.get("domainName"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                let message = format!("Missing game domainName for game {}", game_id_i64);
-                error_with_location(&message);
-                anyhow::anyhow!(message)
-            })?;
+        let (_resolved_game_id, domain) = self.resolve_game_by_input(game_id).await?;
 
         let endpoint = format!(
             "https://api.nexusmods.com/v1/games/{}/mods/{}/files/{}/download_link.json",
@@ -674,8 +1031,9 @@ impl NexusModsService {
         let response = client
             .get(endpoint)
             .bearer_auth(access_token)
-            .header("Application-Name", "SIMM")
-            .header("Application-Version", env!("CARGO_PKG_VERSION"))
+            .header(reqwest::header::USER_AGENT, http_identity::user_agent())
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION)
             .send()
             .await
             .map_err(|e| {
@@ -730,6 +1088,55 @@ impl NexusModsService {
         Ok(links)
     }
 
+    pub async fn download_from_url(
+        &self,
+        url: &str,
+        access_token: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| {
+            let message = format!("Invalid Nexus download URL: {}", e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
+        })?;
+        if parsed.scheme() != "https" {
+            let message = "Nexus download URL must use HTTPS";
+            error_with_location(message);
+            return Err(anyhow::anyhow!(message));
+        }
+
+        let mut request = self
+            .client
+            .get(parsed)
+            .header(reqwest::header::USER_AGENT, http_identity::user_agent())
+            .header(reqwest::header::ACCEPT, "application/octet-stream,*/*")
+            .header(reqwest::header::REFERER, NEXUS_WEB_BASE)
+            .header("Application-Name", http_identity::APP_NAME)
+            .header("Application-Version", http_identity::APP_VERSION);
+
+        if let Some(token) = access_token.filter(|token| !token.trim().is_empty()) {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await.map_err(|e| {
+            let message = format!("Nexus download request failed: {}", e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = format!("Nexus download request failed ({})", status);
+            error_with_location(&message);
+            return Err(anyhow::anyhow!(message));
+        }
+
+        let bytes = response.bytes().await.map_err(|e| {
+            let message = format!("Failed to read Nexus download response: {}", e);
+            error_with_location(&message);
+            anyhow::anyhow!(message)
+        })?;
+        Ok(bytes.to_vec())
+    }
+
     /// Download mod file by mod ID and file ID using OAuth access token
     pub async fn download_mod_file(
         &self,
@@ -749,15 +1156,7 @@ impl NexusModsService {
                 anyhow::anyhow!(message)
             })?;
 
-        let downloaded = nexus_api::download_from_url(&first_url, None)
-            .await
-            .map_err(|e| {
-                let message = format!("Failed to download Nexus file via crate: {}", e);
-                error_with_location(&message);
-                anyhow::anyhow!(message)
-            })?;
-
-        Ok(downloaded.bytes)
+        self.download_from_url(&first_url, None).await
     }
 }
 

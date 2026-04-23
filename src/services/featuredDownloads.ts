@@ -28,6 +28,12 @@ const FEATURED_THUNDERSTORE_SOURCE_IDS = [
   'ifBars/S1MAPI',
 ] as const;
 
+let thunderstoreFeaturedVersionsCache:
+  | { loadedAt: number; latestBySourceId: Map<string, string> }
+  | null = null;
+let thunderstoreFeaturedVersionsRequest: Promise<Map<string, string>> | null = null;
+const FEATURED_VERSIONS_CACHE_TTL_MS = 15 * 60 * 1000;
+
 async function loadLatestRelease(
   source: string,
   loader: ((owner: string) => Promise<{ tag_name?: string } | null>) | undefined,
@@ -122,80 +128,87 @@ function getVersionUpdatedAt(version: ThunderstorePackageVersion): string {
   );
 }
 
-async function loadLatestThunderstoreVersion(sourceId: string): Promise<string | null> {
-  const parsed = parseThunderstoreSourceId(sourceId);
-  if (!parsed.name) {
-    return null;
-  }
-
-  const query = normalizeThunderstoreName(parsed.name) || parsed.name;
-
+async function loadLatestThunderstoreVersions(
+  sourceIds: readonly string[],
+): Promise<Map<string, string>> {
   try {
-    const searchResults = await Promise.allSettled([
-      ApiService.searchThunderstore('schedule-i', query, 'IL2CPP'),
-      ApiService.searchThunderstore('schedule-i', query, 'Mono'),
-    ]);
+    const result = await ApiService.searchThunderstore('schedule-i', '', 'unknown');
+    const packages = (result.packages || []) as ThunderstorePackage[];
+    const latestBySourceId = new Map<string, string>();
 
-    const packages = searchResults.flatMap((result) => {
-      if (result.status !== 'fulfilled') {
-        return [];
+    for (const sourceId of sourceIds) {
+      const match = findThunderstorePackageForSourceId(packages, sourceId);
+      const versions = match?.versions || [];
+      if (versions.length === 0) {
+        logger.warn('Featured Thunderstore package lookup returned no matching versions', {
+          sourceId,
+        });
+        continue;
       }
-      return (result.value?.packages || []) as ThunderstorePackage[];
-    });
 
-    if (packages.length === 0) {
-      return null;
+      const latestVersion = [...versions].sort((left, right) => {
+        const versionDelta = compareVersionTokensDescForSource(
+          sourceId,
+          left.version_number,
+          right.version_number,
+        );
+        if (versionDelta !== 0) {
+          return versionDelta;
+        }
+
+        return getVersionUpdatedAt(right).localeCompare(getVersionUpdatedAt(left));
+      })[0]?.version_number;
+
+      if (latestVersion) {
+        latestBySourceId.set(sourceId.toLowerCase(), latestVersion);
+      }
     }
 
-    const matchedPackages = searchResults.flatMap((result) => {
-      if (result.status !== 'fulfilled') {
-        return [];
-      }
-      const match = findThunderstorePackageForSourceId(
-        (result.value?.packages || []) as ThunderstorePackage[],
-        sourceId,
-      );
-      return match ? [match] : [];
-    });
-
-    const versions = matchedPackages.flatMap((pkg) => pkg.versions || []);
-    if (versions.length === 0) {
-      logger.warn('Featured Thunderstore package lookup returned no matching versions', {
-        sourceId,
-        query,
-      });
-      return null;
-    }
-
-    const latestVersion = [...versions].sort((left, right) => {
-      const versionDelta = compareVersionTokensDescForSource(
-        sourceId,
-        left.version_number,
-        right.version_number,
-      );
-      if (versionDelta !== 0) {
-        return versionDelta;
-      }
-
-      return getVersionUpdatedAt(right).localeCompare(getVersionUpdatedAt(left));
-    })[0]?.version_number;
-
-    return latestVersion || null;
+    return latestBySourceId;
   } catch (error) {
     logger.warn('Failed to resolve featured Thunderstore package metadata', {
-      sourceId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return null;
+    return new Map();
   }
 }
 
 export async function getFeaturedDownloadLatestVersions(): Promise<Map<string, string>> {
-  const [s1apiRelease, mlvscanRelease, meshVaultVersion, s1mapiVersion] = await Promise.all([
+  const thunderstoreVersionsPromise = (() => {
+    if (
+      thunderstoreFeaturedVersionsCache &&
+      Date.now() - thunderstoreFeaturedVersionsCache.loadedAt <
+        FEATURED_VERSIONS_CACHE_TTL_MS
+    ) {
+      return Promise.resolve(
+        new Map(thunderstoreFeaturedVersionsCache.latestBySourceId),
+      );
+    }
+
+    if (thunderstoreFeaturedVersionsRequest) {
+      return thunderstoreFeaturedVersionsRequest.then((versions) => new Map(versions));
+    }
+
+    thunderstoreFeaturedVersionsRequest = loadLatestThunderstoreVersions(
+      FEATURED_THUNDERSTORE_SOURCE_IDS,
+    ).then((versions) => {
+      if (versions.size > 0) {
+        thunderstoreFeaturedVersionsCache = {
+          loadedAt: Date.now(),
+          latestBySourceId: new Map(versions),
+        };
+      }
+      thunderstoreFeaturedVersionsRequest = null;
+      return versions;
+    });
+
+    return thunderstoreFeaturedVersionsRequest.then((versions) => new Map(versions));
+  })();
+
+  const [s1apiRelease, mlvscanRelease, thunderstoreVersions] = await Promise.all([
     loadLatestRelease('s1api', ApiService.getS1APILatestRelease),
     loadLatestRelease('mlvscan', ApiService.getMLVScanLatestRelease),
-    loadLatestThunderstoreVersion(FEATURED_THUNDERSTORE_SOURCE_IDS[0]),
-    loadLatestThunderstoreVersion(FEATURED_THUNDERSTORE_SOURCE_IDS[1]),
+    thunderstoreVersionsPromise,
   ]);
 
   const latestBySourceId = new Map<string, string>();
@@ -206,11 +219,8 @@ export async function getFeaturedDownloadLatestVersions(): Promise<Map<string, s
   if (mlvscanRelease?.tag_name) {
     latestBySourceId.set('ifbars/mlvscan', mlvscanRelease.tag_name);
   }
-  if (meshVaultVersion) {
-    latestBySourceId.set('hdlmrell/meshvault', meshVaultVersion);
-  }
-  if (s1mapiVersion) {
-    latestBySourceId.set('ifbars/s1mapi', s1mapiVersion);
+  for (const [sourceId, version] of thunderstoreVersions) {
+    latestBySourceId.set(sourceId, version);
   }
 
   return latestBySourceId;

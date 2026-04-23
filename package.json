@@ -1,7 +1,7 @@
 {
   "name": "simmrust",
   "private": true,
-  "version": "0.8.2",
+  "version": "0.8.3",
   "author": "LockWire Labs",
   "repository": {
     "type": "git",
@@ -28,7 +28,11 @@
     "test:rust:live": "cargo test --manifest-path src-tauri/Cargo.toml -- --ignored"
   },
   "dependencies": {
-    "@fortawesome/fontawesome-free": "^6.7.2",
+    "@fortawesome/fontawesome-svg-core": "^6.7.2",
+    "@fortawesome/free-brands-svg-icons": "^6.7.2",
+    "@fortawesome/free-regular-svg-icons": "^6.7.2",
+    "@fortawesome/free-solid-svg-icons": "^6.7.2",
+    "@fortawesome/react-fontawesome": "^0.2.2",
     "@mlvscan/wasm-core": "^1.3.8",
     "@tauri-apps/api": "2.10.1",
     "@tauri-apps/plugin-deep-link": "^2.4.8",

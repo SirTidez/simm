@@ -27,3 +27,4 @@ TEST_PLAN.md
 /.codex_tmp
 /.serena
 /.vscode
+/output/playwright

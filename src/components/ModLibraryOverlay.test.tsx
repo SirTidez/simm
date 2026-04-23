@@ -23,6 +23,7 @@ const apiMocks = vi.hoisted(() => ({
   downloadS1APIToLibrary: vi.fn(),
   downloadMLVScanToLibrary: vi.fn(),
   searchThunderstore: vi.fn(),
+  searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   getNexusModsModFiles: vi.fn(),
@@ -36,6 +37,7 @@ const apiMocks = vi.hoisted(() => ({
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
   storeModArchive: vi.fn(),
+  refreshThunderstorePackageCache: vi.fn(),
 }));
 
 vi.mock("../services/api", () => ({
@@ -189,6 +191,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.downloadS1APIToLibrary.mockReset();
     apiMocks.downloadMLVScanToLibrary.mockReset();
     apiMocks.searchThunderstore.mockReset();
+    apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.getNexusModsModFiles.mockReset();
@@ -202,6 +205,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.storeModArchive.mockReset();
+    apiMocks.refreshThunderstorePackageCache.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
 
@@ -225,6 +229,22 @@ describe("ModLibraryOverlay", () => {
           };
         }
         return { packages: [] };
+      },
+    );
+    apiMocks.searchThunderstoreByRuntime.mockImplementation(
+      async (gameId, query) => {
+        const il2cpp = await apiMocks.searchThunderstore(
+          gameId,
+          query,
+          "IL2CPP",
+        );
+        const mono = await apiMocks.searchThunderstore(gameId, query, "Mono");
+        return {
+          packagesByRuntime: {
+            IL2CPP: il2cpp.packages || [],
+            Mono: mono.packages || [],
+          },
+        };
       },
     );
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
@@ -258,6 +278,23 @@ describe("ModLibraryOverlay", () => {
     apiMocks.storeModArchive.mockResolvedValue({
       success: true,
       storageId: "imported-storage",
+    });
+    apiMocks.refreshThunderstorePackageCache.mockResolvedValue({
+      packageCount: 0,
+      manualRefreshThrottled: false,
+      retryAfterSeconds: null,
+      stats: {
+        listingIndexRequests: 0,
+        listingChunkRequests: 0,
+        packageDetailRequests: 0,
+        downloadRequests: 0,
+        conditionalNotModified: 0,
+        memoryCacheHits: 0,
+        diskCacheHits: 0,
+        staleDiskFallbacks: 0,
+        forbiddenResponses: 0,
+        rateLimitedResponses: 0,
+      },
     });
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
     settingsStoreMocks.useSettingsStore.mockReturnValue({
@@ -314,6 +351,30 @@ describe("ModLibraryOverlay", () => {
         "Update",
       );
     });
+  });
+
+  it("refreshes the Thunderstore package cache before reloading the mod library", async () => {
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockResolvedValueOnce({
+        downloaded: [
+          makeEntry({
+            storageId: "fresh-cache-mod",
+            displayName: "Fresh Cache Mod",
+          }),
+        ],
+      });
+
+    renderLibraryOverlay({ libraryTab: "library" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(apiMocks.refreshThunderstorePackageCache).toHaveBeenCalledWith(
+        "schedule-i",
+      );
+    });
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(2);
   });
 
   it("downloads MLVScan from the GitHub release source used by the library entry", async () => {
@@ -537,7 +598,9 @@ describe("ModLibraryOverlay", () => {
             description: "Carry more stuff.",
             picture_url: "https://example.com/packrat.png",
             version: "1.0.0",
-            author: "ExampleAuthor",
+            author: "ActualUploader",
+            uploader: "ActualUploader",
+            original_author: "ExampleAuthor",
             uploaded_time: "2025-01-01",
             updated_time: "2025-01-02",
             category_id: 1,
@@ -569,6 +632,9 @@ describe("ModLibraryOverlay", () => {
     });
 
     expect(await screen.findByText("Nexus Results")).toBeTruthy();
+    expect(
+      screen.getByText("ActualUploader • Original creator: ExampleAuthor"),
+    ).toBeTruthy();
     expect(apiMocks.getNexusModsModFiles).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /Pack Rat/i }));
@@ -580,6 +646,11 @@ describe("ModLibraryOverlay", () => {
         1629,
       );
     });
+    expect(
+      screen.getByText(
+        "Nexus Mods • ActualUploader • Original creator: ExampleAuthor",
+      ),
+    ).toBeTruthy();
   });
 
   it("ignores stale Nexus file responses after search results are pruned", async () => {
@@ -812,7 +883,7 @@ describe("ModLibraryOverlay", () => {
     );
   });
 
-  it("downloads the newest runtime-compatible Nexus file instead of the first matching file", async () => {
+  it("downloads the primary Nexus file even when another runtime-compatible file is newer", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })
       .mockResolvedValueOnce({ downloaded: [] });
@@ -883,7 +954,7 @@ describe("ModLibraryOverlay", () => {
     await waitFor(() => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
         1629,
-        200,
+        100,
         "Mono",
       );
     });
@@ -1553,7 +1624,7 @@ describe("ModLibraryOverlay", () => {
     expect(await screen.findByText("Uploaded Mar 23, 2026")).toBeTruthy();
   });
 
-  it("de-prioritizes FOMOD installers in the Nexus inspector when direct runtime files exist", async () => {
+  it("prioritizes primary All-in-One installers in the Nexus inspector", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })
       .mockResolvedValueOnce({ downloaded: [] });
@@ -1561,12 +1632,12 @@ describe("ModLibraryOverlay", () => {
       {
         file_id: 501,
         name: "Pack Rat Vortex Installer",
-        file_name: "PackRat-Vortex-Installer-1.0.7r2.zip",
-        version: "1.0.7r2",
-        mod_version: "1.0.7r2",
+        file_name: "PackRat-Vortex-Installer-1.0.6.zip",
+        version: "1.0.6",
+        mod_version: "1.0.6",
         category_name: "MAIN",
         is_primary: true,
-        uploaded_timestamp: 2000,
+        uploaded_timestamp: 1000,
       },
       {
         file_id: 502,
@@ -1617,7 +1688,7 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
-    expect(await screen.findByText("FOMOD Installer")).toBeTruthy();
+    expect(await screen.findByText("All-in-One")).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", { name: "Download selected version" }),
     );
@@ -1625,8 +1696,8 @@ describe("ModLibraryOverlay", () => {
     await waitFor(() => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
         1629,
-        502,
-        "Mono",
+        501,
+        undefined,
       );
     });
   });

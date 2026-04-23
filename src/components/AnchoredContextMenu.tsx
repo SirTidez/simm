@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Icon } from './Icon';
 
 export interface AnchoredContextMenuItem {
   key: string;
@@ -86,7 +87,7 @@ export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
             onClose();
           }}
         >
-          {item.icon ? <i className={item.icon} aria-hidden="true"></i> : <span className="workspace-context-menu__icon-placeholder" />}
+          {item.icon ? <Icon name={item.icon} /> : <span className="workspace-context-menu__icon-placeholder" />}
           <span>{item.label}</span>
         </button>
       ))}

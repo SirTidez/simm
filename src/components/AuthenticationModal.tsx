@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 
 import { ApiService } from '../services/api';
 import { useSettingsStore } from '../stores/settingsStore';
+import { Icon } from './Icon';
 
 interface Props {
   isOpen: boolean;
@@ -106,8 +107,8 @@ export function AuthenticationModal({
             <h2>{waitingForAuth ? 'Waiting for Steam Approval' : 'Authenticate with Steam'}</h2>
             <p>
               {required
-                ? 'Protected branch downloads need Steam authentication before SIMM can continue.'
-                : 'Connect Steam when SIMM needs access to protected branches and depot downloads.'}
+                ? 'Authenticate with Steam to authorize SIMM to manage your Schedule I game install.'
+                : 'Connect Steam when SIMM needs authorization for advanced Schedule I installs.'}
             </p>
           </div>
           {!required && (
@@ -119,15 +120,15 @@ export function AuthenticationModal({
 
         <div className="auth-modal__status-strip" aria-hidden={waitingForAuth}>
           <div className="auth-modal__status-pill">
-            <i className="fas fa-shield-halved"></i>
-            Protected branches
+            <Icon name="fas fa-shield-halved" />
+            Steam authorization
           </div>
           <div className="auth-modal__status-pill">
-            <i className="fas fa-lock"></i>
+            <Icon name="fas fa-lock" />
             Stored locally
           </div>
           <div className="auth-modal__status-pill">
-            <i className="fas fa-mobile-screen-button"></i>
+            <Icon name="fas fa-mobile-screen-button" />
             Steam Guard may be required
           </div>
         </div>
@@ -160,9 +161,9 @@ export function AuthenticationModal({
             <aside className="auth-modal__panel auth-modal__panel--intro">
               <div className="auth-modal__panel-copy">
                 <span className="settings-eyebrow">Why SIMM needs this</span>
-                <h3>Use Steam only when branch access requires it.</h3>
+                <h3>Authorize SIMM for Schedule I install management.</h3>
                 <p>
-                  SIMM uses Steam credentials only to authenticate protected depot access for branch downloads. This does not affect normal browsing or local workspace management.
+                  SIMM uses Steam credentials only when advanced Steam install actions need approval. This does not affect normal browsing or local workspace management.
                 </p>
               </div>
 
@@ -173,7 +174,7 @@ export function AuthenticationModal({
                 </div>
                 <div className="auth-modal__security-card">
                   <span>Use case</span>
-                  <strong>Steam depot access</strong>
+                  <strong>Schedule I access</strong>
                 </div>
                 <div className="auth-modal__security-card">
                   <span>Approval</span>
@@ -241,7 +242,7 @@ export function AuthenticationModal({
                     <span className="settings-toggle__control"></span>
                     <span>
                       <strong>Remember credentials securely</strong>
-                      <small>Store this Steam login locally in encrypted form for future protected downloads.</small>
+                      <small>Store this Steam login locally in encrypted form for future Steam authorization.</small>
                     </span>
                   </label>
                 </div>
@@ -254,7 +255,7 @@ export function AuthenticationModal({
                   </button>
                 )}
                 <button type="submit" className="btn btn-primary" disabled={loading || !username || !password}>
-                  <i className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-right-to-bracket'}></i>
+                  <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-right-to-bracket'} spin={loading} />
                   {loading ? 'Authenticating…' : 'Authenticate with Steam'}
                 </button>
               </div>

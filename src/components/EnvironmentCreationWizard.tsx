@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { ApiService } from '../services/api';
-import type { AppConfig, BranchConfig, SecurityScannerStatus } from '../types';
+import type { AppConfig, BranchConfig } from '../types';
+import { resolveExperienceMode, resolveShowAdvancedGameTools } from '../utils/uxSettings';
+import { Icon } from './Icon';
 
 interface Props {
   onClose: () => void;
@@ -90,19 +92,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [installingDepotDownloader, setInstallingDepotDownloader] = useState(false);
   const [depotDownloaderPromptError, setDepotDownloaderPromptError] = useState<string | null>(null);
   const [depotDownloaderDetectionError, setDepotDownloaderDetectionError] = useState<string | null>(null);
-  const [securityScannerStatus, setSecurityScannerStatus] = useState<SecurityScannerStatus | null>(null);
-  const [loadingSecurityScannerStatus, setLoadingSecurityScannerStatus] = useState(false);
-  const [installingSecurityScanner, setInstallingSecurityScanner] = useState(false);
-  const [securityScannerError, setSecurityScannerError] = useState<string | null>(null);
   const previousDerivedNameRef = useRef('');
   const autoDepotInstallAttemptedRef = useRef(false);
-  const autoSecurityScannerInstallAttemptedRef = useRef(false);
 
   const hasSteamEnvironment = environments.some(
     env => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')
   );
   const isSteamAuthenticated = Boolean(settings?.steamUsername);
   const steamDetected = steamInstallations.length > 0 && !steamDetectionError;
+  const experienceMode = resolveExperienceMode(settings);
+  const showAdvancedGameTools = resolveShowAdvancedGameTools(settings);
+  const canDownloadBranches = experienceMode === 'powerUser' && showAdvancedGameTools;
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -129,30 +129,6 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         setError(err instanceof Error ? err.message : 'Failed to load environment creation data');
       }
 
-      try {
-        const depotInfo = await ApiService.detectDepotDownloader();
-        setDepotDownloaderInstalled(!!depotInfo.installed);
-        setDepotDownloaderDetectionError(null);
-      } catch (err) {
-        setDepotDownloaderInstalled(null);
-        setDepotDownloaderDetectionError(
-          err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
-        );
-      }
-
-      try {
-        setLoadingSecurityScannerStatus(true);
-        const scannerStatus = await ApiService.getSecurityScannerStatus();
-        setSecurityScannerStatus(scannerStatus);
-        setSecurityScannerError(null);
-      } catch (err) {
-        setSecurityScannerStatus(null);
-        setSecurityScannerError(
-          err instanceof Error ? err.message : 'Unable to detect the MLVScan security scanner right now.'
-        );
-      } finally {
-        setLoadingSecurityScannerStatus(false);
-      }
     };
 
     void loadInitialState();
@@ -315,39 +291,27 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
     window.open('https://github.com/SteamRE/DepotDownloader#installation', '_blank', 'noopener,noreferrer');
   };
 
-  const refreshSecurityScannerStatus = async () => {
-    setLoadingSecurityScannerStatus(true);
-    setSecurityScannerError(null);
+  const refreshDepotDownloaderStatus = async () => {
+    setDepotDownloaderInstalled(null);
+    setDepotDownloaderDetectionError(null);
     try {
-      const scannerStatus = await ApiService.getSecurityScannerStatus();
-      setSecurityScannerStatus(scannerStatus);
+      const depotInfo = await ApiService.detectDepotDownloader();
+      setDepotDownloaderInstalled(!!depotInfo.installed);
     } catch (err) {
-      setSecurityScannerStatus(null);
-      setSecurityScannerError(
-        err instanceof Error ? err.message : 'Unable to detect the MLVScan security scanner right now.'
+      setDepotDownloaderInstalled(null);
+      setDepotDownloaderDetectionError(
+        err instanceof Error ? err.message : 'Unable to detect DepotDownloader right now.'
       );
-    } finally {
-      setLoadingSecurityScannerStatus(false);
-    }
-  };
-
-  const handleInstallSecurityScanner = async () => {
-    setInstallingSecurityScanner(true);
-    setSecurityScannerError(null);
-    try {
-      const scannerStatus = await ApiService.installSecurityScanner();
-      setSecurityScannerStatus(scannerStatus);
-    } catch (err) {
-      setSecurityScannerError(
-        err instanceof Error ? err.message : 'Failed to install the MLVScan security scanner automatically.'
-      );
-    } finally {
-      setInstallingSecurityScanner(false);
     }
   };
 
   useEffect(() => {
     if (wizardMode !== 'download-select') {
+      return;
+    }
+
+    if (depotDownloaderInstalled === null && !depotDownloaderDetectionError) {
+      void refreshDepotDownloaderStatus();
       return;
     }
 
@@ -362,27 +326,12 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       void handleAutoInstallDepotDownloader();
     }
 
-    if (
-      securityScannerStatus &&
-      securityScannerStatus.installed !== true &&
-      !securityScannerError &&
-      !loadingSecurityScannerStatus &&
-      !installingSecurityScanner &&
-      !autoSecurityScannerInstallAttemptedRef.current
-    ) {
-      autoSecurityScannerInstallAttemptedRef.current = true;
-      void handleInstallSecurityScanner();
-    }
   }, [
     wizardMode,
     depotDownloaderInstalled,
     depotDownloaderDetectionError,
     depotDownloaderPromptError,
     installingDepotDownloader,
-    securityScannerStatus,
-    securityScannerError,
-    loadingSecurityScannerStatus,
-    installingSecurityScanner,
   ]);
 
   const handleBranchSelect = (branch: BranchConfig) => {
@@ -471,26 +420,16 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             ? 'Detected'
             : 'Not linked'
     },
-    {
+    ...(canDownloadBranches ? [{
       label: 'DepotDownloader',
       value: depotDownloaderDetectionError
         ? 'Check failed'
         : depotDownloaderInstalled === null
-          ? 'Checking'
+          ? 'Not checked'
           : depotDownloaderInstalled
             ? 'Ready'
             : 'Missing'
-    },
-    {
-      label: 'MLVScan',
-      value: securityScannerError
-        ? 'Check failed'
-        : loadingSecurityScannerStatus
-          ? 'Checking'
-          : securityScannerStatus?.installed
-            ? 'Ready'
-            : 'Missing'
-    },
+    }] : []),
     { label: 'Default path', value: settings?.defaultDownloadDir ? 'Configured' : 'Unset' },
   ];
 
@@ -509,7 +448,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       aria-label="Create environment panel"
     >
       <div className="modal-header">
-        <h2>Create Environment</h2>
+        <h2>Add Game</h2>
       </div>
 
       {error && <div className="settings-error-banner">{error}</div>}
@@ -518,8 +457,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
         <div className="wizard-overview">
           <div className="wizard-overview__copy">
             <span className="settings-eyebrow">Environment Setup</span>
-            <h3>Create a new managed branch download or import an existing install.</h3>
-            <p>Use SIMM to manage download targets, detect local installs, and keep your environment aligned with branch runtime requirements.</p>
+            <h3>Add or import a game install.</h3>
+            <p>
+              SIMM looks for your Steam install automatically. Import a folder only if detection misses it.
+              Power User mode can also add separate Steam branches when needed.
+            </p>
           </div>
           <div className="wizard-overview__stats">
             {wizardStats.map((stat) => (
@@ -535,7 +477,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
           <div className="wizard-steam-card__header">
             <div className="wizard-steam-card__identity">
               <div className="wizard-steam-card__icon">
-                <i className="fab fa-steam-symbol"></i>
+                <Icon name="fab fa-steam-symbol" />
               </div>
               <div>
                 <span className="settings-eyebrow">Steam Detection</span>
@@ -550,23 +492,23 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 </h3>
                 <p>
                   {hasSteamEnvironment
-                    ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates while SIMM handles mods, plugins, and support tools.'
+                    ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates and does not need a Steam login inside SIMM.'
                     : steamDetectionError
                       ? 'SIMM could not verify Steam installations on this machine. Retry detection if you expect an existing install to appear.'
                       : steamDetected
-                      ? 'A Steam installation for Schedule I was found on this machine. You can add it to SIMM without making Steam a primary entry card in this flow.'
-                      : 'Detect an existing Steam installation if you want to manage your current install inside SIMM without downloading a separate branch copy.'}
+                      ? 'A Schedule I Steam install was found on this machine. Add it to SIMM so Steam keeps handling game updates while SIMM manages mods and tools. No Steam login is needed for this path.'
+                      : 'Refresh detection to find your existing Steam install. Use Import only if SIMM still cannot find the folder.'}
                 </p>
               </div>
             </div>
           <div className="wizard-steam-card__actions">
               <button type="button" className="btn btn-secondary" onClick={() => void handleDetectSteam()} disabled={detectingSteam}>
-                <i className={detectingSteam ? 'fas fa-spinner fa-spin' : 'fab fa-steam'}></i>
+                <Icon name={detectingSteam ? 'fas fa-spinner fa-spin' : 'fab fa-steam'} />
                 {detectingSteam ? 'Detecting…' : steamDetected ? 'Refresh Detection' : 'Detect Steam Install'}
               </button>
               {!hasSteamEnvironment && steamDetected && (
                 <button type="button" className="btn btn-secondary" onClick={() => setShowSteamInstallations((value) => !value)}>
-                  <i className="fas fa-list"></i>
+                  <Icon name="fas fa-list" />
                   {showSteamInstallations ? 'Hide Detected Installs' : 'Review Detected Installs'}
                 </button>
               )}
@@ -584,7 +526,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
               {steamInstallations.length === 0 ? (
                 <div className="wizard-empty-card">
-                  <i className="fab fa-steam"></i>
+                  <Icon name="fab fa-steam" />
                   <strong>No Steam installation found</strong>
                   <p>Make sure Schedule I is installed through Steam, then refresh detection to try again.</p>
                 </div>
@@ -625,7 +567,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           disabled={loading}
                         >
                           <div className="wizard-steam-install-row__icon">
-                            <i className="fab fa-steam-symbol"></i>
+                            <Icon name="fab fa-steam-symbol" />
                           </div>
                           <div className="wizard-steam-install-row__content">
                             <strong>Schedule I Steam install</strong>
@@ -651,38 +593,40 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               className="wizard-entry-card"
               onClick={() => {
                 setError(null);
-                setWizardMode('download-select');
-              }}
-            >
-              <div className="wizard-entry-card__icon">
-                <i className="fas fa-download"></i>
-              </div>
-              <div className="wizard-entry-card__content">
-                <span className="settings-eyebrow">Download</span>
-                <h3>Download New Branch</h3>
-                <p>Choose a managed branch, verify runtime/auth requirements, and create a dedicated SIMM environment.</p>
-              </div>
-              <span className="wizard-inline-action">Browse Branches</span>
-            </button>
-
-            <button
-              type="button"
-              className="wizard-entry-card"
-              onClick={() => {
-                setError(null);
                 setWizardMode('import-configure');
               }}
             >
               <div className="wizard-entry-card__icon wizard-entry-card__icon--success">
-                <i className="fas fa-folder-open"></i>
+                <Icon name="fas fa-folder-open" />
               </div>
               <div className="wizard-entry-card__content">
                 <span className="settings-eyebrow">Import</span>
                 <h3>Import Existing Folder</h3>
-                <p>Add a local installation that already exists on disk. SIMM will detect branch, runtime, and version details automatically.</p>
+                <p>Use this when automatic Steam detection misses your game, or when you keep a separate local copy on disk.</p>
               </div>
               <span className="wizard-inline-action">Select Folder</span>
             </button>
+
+            {canDownloadBranches && (
+              <button
+                type="button"
+                className="wizard-entry-card"
+                onClick={() => {
+                  setError(null);
+                  setWizardMode('download-select');
+                }}
+              >
+                <div className="wizard-entry-card__icon">
+                  <Icon name="fas fa-download" />
+                </div>
+                <div className="wizard-entry-card__content">
+                  <span className="settings-eyebrow">Advanced</span>
+                  <h3>Download Separate Branch</h3>
+                  <p>Create a separate SIMM-managed Steam branch install for beta, alternate, or runtime-specific testing. SIMM handles updates for these installs.</p>
+                </div>
+                <span className="wizard-inline-action">Browse Branches</span>
+              </button>
+            )}
           </section>
         )}
 
@@ -692,10 +636,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div>
                 <span className="settings-eyebrow">Step 1</span>
                 <h3>Select a branch to download</h3>
-                <p>Choose the branch that matches the runtime and access level you need. SIMM will configure the output folder in the next step.</p>
+                <p>Choose the Steam branch and runtime you need. SIMM will configure the install folder in the next step.</p>
               </div>
               <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('landing')}>
-                <i className="fas fa-arrow-left"></i>
+                <Icon name="fas fa-arrow-left" />
                 Back
               </button>
             </div>
@@ -704,11 +648,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="wizard-prerequisite-card">
                 <div className="wizard-prerequisite-card__copy">
                   <span className="settings-eyebrow">Requirement</span>
-                  <h4>{depotDownloaderDetectionError ? 'Unable to verify DepotDownloader status' : 'DepotDownloader is required for branch downloads'}</h4>
+                  <h4>{depotDownloaderDetectionError ? 'Unable to verify DepotDownloader status' : 'DepotDownloader is required for separate branch installs'}</h4>
                   <p>
                     {depotDownloaderDetectionError
-                      ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before downloading a branch.'
-                      : 'SIMM uses DepotDownloader to install and update non-Steam environments. You can install it automatically or open the official manual instructions.'}
+                      ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before adding a branch.'
+                      : 'SIMM uses DepotDownloader to add and update separate Steam branch installs. You can install it automatically or open the official manual instructions.'}
                   </p>
                   {depotDownloaderDetectionError && <div className="settings-error-banner">{depotDownloaderDetectionError}</div>}
                   {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
@@ -737,7 +681,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     }}
                     disabled={installingDepotDownloader || (!depotDownloaderDetectionError && depotDownloaderInstalled === null)}
                   >
-                    <i className={installingDepotDownloader ? 'fas fa-spinner fa-spin' : 'fas fa-download'}></i>
+                    <Icon name={installingDepotDownloader ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
                     {depotDownloaderDetectionError
                       ? 'Retry Detection'
                       : depotDownloaderInstalled === null
@@ -747,58 +691,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                         : 'Install Automatically'}
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={handleOpenDepotDownloaderInstructions}>
-                    <i className="fas fa-external-link-alt"></i>
+                    <Icon name="fas fa-external-link-alt" />
                     Manual Instructions
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {((securityScannerStatus?.installed !== true) || securityScannerError) && (
-              <div className="wizard-prerequisite-card">
-                <div className="wizard-prerequisite-card__copy">
-                  <span className="settings-eyebrow">Requirement</span>
-                  <h4>{securityScannerError ? 'Unable to verify MLVScan status' : 'MLVScan is installed during setup'}</h4>
-                  <p>
-                    {securityScannerError
-                      ? 'SIMM could not confirm whether the MLVScan security scanner is available. Retry the check or install it here before continuing.'
-                      : 'MLVScan is now managed from the setup wizard instead of Settings. Install it here so protected downloads are ready before you start using the app.'}
-                  </p>
-                  {securityScannerError && <div className="settings-error-banner">{securityScannerError}</div>}
-                  {securityScannerStatus?.lastError && <div className="settings-error-banner">{securityScannerStatus.lastError}</div>}
-                </div>
-                <div className="wizard-inline-actions">
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => {
-                      if (securityScannerError) {
-                        void refreshSecurityScannerStatus();
-                        return;
-                      }
-                      void handleInstallSecurityScanner();
-                    }}
-                    disabled={installingSecurityScanner || loadingSecurityScannerStatus}
-                  >
-                    <i className={installingSecurityScanner || loadingSecurityScannerStatus ? 'fas fa-spinner fa-spin' : 'fas fa-shield-halved'}></i>
-                    {securityScannerError
-                      ? 'Retry Detection'
-                      : loadingSecurityScannerStatus
-                        ? 'Checking…'
-                        : installingSecurityScanner
-                          ? 'Installing…'
-                          : securityScannerStatus?.installed
-                            ? 'Repair / Update'
-                            : 'Install MLVScan'}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => void refreshSecurityScannerStatus()}
-                    disabled={installingSecurityScanner || loadingSecurityScannerStatus}
-                  >
-                    <i className={loadingSecurityScannerStatus ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'}></i>
-                    Refresh Status
                   </button>
                 </div>
               </div>
@@ -809,8 +703,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 {appConfig.branches.map((branch) => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
                   const depotRequired = depotDownloaderInstalled !== true || !!depotDownloaderDetectionError;
-                  const scannerRequired = securityScannerStatus?.installed !== true || !!securityScannerError;
-                  const disabled = authRequired || depotRequired || scannerRequired;
+                  const disabled = authRequired || depotRequired;
 
                   return (
                     <div key={branch.name} role="listitem">
@@ -823,15 +716,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                         disabled={disabled}
                         title={
                           authRequired
-                            ? 'Steam authentication required to select this branch'
+                            ? 'Authenticate with Steam to authorize SIMM for this Schedule I install'
                             : depotRequired
                               ? depotDownloaderDetectionError
                                 ? 'SIMM could not verify DepotDownloader for this branch'
-                                : 'DepotDownloader is required to download this branch'
-                              : scannerRequired
-                                ? securityScannerError
-                                  ? 'SIMM could not verify the MLVScan security scanner for this setup'
-                                  : 'Install MLVScan from the setup prerequisites before selecting a branch'
+                                : 'DepotDownloader is required to add this branch'
                               : undefined
                         }
                       >
@@ -850,7 +739,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           </div>
                         </div>
                         <div className="wizard-branch-card__footer">
-                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before starting this download.' : 'Install DepotDownloader to unlock downloads.') : scannerRequired ? (securityScannerError ? 'Fix MLVScan detection before starting this download.' : 'Install MLVScan in the setup wizard to unlock branch downloads.') : 'Continue to environment configuration.'}</span>
+                          <span>{authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
                         </div>
                       </button>
                     </div>
@@ -859,7 +748,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
             ) : (
               <div className="wizard-empty-card">
-                <i className="fas fa-spinner fa-spin"></i>
+                <Icon name="fas fa-spinner fa-spin" />
                 <strong>Loading branches</strong>
                 <p>SIMM is fetching the currently supported game branches.</p>
               </div>
@@ -876,7 +765,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <p>Set the display details and confirm where the selected branch should be downloaded.</p>
               </div>
               <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('download-select')}>
-                <i className="fas fa-arrow-left"></i>
+                <Icon name="fas fa-arrow-left" />
                 Back
               </button>
             </div>
@@ -936,7 +825,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       placeholder="C:\\Games\\Schedule I Beta"
                     />
                     <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('download')}>
-                      <i className="fas fa-folder-open"></i>
+                      <Icon name="fas fa-folder-open" />
                       Browse
                     </button>
                   </div>
@@ -955,7 +844,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 Back
               </button>
               <button type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir}>
-                <i className={loading ? 'fas fa-spinner fa-spin' : 'fas fa-plus'}></i>
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
                 {loading ? 'Creating…' : 'Create Environment'}
               </button>
             </div>
@@ -978,7 +867,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   setImportPath('');
                 }}
               >
-                <i className="fas fa-arrow-left"></i>
+                <Icon name="fas fa-arrow-left" />
                 Back
               </button>
             </div>
@@ -1002,7 +891,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       placeholder="C:\\Games\\Schedule I"
                     />
                     <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('import')}>
-                      <i className="fas fa-folder-open"></i>
+                      <Icon name="fas fa-folder-open" />
                       Browse
                     </button>
                   </div>
@@ -1050,7 +939,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             </div>
 
             <div className="wizard-empty-card wizard-empty-card--info">
-              <i className="fas fa-circle-info"></i>
+              <Icon name="fas fa-circle-info" />
               <strong>Runtime and branch are detected automatically</strong>
               <p>Import is only asking for the folder and optional labels. SIMM will identify runtime, branch, version, and installed tooling from disk.</p>
             </div>
@@ -1072,7 +961,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 onClick={() => void handleImportLocalEnvironment()}
                 disabled={importingLocal || !importPath}
               >
-                <i className={importingLocal ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'}></i>
+                <Icon name={importingLocal ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} />
                 {importingLocal ? 'Importing…' : 'Import Installation'}
               </button>
             </div>
@@ -1091,7 +980,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             <div className="wizard-directory-dialog__body">
               <div className="wizard-directory-dialog__overview">
                 <span className="settings-eyebrow">Directory Browser</span>
-                <h3>{directoryPurpose === 'import' ? 'Choose the local game folder to import' : 'Choose the install folder for this branch download'}</h3>
+                <h3>{directoryPurpose === 'import' ? 'Choose the local game folder to import' : 'Choose the install folder for this branch install'}</h3>
                 <p>Browse folders, create a new subdirectory if needed, and confirm the current location when you are ready.</p>
               </div>
 
@@ -1111,7 +1000,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     placeholder="C:\\Users\\YourName"
                   />
                   <button type="button" className="btn btn-secondary" onClick={() => void loadDirectory(directoryPath)} disabled={browsing}>
-                    <i className={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'}></i>
+                    <Icon name={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'} />
                     {browsing ? 'Loading…' : 'Go to Path'}
                   </button>
                 </div>
@@ -1139,7 +1028,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     onClick={() => void handleCreateFolder()}
                     disabled={creatingFolder || !newFolderName.trim() || !directoryPath}
                   >
-                    <i className={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'}></i>
+                    <Icon name={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} />
                     {creatingFolder ? 'Creating…' : 'Create Folder'}
                   </button>
                 </div>
@@ -1148,7 +1037,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="wizard-directory-dialog__list" role="list">
                 {browsing ? (
                   <div className="wizard-empty-card">
-                    <i className="fas fa-spinner fa-spin"></i>
+                    <Icon name="fas fa-spinner fa-spin" />
                     <strong>Loading directories</strong>
                     <p>SIMM is reading the current folder contents.</p>
                   </div>
@@ -1161,7 +1050,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           className="wizard-directory-row wizard-directory-row--parent"
                           onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
                         >
-                          <i className="fas fa-arrow-up"></i>
+                          <Icon name="fas fa-arrow-up" />
                           <span>Parent Directory</span>
                         </button>
                       </div>
@@ -1169,7 +1058,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
                     {directoryList.length === 0 ? (
                       <div className="wizard-empty-card">
-                        <i className="fas fa-folder-open"></i>
+                        <Icon name="fas fa-folder-open" />
                         <strong>No subdirectories found</strong>
                         <p>This location does not contain any folders that SIMM can browse into right now.</p>
                       </div>
@@ -1181,7 +1070,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                             className="wizard-directory-row"
                             onClick={() => void loadDirectory(dir.path)}
                           >
-                            <i className="fas fa-folder"></i>
+                            <Icon name="fas fa-folder" />
                             <span>{dir.name}</span>
                           </button>
                         </div>
@@ -1201,7 +1090,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   onClick={() => handleDirectorySelection(directoryPath)}
                   disabled={browsing || !directoryPath}
                 >
-                  <i className="fas fa-check"></i>
+                  <Icon name="fas fa-check" />
                   Select Folder
                 </button>
               </div>

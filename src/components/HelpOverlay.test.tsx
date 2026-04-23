@@ -20,7 +20,7 @@ describe('HelpOverlay', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /create environment/i }));
+    fireEvent.click(screen.getByRole('button', { name: /add game/i }));
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }));
     fireEvent.click(screen.getByRole('button', { name: /open accounts/i }));
 
