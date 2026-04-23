@@ -21,7 +21,13 @@ fn normalize_path(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(test)]
 pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
+    let (pool, _) = initialize_pool_with_startup_state().await?;
+    Ok(pool)
+}
+
+pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bool)> {
     let db_path = get_database_path()?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create database directory")?;
@@ -64,7 +70,7 @@ pub async fn initialize_pool() -> Result<Arc<SqlitePool>> {
     migrate_from_files(&pool).await?;
     set_app_meta_value(&pool, APP_VERSION_KEY, current_app_version()).await?;
 
-    Ok(Arc::new(pool))
+    Ok((Arc::new(pool), !database_preexisted))
 }
 
 pub fn get_database_path() -> Result<PathBuf> {
@@ -788,6 +794,9 @@ mod tests {
             database_backup_count: Some(10),
             log_retention_days: Some(7),
             app_update: None,
+            experience_mode: None,
+            show_advanced_game_tools: None,
+            setup_guide_completed: None,
         }
     }
 

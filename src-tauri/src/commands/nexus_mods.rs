@@ -866,7 +866,7 @@ fn derive_account_summary(
         )
     };
 
-    let requires_site_confirmation = !(flags.0 || flags.1);
+    let requires_site_confirmation = !flags.0;
 
     let name = token_identity
         .as_ref()
@@ -910,7 +910,7 @@ fn derive_account_summary(
         "isPremium": flags.0,
         "isSupporter": flags.1,
         "requiresSiteConfirmation": requires_site_confirmation,
-        "canDirectDownload": !requires_site_confirmation,
+        "canDirectDownload": flags.0,
     })
 }
 
@@ -2523,7 +2523,7 @@ pub async fn install_nexus_mods_mod(
 mod tests {
     use super::{
         classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
-        OAuthRefreshFailure,
+        derive_account_summary, OAuthRefreshFailure,
     };
     use serde_json::json;
 
@@ -2587,6 +2587,26 @@ mod tests {
         let (is_premium, is_supporter) = derive_account_flags(&userinfo, &token);
         assert!(!is_premium);
         assert!(is_supporter);
+    }
+
+    #[test]
+    fn supporter_accounts_still_require_site_confirmation_for_downloads() {
+        let token = build_test_jwt(json!({
+            "user": {
+                "id": 12345,
+                "username": "SupporterOnly"
+            }
+        }));
+        let userinfo = json!({
+            "membershipRoles": ["supporter"]
+        });
+
+        let account = derive_account_summary(Some(&token), Some(&userinfo), None);
+
+        assert_eq!(account["isPremium"], json!(false));
+        assert_eq!(account["isSupporter"], json!(true));
+        assert_eq!(account["requiresSiteConfirmation"], json!(true));
+        assert_eq!(account["canDirectDownload"], json!(false));
     }
 
     #[test]

@@ -103,6 +103,33 @@ const getErrorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+type NexusManualInstallHint = {
+  requiresManualDownload?: boolean;
+  gameId?: string;
+  modId?: number;
+  fileId?: number;
+  runtime?: string;
+  recoveryUrl?: string;
+  modUrl?: string;
+  error?: string;
+};
+
+const normalizeNexusRuntime = (value?: string | null): 'IL2CPP' | 'Mono' | undefined => {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'il2cpp') {
+    return 'IL2CPP';
+  }
+  if (normalized === 'mono') {
+    return 'Mono';
+  }
+  return undefined;
+};
+
+const normalizeNexusId = (value: unknown): number | null => {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+
 export interface ModsOverlayNavigationState {
   modsTab?: ModsTab;
   searchSource?: 'thunderstore' | 'nexusmods';
@@ -737,6 +764,37 @@ export function ModsOverlay({
     }, 5 * 60 * 1000);
   };
 
+  const beginManualNexusInstallSession = async (hint: NexusManualInstallHint) => {
+    const modId = normalizeNexusId(hint.modId);
+    const fileId = normalizeNexusId(hint.fileId);
+
+    if (!modId || !fileId) {
+      return false;
+    }
+
+    const runtime =
+      normalizeNexusRuntime(hint.runtime) ??
+      normalizeNexusRuntime(environment?.runtime);
+
+    setInstallingNexusMod({ modId, fileId });
+    try {
+      await ApiService.beginNexusManualDownloadSession({
+        kind: 'install',
+        modId,
+        fileId,
+        gameId: hint.gameId || 'schedule1',
+        environmentId,
+        runtime,
+      });
+      startNexusManualTimeout();
+      showToast('Opened the Nexus Mods Files tab in your browser. Confirm the download there; SIMM will continue when the nxm link returns.');
+      return true;
+    } catch (error) {
+      setInstallingNexusMod(null);
+      throw error;
+    }
+  };
+
   const loadInstalledMods = async (showSpinner: boolean = true, refresh: boolean = false) => {
     const requestId = ++activeLoadRequestRef.current;
     if (showSpinner) {
@@ -1091,7 +1149,19 @@ export function ModsOverlay({
           });
           return;
         }
-        if (result.requiresManualDownload && result.recoveryUrl) {
+        if (result.requiresManualDownload) {
+          const sessionStarted = await beginManualNexusInstallSession(result);
+          if (sessionStarted) {
+            return;
+          }
+
+          if (!result.recoveryUrl) {
+            throw new Error(
+              result.error ||
+                'Nexus requires website confirmation, but SIMM did not receive the target file details for this update.',
+            );
+          }
+
           setConfirmDialog({
             title: 'Manual Download Required',
             message: result.error || 'Open the mod page to complete this update manually.',
@@ -2067,8 +2137,15 @@ export function ModsOverlay({
 
       if (!result.success) {
         if (result.requiresManualDownload && result.modUrl) {
-          window.open(result.modUrl, '_blank', 'noopener,noreferrer');
-          showToast('Opened the Nexus Mods Files tab in your browser. Confirm the download there, then return to SIMM.');
+          await beginManualNexusInstallSession({
+            modId,
+            fileId: targetFile.file_id,
+            gameId: 'schedule1',
+            runtime: environment.runtime,
+            modUrl: result.modUrl,
+            error: result.error,
+          });
+          keepPendingInstall = true;
           return;
         }
 

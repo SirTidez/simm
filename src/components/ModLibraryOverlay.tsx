@@ -1753,6 +1753,27 @@ export function ModLibraryOverlay({
     [closeConfirmOverlay],
   );
 
+  const handleRefreshLibrary = useCallback(async () => {
+    setLoadingLibrary(true);
+    try {
+      await ApiService.refreshThunderstorePackageCache("schedule-i");
+      await refreshLibrary();
+      await refreshEnvironments();
+    } catch (error) {
+      logger.warn("Failed to refresh Thunderstore package cache", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      showLibraryNotice(
+        "Thunderstore Refresh Failed",
+        error instanceof Error
+          ? error.message
+          : "SIMM could not refresh Thunderstore right now. Local library data is still available.",
+      );
+    } finally {
+      setLoadingLibrary(false);
+    }
+  }, [refreshEnvironments, refreshLibrary, showLibraryNotice]);
+
   const openSecurityReport = useCallback(
     (request: SecurityReportWorkspaceRequest) => {
       if (onOpenSecurityReport) {
@@ -2282,10 +2303,11 @@ export function ModLibraryOverlay({
       setNexusModsSearchResults([]);
       setActiveModView(null);
       try {
-        const [il2cppResult, monoResult] = await Promise.all([
-          ApiService.searchThunderstore("schedule-i", trimmedQuery, "IL2CPP"),
-          ApiService.searchThunderstore("schedule-i", trimmedQuery, "Mono"),
-        ]);
+        const { packagesByRuntime } =
+          await ApiService.searchThunderstoreByRuntime(
+            "schedule-i",
+            trimmedQuery,
+          );
 
         const merged = new Map<string, ThunderstorePackageGroup>();
         const addRuntime = (
@@ -2317,10 +2339,10 @@ export function ModLibraryOverlay({
           });
         };
 
-        (il2cppResult.packages || []).forEach((pkg: ThunderstorePackage) =>
+        (packagesByRuntime.IL2CPP || []).forEach((pkg: ThunderstorePackage) =>
           addRuntime(pkg, "IL2CPP"),
         );
-        (monoResult.packages || []).forEach((pkg: ThunderstorePackage) =>
+        (packagesByRuntime.Mono || []).forEach((pkg: ThunderstorePackage) =>
           addRuntime(pkg, "Mono"),
         );
 
@@ -2336,12 +2358,19 @@ export function ModLibraryOverlay({
         setShowSearchResults(true);
       } catch (err) {
         console.error("Error searching Thunderstore:", err);
+        showLibraryNotice(
+          "Thunderstore API Issue",
+          getErrorMessage(
+            err,
+            "Thunderstore API is having issues. Please try again later.",
+          ),
+        );
         setSearchResults([]);
       } finally {
         setSearching(false);
       }
     },
-    [discoverSort],
+    [discoverSort, showLibraryNotice],
   );
 
   const runNexusSearch = useCallback(
@@ -2850,97 +2879,84 @@ export function ModLibraryOverlay({
         setMlvscanFeaturedRelease(null);
       }
 
-      const [
-        meshVaultIl2cpp,
-        meshVaultMono,
-        s1mapiIl2cpp,
-        s1mapiMono,
-      ] = await Promise.allSettled([
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
-          "IL2CPP",
-        ),
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
-          "Mono",
-        ),
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
-          "IL2CPP",
-        ),
-        findThunderstorePackageForRuntime(
-          FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
-          "Mono",
-        ),
+      const thunderstoreFeatured = await Promise.allSettled([
+        ApiService.searchThunderstoreByRuntime("schedule-i", ""),
       ]);
-
-      if (
-        meshVaultIl2cpp.status === "rejected" ||
-        meshVaultMono.status === "rejected"
-      ) {
-        logger.warn("Failed to load featured MeshVault Thunderstore metadata", {
-          il2cppError:
-            meshVaultIl2cpp.status === "rejected"
-              ? meshVaultIl2cpp.reason instanceof Error
-                ? meshVaultIl2cpp.reason.message
-                : String(meshVaultIl2cpp.reason)
-              : undefined,
-          monoError:
-            meshVaultMono.status === "rejected"
-              ? meshVaultMono.reason instanceof Error
-                ? meshVaultMono.reason.message
-                : String(meshVaultMono.reason)
-              : undefined,
+      const packagesByRuntime =
+        thunderstoreFeatured[0].status === "fulfilled"
+          ? thunderstoreFeatured[0].value.packagesByRuntime
+          : {};
+      if (thunderstoreFeatured[0].status === "rejected") {
+        logger.warn("Failed to load featured Thunderstore metadata", {
+          error:
+            thunderstoreFeatured[0].reason instanceof Error
+              ? thunderstoreFeatured[0].reason.message
+              : String(thunderstoreFeatured[0].reason),
         });
       }
+
+      const findFeaturedPackage = (
+        sourceId: string,
+        runtime: ThunderstoreRuntime,
+      ): ThunderstorePackage | null => {
+        const parsed = parseThunderstoreSourceId(sourceId);
+        if (!parsed.owner || !parsed.name) {
+          return null;
+        }
+        const targetOwner = parsed.owner.toLowerCase();
+        const targetName = normalizeThunderstoreName(parsed.name).toLowerCase();
+        const packages = (packagesByRuntime[runtime] || []) as ThunderstorePackage[];
+
+        return (
+          packages.find((pkg) => {
+            const pkgOwner = (pkg.owner || "").toLowerCase();
+            const pkgName = normalizeThunderstoreName(
+              pkg.name || pkg.full_name || "",
+            ).toLowerCase();
+            return pkgOwner === targetOwner && pkgName === targetName;
+          }) ||
+          packages.find((pkg) => {
+            const pkgOwner = (pkg.owner || "").toLowerCase();
+            const pkgName = (pkg.name || "").toLowerCase();
+            return pkgOwner === targetOwner && pkgName === parsed.name.toLowerCase();
+          }) ||
+          null
+        );
+      };
+
       setMeshVaultFeaturedPackage(
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.meshvault, {
           IL2CPP:
-            meshVaultIl2cpp.status === "fulfilled"
-              ? meshVaultIl2cpp.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              "IL2CPP",
+            ) || undefined,
           Mono:
-            meshVaultMono.status === "fulfilled"
-              ? meshVaultMono.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              "Mono",
+            ) || undefined,
         }),
       );
 
-      if (
-        s1mapiIl2cpp.status === "rejected" ||
-        s1mapiMono.status === "rejected"
-      ) {
-        logger.warn("Failed to load featured S1MAPI Thunderstore metadata", {
-          il2cppError:
-            s1mapiIl2cpp.status === "rejected"
-              ? s1mapiIl2cpp.reason instanceof Error
-                ? s1mapiIl2cpp.reason.message
-                : String(s1mapiIl2cpp.reason)
-              : undefined,
-          monoError:
-            s1mapiMono.status === "rejected"
-              ? s1mapiMono.reason instanceof Error
-                ? s1mapiMono.reason.message
-                : String(s1mapiMono.reason)
-              : undefined,
-        });
-      }
       setS1mapiFeaturedPackage(
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi, {
           IL2CPP:
-            s1mapiIl2cpp.status === "fulfilled"
-              ? s1mapiIl2cpp.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              "IL2CPP",
+            ) || undefined,
           Mono:
-            s1mapiMono.status === "fulfilled"
-              ? s1mapiMono.value || undefined
-              : undefined,
+            findFeaturedPackage(
+              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              "Mono",
+            ) || undefined,
         }),
       );
     };
 
     void loadFeaturedReleases();
-  }, [isOpen, findThunderstorePackageForRuntime]);
+  }, [isOpen]);
 
   const pickNexusFileForVersionAndRuntime = useCallback(
     (
@@ -6541,7 +6557,7 @@ export function ModLibraryOverlay({
               </button>
               <button
                 className="btn btn-secondary btn-small"
-                onClick={refreshLibrary}
+                onClick={handleRefreshLibrary}
                 disabled={loadingLibrary}
                 title="Refresh library entries"
               >
@@ -8727,7 +8743,7 @@ export function ModLibraryOverlay({
                     </div>
                     <button
                       className="btn btn-secondary btn-small"
-                      onClick={refreshLibrary}
+                      onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
                     >
                       <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
@@ -8772,7 +8788,7 @@ export function ModLibraryOverlay({
                     ) : null}
                     <button
                       className="btn btn-secondary btn-small"
-                      onClick={refreshLibrary}
+                      onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
                     >
                       <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}

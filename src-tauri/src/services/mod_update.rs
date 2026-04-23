@@ -75,7 +75,12 @@ impl ModUpdateService {
                 .installed_in_by_runtime
                 .get(runtime_label)
                 .map(|env_ids| env_ids.iter().any(|env_id| env_id == environment_id))
-                .unwrap_or_else(|| entry.installed_in.iter().any(|env_id| env_id == environment_id));
+                .unwrap_or_else(|| {
+                    entry
+                        .installed_in
+                        .iter()
+                        .any(|env_id| env_id == environment_id)
+                });
             if !installed_for_runtime {
                 continue;
             }
@@ -199,8 +204,7 @@ impl ModUpdateService {
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
                             });
-                        metadata.icon_url =
-                            Self::extract_package_icon(&package, Some(&source_id));
+                        metadata.icon_url = Self::extract_package_icon(&package, Some(&source_id));
                         metadata.icon_cache_path = mods_service
                             .cache_icon_for_metadata(metadata.icon_url.as_deref())
                             .await
@@ -212,9 +216,7 @@ impl ModUpdateService {
                                 versions
                                     .iter()
                                     .map(|ver| {
-                                        ver.get("downloads")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0)
+                                        ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0)
                                     })
                                     .sum::<u64>()
                             });
@@ -347,8 +349,9 @@ impl ModUpdateService {
                     let owner = parts[0];
                     let repo_name = parts[1];
 
-                    if let Ok(Some(latest_release)) =
-                        github_service.get_latest_release(owner, repo_name, false).await
+                    if let Ok(Some(latest_release)) = github_service
+                        .get_latest_release(owner, repo_name, false)
+                        .await
                     {
                         if let Some(latest_version) = latest_release
                             .get("tag_name")
@@ -506,7 +509,8 @@ impl ModUpdateService {
             storage_metadata_updates.insert(candidate.storage_id.clone(), updated_metadata.clone());
 
             for existing_metadata in all_metadata.values_mut() {
-                if existing_metadata.mod_storage_id.as_deref() == Some(candidate.storage_id.as_str())
+                if existing_metadata.mod_storage_id.as_deref()
+                    == Some(candidate.storage_id.as_str())
                 {
                     Self::sync_refreshed_metadata_fields(existing_metadata, &updated_metadata);
                 }
@@ -1091,6 +1095,30 @@ impl ModUpdateService {
         })
     }
 
+    fn nexus_manual_confirmation_required_response(
+        message: String,
+        nexus_game_domain: &str,
+        mod_id: u32,
+        file_id: u32,
+        runtime_label: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "success": false,
+            "error": message,
+            "errorCode": "nexus_manual_confirmation_required",
+            "requiresManualDownload": true,
+            "gameId": nexus_game_domain,
+            "modId": mod_id,
+            "fileId": file_id,
+            "runtime": runtime_label,
+            "recoveryUrl": format!(
+                "https://www.nexusmods.com/{}/mods/{}?tab=files",
+                nexus_game_domain,
+                mod_id
+            )
+        })
+    }
+
     pub async fn update_mod<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -1377,18 +1405,16 @@ impl ModUpdateService {
                         if normalized.contains("premium")
                             || normalized.contains("site confirmation")
                             || normalized.contains("requires website confirmation")
+                            || normalized.contains("download-link request failed (403)")
+                            || normalized.contains("forbidden")
                         {
-                            return Ok(serde_json::json!({
-                                "success": false,
-                                "error": message,
-                                "errorCode": "nexus_manual_confirmation_required",
-                                "requiresManualDownload": true,
-                                "recoveryUrl": format!(
-                                    "https://www.nexusmods.com/{}/mods/{}?tab=files",
-                                    nexus_game_domain,
-                                    mod_id
-                                )
-                            }));
+                            return Ok(Self::nexus_manual_confirmation_required_response(
+                                message,
+                                &nexus_game_domain,
+                                mod_id,
+                                file_id,
+                                runtime_label,
+                            ));
                         }
 
                         return Err(anyhow::anyhow!(message));
@@ -1643,8 +1669,7 @@ mod tests {
             source_id: Some("ifBars/SteamNetworkLib_Mono".to_string()),
             source_version: Some("1.2.1".to_string()),
             source_url: Some(
-                "https://thunderstore.io/c/schedule-i/p/ifBars/SteamNetworkLib_Mono/"
-                    .to_string(),
+                "https://thunderstore.io/c/schedule-i/p/ifBars/SteamNetworkLib_Mono/".to_string(),
             ),
             summary: Some("Steam networking library".to_string()),
             icon_url: None,
@@ -1662,10 +1687,7 @@ mod tests {
             managed: true,
             installed_in: vec!["env-mono".to_string()],
             available_runtimes: vec!["Mono".to_string()],
-            storage_ids_by_runtime: HashMap::from([(
-                "Mono".to_string(),
-                "storage-1".to_string(),
-            )]),
+            storage_ids_by_runtime: HashMap::from([("Mono".to_string(), "storage-1".to_string())]),
             installed_in_by_runtime: HashMap::from([(
                 "Mono".to_string(),
                 vec!["env-mono".to_string()],
@@ -1678,6 +1700,31 @@ mod tests {
         };
         overrides(&mut entry);
         entry
+    }
+
+    #[test]
+    fn nexus_manual_confirmation_response_includes_pending_session_target() {
+        let response = ModUpdateService::nexus_manual_confirmation_required_response(
+            "Failed to download Nexus update: forbidden".to_string(),
+            "schedule1",
+            1777,
+            42,
+            "IL2CPP",
+        );
+
+        assert_eq!(response["requiresManualDownload"], serde_json::json!(true));
+        assert_eq!(
+            response["errorCode"],
+            serde_json::json!("nexus_manual_confirmation_required")
+        );
+        assert_eq!(response["gameId"], serde_json::json!("schedule1"));
+        assert_eq!(response["modId"], serde_json::json!(1777));
+        assert_eq!(response["fileId"], serde_json::json!(42));
+        assert_eq!(response["runtime"], serde_json::json!("IL2CPP"));
+        assert_eq!(
+            response["recoveryUrl"],
+            serde_json::json!("https://www.nexusmods.com/schedule1/mods/1777?tab=files")
+        );
     }
 
     #[tokio::test]
@@ -2121,8 +2168,10 @@ mod tests {
                 HashMap::from([("IL2CPP".to_string(), "storage-2".to_string())]);
             entry.installed_in_by_runtime =
                 HashMap::from([("IL2CPP".to_string(), vec!["env-il2cpp".to_string()])]);
-            entry.files_by_runtime =
-                HashMap::from([("IL2CPP".to_string(), vec!["SteamNetworkLib.dll".to_string()])]);
+            entry.files_by_runtime = HashMap::from([(
+                "IL2CPP".to_string(),
+                vec!["SteamNetworkLib.dll".to_string()],
+            )]);
         });
         let library = ModLibraryResult {
             downloaded: vec![mono_entry, il2cpp_entry],
@@ -2130,10 +2179,7 @@ mod tests {
 
         let processed = HashSet::from(["storage-1".to_string()]);
         let candidates = ModUpdateService::build_managed_library_update_candidates(
-            &library,
-            "env-mono",
-            "Mono",
-            &processed,
+            &library, "env-mono", "Mono", &processed,
         );
 
         assert!(candidates.is_empty());

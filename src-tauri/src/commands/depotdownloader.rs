@@ -90,20 +90,23 @@ pub async fn install_depot_downloader() -> Result<DepotDownloaderInfo, String> {
 
         let mut command = Command::new(&winget_path);
         command.args([
-                "install",
-                "--exact",
-                "--id",
-                DEPOTDOWNLOADER_WINGET_ID,
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-                "--disable-interactivity",
-            ]);
+            "install",
+            "--exact",
+            "--id",
+            DEPOTDOWNLOADER_WINGET_ID,
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ]);
         apply_windows_flags(&mut command);
 
-        let output = command
-            .output()
-            .await
-            .map_err(|e| format!("Failed to launch winget at {}: {}", winget_path.display(), e))?;
+        let output = command.output().await.map_err(|e| {
+            format!(
+                "Failed to launch winget at {}: {}",
+                winget_path.display(),
+                e
+            )
+        })?;
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);

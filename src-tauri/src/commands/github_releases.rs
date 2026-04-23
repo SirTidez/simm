@@ -51,7 +51,10 @@ async fn get_all_releases_logged(
 ) -> Result<Vec<serde_json::Value>, String> {
     log::debug!("Fetching all release metadata for {}/{}", owner, repo);
 
-    match service.get_all_releases_with_latest(owner, repo, false).await {
+    match service
+        .get_all_releases_with_latest(owner, repo, false)
+        .await
+    {
         Ok(releases) => {
             log::debug!(
                 "Resolved {} release entries for {}/{}",

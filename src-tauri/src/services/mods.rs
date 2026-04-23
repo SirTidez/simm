@@ -1,7 +1,7 @@
 use crate::services::fomod::{FomodInstallEntry, FomodService};
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
-use crate::services::thunderstore::ThunderStoreService;
+use crate::services::thunderstore::shared_thunderstore_service;
 use crate::types::{
     Environment, LocalModOwnershipCandidate, LocalModSourcePreview, LocalModSourceVersionOption,
     ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, SecurityFindingSeverity,
@@ -434,7 +434,7 @@ impl ModsService {
                 package_name,
                 normalized_url,
             } => {
-                let service = ThunderStoreService::new();
+                let service = shared_thunderstore_service();
                 let packages = service
                     .search_packages_filtered_by_runtime(&game_id, "unknown", Some(&package_name))
                     .await
@@ -5271,10 +5271,7 @@ exit 1
 
         if !locked_warnings.is_empty() {
             let running_reason = if environment_running {
-                format!(
-                    " Schedule I is currently running for {}.",
-                    env.name
-                )
+                format!(" Schedule I is currently running for {}.", env.name)
             } else {
                 format!(
                     " This usually means Schedule I is still running for {}.",
@@ -5512,16 +5509,18 @@ exit 1
             if installed_files.is_empty() {
                 let environment_running =
                     Self::environment_game_process_is_running(Path::new(&env.output_dir));
-                return Err(anyhow::anyhow!(Self::build_storage_install_failure_message(
-                    storage_id,
-                    &env,
-                    &warnings,
-                    storage_mods.exists(),
-                    storage_plugins.exists(),
-                    storage_userlibs.exists(),
-                    storage_userdata.exists(),
-                    environment_running,
-                )));
+                return Err(anyhow::anyhow!(
+                    Self::build_storage_install_failure_message(
+                        storage_id,
+                        &env,
+                        &warnings,
+                        storage_mods.exists(),
+                        storage_plugins.exists(),
+                        storage_userlibs.exists(),
+                        storage_userdata.exists(),
+                        environment_running,
+                    )
+                ));
             }
 
             eprintln!(
@@ -12429,9 +12428,18 @@ mod tests {
             .get("storageId")
             .and_then(|value| value.as_str())
             .expect("meshvault storage id");
-        let meshvault_storage_base = service.get_mods_storage_dir().await?.join(meshvault_storage_id);
-        assert!(meshvault_storage_base.join("Plugins").join("MeshVault.Il2Cpp.dll").exists());
-        assert!(!meshvault_storage_base.join("Mods").join("MeshVault.Il2Cpp.dll").exists());
+        let meshvault_storage_base = service
+            .get_mods_storage_dir()
+            .await?
+            .join(meshvault_storage_id);
+        assert!(meshvault_storage_base
+            .join("Plugins")
+            .join("MeshVault.Il2Cpp.dll")
+            .exists());
+        assert!(!meshvault_storage_base
+            .join("Mods")
+            .join("MeshVault.Il2Cpp.dll")
+            .exists());
 
         service
             .install_storage_mod_to_envs(meshvault_storage_id, vec![plugin_env.id.clone()])
@@ -12446,9 +12454,7 @@ mod tests {
         );
         assert!(
             !service
-                .path_exists_or_symlink(
-                    &plugin_env_dir.join("Mods").join("MeshVault.Il2Cpp.dll"),
-                )
+                .path_exists_or_symlink(&plugin_env_dir.join("Mods").join("MeshVault.Il2Cpp.dll"),)
                 .await
         );
 
@@ -12485,9 +12491,18 @@ mod tests {
             .get("storageId")
             .and_then(|value| value.as_str())
             .expect("s1mapi storage id");
-        let s1mapi_storage_base = service.get_mods_storage_dir().await?.join(s1mapi_storage_id);
-        assert!(s1mapi_storage_base.join("UserLibs").join("S1MAPI_Il2Cpp.dll").exists());
-        assert!(!s1mapi_storage_base.join("Mods").join("S1MAPI_Il2Cpp.dll").exists());
+        let s1mapi_storage_base = service
+            .get_mods_storage_dir()
+            .await?
+            .join(s1mapi_storage_id);
+        assert!(s1mapi_storage_base
+            .join("UserLibs")
+            .join("S1MAPI_Il2Cpp.dll")
+            .exists());
+        assert!(!s1mapi_storage_base
+            .join("Mods")
+            .join("S1MAPI_Il2Cpp.dll")
+            .exists());
 
         service
             .install_storage_mod_to_envs(s1mapi_storage_id, vec![userlib_env.id.clone()])
@@ -12502,9 +12517,7 @@ mod tests {
         );
         assert!(
             !service
-                .path_exists_or_symlink(
-                    &userlib_env_dir.join("Mods").join("S1MAPI_Il2Cpp.dll"),
-                )
+                .path_exists_or_symlink(&userlib_env_dir.join("Mods").join("S1MAPI_Il2Cpp.dll"),)
                 .await
         );
 
@@ -12579,16 +12592,12 @@ mod tests {
         );
         assert!(
             service
-                .path_exists_or_symlink(
-                    &output_dir.join("Plugins").join("MeshVault.Il2Cpp.dll"),
-                )
+                .path_exists_or_symlink(&output_dir.join("Plugins").join("MeshVault.Il2Cpp.dll"),)
                 .await
         );
         assert!(
             !service
-                .path_exists_or_symlink(
-                    &output_dir.join("Mods").join("MeshVault.Il2Cpp.dll"),
-                )
+                .path_exists_or_symlink(&output_dir.join("Mods").join("MeshVault.Il2Cpp.dll"),)
                 .await
         );
 
@@ -12658,16 +12667,12 @@ mod tests {
         );
         assert!(
             service
-                .path_exists_or_symlink(
-                    &output_dir.join("UserLibs").join("S1MAPI_Il2Cpp.dll"),
-                )
+                .path_exists_or_symlink(&output_dir.join("UserLibs").join("S1MAPI_Il2Cpp.dll"),)
                 .await
         );
         assert!(
             !service
-                .path_exists_or_symlink(
-                    &output_dir.join("Mods").join("S1MAPI_Il2Cpp.dll"),
-                )
+                .path_exists_or_symlink(&output_dir.join("Mods").join("S1MAPI_Il2Cpp.dll"),)
                 .await
         );
 
@@ -12706,7 +12711,10 @@ mod tests {
             result.get("success").and_then(|value| value.as_bool()),
             Some(true)
         );
-        assert!(game_dir.join("Plugins").join("MeshVault.Il2Cpp.dll").exists());
+        assert!(game_dir
+            .join("Plugins")
+            .join("MeshVault.Il2Cpp.dll")
+            .exists());
         assert!(!game_dir.join("Mods").join("MeshVault.Il2Cpp.dll").exists());
 
         Ok(())

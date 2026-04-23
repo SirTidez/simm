@@ -8,7 +8,6 @@ import {
   useRef,
 } from 'react';
 import type { ComponentType } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -25,7 +24,13 @@ import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
 import { logger } from '../services/logger';
+import {
+  buildSetupGuideSettings,
+  resolveExperienceMode,
+  settingsNeedUpgradeSetupPrompt,
+} from '../utils/uxSettings';
 import type {
+  ExperienceMode,
   AppUpdateChannel,
   AppUpdatePreferences,
   AppUpdateStatus,
@@ -152,6 +157,7 @@ function AppContent() {
     modsState?: ModsOverlayNavigationState;
     libraryFocusRequest?: LibraryFocusRequest | null;
     securityReportState?: SecurityReportWorkspaceRequest;
+    welcomeMode?: 'setup' | 'upgradePrompt';
   };
   type AppUpdateState =
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
@@ -170,6 +176,7 @@ function AppContent() {
     modsState: seed?.modsState,
     libraryFocusRequest: seed?.libraryFocusRequest ?? null,
     securityReportState: seed?.securityReportState,
+    welcomeMode: seed?.welcomeMode,
   }), []);
   const [workspaceStack, setWorkspaceStack] = useState<WorkspaceEntry[]>(() => [
     createWorkspaceEntry({ view: 'home' }),
@@ -188,6 +195,7 @@ function AppContent() {
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
+  const startupSetupCheckedRef = useRef(false);
   const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
@@ -377,18 +385,30 @@ function AppContent() {
 
   // Check if SIMM directory was just created on app launch
   useEffect(() => {
+    if (!hasSettings || startupSetupCheckedRef.current) {
+      return;
+    }
+
+    startupSetupCheckedRef.current = true;
+
     const checkWelcome = async () => {
       try {
-        const wasCreated = await invoke<boolean>('was_simm_directory_just_created');
-        if (wasCreated) {
-          pushWorkspace({ view: 'welcome' });
+        const startupState = await ApiService.getStartupState();
+        const freshInstall = startupState.simmDirectoryCreated || startupState.databaseCreated;
+        if (freshInstall || settings?.setupGuideCompleted === false) {
+          pushWorkspace({ view: 'welcome' }, { welcomeMode: 'setup' });
+          return;
+        }
+
+        if (settingsNeedUpgradeSetupPrompt(settings)) {
+          pushWorkspace({ view: 'welcome' }, { welcomeMode: 'upgradePrompt' });
         }
       } catch (error) {
-        console.error('Failed to check if SIMM directory was created:', error);
+        console.error('Failed to check startup setup state:', error);
       }
     };
     checkWelcome();
-  }, [pushWorkspace]);
+  }, [hasSettings, pushWorkspace, settings]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -464,6 +484,18 @@ function AppContent() {
   }, []);
 
   const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'beta';
+
+  const completeSetupGuide = useCallback(async (mode: ExperienceMode) => {
+    await updateSettings(buildSetupGuideSettings(mode));
+  }, [updateSettings]);
+
+  const skipSetupGuide = useCallback(async () => {
+    await updateSettings({
+      experienceMode: 'powerUser',
+      showAdvancedGameTools: true,
+      setupGuideCompleted: true,
+    });
+  }, [updateSettings]);
 
   useEffect(() => {
     if (!hasSettings || showStartupSplash) {
@@ -919,7 +951,13 @@ function AppContent() {
           />
         );
       case 'settings':
-        return <Settings isOpen={true} onClose={onCloseHandler} />;
+        return (
+          <Settings
+            isOpen={true}
+            onClose={onCloseHandler}
+            onRunSetupGuide={() => pushWorkspace({ view: 'welcome' }, { welcomeMode: 'setup' })}
+          />
+        );
       case 'welcome':
         return (
           <WelcomeOverlay
@@ -927,6 +965,11 @@ function AppContent() {
             onClose={onCloseHandler}
             onOpenWizard={() => openWorkspace({ view: 'wizard' })}
             onOpenSettings={() => openWorkspace({ view: 'settings' })}
+            onOpenAccounts={() => openWorkspace({ view: 'accounts' })}
+            mode={entry.welcomeMode ?? 'setup'}
+            initialExperienceMode={resolveExperienceMode(settings)}
+            onFinishSetup={completeSetupGuide}
+            onSkipSetup={skipSetupGuide}
           />
         );
       case 'mods':
@@ -992,7 +1035,7 @@ function AppContent() {
       default:
         return null;
     }
-  }, [getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, pushWorkspace, updateWorkspaceEntry]);
+  }, [completeSetupGuide, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, pushWorkspace, settings, skipSetupGuide, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
@@ -1042,11 +1085,11 @@ function AppContent() {
             <button
               onClick={() => openWorkspace({ view: 'wizard' })}
               className={`btn btn-primary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('wizard') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Download/Import New Game"
+              title="Add or import a game install"
               aria-pressed={isToolbarWorkspaceActive('wizard')}
             >
               <Icon name="plus" />
-              New Game
+              Add Game
             </button>
             <button
               onClick={() => openWorkspace({ view: 'accounts' })}

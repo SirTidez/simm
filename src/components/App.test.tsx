@@ -222,24 +222,41 @@ vi.mock('./WelcomeOverlay', () => ({
     onClose,
     onOpenWizard,
     onOpenSettings,
+    onOpenAccounts,
+    mode,
+    onFinishSetup,
+    onSkipSetup,
   }: {
     isOpen: boolean;
     onClose: () => void;
     onOpenWizard: () => void;
     onOpenSettings: () => void;
+    onOpenAccounts?: () => void;
+    mode?: string;
+    onFinishSetup?: (mode: 'player' | 'powerUser') => void;
+    onSkipSetup?: () => void;
   }) =>
     isOpen ? (
       <div>
         <span>Welcome Overlay</span>
+        <span>Welcome Mode: {mode}</span>
         <button onClick={onClose}>Close Welcome</button>
         <button onClick={onOpenWizard}>Open Wizard From Welcome</button>
         <button onClick={onOpenSettings}>Open Settings From Welcome</button>
+        <button onClick={onOpenAccounts}>Open Accounts From Welcome</button>
+        <button onClick={() => onFinishSetup?.('player')}>Finish Player Setup</button>
+        <button onClick={() => onSkipSetup?.()}>Skip Setup Guide</button>
       </div>
     ) : null,
 }));
 
 vi.mock('./Settings', () => ({
-  Settings: () => <button>Settings</button>,
+  Settings: ({ onRunSetupGuide }: { onRunSetupGuide?: () => void }) => (
+    <div>
+      <button>Settings</button>
+      <button onClick={onRunSetupGuide}>Run setup guide again</button>
+    </div>
+  ),
 }));
 
 vi.mock('./Footer', () => ({
@@ -302,7 +319,7 @@ describe('App', () => {
     });
     settingsStoreMocks.useSettingsStore.mockReset();
     settingsStoreMocks.useSettingsStore.mockReturnValue({
-      settings: { appUpdate: { channel: 'beta' } },
+      settings: { appUpdate: { channel: 'beta' }, setupGuideCompleted: true },
       updateSettings: vi.fn().mockResolvedValue(undefined),
     });
   });
@@ -330,7 +347,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
     await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'New Game' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Game' }));
     expect(await screen.findByText('Wizard Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Wizard' }));
     await waitFor(() => expect(screen.queryByText('Wizard Overlay')).toBeNull());
@@ -344,6 +361,47 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('opens the setup guide on a fresh startup', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_app_startup_state') {
+        return Promise.resolve({ simmDirectoryCreated: true, databaseCreated: true });
+      }
+      return Promise.resolve(false);
+    });
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: { appUpdate: { channel: 'beta' }, setupGuideCompleted: false },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Welcome Overlay')).toBeTruthy();
+    expect(screen.getByText('Welcome Mode: setup')).toBeTruthy();
+  });
+
+  it('offers the setup guide once for upgraded settings and preserves power-user layout when skipped', async () => {
+    const updateSettings = vi.fn().mockResolvedValue(undefined);
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: { appUpdate: { channel: 'beta' } },
+      updateSettings,
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Welcome Overlay')).toBeTruthy();
+    expect(screen.getByText('Welcome Mode: upgradePrompt')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skip Setup Guide' }));
+
+    await waitFor(() => {
+      expect(updateSettings).toHaveBeenCalledWith({
+        experienceMode: 'powerUser',
+        showAdvancedGameTools: true,
+        setupGuideCompleted: true,
+      });
+    });
   });
 
   it('keeps the workspace shell interactive while a workspace panel is loading', async () => {
@@ -494,7 +552,7 @@ describe('App', () => {
     const secondUpdateSettings = vi.fn().mockResolvedValue(undefined);
 
     settingsStoreMocks.useSettingsStore.mockImplementation(() => ({
-      settings: { appUpdate: { channel: 'beta' } },
+      settings: { appUpdate: { channel: 'beta' }, setupGuideCompleted: true },
       updateSettings: updateSettingsVersion === 0 ? firstUpdateSettings : secondUpdateSettings,
     }));
 

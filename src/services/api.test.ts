@@ -332,6 +332,7 @@ describe('ApiService', () => {
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
+    ['refreshThunderstorePackageCache', () => ApiService.refreshThunderstorePackageCache('schedule-i'), 'refresh_thunderstore_package_cache', { gameId: 'schedule-i' }],
     ['openPath', () => ApiService.openPath('C:/test/file.cfg'), 'open_path', { path: 'C:/test/file.cfg' }],
     ['revealPath', () => ApiService.revealPath('C:/test/file.cfg'), 'reveal_path', { path: 'C:/test/file.cfg' }],
   ])('%s invokes correct command contract', async (_label, call, command, payload) => {

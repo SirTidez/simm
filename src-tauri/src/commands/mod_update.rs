@@ -6,7 +6,7 @@ use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
-use crate::services::thunderstore::ThunderStoreService;
+use crate::services::thunderstore::{shared_thunderstore_service, ThunderStoreService};
 use crate::types::ModSource;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -16,8 +16,6 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
 static MOD_UPDATE_SERVICE: Lazy<AsyncMutex<Option<Arc<ModUpdateService>>>> =
-    Lazy::new(|| AsyncMutex::new(None));
-static THUNDERSTORE_SERVICE: Lazy<AsyncMutex<Option<Arc<ThunderStoreService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
@@ -44,11 +42,7 @@ async fn get_mod_update_service() -> Result<Arc<ModUpdateService>, String> {
 
 async fn get_thunderstore_service(db: Arc<SqlitePool>) -> Result<Arc<ThunderStoreService>, String> {
     let _ = db;
-    let mut service = THUNDERSTORE_SERVICE.lock().await;
-    if service.is_none() {
-        *service = Some(Arc::new(ThunderStoreService::new()));
-    }
-    Ok(service.as_ref().unwrap().clone())
+    Ok(shared_thunderstore_service())
 }
 
 async fn get_nexus_mods_service(db: Arc<SqlitePool>) -> Result<Arc<NexusModsService>, String> {

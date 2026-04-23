@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   getEnvironments: vi.fn(),
   getModLibrary: vi.fn(),
   searchThunderstore: vi.fn(),
+  searchThunderstoreByRuntime: vi.fn(),
   getMods: vi.fn(),
   getModsCount: vi.fn(),
   getModUpdatesSummary: vi.fn(),
@@ -158,6 +159,9 @@ describe('EnvironmentList', () => {
       ],
     });
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
+    apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
+      packagesByRuntime: { IL2CPP: [], Mono: [] },
+    });
     apiMocks.getMods.mockResolvedValue({
       mods: [
         {

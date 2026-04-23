@@ -9,11 +9,14 @@ import {
 } from "./EnvironmentList";
 import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
 import type { Settings as AppSettings } from "../types";
+import type { ExperienceMode } from "../types";
+import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
 import { Icon } from './Icon';
 
 type SettingsProps = {
   isOpen: boolean;
   onClose: () => void;
+  onRunSetupGuide?: () => void;
 };
 
 type SettingsFormData = {
@@ -35,6 +38,8 @@ type SettingsFormData = {
   logLevel: "debug" | "info" | "warn" | "error";
   modIconCacheLimitMb: number;
   databaseBackupCount: number;
+  experienceMode: ExperienceMode;
+  showAdvancedGameTools: boolean;
 };
 
 const MIN_MOD_ICON_CACHE_LIMIT_MB = 100;
@@ -155,6 +160,8 @@ function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
     databaseBackupCount: normalizeDatabaseBackupCount(
       settings.databaseBackupCount,
     ),
+    experienceMode: resolveExperienceMode(settings),
+    showAdvancedGameTools: resolveShowAdvancedGameTools(settings),
   };
 }
 
@@ -199,7 +206,7 @@ function SettingsToggle({
   );
 }
 
-export function Settings({ isOpen, onClose }: SettingsProps) {
+export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const {
     settings,
     customThemes,
@@ -247,6 +254,8 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
+    experienceMode: "powerUser",
+    showAdvancedGameTools: true,
   });
   const [error, setError] = useState<string | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
@@ -424,6 +433,9 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
           databaseBackupCount: normalizeDatabaseBackupCount(
             formData.databaseBackupCount,
           ),
+          experienceMode: formData.experienceMode,
+          showAdvancedGameTools: formData.showAdvancedGameTools,
+          setupGuideCompleted: true,
           platform: "windows" as const,
           language: "english",
         };
@@ -772,6 +784,65 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                         troubleshooting.
                       </small>
                     </div>
+
+                    <div className="settings-field">
+                      <label>App mode</label>
+                      <select
+                        value={formData.experienceMode}
+                        onChange={(e) => {
+                          const nextMode = e.target.value as ExperienceMode;
+                          setFormData({
+                            ...formData,
+                            experienceMode: nextMode,
+                            showAdvancedGameTools:
+                              nextMode === "powerUser"
+                                ? true
+                                : formData.showAdvancedGameTools,
+                          });
+                        }}
+                        disabled={loading}
+                      >
+                        <option value="player">Player</option>
+                        <option value="powerUser">Power User</option>
+                      </select>
+                      <small>
+                        Player keeps common mod-management actions prominent.
+                        Power User keeps branch and tooling workflows visible.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--toggle">
+                      <SettingsToggle
+                        label="Show advanced game branch downloads"
+                        description="Show DepotDownloader branch downloads inside Add Game."
+                        checked={formData.showAdvancedGameTools}
+                        onChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            showAdvancedGameTools: checked,
+                            experienceMode: checked ? "powerUser" : formData.experienceMode,
+                          })
+                        }
+                      />
+                    </div>
+
+                    {onRunSetupGuide && (
+                      <div className="settings-field settings-field--span">
+                        <label>Setup guide</label>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={onRunSetupGuide}
+                        >
+                          <Icon name="sliders" />
+                          Run setup guide again
+                        </button>
+                        <small>
+                          Revisit Player and Power User choices without changing
+                          installed mods or environments.
+                        </small>
+                      </div>
+                    )}
                   </div>
 
                   <div className="settings-inline-status-grid">
@@ -1342,11 +1413,11 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
                     </div>
                     <div className="settings-inline-status settings-inline-status--action">
                       <span>Scanner Management</span>
-                      <strong>Managed during setup</strong>
+                      <strong>Prepared by setup guide</strong>
                       <small>
-                        Install or repair MLVScan from the setup wizard
-                        prerequisites first. Use the fallback action here if
-                        setup failed or the scanner is still missing.
+                        The first-run guide installs MLVScan automatically.
+                        Use the fallback action here if setup failed or the
+                        scanner is still missing.
                       </small>
                       <div className="settings-backup-panel__actions">
                         <button

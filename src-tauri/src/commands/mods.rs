@@ -1099,11 +1099,7 @@ pub async fn download_s1api_to_library(
 
     let zip_url = match github_service.get_zip_asset_url(release) {
         Some(url) => {
-            log::debug!(
-                "Selected S1API ZIP asset for {} from {}",
-                version_tag,
-                url
-            );
+            log::debug!("Selected S1API ZIP asset for {} from {}", version_tag, url);
             url
         }
         None => {
@@ -1114,7 +1110,7 @@ pub async fn download_s1api_to_library(
             return error_json(format!(
                 "No ZIP asset found for S1API version {}",
                 version_tag
-            ))
+            ));
         }
     };
 
@@ -1338,7 +1334,7 @@ pub async fn download_mlvscan_to_library(
                 return error_json(format!(
                     "Invalid ZIP asset for MLVScan version {}",
                     version_tag
-                ))
+                ));
             }
         }
     } else if let Some(asset) = dll_asset {
@@ -1364,7 +1360,7 @@ pub async fn download_mlvscan_to_library(
                 return error_json(format!(
                     "Invalid DLL asset for MLVScan version {}",
                     version_tag
-                ))
+                ));
             }
         }
     } else {

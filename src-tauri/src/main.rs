@@ -57,11 +57,12 @@ fn main() {
                 simm_was_created
             );
 
-            let db_pool =
-                tauri::async_runtime::block_on(crate::db::initialize_pool()).map_err(|e| {
-                    log::error!("Failed to initialize database: {}", e);
-                    e
-                })?;
+            let (db_pool, database_was_created) =
+                tauri::async_runtime::block_on(crate::db::initialize_pool_with_startup_state())
+                    .map_err(|e| {
+                        log::error!("Failed to initialize database: {}", e);
+                        e
+                    })?;
 
             let mut settings_service =
                 crate::services::settings::SettingsService::new(db_pool.clone()).map_err(|e| {
@@ -124,8 +125,11 @@ fn main() {
                 }
             }
 
-            // Store flag in app state so frontend can check it
-            app.manage(tauri::async_runtime::Mutex::new(simm_was_created));
+            // Store startup state so frontend can choose fresh-install and upgrade setup flows.
+            app.manage(crate::types::AppStartupState {
+                simm_directory_created: simm_was_created,
+                database_created: database_was_created,
+            });
 
             // Initialize services (async)
             let app_handle = app.handle().clone();
@@ -133,6 +137,18 @@ fn main() {
                 if let Err(e) = crate::services::app_init::initialize_services(app_handle).await {
                     log::error!("Error during service initialization: {}", e);
                     // Continue anyway - some services may still work
+                }
+            });
+
+            // Prime Thunderstore once per launch. Search and update-check paths use this
+            // local listing unless the scheduled refresh window explicitly asks for a
+            // network refresh.
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::services::thunderstore::shared_thunderstore_service()
+                    .warm_community_cache("schedule-i")
+                    .await
+                {
+                    log::warn!("Failed to warm Thunderstore Schedule I cache: {}", error);
                 }
             });
 
@@ -158,6 +174,7 @@ fn main() {
             commands::app_update::check_app_update,
             commands::app_update::install_app_update,
             commands::app_init::was_simm_directory_just_created,
+            commands::app_init::get_app_startup_state,
             commands::app_init::get_home_directory,
             // DepotDownloader
             commands::depotdownloader::detect_depot_downloader,
@@ -273,8 +290,11 @@ fn main() {
             commands::nexus_mods::check_nexus_mods_for_updates,
             // Thunderstore
             commands::thunderstore::search_thunderstore_packages,
+            commands::thunderstore::search_thunderstore_packages_by_runtime,
+            commands::thunderstore::refresh_thunderstore_package_cache,
             commands::thunderstore::get_thunderstore_package,
             commands::thunderstore::download_thunderstore_package,
+            commands::thunderstore::get_thunderstore_request_stats,
             // Mod Updates
             commands::mod_update::check_mod_updates,
             commands::mod_update::update_mod,

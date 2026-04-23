@@ -19,6 +19,7 @@ import type {
   LocalModSourcePreview,
   CustomThemeDefinition,
   AppUpdateChannel,
+  AppStartupState,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -41,6 +42,10 @@ export class ApiService {
   // App Init
   static async getHomeDirectory(): Promise<string> {
     return invoke('get_home_directory');
+  }
+
+  static async getStartupState(): Promise<AppStartupState> {
+    return invoke('get_app_startup_state');
   }
 
   static async checkAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateStatus> {
@@ -961,6 +966,10 @@ export class ApiService {
     error?: string;
     errorCode?: string;
     requiresManualDownload?: boolean;
+    gameId?: string;
+    modId?: number;
+    fileId?: number;
+    runtime?: 'IL2CPP' | 'Mono';
     recoveryUrl?: string;
     alreadyUpToDate?: boolean;
   }> {
@@ -1215,7 +1224,7 @@ export class ApiService {
   static async searchThunderstore(
     gameId: string,
     query: string,
-    runtime: 'IL2CPP' | 'Mono'
+    runtime: 'IL2CPP' | 'Mono' | 'unknown' = 'unknown'
   ): Promise<{
     packages: Array<any>;
   }> {
@@ -1225,6 +1234,57 @@ export class ApiService {
       query,
     });
     return { packages };
+  }
+
+  static async searchThunderstoreByRuntime(
+    gameId: string,
+    query: string,
+  ): Promise<{
+    packagesByRuntime: Partial<Record<'IL2CPP' | 'Mono', Array<any>>>;
+  }> {
+    const packagesByRuntime = await invoke<Partial<Record<'IL2CPP' | 'Mono', Array<any>>>>(
+      'search_thunderstore_packages_by_runtime',
+      {
+        gameId,
+        query,
+      },
+    );
+    return { packagesByRuntime };
+  }
+
+  static async getThunderstoreRequestStats(): Promise<{
+    listingIndexRequests: number;
+    listingChunkRequests: number;
+    packageDetailRequests: number;
+    downloadRequests: number;
+    conditionalNotModified: number;
+    memoryCacheHits: number;
+    diskCacheHits: number;
+    staleDiskFallbacks: number;
+    forbiddenResponses: number;
+    rateLimitedResponses: number;
+  }> {
+    return invoke('get_thunderstore_request_stats');
+  }
+
+  static async refreshThunderstorePackageCache(gameId: string): Promise<{
+    packageCount: number;
+    manualRefreshThrottled?: boolean;
+    retryAfterSeconds?: number | null;
+    stats: {
+      listingIndexRequests: number;
+      listingChunkRequests: number;
+      packageDetailRequests: number;
+      downloadRequests: number;
+      conditionalNotModified: number;
+      memoryCacheHits: number;
+      diskCacheHits: number;
+      staleDiskFallbacks: number;
+      forbiddenResponses: number;
+      rateLimitedResponses: number;
+    };
+  }> {
+    return invoke('refresh_thunderstore_package_cache', { gameId });
   }
 
   static async installThunderstoreMod(

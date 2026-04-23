@@ -397,4 +397,77 @@ describe("Settings", () => {
       expect(apiMocks.installSecurityScanner).toHaveBeenCalledTimes(1);
     });
   });
+
+  it("saves app mode and advanced game tool preferences", async () => {
+    vi.useFakeTimers();
+    const updateSettingsSpy = vi.fn().mockResolvedValue(undefined);
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        defaultDownloadDir: "C:\\Games",
+        maxConcurrentDownloads: 2,
+        theme: "modern-blue",
+        melonLoaderVersion: "",
+        autoInstallMelonLoader: false,
+        updateCheckInterval: 60,
+        autoCheckUpdates: true,
+        logLevel: "info",
+        modIconCacheLimitMb: 500,
+        databaseBackupCount: 10,
+        experienceMode: "powerUser",
+        showAdvancedGameTools: true,
+        setupGuideCompleted: true,
+      },
+      customThemes: [],
+      themesDirectory: "C:\\Users\\SirTidez\\SIMM\\themes",
+      depotDownloader: null,
+      loading: false,
+      updateSettings: updateSettingsSpy,
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+      refreshThemes,
+    });
+
+    render(<Settings isOpen={true} onClose={vi.fn()} onRunSetupGuide={vi.fn()} />);
+
+    const modeLabel = screen
+      .getAllByText(/^app mode$/i)
+      .find((node) => node.tagName === "LABEL");
+    const modeSelect = modeLabel
+      ?.closest(".settings-field")
+      ?.querySelector("select") as HTMLSelectElement | null;
+    expect(modeSelect).toBeTruthy();
+
+    fireEvent.change(modeSelect!, { target: { value: "player" } });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(updateSettingsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        experienceMode: "player",
+        showAdvancedGameTools: true,
+        setupGuideCompleted: true,
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: /show advanced game branch downloads/i,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(updateSettingsSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        experienceMode: "player",
+        showAdvancedGameTools: false,
+        setupGuideCompleted: true,
+      }),
+    );
+
+    expect(screen.getByRole("button", { name: /run setup guide again/i })).toBeTruthy();
+  });
 });

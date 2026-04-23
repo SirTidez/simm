@@ -2267,6 +2267,12 @@ body::before {
   transform: translateY(-1px);
 }
 
+.wizard-entry-card--selected {
+  border-color: rgba(86, 191, 143, 0.75);
+  background: rgba(86, 191, 143, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(86, 191, 143, 0.18);
+}
+
 .wizard-steam-install-row {
   display: flex;
   align-items: center;

@@ -13,8 +13,8 @@ interface HelpOverlayProps {
 const quickStartSteps = [
   {
     icon: 'plusCircle',
-    title: 'Create an install',
-    body: 'Use New Game to choose a branch, confirm the target folder, and create a managed environment.',
+    title: 'Add a game',
+    body: 'Use Add Game to link your Steam install, import an existing folder, or open Power User branch downloads.',
   },
   {
     icon: 'userCircle',
@@ -34,7 +34,7 @@ const primaryHelpCards = [
     title: 'Manage Game Installs',
     copy: 'Use install actions from the Home workspace to keep each environment healthy and easy to launch.',
     items: [
-      'Download new builds into the selected directory.',
+      'Import existing game folders or use Power User branch downloads when enabled.',
       'Run Check Updates when you want an immediate refresh.',
       'Use Update to apply the newest available branch build.',
       'Launch Game and Open Folder for quick verification and support work.',
@@ -106,8 +106,8 @@ const referenceCards = [
 const quickActions = [
   {
     icon: 'plusCircle',
-    title: 'Create Environment',
-    body: 'Start a new managed install or import an existing folder into SIMM.',
+    title: 'Add Game',
+    body: 'Link a Steam install, import an existing folder, or open advanced branch downloads.',
     action: 'wizard' as const,
   },
   {
