@@ -459,8 +459,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             <span className="settings-eyebrow">Environment Setup</span>
             <h3>Add or import a game install.</h3>
             <p>
-              Start with the Steam install or local folder you already use.
-              Power User mode can also download separate branches when needed.
+              SIMM looks for your Steam install automatically. Import a folder only if detection misses it.
+              Power User mode can also add separate Steam branches when needed.
             </p>
           </div>
           <div className="wizard-overview__stats">
@@ -492,12 +492,12 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 </h3>
                 <p>
                   {hasSteamEnvironment
-                    ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates while SIMM handles mods, plugins, and support tools.'
+                    ? 'Your primary Steam install is already linked to SIMM. Steam continues to manage game updates and does not need a Steam login inside SIMM.'
                     : steamDetectionError
                       ? 'SIMM could not verify Steam installations on this machine. Retry detection if you expect an existing install to appear.'
                       : steamDetected
-                      ? 'A Steam installation for Schedule I was found on this machine. You can add it to SIMM without making Steam a primary entry card in this flow.'
-                      : 'Detect an existing Steam installation if you want to manage your current install inside SIMM without downloading a separate branch copy.'}
+                      ? 'A Schedule I Steam install was found on this machine. Add it to SIMM so Steam keeps handling game updates while SIMM manages mods and tools. No Steam login is needed for this path.'
+                      : 'Refresh detection to find your existing Steam install. Use Import only if SIMM still cannot find the folder.'}
                 </p>
               </div>
             </div>
@@ -602,7 +602,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="wizard-entry-card__content">
                 <span className="settings-eyebrow">Import</span>
                 <h3>Import Existing Folder</h3>
-                <p>Add a local installation that already exists on disk. SIMM will detect branch, runtime, and version details automatically.</p>
+                <p>Use this when automatic Steam detection misses your game, or when you keep a separate local copy on disk.</p>
               </div>
               <span className="wizard-inline-action">Select Folder</span>
             </button>
@@ -622,7 +622,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <div className="wizard-entry-card__content">
                   <span className="settings-eyebrow">Advanced</span>
                   <h3>Download Separate Branch</h3>
-                  <p>Use DepotDownloader to create a dedicated install for beta, alternate, or runtime-specific branches.</p>
+                  <p>Create a separate SIMM-managed Steam branch install for beta, alternate, or runtime-specific testing. SIMM handles updates for these installs.</p>
                 </div>
                 <span className="wizard-inline-action">Browse Branches</span>
               </button>
@@ -636,7 +636,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div>
                 <span className="settings-eyebrow">Step 1</span>
                 <h3>Select a branch to download</h3>
-                <p>Choose the branch that matches the runtime and access level you need. SIMM will configure the output folder in the next step.</p>
+                <p>Choose the Steam branch and runtime you need. SIMM will configure the install folder in the next step.</p>
               </div>
               <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('landing')}>
                 <Icon name="fas fa-arrow-left" />
@@ -648,11 +648,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="wizard-prerequisite-card">
                 <div className="wizard-prerequisite-card__copy">
                   <span className="settings-eyebrow">Requirement</span>
-                  <h4>{depotDownloaderDetectionError ? 'Unable to verify DepotDownloader status' : 'DepotDownloader is required for branch downloads'}</h4>
+                  <h4>{depotDownloaderDetectionError ? 'Unable to verify DepotDownloader status' : 'DepotDownloader is required for separate branch installs'}</h4>
                   <p>
                     {depotDownloaderDetectionError
-                      ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before downloading a branch.'
-                      : 'SIMM uses DepotDownloader to install and update non-Steam environments. You can install it automatically or open the official manual instructions.'}
+                      ? 'SIMM could not confirm whether DepotDownloader is installed. Retry the check or open the manual instructions before adding a branch.'
+                      : 'SIMM uses DepotDownloader to add and update separate Steam branch installs. You can install it automatically or open the official manual instructions.'}
                   </p>
                   {depotDownloaderDetectionError && <div className="settings-error-banner">{depotDownloaderDetectionError}</div>}
                   {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
@@ -716,11 +716,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                         disabled={disabled}
                         title={
                           authRequired
-                            ? 'Steam authentication required to select this branch'
+                            ? 'Authenticate with Steam to authorize SIMM for this Schedule I install'
                             : depotRequired
                               ? depotDownloaderDetectionError
                                 ? 'SIMM could not verify DepotDownloader for this branch'
-                                : 'DepotDownloader is required to download this branch'
+                                : 'DepotDownloader is required to add this branch'
                               : undefined
                         }
                       >
@@ -739,7 +739,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           </div>
                         </div>
                         <div className="wizard-branch-card__footer">
-                          <span>{authRequired ? 'Sign in to Steam in Accounts to use this branch.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before starting this download.' : 'Install DepotDownloader to unlock downloads.') : 'Continue to environment configuration.'}</span>
+                          <span>{authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
                         </div>
                       </button>
                     </div>
@@ -980,7 +980,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             <div className="wizard-directory-dialog__body">
               <div className="wizard-directory-dialog__overview">
                 <span className="settings-eyebrow">Directory Browser</span>
-                <h3>{directoryPurpose === 'import' ? 'Choose the local game folder to import' : 'Choose the install folder for this branch download'}</h3>
+                <h3>{directoryPurpose === 'import' ? 'Choose the local game folder to import' : 'Choose the install folder for this branch install'}</h3>
                 <p>Browse folders, create a new subdirectory if needed, and confirm the current location when you are ready.</p>
               </div>
 

@@ -116,7 +116,7 @@ describe('WelcomeOverlay', () => {
     expect(screen.getByRole('button', { name: 'Open Accounts After Setup' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /^continue$/i }));
-    expect(await screen.findByText('Sign in to Steam for advanced downloads')).toBeTruthy();
+    expect(await screen.findByText('Authenticate with Steam for advanced installs')).toBeTruthy();
     await waitFor(() => {
       expect(apiMocks.getSecurityScannerStatus).toHaveBeenCalledTimes(1);
     });

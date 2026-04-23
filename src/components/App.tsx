@@ -1041,6 +1041,65 @@ function AppContent() {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
   };
 
+  const renderWorkspaceSidebar = (showNavigationControls: boolean) => {
+    const selectedEnvironmentId =
+      'environmentId' in activeWorkspace
+        ? activeWorkspace.environmentId
+        : null;
+    const sortedEnvironments = [...environments].sort((a, b) => a.name.localeCompare(b.name));
+
+    return (
+      <aside className="workspace-sidebar">
+        {showNavigationControls && (
+          <div className="workspace-sidebar__nav">
+            <button
+              onClick={popWorkspace}
+              className="btn btn-secondary app-workspace-home-button"
+              disabled={!canGoBack}
+            >
+              <Icon name="arrowLeft" />
+              Back
+            </button>
+            <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
+              <Icon name="house" />
+              Home
+            </button>
+          </div>
+        )}
+
+        <div className="workspace-environment-sidebar">
+          <h3 className="workspace-environment-sidebar__title">Environments</h3>
+          <p className="workspace-environment-sidebar__copy">
+            Select an environment to open its active tools workspace.
+          </p>
+          <div className="workspace-environment-sidebar__list">
+            {sortedEnvironments.length > 0 ? (
+              sortedEnvironments.map((env) => (
+                <div key={env.id} className="workspace-environment-sidebar__item">
+                  <button
+                    onClick={() => {
+                      localStorage.setItem('simm:lastEnvId', env.id);
+                      handleWorkspaceEnvironmentSelect(env.id);
+                    }}
+                    className={`workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
+                    title={env.name}
+                    aria-current={selectedEnvironmentId === env.id ? 'page' : undefined}
+                  >
+                    <span className="workspace-environment-sidebar__button-label">{env.name}</span>
+                  </button>
+                </div>
+              ))
+            ) : (
+              <div className="workspace-environment-sidebar__empty">No game installs yet.</div>
+            )}
+          </div>
+        </div>
+
+        <DownloadsPanel />
+      </aside>
+    );
+  };
+
   const appUpdatePreferences = settings?.appUpdate ?? null;
   const appUpdateSnoozedUntil = appUpdatePreferences?.snoozedUntil
     && Number.isFinite(Date.parse(appUpdatePreferences.snoozedUntil))
@@ -1149,40 +1208,20 @@ function AppContent() {
         </header>
 
         <div className="app-body">
-          <div className={`app-content ${activeWorkspace.view === 'home' ? '' : 'workspace-active'}`}>
+          <div className="app-content workspace-active">
             {activeWorkspace.view === 'home' ? (
-              <main className="app-main">
-                <EnvironmentList
-                  onInitialDetectionComplete={handleInitialDetectionComplete}
-                  onOpenWorkspace={openWorkspace}
-                />
-              </main>
+              <div className="workspace-layout">
+                {renderWorkspaceSidebar(false)}
+                <main className="app-main app-home-main">
+                  <EnvironmentList
+                    onInitialDetectionComplete={handleInitialDetectionComplete}
+                    onOpenWorkspace={openWorkspace}
+                  />
+                </main>
+              </div>
             ) : (
               <div className="workspace-layout">
-                <aside
-                  className="workspace-sidebar"
-                >
-                  <div style={{ display: 'flex', gap: '0.65rem' }}>
-                    <button
-                      onClick={popWorkspace}
-                      className="btn btn-secondary app-workspace-home-button"
-                      disabled={!canGoBack}
-                    >
-                      <Icon name="arrowLeft" />
-                      Back
-                    </button>
-                    <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
-                      <Icon name="house" />
-                      Home
-                    </button>
-                  </div>
-                  <EnvironmentList
-                    compactMode={true}
-                    activeWorkspace={activeWorkspace}
-                    onSelectEnvironment={handleWorkspaceEnvironmentSelect}
-                  />
-                  <DownloadsPanel />
-                </aside>
+                {renderWorkspaceSidebar(true)}
                 <main className="app-main workspace-main app-workspace-main">
                   <Suspense fallback={<WorkspacePanelFallback />}>
                     {renderWorkspacePanel()}

@@ -452,7 +452,7 @@ describe("Settings", () => {
 
     fireEvent.click(
       screen.getByRole("switch", {
-        name: /show advanced game branch downloads/i,
+        name: /show advanced steam branch installs/i,
       }),
     );
 

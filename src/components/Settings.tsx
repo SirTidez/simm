@@ -556,8 +556,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const depotStatusDetail = depotDownloader
     ? depotDownloader.method
       ? `Managed via ${depotDownloader.method}`
-      : "Managed automatically for protected branches"
-    : "Installed automatically when protected downloads need it";
+      : "Managed automatically for advanced branch installs"
+    : "Installed automatically when advanced branch installs need it";
   const releaseApiDetail = checkingReleaseApi
     ? "Checking release metadata"
     : releaseApiError
@@ -807,14 +807,14 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </select>
                       <small>
                         Player keeps common mod-management actions prominent.
-                        Power User keeps branch and tooling workflows visible.
+                        Power User keeps separate branch installs and tooling visible.
                       </small>
                     </div>
 
                     <div className="settings-field settings-field--toggle">
                       <SettingsToggle
-                        label="Show advanced game branch downloads"
-                        description="Show DepotDownloader branch downloads inside Add Game."
+                        label="Show advanced Steam branch installs"
+                        description="Show separate Steam branch install options inside Add Game."
                         checked={formData.showAdvancedGameTools}
                         onChange={(checked) =>
                           setFormData({
@@ -1330,7 +1330,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     <div className="settings-field settings-field--toggle">
                       <SettingsToggle
                         label="Auto-install scanner"
-                        description="Let SIMM acquire or repair the scanner when a protected download needs it."
+                        description="Let SIMM acquire or repair the scanner when download safety checks need it."
                         checked={formData.autoInstallSecurityScanner ?? true}
                         onChange={(checked) =>
                           setFormData({
@@ -1397,7 +1397,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       <small>
                         {securityScannerStatus?.installedVersion
                           ? `Installed ${securityScannerStatus.installedVersion}`
-                          : "Install the scanner to enforce protected download checks."}
+                          : "Install the scanner to enforce download safety checks."}
                       </small>
                     </div>
                     <div className="settings-inline-status">

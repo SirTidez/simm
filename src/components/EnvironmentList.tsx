@@ -1662,6 +1662,7 @@ export function EnvironmentList({
               className={`environment-metric ${metric.tone ? `environment-metric--${metric.tone}` : ''}`}
               role={metric.onClick ? 'button' : undefined}
               tabIndex={metric.onClick ? 0 : undefined}
+              aria-label={`${metric.label}: ${metric.value}`}
               onClick={metric.onClick}
               onKeyDown={metric.onClick ? (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -1675,7 +1676,11 @@ export function EnvironmentList({
             </div>
           ))}
           {env.updateAvailable && env.updateGameVersion && (
-            <div className="environment-metric environment-metric--warning">
+            <div
+              className="environment-metric environment-metric--warning"
+              aria-label={`Available update: ${env.updateGameVersion}`}
+              title={`Available update: ${env.updateGameVersion}`}
+            >
               <span>Available update</span>
               <strong>{env.updateGameVersion}</strong>
             </div>
@@ -1706,42 +1711,46 @@ export function EnvironmentList({
               <div className="environment-card__action-row environment-card__action-row--primary">
                 <button
                   onClick={() => handleLaunchGame(env, launchMethod)}
-                  className="btn btn-primary"
+                  className="btn btn-primary environment-card__hero-action"
                   title={`Launch the game via ${launchMethod === 'direct' ? 'Local Install' : 'Steam'}`}
                 >
                   <Icon name="fas fa-play" />
                   <span>Launch</span>
                 </button>
-                <button onClick={() => handleOpenModsOverlay(env.id)} className="btn btn-secondary" title="Open installed mods">
+                <button
+                  onClick={() => handleOpenModsOverlay(env.id)}
+                  className="btn btn-secondary environment-card__hero-action environment-card__hero-action--mods"
+                  title="Open installed mods"
+                >
                   <Icon name="fas fa-puzzle-piece" />
                   <span>Mods</span>
-                </button>
-                <button onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary" title="Edit mod configuration">
-                  <Icon name="fas fa-cog" />
-                  <span>Config</span>
-                </button>
-                <button onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary" title="View MelonLoader logs">
-                  <Icon name="fas fa-file-alt" />
-                  <span>Logs</span>
                 </button>
               </div>
 
               <div className="environment-card__action-row environment-card__action-row--secondary">
-                <button onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary" title="View installed plugins">
+                <button onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="Edit mod configuration">
+                  <Icon name="fas fa-cog" />
+                  <span>Config</span>
+                </button>
+                <button onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View MelonLoader logs">
+                  <Icon name="fas fa-file-alt" />
+                  <span>Logs</span>
+                </button>
+                <button onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View installed plugins">
                   <Icon name="fas fa-plug" />
                   <span>Plugins</span>
                 </button>
-                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary" title="View UserLibs">
+                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View UserLibs">
                   <Icon name="fas fa-book" />
                   <span>UserLibs</span>
                 </button>
-                <button onClick={() => handleOpenFolder(env)} className="btn btn-secondary" title="Open folder in file explorer">
+                <button onClick={() => handleOpenFolder(env)} className="btn btn-secondary environment-card__command-btn" title="Open folder in file explorer">
                   <Icon name="fas fa-folder-open" />
-                  <span>Open Folder</span>
+                  <span>Folder</span>
                 </button>
                 <button
                   onClick={() => handleUpdateAction(env)}
-                  className={`btn ${env.updateAvailable && !isSteam ? 'btn-primary' : 'btn-secondary'}`}
+                  className={`btn btn-secondary environment-card__command-btn ${env.updateAvailable && !isSteam ? 'environment-card__command-btn--warning' : ''}`}
                   disabled={isCheckingUpdate}
                   title={isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
                 >

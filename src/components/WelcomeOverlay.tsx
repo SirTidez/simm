@@ -325,8 +325,8 @@ export function WelcomeOverlay({
               <h4>Player mode keeps the everyday workflow up front.</h4>
             </div>
             <p>
-              Add Game focuses on your Steam install and existing folders. Power User mode keeps separate branch
-              downloads visible when you need DepotDownloader workflows.
+              Add Game starts with your detected Steam install. Import is there if detection misses it, and Power User
+              mode keeps separate branch installs visible when you need them.
             </p>
             <div className="welcome-panel__actions">
               <button type="button" className="btn btn-primary" onClick={() => setSetupStarted(true)}>
@@ -365,9 +365,9 @@ export function WelcomeOverlay({
             </h3>
             <p>
               {step === 'mode'
-                ? 'Player mode keeps the normal mod manager flow clear. Power User mode keeps advanced branch downloads visible.'
+                ? 'Player mode keeps the normal mod manager flow clear. Power User mode keeps separate Steam branch installs visible.'
                 : step === 'game'
-                  ? 'Start with the Steam install you already use, or open Add Game after setup to browse for another folder.'
+                  ? 'SIMM looks for the Steam install you already use. Open Add Game after setup only if you need to link or import it.'
                   : 'SIMM prepares MLVScan automatically here, then keeps scan behavior adjustable from Settings.'}
             </p>
           </div>
@@ -401,7 +401,7 @@ export function WelcomeOverlay({
               <div className="wizard-entry-card__content">
                 <span className="settings-eyebrow">Player</span>
                 <h3>Everyday mod management</h3>
-                <p>Use the mod library, updates, accounts, and existing game installs without branch-download noise.</p>
+                <p>Use the mod library, updates, accounts, and existing game installs without advanced install noise.</p>
               </div>
               <span className="wizard-inline-action">Recommended</span>
             </button>
@@ -418,7 +418,7 @@ export function WelcomeOverlay({
               <div className="wizard-entry-card__content">
                 <span className="settings-eyebrow">Power User</span>
                 <h3>Branch and tooling workflows</h3>
-                <p>Keep DepotDownloader branch downloads and lower-level setup tools visible inside Add Game.</p>
+                <p>Keep separate Steam branch installs and lower-level setup tools visible inside Add Game.</p>
               </div>
               <span className="wizard-inline-action">Full controls</span>
             </button>
@@ -440,8 +440,8 @@ export function WelcomeOverlay({
               </div>
               <p>
                 {steamInstallCount && steamInstallCount > 0
-                  ? 'Add Game can link the detected Steam install after this guide finishes.'
-                  : 'If the automatic check does not find Steam, Add Game can still browse to an existing folder.'}
+                  ? 'Add Game can link the detected Steam install after this guide finishes. Steam keeps handling game updates, so no Steam sign-in is needed in SIMM for that install.'
+                  : 'If automatic detection does not find Steam, Add Game can still import the existing folder.'}
               </p>
               <div className="welcome-panel__actions">
                 <button
@@ -570,8 +570,8 @@ export function WelcomeOverlay({
                       <Icon name="steam" />
                     </div>
                     <div>
-                      <h5>Sign in to Steam for advanced downloads</h5>
-                      <p>DepotDownloader branch installs may need Steam authentication before SIMM can access protected depots.</p>
+                      <h5>Authenticate with Steam for advanced installs</h5>
+                      <p>Only separate SIMM-managed branch installs may ask you to authorize SIMM. Your regular Steam install stays updated by Steam.</p>
                       <div className="welcome-panel__inline-actions">
                         <button
                           type="button"

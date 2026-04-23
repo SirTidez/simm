@@ -80,11 +80,11 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
   const steamConnected = Boolean(settings?.steamUsername);
   const steamIdentity = settings?.steamUsername || 'Steam not connected';
   const steamSummary = steamConnected
-    ? 'Protected Steam branches are ready for depot access, and you can refresh the Steam session here whenever credentials or Steam Guard requirements change.'
-    : 'No Steam account is connected yet. Authenticate with Steam here when SIMM needs access to protected branches or depot downloads.';
+    ? 'Steam authorization is ready for advanced Schedule I branch installs, and you can refresh the session here whenever Steam Guard or credentials change.'
+    : 'No Steam account is connected yet. You do not need Steam sign-in for the normal Steam install; Steam manages that game and its updates. Authenticate here only when SIMM asks to manage an advanced Schedule I install.';
   const steamActionNote = steamConnected
-    ? 'Refresh the stored Steam session if branch downloads start prompting again or Steam changes its approval requirements.'
-    : 'SIMM only uses Steam credentials for protected branch authentication and stores them locally in encrypted form if you choose to remember them.';
+    ? 'Refresh the stored Steam session if advanced branch installs start prompting again or Steam changes its approval requirements.'
+    : 'SIMM only uses Steam credentials for Schedule I install authorization and stores them locally in encrypted form if you choose to remember them.';
   const nexusExpiry = nexusStatus.connected && nexusStatus.expiresAt
     ? new Date(nexusStatus.expiresAt * 1000).toLocaleString()
     : null;
@@ -185,7 +185,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
           <div className="accounts-overview">
             <div className="accounts-overview__copy">
               <span className="accounts-eyebrow">Connected Services</span>
-              <h3>Manage Steam and Nexus access for protected downloads.</h3>
+              <h3>Manage Steam and Nexus sign-ins.</h3>
               <p>Keep account links healthy, verify what capabilities are available, and understand how SIMM stores credentials on this machine.</p>
             </div>
           </div>
@@ -211,7 +211,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
               </span>
               <span className="account-capability-pill">
                 <Icon name="fab fa-steam-symbol" />
-                Protected branch access
+                Steam authorization
               </span>
               <span className="account-capability-pill">
                 <Icon name="fas fa-lock" />
@@ -221,7 +221,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
             {!steamConnected && (
               <div className="account-disconnected-note">
-                Authenticate here when SIMM needs protected Steam access. If Steam Guard prompts appear, approve them and SIMM will continue automatically.
+                Normal Steam installs do not require signing in here. Authenticate only for advanced SIMM-managed branch installs. If Steam Guard prompts appear, approve them and SIMM will continue automatically.
               </div>
             )}
 
@@ -308,7 +308,7 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             <div className="account-note-card__content">
               <span className="accounts-eyebrow">Security & Storage</span>
               <h3>Credentials stay on this machine</h3>
-              <p>SIMM stores linked-account credentials locally and encrypted. Steam credentials are only used for branch access, and Nexus tokens are only used for authenticated download flows.</p>
+              <p>SIMM stores linked-account credentials locally and encrypted. Steam credentials are only used to authorize Schedule I install management, and Nexus tokens are only used for authenticated download flows.</p>
             </div>
           </section>
         </div>
