@@ -883,7 +883,7 @@ describe("ModLibraryOverlay", () => {
     );
   });
 
-  it("downloads the newest runtime-compatible Nexus file instead of the first matching file", async () => {
+  it("downloads the primary Nexus file even when another runtime-compatible file is newer", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })
       .mockResolvedValueOnce({ downloaded: [] });
@@ -954,7 +954,7 @@ describe("ModLibraryOverlay", () => {
     await waitFor(() => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
         1629,
-        200,
+        100,
         "Mono",
       );
     });
@@ -1624,7 +1624,7 @@ describe("ModLibraryOverlay", () => {
     expect(await screen.findByText("Uploaded Mar 23, 2026")).toBeTruthy();
   });
 
-  it("de-prioritizes FOMOD installers in the Nexus inspector when direct runtime files exist", async () => {
+  it("prioritizes primary All-in-One installers in the Nexus inspector", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })
       .mockResolvedValueOnce({ downloaded: [] });
@@ -1632,12 +1632,12 @@ describe("ModLibraryOverlay", () => {
       {
         file_id: 501,
         name: "Pack Rat Vortex Installer",
-        file_name: "PackRat-Vortex-Installer-1.0.7r2.zip",
-        version: "1.0.7r2",
-        mod_version: "1.0.7r2",
+        file_name: "PackRat-Vortex-Installer-1.0.6.zip",
+        version: "1.0.6",
+        mod_version: "1.0.6",
         category_name: "MAIN",
         is_primary: true,
-        uploaded_timestamp: 2000,
+        uploaded_timestamp: 1000,
       },
       {
         file_id: 502,
@@ -1688,7 +1688,7 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
-    expect(await screen.findByText("FOMOD Installer")).toBeTruthy();
+    expect(await screen.findByText("All-in-One")).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", { name: "Download selected version" }),
     );
@@ -1696,8 +1696,8 @@ describe("ModLibraryOverlay", () => {
     await waitFor(() => {
       expect(apiMocks.downloadNexusModToLibrary).toHaveBeenCalledWith(
         1629,
-        502,
-        "Mono",
+        501,
+        undefined,
       );
     });
   });

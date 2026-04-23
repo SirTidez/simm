@@ -721,15 +721,19 @@ const isNexusFomodInstaller = (
 
 const getNexusFileDisplayKind = (
   file: Pick<NexusModFile, "file_name" | "name" | "category_name">,
-): "FOMOD Installer" | "IL2CPP" | "Mono" | "Unknown" => {
+): "All-in-One" | "IL2CPP" | "Mono" | "Unknown" => {
   if (isNexusFomodInstaller(file)) {
-    return "FOMOD Installer";
+    return "All-in-One";
   }
   return inferNexusFileRuntime(file);
 };
 
 const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
   return [...files].sort((left, right) => {
+    if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
+      return left.is_primary ? -1 : 1;
+    }
+
     const versionDelta = compareVersionTokensDesc(
       left.version || left.mod_version || "",
       right.version || right.mod_version || "",
@@ -756,10 +760,6 @@ const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
     const rightInstaller = isNexusFomodInstaller(right);
     if (leftInstaller !== rightInstaller) {
       return leftInstaller ? 1 : -1;
-    }
-
-    if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
-      return left.is_primary ? -1 : 1;
     }
 
     return (left.file_name || left.name || "").localeCompare(
@@ -2392,23 +2392,11 @@ export function ModLibraryOverlay({
                 : await ApiService.getNexusModsLatestUpdated("schedule1");
           mods = result.mods || [];
         } else {
-          const [searchResult, supplementalBrowse] = await Promise.all([
-            ApiService.searchNexusMods("schedule1", trimmedQuery),
-            ApiService.getNexusModsLatestUpdated("schedule1"),
-          ]);
-          const merged = new Map<string, NexusMod>();
-          for (const mod of searchResult.mods || []) {
-            merged.set(String(mod.mod_id), mod);
-          }
-          for (const mod of supplementalBrowse.mods || []) {
-            if (matchesNexusQueryLocally(mod, trimmedQuery)) {
-              merged.set(
-                String(mod.mod_id),
-                merged.get(String(mod.mod_id)) || mod,
-              );
-            }
-          }
-          mods = Array.from(merged.values()).filter((mod) =>
+          const searchResult = await ApiService.searchNexusMods(
+            "schedule1",
+            trimmedQuery,
+          );
+          mods = (searchResult.mods || []).filter((mod) =>
             matchesNexusQueryLocally(mod, trimmedQuery),
           );
         }

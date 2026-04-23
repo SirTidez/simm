@@ -25,6 +25,38 @@ impl ModUpdateService {
         Self
     }
 
+    fn cached_update_check_result(
+        file_name: &str,
+        metadata: &crate::types::ModMetadata,
+        source: &str,
+    ) -> Option<serde_json::Value> {
+        if metadata.update_available != Some(true) {
+            return None;
+        }
+
+        Some(serde_json::json!({
+            "modFileName": file_name,
+            "modName": metadata.mod_name.clone().unwrap_or_else(|| file_name.to_string()),
+            "updateAvailable": true,
+            "currentVersion": metadata.source_version.clone().or_else(|| metadata.installed_version.clone()).unwrap_or_default(),
+            "latestVersion": metadata.remote_version.clone().unwrap_or_default(),
+            "source": source,
+        }))
+    }
+
+    fn recent_update_check_is_reusable(
+        metadata: &crate::types::ModMetadata,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        metadata
+            .last_update_check
+            .is_some_and(|checked_at| now.signed_duration_since(checked_at).num_minutes() < 60)
+            && metadata
+                .remote_version
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+    }
+
     fn sync_refreshed_metadata_fields(
         target: &mut crate::types::ModMetadata,
         updated: &crate::types::ModMetadata,
@@ -257,6 +289,12 @@ impl ModUpdateService {
             }
         } else if let Some(ModSource::Nexusmods) = source {
             if let Some(mod_id_str) = source_id {
+                if Self::recent_update_check_is_reusable(&metadata, now) {
+                    let cached =
+                        Self::cached_update_check_result(file_name, &metadata, "nexusmods");
+                    return Ok((metadata, cached));
+                }
+
                 metadata.last_update_check = Some(now);
 
                 if let Ok(mod_id) = mod_id_str.parse::<u32>() {

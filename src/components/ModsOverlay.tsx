@@ -1065,17 +1065,6 @@ export function ModsOverlay({
     };
   }, [environment?.name, environmentId, installingNexusMod, onModsChanged, showToast]);
 
-  // Auto-load files for NexusMods search results
-  useEffect(() => {
-    if (showNexusModsResults && nexusModsSearchResults.length > 0) {
-      nexusModsSearchResults.forEach((mod) => {
-        if (!nexusModsFiles.has(mod.mod_id)) {
-          handleLoadNexusModFiles(mod.mod_id);
-        }
-      });
-    }
-  }, [showNexusModsResults, nexusModsSearchResults]);
-
   const checkModUpdates = async (showErrors: boolean = false) => {
     try {
       const updates = await ApiService.checkModUpdates(environmentId);
@@ -2041,16 +2030,19 @@ export function ModsOverlay({
     }
   };
 
-  const handleLoadNexusModFiles = async (modId: number) => {
-    if (nexusModsFiles.has(modId)) {
-      return; // Already loaded
+  const handleLoadNexusModFiles = async (modId: number): Promise<NexusModFile[]> => {
+    const cached = nexusModsFiles.get(modId);
+    if (cached) {
+      return cached;
     }
 
     try {
       const files = await ApiService.getNexusModsModFiles('schedule1', modId);
       setNexusModsFiles(prev => new Map(prev).set(modId, files));
+      return files;
     } catch (err) {
       console.error('Failed to load NexusMods mod files:', err);
+      return [];
     }
   };
 
@@ -2073,11 +2065,10 @@ export function ModsOverlay({
     }
 
     // Load files if not already loaded
-    if (!nexusModsFiles.has(modId)) {
-      await handleLoadNexusModFiles(modId);
+    let files = nexusModsFiles.get(modId) || [];
+    if (files.length === 0) {
+      files = await handleLoadNexusModFiles(modId);
     }
-
-    const files = nexusModsFiles.get(modId) || [];
 
     // Filter files by runtime type if fileId not specified
     // NexusMods uses separate files for IL2CPP and Mono, so we filter by file name
@@ -3115,9 +3106,12 @@ export function ModsOverlay({
           {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length > 0 && (() => {
             const runtimeLower = environment?.runtime?.toLowerCase() || '';
 
-            // Filter mods to only show those with installable files for current runtime
+            // Only filter by files after a user has loaded that mod's file list.
             const compatibleMods = nexusModsSearchResults.filter((mod) => {
               const files = nexusModsFiles.get(mod.mod_id) || [];
+              if (files.length === 0) {
+                return true;
+              }
 
               const runtimeFiles = files.filter((f: any) => {
                 const fileName = (f.file_name || f.name || '').toLowerCase();
@@ -3134,7 +3128,6 @@ export function ModsOverlay({
                 }
               });
 
-              // Only include mods that have at least one compatible file
               return runtimeFiles.length > 0;
             });
 
@@ -3254,7 +3247,7 @@ export function ModsOverlay({
                             <button
                               onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
                               className={`${isAlreadyInstalled ? 'btn btn-secondary' : 'btn btn-primary'} btn-small mod-card-action-button`}
-                              disabled={installingNexusMod?.modId === mod.mod_id || !bestFile || isAlreadyInstalled}
+                              disabled={installingNexusMod?.modId === mod.mod_id || isAlreadyInstalled}
                               title={isAlreadyInstalled
                                 ? 'This mod is already installed'
                                 : !hasNexusDownloadAccess
@@ -3263,7 +3256,7 @@ export function ModsOverlay({
                                     ? 'Open NexusMods website to confirm and download this mod'
                                   : bestFile
                                     ? `Install ${bestFile.file_name || bestFile.name || 'mod'}`
-                                    : 'Loading files...'}
+                                    : 'Load files and install the best match for this runtime'}
                             >
                               {installingNexusMod?.modId === mod.mod_id
                                 ? 'Installing...'

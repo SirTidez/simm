@@ -907,6 +907,17 @@ export class ApiService {
     return { mods: this.transformNexusMods(mods) };
   }
 
+  static async getNexusRateLimits(): Promise<{
+    hourly_limit?: number;
+    hourly_remaining?: number;
+    hourly_reset?: number;
+    daily_limit?: number;
+    daily_remaining?: number;
+    daily_reset?: number;
+  } | null> {
+    return invoke('get_nexus_rate_limits');
+  }
+
   static async getNexusModsMod(gameId: string, modId: number): Promise<any> {
     return invoke('get_nexus_mods_mod', { gameId, modId });
   }
@@ -1485,46 +1496,22 @@ export class ApiService {
     fileId: number,
     runtime?: 'IL2CPP' | 'Mono',
     securityOverride?: boolean,
-  ): Promise<{ success: boolean; storageId?: string; alreadyStored?: boolean } & SecurityGateResponse> {
+  ): Promise<{
+    success: boolean;
+    storageId?: string;
+    alreadyStored?: boolean;
+    requiresManualDownload?: boolean;
+    modUrl?: string;
+    error?: string;
+  } & SecurityGateResponse> {
     const gameId = 'schedule1';
-    const modInfo = await invoke<any>('get_nexus_mods_mod', { gameId, modId });
-    const files = await invoke<any[]>('get_nexus_mods_mod_files', { gameId, modId });
-    const fileInfo = files.find(f => f.file_id === fileId || f.file_id === Number(fileId));
-
-    if (!fileInfo) {
-      throw new Error(`File ${fileId} not found for mod ${modId}`);
-    }
-
-    const version = fileInfo.version || fileInfo.mod_version || '1.0.0';
-    const sourceUrl = `https://www.nexusmods.com/${gameId}/mods/${modId}`;
-    const zipPath = await invoke<string>('download_nexus_mods_mod_file', {
-      gameId,
+    return invoke('download_nexus_mod_to_library', {
+      game_id_param: gameId,
       modId,
       fileId,
-    });
-
-    return this.storeModArchive(
-      zipPath,
-      fileInfo.file_name || `nexusmods-${modId}-${fileId}.zip`,
-      runtime,
-      {
-        source: 'nexusmods',
-        sourceId: modId.toString(),
-        sourceVersion: version,
-        sourceUrl,
-        modName: modInfo?.name || 'Unknown Mod',
-        author: modInfo?.author || 'Unknown',
-        summary: modInfo?.summary || '',
-        iconUrl: modInfo?.picture_url || modInfo?.pictureUrl || '',
-        downloads: Number(modInfo?.mod_downloads || modInfo?.downloads || 0),
-        likesOrEndorsements: Number(modInfo?.endorsement_count || modInfo?.endorsements || 0),
-        updatedAt: modInfo?.updated_at || modInfo?.updatedAt || '',
-        tags: Array.isArray(modInfo?.tags) ? modInfo.tags : (Array.isArray(modInfo?.tag_list) ? modInfo.tag_list : []),
-      },
-      undefined,
-      true,
+      runtime: runtime ?? null,
       securityOverride,
-    );
+    });
   }
 
   static async downloadS1APIToLibrary(
