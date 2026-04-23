@@ -1,6 +1,6 @@
 {
   "productName": "Schedule I Mod Manager",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "identifier": "com.s1devenvmanager.app",
   "build": {
     "beforeDevCommand": "npm run dev",

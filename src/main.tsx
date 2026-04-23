@@ -1,5 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { config } from '@fortawesome/fontawesome-svg-core'
 import { App } from './components/App'
 import { logger } from './services/logger'
 import { interceptConsole } from './utils/logger'
@@ -9,8 +10,10 @@ import {
   readCachedThemeBaseSelection,
   readCachedThemeSelection,
 } from './utils/theme'
+import '@fortawesome/fontawesome-svg-core/styles.css'
 import './style.css'
 
+config.autoAddCss = false;
 interceptConsole();
 const cachedThemeSelection = readCachedThemeSelection();
 applyBuiltInTheme(
