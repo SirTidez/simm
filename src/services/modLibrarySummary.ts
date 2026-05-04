@@ -12,6 +12,9 @@ const featuredDownloadSourceIds = new Set([
   'ifbars/mlvscan',
   'hdlmrell/meshvault',
   'ifbars/s1mapi',
+  'ifbars/steamnetworklib',
+  'ifbars/steamnetworklib_mono',
+  'ifbars/steamnetworklib_il2cpp',
 ]);
 
 const s1ApiRevisionSourceIds = new Set([

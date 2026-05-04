@@ -353,6 +353,45 @@ describe("ModLibraryOverlay", () => {
     });
   });
 
+  it("downloads SteamNetworkLib featured packages for both runtimes", async () => {
+    apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
+      packagesByRuntime: {
+        IL2CPP: [
+          makeThunderstorePackage(
+            "SteamNetworkLib_Il2Cpp",
+            "1.2.1",
+            "IL2CPP",
+          ),
+        ],
+        Mono: [
+          makeThunderstorePackage("SteamNetworkLib_Mono", "1.2.1", "Mono"),
+        ],
+      },
+    });
+
+    renderLibraryOverlay({ libraryTab: "discover" });
+
+    const steamNetworkLibButtons = await screen.findAllByRole("button", {
+      name: /SteamNetworkLib/i,
+    });
+    fireEvent.click(steamNetworkLibButtons[0]);
+
+    await waitFor(() => {
+      expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+        "SteamNetworkLib_Il2Cpp-IL2CPP-pkg",
+        "IL2CPP",
+        undefined,
+        "SteamNetworkLib_Il2Cpp-IL2CPP-ver",
+      );
+      expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+        "SteamNetworkLib_Mono-Mono-pkg",
+        "Mono",
+        undefined,
+        "SteamNetworkLib_Mono-Mono-ver",
+      );
+    });
+  });
+
   it("refreshes the Thunderstore package cache before reloading the mod library", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })

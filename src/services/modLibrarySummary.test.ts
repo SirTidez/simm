@@ -125,6 +125,37 @@ describe('modLibrarySummary', () => {
     ]);
   });
 
+  it('includes runtime-split SteamNetworkLib packages as featured downloads', () => {
+    const snapshot = buildEnvironmentModSnapshot({
+      downloaded: [
+        makeEntry({
+          storageId: 'steamnetworklib-mono-storage',
+          displayName: 'SteamNetworkLib',
+          source: 'thunderstore',
+          sourceId: 'ifBars/SteamNetworkLib_Mono',
+          sourceVersion: '1.2.1',
+          remoteVersion: '1.2.2',
+          updateAvailable: true,
+          availableRuntimes: ['Mono'],
+          storageIdsByRuntime: { Mono: 'steamnetworklib-mono-storage' },
+          installedInByRuntime: { Mono: ['env-main'] },
+          filesByRuntime: { Mono: ['SteamNetworkLib.dll'] },
+          installedIn: ['env-main'],
+        }),
+      ],
+    }, 'env-main');
+
+    expect(snapshot.featuredDownloads).toBe(1);
+    expect(snapshot.updateCount).toBe(1);
+    expect(snapshot.updates[0]).toMatchObject({
+      modName: 'SteamNetworkLib',
+      currentVersion: '1.2.1',
+      latestVersion: '1.2.2',
+      source: 'thunderstore',
+      groupKey: 'thunderstore::steamnetworklib',
+    });
+  });
+
   it('treats S1API revision tags as newer featured-download releases', () => {
     const library = applyFeaturedDownloadRemoteVersions({
       downloaded: [

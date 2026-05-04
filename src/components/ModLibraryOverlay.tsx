@@ -165,6 +165,21 @@ const FEATURED_THUNDERSTORE_DOWNLOADS = {
     summary:
       "Thunderstore package for shared Schedule I mapping and construction APIs.",
   },
+  steamnetworklib: {
+    key: "featured-steamnetworklib",
+    sourceId: "ifBars/SteamNetworkLib_Mono",
+    sourceIdsByRuntime: {
+      IL2CPP: "ifBars/SteamNetworkLib_Il2Cpp",
+      Mono: "ifBars/SteamNetworkLib_Mono",
+    },
+    displayName: "SteamNetworkLib",
+    packageUrl:
+      "https://thunderstore.io/c/schedule-i/p/ifBars/SteamNetworkLib_Mono/",
+    author: "ifBars",
+    installBucketLabel: "UserLibs",
+    summary:
+      "Thunderstore library for shared Steam networking support used by many tools.",
+  },
 } as const;
 
 function getDownloadedGroupSourceIds(group: DownloadedModGroup): string[] {
@@ -203,6 +218,17 @@ function isS1MApiDownloadedGroup(group: DownloadedModGroup): boolean {
   return (
     sourceIds.includes("ifbars/s1mapi") ||
     normalizeThunderstoreName(group.displayName).toLowerCase() === "s1mapi"
+  );
+}
+
+function isSteamNetworkLibDownloadedGroup(group: DownloadedModGroup): boolean {
+  const sourceIds = getDownloadedGroupSourceIds(group);
+  return (
+    sourceIds.includes("ifbars/steamnetworklib") ||
+    sourceIds.includes("ifbars/steamnetworklib_mono") ||
+    sourceIds.includes("ifbars/steamnetworklib_il2cpp") ||
+    normalizeThunderstoreName(group.displayName).toLowerCase() ===
+      "steamnetworklib"
   );
 }
 
@@ -1392,6 +1418,8 @@ export function ModLibraryOverlay({
     useState<ThunderstorePackageGroup | null>(null);
   const [s1mapiFeaturedPackage, setS1mapiFeaturedPackage] =
     useState<ThunderstorePackageGroup | null>(null);
+  const [steamNetworkLibFeaturedPackage, setSteamNetworkLibFeaturedPackage] =
+    useState<ThunderstorePackageGroup | null>(null);
 
   const downloadedGroups = useMemo(
     () => buildDownloadedGroups(library?.downloaded ?? []),
@@ -1458,11 +1486,15 @@ export function ModLibraryOverlay({
   const mlvscanGroups = downloadedGroups.filter(isMlvscanDownloadedGroup);
   const meshVaultGroups = downloadedGroups.filter(isMeshVaultDownloadedGroup);
   const s1mapiGroups = downloadedGroups.filter(isS1MApiDownloadedGroup);
+  const steamNetworkLibGroups = downloadedGroups.filter(
+    isSteamNetworkLibDownloadedGroup,
+  );
 
   const s1apiInLibrary = s1apiGroups.length > 0;
   const mlvscanInLibrary = mlvscanGroups.length > 0;
   const meshVaultInLibrary = meshVaultGroups.length > 0;
   const s1mapiInLibrary = s1mapiGroups.length > 0;
+  const steamNetworkLibInLibrary = steamNetworkLibGroups.length > 0;
   const s1apiInstalledVersion =
     getLatestDownloadedVersionForGroups(s1apiGroups);
   const s1apiLatestVersion = s1apiFeaturedRelease?.tag_name;
@@ -1510,6 +1542,22 @@ export function ModLibraryOverlay({
       s1mapiLatestVersion,
       s1mapiInstalledVersion,
     ) < 0;
+  const steamNetworkLibInstalledVersion = getLatestDownloadedVersionForGroups(
+    steamNetworkLibGroups,
+  );
+  const steamNetworkLibLatestVersion = buildThunderstoreVersionOptions(
+    steamNetworkLibFeaturedPackage,
+  )[0]?.versionNumber;
+  const steamNetworkLibNeedsUpdate =
+    steamNetworkLibInLibrary &&
+    steamNetworkLibInstalledVersion &&
+    steamNetworkLibLatestVersion &&
+    compareVersionTokensDescForSource(
+      getDownloadedVersionSourceId(steamNetworkLibGroups) ||
+        FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib.sourceId,
+      steamNetworkLibLatestVersion,
+      steamNetworkLibInstalledVersion,
+    ) < 0;
 
   const isGroupUpdateAvailable = useCallback(
     (group: DownloadedModGroup): boolean => {
@@ -1541,6 +1589,15 @@ export function ModLibraryOverlay({
         return !!s1mapiNeedsUpdate;
       }
 
+      const isSteamNetworkLibGroup = isSteamNetworkLibDownloadedGroup(group);
+      if (
+        isSteamNetworkLibGroup &&
+        !!steamNetworkLibInstalledVersion &&
+        !!steamNetworkLibLatestVersion
+      ) {
+        return !!steamNetworkLibNeedsUpdate;
+      }
+
       return !!group.updateAvailable;
     },
     [
@@ -1556,6 +1613,9 @@ export function ModLibraryOverlay({
       s1apiInstalledVersion,
       s1apiLatestVersion,
       s1apiNeedsUpdate,
+      steamNetworkLibInstalledVersion,
+      steamNetworkLibLatestVersion,
+      steamNetworkLibNeedsUpdate,
       getLatestDownloadedVersionForGroups,
     ],
   );
@@ -2912,16 +2972,31 @@ export function ModLibraryOverlay({
         );
       };
 
+      const getFeaturedThunderstoreSourceId = (
+        featured:
+          (typeof FEATURED_THUNDERSTORE_DOWNLOADS)[keyof typeof FEATURED_THUNDERSTORE_DOWNLOADS],
+        runtime: ThunderstoreRuntime,
+      ) =>
+        ("sourceIdsByRuntime" in featured
+          ? featured.sourceIdsByRuntime?.[runtime]
+          : undefined) || featured.sourceId;
+
       setMeshVaultFeaturedPackage(
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.meshvault, {
           IL2CPP:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
+                "IL2CPP",
+              ),
               "IL2CPP",
             ) || undefined,
           Mono:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
+                "Mono",
+              ),
               "Mono",
             ) || undefined,
         }),
@@ -2931,15 +3006,45 @@ export function ModLibraryOverlay({
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi, {
           IL2CPP:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
+                "IL2CPP",
+              ),
               "IL2CPP",
             ) || undefined,
           Mono:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
+                "Mono",
+              ),
               "Mono",
             ) || undefined,
         }),
+      );
+
+      setSteamNetworkLibFeaturedPackage(
+        buildFeaturedThunderstorePackage(
+          FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+          {
+            IL2CPP:
+              findFeaturedPackage(
+                getFeaturedThunderstoreSourceId(
+                  FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+                  "IL2CPP",
+                ),
+                "IL2CPP",
+              ) || undefined,
+            Mono:
+              findFeaturedPackage(
+                getFeaturedThunderstoreSourceId(
+                  FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+                  "Mono",
+                ),
+                "Mono",
+              ) || undefined,
+          },
+        ),
       );
     };
 
@@ -4528,6 +4633,13 @@ export function ModLibraryOverlay({
     handleDownloadFeaturedThunderstoreClick(
       FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
       s1mapiFeaturedPackage,
+    );
+  };
+
+  const handleDownloadSteamNetworkLibClick = () => {
+    handleDownloadFeaturedThunderstoreClick(
+      FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+      steamNetworkLibFeaturedPackage,
     );
   };
 
@@ -6204,6 +6316,11 @@ export function ModLibraryOverlay({
       ? "Update"
       : "Downloaded"
     : "Download";
+  const steamNetworkLibActionLabel = steamNetworkLibInLibrary
+    ? steamNetworkLibNeedsUpdate
+      ? "Update"
+      : "Downloaded"
+    : "Download";
 
   const renderFeaturedThunderstoreCard = (
     featured:
@@ -7068,6 +7185,15 @@ export function ModLibraryOverlay({
                     !!s1mapiNeedsUpdate,
                     s1mapiActionLabel,
                     handleDownloadS1MapiClick,
+                  )}
+                  {renderFeaturedThunderstoreCard(
+                    FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+                    steamNetworkLibInstalledVersion,
+                    steamNetworkLibLatestVersion,
+                    steamNetworkLibInLibrary,
+                    !!steamNetworkLibNeedsUpdate,
+                    steamNetworkLibActionLabel,
+                    handleDownloadSteamNetworkLibClick,
                   )}
                 </div>
               </div>
@@ -8853,6 +8979,20 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{s1mapiActionLabel}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="workspace-feature-card"
+                        onClick={handleDownloadSteamNetworkLibClick}
+                      >
+                        <div>
+                          <strong>SteamNetworkLib</strong>
+                          <p>
+                            Thunderstore library for shared Steam networking in
+                            UserLibs.
+                          </p>
+                        </div>
+                        <span>{steamNetworkLibActionLabel}</span>
                       </button>
                     </div>
                   </section>

@@ -26,6 +26,8 @@ type ThunderstorePackage = {
 const FEATURED_THUNDERSTORE_SOURCE_IDS = [
   'hdlmrell/MeshVault',
   'ifBars/S1MAPI',
+  'ifBars/SteamNetworkLib_Mono',
+  'ifBars/SteamNetworkLib_Il2Cpp',
 ] as const;
 
 let thunderstoreFeaturedVersionsCache:
