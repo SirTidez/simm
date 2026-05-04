@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.8.5]
+
+- Began the next UI redesign pass while refining release flow behavior, frontend contract sync, featured Thunderstore library curation, and related commit message handling.
+- Contributors:
+  - `SirTidez`: release-flow refinement, frontend contract sync, featured SteamNetworkLib curation, and related commit-message handling. Timestamps: `2026-05-03 17:27:10 PDT`, `2026-05-03 17:49:35 PDT`, `2026-05-03 18:12:00 PDT`
+  - `ifBars`: initial UI redesign work for the next release line. Timestamps: `2026-05-04 01:38:44 PDT`
+
+## [0.8.4]
+
+- Finalized the `0.8.4` release bump by configuring FontAwesome in the app.
+- Contributors:
+  - `SirTidez`: `0.8.4` versioning work and FontAwesome configuration. Timestamps: `2026-04-22 22:40:35 PDT`
+
+## [0.8.3]
+
+- Added automatic prerequisite installation with more reliable `winget` path resolution during environment setup.
+- Lazy-loaded workspace panels, replaced older icon usage with FontAwesome, and refined the desktop workspace sidebar copy and styling.
+- Added a shared Thunderstore service and startup state handling while expanding Nexus Mods integration and UI behavior.
+- Contributors:
+  - `SirTidez`: prerequisite auto-install/`winget` fixes, lazy-loaded panels, FontAwesome adoption, shared Thunderstore startup state, broader Nexus UI integration, sidebar refinement, `0.8.3` versioning, and the branch merge that staged the `0.8.3` release line. Timestamps: `2026-04-17 23:21:29 PDT`, `2026-04-21 21:24:41 PDT`, `2026-04-22 19:24:12 PDT`, `2026-04-22 20:28:19 PDT`, `2026-04-22 21:03:42 PDT`, `2026-04-22 21:11:34 PDT`, `2026-04-22 21:25:05 PDT`
+
+## [0.8.2]
+
+- Centralized auth arguments, surfaced backend auth errors more clearly, and normalized release `PubDate` metadata for the `0.8.2` line.
+- Contributors:
+  - `SirTidez`: auth-argument cleanup, clearer backend auth errors, and `0.8.2` release metadata/versioning updates. Timestamps: `2026-04-17 12:50:23 PDT`, `2026-04-17 13:42:53 PDT`
+
+## [0.8.1]
+
+- Migrated app updates to the Tauri updater with release manifests, defaulted update checks to the beta channel, and tightened release validation/dev-startup behavior.
+- Hardened mod installs, library flows, theme bootstrap, environment creation/download follow-up, settings autosave, update metadata propagation, and mod-removal fallback behavior.
+- Expanded managed-storage mod support, Thunderstore metadata/version handling, nested DLL collection, S1API revision ordering, GitHub-backed mod updates, and Plugins/UserLibs bucket update checks.
+- Locked the frontend onto the Node 22 toolchain, refreshed dependencies, and finished the `0.8.1` release with CI repair and follow-up cleanup.
+- Contributors:
+  - `SirTidez`: Tauri updater migration, beta-channel defaults, release-validation fixes, hardened install/library/theme flows, environment/download follow-up fixes, settings/update cleanup, Thunderstore metadata and revision handling, nested DLL collection, S1API update detection, GitHub-backed mod updates, Plugins/UserLibs update checks, final CI repair, updater URL switching, dependency/env-list/library-summary refreshes, managed-storage companion-file support, and the branch merge that staged `0.8.1`. Timestamps: `2026-04-03 23:58:37 PDT`, `2026-04-04 00:15:18 PDT`, `2026-04-04 00:31:35 PDT`, `2026-04-04 02:04:16 PDT`, `2026-04-04 02:14:08 PDT`, `2026-04-04 11:59:06 PDT`, `2026-04-04 12:23:53 PDT`, `2026-04-05 00:11:56 PDT`, `2026-04-05 00:24:04 PDT`, `2026-04-05 01:05:22 PDT`, `2026-04-09 13:02:34 PDT`, `2026-04-09 14:28:24 PDT`, `2026-04-09 14:59:32 PDT`, `2026-04-09 15:51:41 PDT`, `2026-04-09 17:19:14 PDT`, `2026-04-09 17:31:03 PDT`, `2026-04-09 17:48:51 PDT`, `2026-04-09 18:04:17 PDT`, `2026-04-12 02:41:31 PDT`, `2026-04-12 02:55:37 PDT`, `2026-04-12 03:19:22 PDT`, `2026-04-12 03:51:34 PDT`, `2026-04-12 04:06:32 PDT`, `2026-04-12 13:59:12 PDT`, `2026-04-12 23:33:58 PDT`, `2026-04-13 17:36:06 PDT`, `2026-04-13 18:17:56 PDT`, `2026-04-13 18:43:20 PDT`
+
 ## [0.8.0]
 
 - Added custom theme support with persisted user-defined palettes, expanded theme variable coverage across the desktop UI, and matching Settings/store/test updates so custom styling survives reloads and applies consistently.
@@ -9,8 +45,17 @@
 - Improved large-overlay stability and usability by reducing WebView churn in Mods and Mod Library, adding debounced/windowed list behavior for heavy views, and fixing stale log-source state when switching environments in the log viewer.
 - Locked frontend dependencies with a committed `package-lock.json` so local validation and GitHub Actions install the same npm toolchain and produce reproducible builds.
 - Contributors:
-  - `SirTidez`: runtime-aware mod storage/install hardening, installed-environment reporting, `.rar` support, multi-file manual mod uploads, log-viewer environment-switch fixes, CI lockfile stabilization, and release/versioning work.
-  - `ESTONlA`: custom theme support, environment identity healing/canonicalization for reused install paths, and performance-oriented Mods/Mod Library overlay improvements to reduce WebView memory pressure.
+  - `SirTidez`: runtime-aware mod storage/install hardening, installed-environment reporting, `.rar` support, multi-file manual mod uploads, log-viewer environment-switch fixes, CI lockfile stabilization, release/versioning work, release merge, and funding-support follow-up. Timestamps: `2026-03-30 20:51:25 PDT`, `2026-03-30 21:24:33 PDT`, `2026-03-31 21:16:31 PDT`, `2026-04-02 16:47:37 PDT`, `2026-04-03 08:08:53 PDT`, `2026-04-03 08:27:21 PDT`, `2026-04-03 08:51:33 PDT`
+  - `ESTONlA`: custom theme support, environment identity healing/canonicalization for reused install paths, and performance-oriented Mods/Mod Library overlay improvements to reduce WebView memory pressure. Timestamps: `2026-03-30 07:36:08 PDT`, `2026-03-30 09:10:46 PDT`, `2026-03-31 17:17:11 PDT`
+
+## [0.7.9]
+
+- Polished the mod library and workspace flow with better install targeting, selectable versions, grouped scan-report visibility, attached UserLib tracking, text wrapping fixes, and tighter navigation behavior.
+- Hardened runtime-aware update summaries, local promotion handling, copied-mod source preservation, Steam manifest context, and several stale frontend test expectations.
+- Captured follow-up game launch/Nexus download fixes and completed the `0.7.9` release/versioning updates.
+- Contributors:
+  - `SirTidez`: mod-library navigation and install-targeting fixes, workspace polish, grouped scan-report visibility, selectable versions, attached UserLib tracking, runtime-aware update summaries, copied-mod/local-promotion handling, Steam manifest preservation, stale test cleanup, and `0.7.9` release/versioning updates. Timestamps: `2026-03-27 23:12:07 PDT`, `2026-03-28 00:34:02 PDT`, `2026-03-28 00:40:16 PDT`, `2026-03-28 00:50:32 PDT`, `2026-03-28 01:27:00 PDT`, `2026-03-28 03:01:18 PDT`, `2026-03-28 13:06:55 PDT`, `2026-03-28 13:14:51 PDT`, `2026-03-28 14:59:41 PDT`, `2026-03-30 01:29:29 PDT`, `2026-03-30 03:47:01 PDT`, `2026-03-30 04:20:02 PDT`, `2026-03-30 04:36:46 PDT`, `2026-03-30 04:43:46 PDT`, `2026-03-30 04:57:18 PDT`, `2026-03-30 05:01:45 PDT`
+  - `ESTONlA`: game-launch and Nexus-download follow-up fixes that fed into the `0.7.9` release line. Timestamps: `2026-03-29 14:39:34 PDT`, `2026-03-29 14:45:49 PDT`
 
 ## [0.7.8]
 
@@ -18,14 +63,17 @@
 - Surfaced MLVScan results across the desktop UI with security badges, full report overlays, scanner controls in Settings, and library / installed-mod flows that can retry after an explicit user confirmation when policy allows it.
 - Hardened the release with follow-up fixes for update-check inference, ZIP extraction safety, storage path validation, cached security-report handling, grouped runtime scan summaries, and CI-facing frontend timing regressions.
 - Contributors:
-  - `ifBars`: MLVScan scanner integration, security policy/report plumbing, overlays, badges, and scanner-facing UI.
-  - `SirTidez`: follow-up hardening and CI fixes, including update-check inference, archive/path safety, symlink/install correctness, grouped scan summary handling, and flaky test cleanup.
+  - `ifBars`: MLVScan scanner integration, security policy/report plumbing, overlays, badges, and scanner-facing UI. Timestamps: `2026-03-12 22:05:07 PDT`, `2026-03-26 22:51:21 PDT`, `2026-03-26 23:52:00 PDT`
+  - `SirTidez`: follow-up hardening and CI fixes, including update-check inference, archive/path safety, symlink/install correctness, grouped scan summary handling, and flaky test cleanup. Timestamps: `2026-03-15 02:11:05 PDT`, `2026-03-27 00:36:00 PDT`, `2026-03-27 00:44:42 PDT`, `2026-03-27 01:15:58 PDT`
+  - `SirTidez`: release packaging. Timestamps: `2026-03-27 01:26:16 PDT`
 
 ## [0.7.7]
 
 - Corrected environment update detection so same-track installs no longer invert their update state after a branch release, including beta / alternate-beta paired runtime inference and stale update-field clearing.
 - Fixed persisted update-check state so stale `updateGameVersion` data is cleared correctly and single-environment checks use the same backend persistence rules as batch checks.
 - Removed the temporary manual Nexus browser fallback from the Accounts view after confirming the report was mistaken, keeping the OAuth flow on the standard in-app handoff path.
+- Contributors:
+  - `SirTidez`: update-check inference/persistence fixes and removal of the temporary manual Nexus browser fallback. Timestamps: `2026-03-26 17:46:32 PDT`, `2026-03-26 21:17:16 PDT`
 
 ## [0.7.6]
 
@@ -36,6 +84,8 @@
 - Improved DepotDownloader progress parsing and download display behavior so file-count progress is captured more reliably and stale placeholder file counters are no longer shown.
 - Consolidated application logging into a single per-launch `SIMM-log-<timestamp>.log` file, routed more frontend/backend/external-tool output through the shared logger, and expanded sanitization/redaction coverage.
 - Hardened database safety and release maintenance flows with configurable backup retention, manual backup controls in Settings, automatic pre-upgrade/pre-migration snapshots, and additional review-driven fixes across config, mod-library, and wizard behavior.
+- Contributors:
+  - `SirTidez`: structured-editor/UI polish, updated release screenshots/assets, and `0.7.6` release/versioning updates. Timestamps: `2026-03-26 15:43:37 PDT`, `2026-03-26 15:44:28 PDT`, `2026-03-26 15:47:15 PDT`
 
 ## [0.7.5]
 
