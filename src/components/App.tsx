@@ -721,6 +721,7 @@ function AppContent() {
         return;
       }
       if (!result.success) {
+        completedNxmCallbackRef.current.add(nxmUrl);
         dispatchNexusManualDownloadResult({
           success: false,
           error: result.error || 'Failed to complete Nexus manual download',
@@ -739,6 +740,7 @@ function AppContent() {
     } catch (error) {
       console.error('Failed to complete Nexus manual download callback:', nxmUrl, error);
       const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      completedNxmCallbackRef.current.add(nxmUrl);
       if (message.includes('Close SIMM to download Nexus mods for other games')) {
         setAppNotice(message);
       }
@@ -765,6 +767,7 @@ function AppContent() {
     try {
       const result = await ApiService.completeNexusManualDownloadSession(pending.nxmUrl, runtime);
       if (!result.success) {
+        completedNxmCallbackRef.current.add(pending.nxmUrl);
         dispatchNexusManualDownloadResult({
           success: false,
           error: result.error || 'Failed to complete Nexus manual download',
@@ -783,6 +786,7 @@ function AppContent() {
     } catch (error) {
       console.error('Failed to complete Nexus manual download after runtime selection:', pending.nxmUrl, error);
       const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      completedNxmCallbackRef.current.add(pending.nxmUrl);
       if (message.includes('Close SIMM to download Nexus mods for other games')) {
         setAppNotice(message);
       }

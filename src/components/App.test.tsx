@@ -593,4 +593,60 @@ describe('App', () => {
     ).toHaveLength(1);
     expect(secondUpdateSettings).not.toHaveBeenCalled();
   });
+
+  it('does not reopen runtime selection after a failed manual Nexus callback is handled', async () => {
+    const nxmUrl = 'nxm://schedule1/mods/123/files/456?key=abc&expires=999&user_id=1';
+    deepLinkMocks.getCurrent.mockResolvedValue([nxmUrl]);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'complete_nexus_manual_download_session') {
+        const completeCalls = invokeMock.mock.calls.filter(
+          ([calledCommand]) => calledCommand === command,
+        );
+        const runtimeOverride =
+          completeCalls[completeCalls.length - 1]?.[1]?.runtimeOverride;
+
+        if (!runtimeOverride) {
+          return Promise.resolve({
+            success: false,
+            runtimeSelectionRequired: true,
+            kind: 'library',
+            modId: 123,
+            fileId: 456,
+            modName: 'Encoded FOMOD',
+            fileName: 'Encoded-FOMOD.zip',
+            version: '1.0.0',
+          });
+        }
+
+        return Promise.resolve({
+          success: false,
+          requestedKind: 'library',
+          error:
+            'Failed to store manually downloaded Nexus archive: Failed to read ModuleConfig.xml content',
+        });
+      }
+
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Select Runtime' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use IL2CPP' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Select Runtime' })).toBeNull();
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+    expect(screen.queryByRole('heading', { name: 'Select Runtime' })).toBeNull();
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === 'complete_nexus_manual_download_session',
+      ),
+    ).toHaveLength(2);
+  });
 });

@@ -1924,15 +1924,7 @@ pub async fn complete_nexus_manual_download_session(
     )
     .await;
 
-    let requires_runtime_selection = matches!(
-        &result,
-        Ok(value) if value.get("runtimeSelectionRequired").and_then(|item| item.as_bool()) == Some(true)
-    );
-
-    let cleanup_result = if requires_runtime_selection {
-        Ok(())
-    } else if matches!(&result, Ok(value) if value.get("success").and_then(|item| item.as_bool()) == Some(true))
-    {
+    let cleanup_result = if should_clear_pending_after_manual_completion(&result) {
         clear_nxm_pending_download(db.inner().clone()).await
     } else {
         Ok(())
@@ -1951,6 +1943,17 @@ pub async fn complete_nexus_manual_download_session(
             error, cleanup_error
         ))),
     }
+}
+
+fn should_clear_pending_after_manual_completion(result: &Result<Value, String>) -> bool {
+    !matches!(
+        result,
+        Ok(value)
+            if value
+                .get("runtimeSelectionRequired")
+                .and_then(|item| item.as_bool())
+                == Some(true)
+    )
 }
 
 #[tauri::command]
@@ -2769,7 +2772,7 @@ pub async fn install_nexus_mods_mod(
 mod tests {
     use super::{
         classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
-        derive_account_summary, OAuthRefreshFailure,
+        derive_account_summary, should_clear_pending_after_manual_completion, OAuthRefreshFailure,
     };
     use serde_json::json;
 
@@ -2877,5 +2880,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn manual_download_completion_clears_pending_session_after_failures() {
+        let failed = Err("Failed to store manually downloaded Nexus archive".to_string());
+        assert!(should_clear_pending_after_manual_completion(&failed));
+
+        let runtime_selection = Ok(json!({
+            "success": false,
+            "runtimeSelectionRequired": true,
+        }));
+        assert!(!should_clear_pending_after_manual_completion(&runtime_selection));
     }
 }
