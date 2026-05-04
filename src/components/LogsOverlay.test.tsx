@@ -148,7 +148,7 @@ describe('LogsOverlay', () => {
     );
 
     await waitFor(() => {
-      expect(apiMocks.readLogFile).toHaveBeenCalledWith('C:/Games/Schedule I/Logs/Session-latest.log');
+      expect(apiMocks.readLogFile).toHaveBeenCalledWith('C:/Games/Schedule I/Logs/Session-latest.log', 4000);
     });
     const viewerHeader = container.querySelector('.logs-panel__viewer-header');
     expect(viewerHeader).toBeTruthy();
@@ -224,7 +224,7 @@ describe('LogsOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: /Env2-archived\.log/i }));
 
     await waitFor(() => {
-      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I Depot/Logs/Env2-archived.log');
+      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I Depot/Logs/Env2-archived.log', 4000);
     });
   });
 
@@ -426,6 +426,37 @@ describe('LogsOverlay', () => {
     expect(directChildren).toHaveLength(2);
     expect(directChildren[0]?.classList.contains('logs-panel__line-meta')).toBe(true);
     expect(directChildren[1]?.classList.contains('logs-panel__line-content')).toBe(true);
+  });
+
+  it('virtualizes large log files instead of mounting every line at once', async () => {
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue(
+      Array.from({ length: 500 }, (_, index) => makeLogLine({
+        lineNumber: index + 1,
+        content: `Large log line ${index + 1}`,
+        category: 'general',
+      })),
+    );
+
+    const { container } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Large log line 1')).toBeTruthy();
+    expect(screen.getByText(/500 Lines loaded/)).toBeTruthy();
+    expect(container.querySelectorAll('.logs-panel__line').length).toBeLessThan(80);
+    expect(container.querySelector('.logs-panel__virtual-spacer')).toBeTruthy();
   });
 
   it('keeps edge-case metadata visible for missing timestamps and long mod tags', async () => {

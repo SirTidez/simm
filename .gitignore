@@ -28,3 +28,6 @@ TEST_PLAN.md
 /.serena
 /.vscode
 /output/playwright
+.agents/
+.stitch/
+skills-lock.json

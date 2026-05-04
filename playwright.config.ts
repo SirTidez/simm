@@ -11,7 +11,7 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'npm run tauri:playwright',
+    command: 'bun run tauri:playwright',
     url: 'http://127.0.0.1:9222/json/version',
     reuseExistingServer: false,
     timeout: 180000,

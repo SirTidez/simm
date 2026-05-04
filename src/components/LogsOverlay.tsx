@@ -7,6 +7,9 @@ import type { Environment } from '../types';
 import { Icon } from './Icon';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
+const INITIAL_LOG_LINE_LIMIT = 4000;
+const LOG_ROW_ESTIMATED_HEIGHT = 58;
+const LOG_ROW_OVERSCAN = 14;
 
 interface LogFile {
   name: string;
@@ -222,10 +225,13 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const [openingModView, setOpeningModView] = useState(false);
   const [shouldCollapseInspector, setShouldCollapseInspector] = useState<boolean>(() => window.innerWidth <= INSPECTOR_COLLAPSE_BREAKPOINT);
   const [isInspectorCollapsed, setIsInspectorCollapsed] = useState<boolean>(() => window.innerWidth <= INSPECTOR_COLLAPSE_BREAKPOINT);
+  const [streamScrollTop, setStreamScrollTop] = useState(0);
+  const [streamViewportHeight, setStreamViewportHeight] = useState(0);
 
   const logContainerRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const toastTimeoutRef = useRef<number | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
 
   const selectedLogFile = useMemo(
     () => logFiles.find((file) => file.path === selectedLogPath) ?? null,
@@ -390,6 +396,31 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const selectedFilePath = selectedLogFile?.path ?? '';
   const isLiveFile = isLiveLogFile(selectedLogFile);
   const showCollapsedInspector = shouldCollapseInspector && isInspectorCollapsed;
+  const virtualStartIndex = Math.max(0, Math.floor(streamScrollTop / LOG_ROW_ESTIMATED_HEIGHT) - LOG_ROW_OVERSCAN);
+  const virtualEndIndex = Math.min(
+    visibleLines.length,
+    Math.ceil((streamScrollTop + streamViewportHeight) / LOG_ROW_ESTIMATED_HEIGHT) + LOG_ROW_OVERSCAN,
+  );
+  const virtualLines = visibleLines.slice(virtualStartIndex, virtualEndIndex);
+  const virtualTopPadding = virtualStartIndex * LOG_ROW_ESTIMATED_HEIGHT;
+  const virtualBottomPadding = Math.max(0, (visibleLines.length - virtualEndIndex) * LOG_ROW_ESTIMATED_HEIGHT);
+
+  const scrollLineIntoView = (line: LogLine, block: ScrollLogicalPosition = 'nearest') => {
+    const key = getLineKey(line);
+    const renderedRow = rowRefs.current[key];
+    if (renderedRow) {
+      renderedRow.scrollIntoView({ block });
+      return;
+    }
+
+    const targetIndex = visibleLines.findIndex((candidate) => getLineKey(candidate) === key);
+    if (targetIndex >= 0 && logContainerRef.current) {
+      logContainerRef.current.scrollTo({
+        top: Math.max(0, targetIndex * LOG_ROW_ESTIMATED_HEIGHT - LOG_ROW_ESTIMATED_HEIGHT),
+        behavior: 'auto',
+      });
+    }
+  };
 
   useEffect(() => {
     setLogFiles([]);
@@ -403,10 +434,16 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     setOpeningModView(false);
     setAutoScroll(true);
     setIsAtBottom(true);
+    setStreamScrollTop(0);
+    setStreamViewportHeight(0);
 
     if (toastTimeoutRef.current) {
       clearTimeout(toastTimeoutRef.current);
       toastTimeoutRef.current = null;
+    }
+    if (scrollFrameRef.current !== null) {
+      cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
     }
     setToastMessage(null);
 
@@ -423,11 +460,16 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     try {
       setLoading(true);
       setError(null);
-      const lines = await ApiService.readLogFile(logPath);
+      const lines = await ApiService.readLogFile(logPath, INITIAL_LOG_LINE_LIMIT);
       setLogLines(lines);
       setSelectedLineKey(null);
       setAutoScroll(true);
       setIsAtBottom(true);
+      requestAnimationFrame(() => {
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+        }
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load log file');
       setLogLines([]);
@@ -511,12 +553,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       try {
         setLoading(true);
         setError(null);
-        const lines = await ApiService.readLogFile(selectedLogFile.path);
+        const lines = await ApiService.readLogFile(selectedLogFile.path, INITIAL_LOG_LINE_LIMIT);
         if (cancelled) return;
         setLogLines(lines);
         setSelectedLineKey(null);
         setAutoScroll(true);
         setIsAtBottom(true);
+        requestAnimationFrame(() => {
+          if (!cancelled && logContainerRef.current) {
+            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+          }
+        });
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load log file');
@@ -570,7 +617,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     let unlisten: (() => void) | null = null;
     const bindListener = async () => {
       unlisten = await listen<{ lines: LogLine[] }>('log-update', (event) => {
-        setLogLines((current) => [...current, ...event.payload.lines]);
+        setLogLines((current) => [...current, ...event.payload.lines].slice(-INITIAL_LOG_LINE_LIMIT));
       });
     };
 
@@ -610,8 +657,32 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   }, [autoScroll, isAtBottom, isLiveFile, visibleLines.length]);
 
   useEffect(() => {
+    const container = logContainerRef.current;
+    if (!container) return;
+
+    const syncViewport = () => {
+      setStreamViewportHeight(container.clientHeight);
+      setStreamScrollTop(container.scrollTop);
+    };
+
+    syncViewport();
+    if (typeof ResizeObserver !== 'undefined') {
+      const resizeObserver = new ResizeObserver(syncViewport);
+      resizeObserver.observe(container);
+      return () => resizeObserver.disconnect();
+    }
+
+    window.addEventListener('resize', syncViewport);
+    return () => window.removeEventListener('resize', syncViewport);
+  }, [selectedLogPath]);
+
+  useEffect(() => {
     if (!isOpen) return;
     return () => {
+      if (scrollFrameRef.current !== null) {
+        cancelAnimationFrame(scrollFrameRef.current);
+        scrollFrameRef.current = null;
+      }
       if (isWatching) {
         void ApiService.stopWatchingLog().catch((err) => {
           console.error('Failed to stop watching log file:', err);
@@ -622,12 +693,21 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
   const handleScroll = () => {
     if (!logContainerRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
+    const container = logContainerRef.current;
+    const { scrollTop, scrollHeight, clientHeight } = container;
     const atBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 12;
     setIsAtBottom(atBottom);
     if (isLiveFile) {
       setAutoScroll(atBottom);
     }
+    if (scrollFrameRef.current !== null) {
+      return;
+    }
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setStreamScrollTop(container.scrollTop);
+      setStreamViewportHeight(container.clientHeight);
+    });
   };
 
   const jumpToLive = () => {
@@ -721,7 +801,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     const key = getLineKey(candidate);
     setSelectedLineKey(key);
-    rowRefs.current[key]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    scrollLineIntoView(candidate, 'center');
   };
 
   const resetFilters = () => {
@@ -743,7 +823,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       const nextLine = visibleLines[Math.min(currentIndex + 1, visibleLines.length - 1)] ?? visibleLines[0];
       const nextKey = getLineKey(nextLine);
       setSelectedLineKey(nextKey);
-      rowRefs.current[nextKey]?.scrollIntoView({ block: 'nearest' });
+      scrollLineIntoView(nextLine);
     }
 
     if (event.key === 'ArrowUp') {
@@ -751,7 +831,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       const nextLine = currentIndex <= 0 ? visibleLines[0] : visibleLines[currentIndex - 1];
       const nextKey = getLineKey(nextLine);
       setSelectedLineKey(nextKey);
-      rowRefs.current[nextKey]?.scrollIntoView({ block: 'nearest' });
+      scrollLineIntoView(nextLine);
     }
   };
 
@@ -1064,7 +1144,15 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   </p>
                 </div>
               ) : (
-                visibleLines.map((line) => {
+                <>
+                  {virtualTopPadding > 0 && (
+                    <div
+                      aria-hidden="true"
+                      className="logs-panel__virtual-spacer"
+                      style={{ height: virtualTopPadding }}
+                    />
+                  )}
+                  {virtualLines.map((line) => {
                   const key = getLineKey(line);
                   const effectiveLevel = getEffectiveLevel(line);
                   const isSelected = key === selectedLineKey;
@@ -1122,7 +1210,15 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                       <div className="logs-panel__line-content">{highlightText(line.content, searchQuery)}</div>
                     </div>
                   );
-                })
+                })}
+                  {virtualBottomPadding > 0 && (
+                    <div
+                      aria-hidden="true"
+                      className="logs-panel__virtual-spacer"
+                      style={{ height: virtualBottomPadding }}
+                    />
+                  )}
+                </>
               )}
             </div>
             {!isAtBottom && isLiveFile && (

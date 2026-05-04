@@ -121,6 +121,21 @@ export const batchUpdateCheckRef = { current: false };
 export const batchUpdateCheckEventName = 'simm:batch-update-check-started';
 const LAST_ENV_KEY = 'simm:lastEnvId';
 
+const environmentCountCache = {
+  mods: new Map<string, number>(),
+  featuredDownloads: new Map<string, number>(),
+  modUpdates: new Map<string, number>(),
+  plugins: new Map<string, number>(),
+  userLibs: new Map<string, number>(),
+  melonLoader: new Map<string, { installed: boolean; version?: string }>(),
+};
+
+type MapStateUpdater<T> = Map<string, T> | ((previous: Map<string, T>) => Map<string, T>);
+
+function resolveMapState<T>(previous: Map<string, T>, updater: MapStateUpdater<T>) {
+  return typeof updater === 'function' ? updater(previous) : updater;
+}
+
 export function notifyBatchUpdateCheckStarted(environmentIds: string[]) {
   window.dispatchEvent(new CustomEvent(batchUpdateCheckEventName, {
     detail: { environmentIds }
@@ -137,6 +152,7 @@ interface EnvironmentListProps {
 
 export type WorkspaceRoute =
   | { view: 'home' }
+  | { view: 'environments' }
   | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
   | { view: 'securityReport' }
   | { view: 'mods'; environmentId: string; initialTab?: 'installed' | 'updates' }
@@ -173,13 +189,61 @@ export function EnvironmentList({
   const [userLibsOverlay, setUserLibsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
-  const [modsCounts, setModsCounts] = useState<Map<string, number>>(new Map());
-  const [featuredDownloadCounts, setFeaturedDownloadCounts] = useState<Map<string, number>>(new Map());
-  const [modUpdatesCounts, setModUpdatesCounts] = useState<Map<string, number>>(new Map());
-  const [pluginsCounts, setPluginsCounts] = useState<Map<string, number>>(new Map());
-  const [userLibsCounts, setUserLibsCounts] = useState<Map<string, number>>(new Map());
-  const [melonLoaderStatus, setMelonLoaderStatus] = useState<Map<string, { installed: boolean; version?: string }>>(new Map());
+  const [modsCounts, setModsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.mods));
+  const [featuredDownloadCounts, setFeaturedDownloadCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.featuredDownloads));
+  const [modUpdatesCounts, setModUpdatesCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.modUpdates));
+  const [pluginsCounts, setPluginsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.plugins));
+  const [userLibsCounts, setUserLibsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.userLibs));
+  const [melonLoaderStatus, setMelonLoaderStatusState] = useState<Map<string, { installed: boolean; version?: string }>>(() => new Map(environmentCountCache.melonLoader));
   const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
+
+  const setModsCounts = useCallback((updater: MapStateUpdater<number>) => {
+    setModsCountsState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.mods = new Map(next);
+      return next;
+    });
+  }, []);
+
+  const setFeaturedDownloadCounts = useCallback((updater: MapStateUpdater<number>) => {
+    setFeaturedDownloadCountsState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.featuredDownloads = new Map(next);
+      return next;
+    });
+  }, []);
+
+  const setModUpdatesCounts = useCallback((updater: MapStateUpdater<number>) => {
+    setModUpdatesCountsState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.modUpdates = new Map(next);
+      return next;
+    });
+  }, []);
+
+  const setPluginsCounts = useCallback((updater: MapStateUpdater<number>) => {
+    setPluginsCountsState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.plugins = new Map(next);
+      return next;
+    });
+  }, []);
+
+  const setUserLibsCounts = useCallback((updater: MapStateUpdater<number>) => {
+    setUserLibsCountsState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.userLibs = new Map(next);
+      return next;
+    });
+  }, []);
+
+  const setMelonLoaderStatus = useCallback((updater: MapStateUpdater<{ installed: boolean; version?: string }>) => {
+    setMelonLoaderStatusState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.melonLoader = new Map(next);
+      return next;
+    });
+  }, []);
 
   // Debounce timers for filesystem change events
   const modsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -1815,6 +1879,16 @@ export function EnvironmentList({
     return (
       <div className="empty-state">
         <p>No game installs yet. Create one to get started!</p>
+        {onOpenWorkspace && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => onOpenWorkspace({ view: 'wizard' })}
+          >
+            <Icon name="plus" />
+            Add Environment
+          </button>
+        )}
       </div>
     );
   }
@@ -1858,10 +1932,25 @@ export function EnvironmentList({
   return (
     <div className="environment-list">
       <div className="environment-list__header">
-        <h2 className="environment-list__title">Game Installs</h2>
-        <div className="environment-list__runtime-strip" aria-label="Supported runtimes">
-          <span className="badge badge-orange-red environment-list__runtime-badge">Mono</span>
-          <span className="badge badge-blue environment-list__runtime-badge">IL2CPP</span>
+        <div>
+          <h2 className="environment-list__title">Environments</h2>
+          <p className="environment-list__subtitle">Manage your Schedule I installs and environments.</p>
+        </div>
+        <div className="environment-list__toolbar">
+          {onOpenWorkspace && (
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              onClick={() => onOpenWorkspace({ view: 'wizard' })}
+            >
+              <Icon name="plus" />
+              Add Environment
+            </button>
+          )}
+          <div className="environment-list__runtime-strip" aria-label="Supported runtimes">
+            <span className="badge badge-orange-red environment-list__runtime-badge">Mono</span>
+            <span className="badge badge-blue environment-list__runtime-badge">IL2CPP</span>
+          </div>
         </div>
       </div>
 

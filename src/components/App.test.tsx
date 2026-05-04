@@ -100,8 +100,17 @@ vi.mock('./ErrorBoundary', () => ({
 }));
 
 vi.mock('./EnvironmentList', () => ({
-  EnvironmentList: ({ onInitialDetectionComplete }: { onInitialDetectionComplete?: () => void }) => (
-    <button onClick={onInitialDetectionComplete}>Finish Detection</button>
+  EnvironmentList: ({
+    onInitialDetectionComplete,
+    onOpenWorkspace,
+  }: {
+    onInitialDetectionComplete?: () => void;
+    onOpenWorkspace?: (workspace: { view: 'wizard' }) => void;
+  }) => (
+    <div>
+      <button onClick={onInitialDetectionComplete}>Finish Detection</button>
+      <button onClick={() => onOpenWorkspace?.({ view: 'wizard' })}>Add Environment</button>
+    </div>
   ),
 }));
 
@@ -300,6 +309,28 @@ describe('App', () => {
     dialogMocks.confirm.mockResolvedValue(true);
     dialogMocks.message.mockResolvedValue(undefined);
     processMocks.relaunch.mockResolvedValue(undefined);
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('/releases')) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              tag_name: 'v0.8.4',
+              name: 'SIMM 0.8.4',
+              body: '- Refined the desktop workspace.',
+              published_at: '2026-05-01T00:00:00Z',
+              html_url: 'https://github.com/SirTidez/simm/releases/tag/v0.8.4',
+              prerelease: false,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        text: async () => '## [0.8.4]\n\n- Refined Home and desktop UI polish.\n\n## [0.8.3]\n\n- Fixed update checks.\n',
+      };
+    }));
 
     windowMocks.isMaximized.mockReset();
     windowMocks.onResized.mockReset();
@@ -326,16 +357,53 @@ describe('App', () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
-  it('hides startup splash when initial detection completes', async () => {
+  it('hides startup splash after startup detection resolves', async () => {
     render(<App />);
-
-    expect(screen.getByText('Detecting game and MelonLoader versions')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
 
     await waitFor(() => {
       expect(screen.queryByText('Detecting game and MelonLoader versions')).toBeNull();
+    });
+    expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
+  });
+
+  it('shows a release and changelog feed on the Home dashboard', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'News & Changes' })).toBeTruthy();
+    expect(await screen.findAllByText('SIMM 0.8.4')).toHaveLength(2);
+    expect(await screen.findByText('Refined the desktop workspace.')).toBeTruthy();
+    expect(screen.getAllByText('Changelog').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Recommended next step')).toBeNull();
+    expect(screen.queryByText('App channel checked')).toBeNull();
+  });
+
+  it('opens Environments when the Home status environment is clicked', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-update',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Schedule I',
+          runtime: 'IL2CPP',
+          status: 'completed',
+          currentGameVersion: '0.4.5f1',
+          updateAvailable: true,
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const statusButton = await screen.findByRole('button', { name: 'Open Environments for Il2Cpp' });
+    fireEvent.click(statusButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('Finish Detection')).toBeTruthy();
     });
   });
 
@@ -347,7 +415,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
     await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Game' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add Environment' }));
     expect(await screen.findByText('Wizard Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Wizard' }));
     await waitFor(() => expect(screen.queryByText('Wizard Overlay')).toBeNull());
@@ -357,7 +425,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Steam' }));
     await waitFor(() => expect(screen.queryByText('Steam Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Troubleshooting' }));
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
@@ -411,7 +479,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
 
     expect(await screen.findByText('Loading workspace panel...')).toBeTruthy();
-    expect(screen.getByText('Downloads Panel')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Downloads0' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
 
     modLibraryOverlayMocks.releaseSuspense();
@@ -470,26 +538,26 @@ describe('App', () => {
 
     const libraryButton = screen.getByRole('button', { name: 'Mod Library' });
     const accountsButton = screen.getByRole('button', { name: 'Accounts' });
-    const helpButton = screen.getByRole('button', { name: 'Help' });
+    const helpButton = screen.getByRole('button', { name: 'Troubleshooting' });
 
-    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
-    expect(helpButton).toHaveAttribute('aria-pressed', 'false');
+    expect(libraryButton).not.toHaveAttribute('aria-current');
+    expect(accountsButton).not.toHaveAttribute('aria-current');
+    expect(helpButton).not.toHaveAttribute('aria-current');
 
     fireEvent.click(libraryButton);
     expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
-    expect(libraryButton).toHaveAttribute('aria-pressed', 'true');
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+    expect(libraryButton).toHaveAttribute('aria-current', 'page');
+    expect(accountsButton).not.toHaveAttribute('aria-current');
 
     fireEvent.click(accountsButton);
     expect(await screen.findByText('Steam Overlay')).toBeTruthy();
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'true');
-    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
+    expect(accountsButton).toHaveAttribute('aria-current', 'page');
+    expect(libraryButton).not.toHaveAttribute('aria-current');
 
     fireEvent.click(helpButton);
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
-    expect(helpButton).toHaveAttribute('aria-pressed', 'true');
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+    expect(helpButton).toHaveAttribute('aria-current', 'page');
+    expect(accountsButton).not.toHaveAttribute('aria-current');
   });
 
   it('uses window close for the custom close button', async () => {
@@ -531,8 +599,6 @@ describe('App', () => {
     });
 
     render(<App />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
 
     const installButton = await screen.findByRole('button', { name: 'Install App Update' });
     fireEvent.click(installButton);
@@ -579,7 +645,6 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
     await screen.findByRole('button', { name: 'Install App Update' });
 
     await waitFor(() => {

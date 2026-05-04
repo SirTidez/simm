@@ -6143,6 +6143,12 @@ export function ModLibraryOverlay({
       null
     );
   }, [downloadedGroupForSelectedNexus, getActiveEntryForGroup]);
+  const discoverResultCount = showSearchResults
+    ? searchResults.length
+    : showNexusModsResults
+      ? nexusModsSearchResults.length
+      : 0;
+  const activeQueueCount = downloading || installingTargets ? 1 : 0;
 
   useEffect(() => {
     if (
@@ -8680,8 +8686,11 @@ export function ModLibraryOverlay({
       )}
 
       <div className="mods-overlay mods-overlay--library workspace-collection-shell">
-        <div className="modal-header">
-          <h2>Mod Library</h2>
+        <div className="modal-header workspace-page-header">
+          <div>
+            <h2>Mod Library</h2>
+            <p>Discover and install mods from supported sources.</p>
+          </div>
         </div>
 
         <div className="workspace-collection">
@@ -8710,16 +8719,16 @@ export function ModLibraryOverlay({
 
                 <div className="workspace-collection__summary">
                   <div className="workspace-collection__summary-chip">
-                    <span>Downloaded</span>
-                    <strong>{downloadedSummary.total}</strong>
+                    <span>{libraryTab === "discover" ? "Sources" : "Downloaded"}</span>
+                    <strong>{libraryTab === "discover" ? 2 : downloadedSummary.total}</strong>
                   </div>
                   <div className="workspace-collection__summary-chip">
-                    <span>Updates</span>
-                    <strong>{downloadedSummary.updates}</strong>
+                    <span>{libraryTab === "discover" ? "Results" : "Updates"}</span>
+                    <strong>{libraryTab === "discover" ? discoverResultCount : downloadedSummary.updates}</strong>
                   </div>
                   <div className="workspace-collection__summary-chip">
-                    <span>Installed</span>
-                    <strong>{downloadedSummary.installed}</strong>
+                    <span>{libraryTab === "discover" ? "Queue" : "Installed"}</span>
+                    <strong>{libraryTab === "discover" ? activeQueueCount : downloadedSummary.installed}</strong>
                   </div>
                 </div>
               </div>
@@ -8758,7 +8767,8 @@ export function ModLibraryOverlay({
               <div className="workspace-collection__toolbar">
                 {libraryTab === "discover" ? (
                   <>
-                    <div className="workspace-collection__toolbar-group">
+                    <div className="workspace-collection__toolbar-group workspace-source-toggle" aria-label="Search source">
+                      <span className="workspace-control-label">Sources</span>
                       <button
                         type="button"
                         className={`btn btn-small ${searchSource === "thunderstore" ? "btn-primary" : "btn-secondary"}`}
@@ -8833,6 +8843,7 @@ export function ModLibraryOverlay({
                       </button>
                     </div>
                     <div className="workspace-collection__toolbar-group">
+                      <span className="workspace-control-label">Sort</span>
                       <label className="workspace-collection__toolbar-select">
                         <span className="workspace-collection__toolbar-select-wrap">
                           <select
@@ -9015,6 +9026,12 @@ export function ModLibraryOverlay({
                       </span>
                     </div>
                     <div className="workspace-collection__list">
+                      <div className="workspace-collection__table-head workspace-collection__table-head--discover" aria-hidden="true">
+                        <span>Name</span>
+                        <span>Author</span>
+                        <span>Source</span>
+                        <span>Status</span>
+                      </div>
                       {showSearchResults &&
                         searchResults.map((pkg) => {
                           const representative =
@@ -9184,9 +9201,15 @@ export function ModLibraryOverlay({
                           ? "No downloaded mods currently need updates."
                           : "No downloaded mods match this filter."}
                       </div>
-                    )}
+                  )}
                   {!loadingLibrary && displayedDownloadedGroups.length > 0 && (
                     <div className="workspace-collection__list">
+                      <div className="workspace-collection__table-head workspace-collection__table-head--downloaded" aria-hidden="true">
+                        <span>Name</span>
+                        <span>Source</span>
+                        <span>Version</span>
+                        <span>Installed</span>
+                      </div>
                       {displayedDownloadedGroups.map((group) => {
                         const activeEntry =
                           getActiveEntryForGroup(group) || group.entries[0];

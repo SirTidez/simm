@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import process from 'node:process';
 
 const isWindows = process.platform === 'win32';
-const npxCommand = isWindows ? 'npx.cmd' : 'npx';
+const defaultWindowsBun = join(process.env.USERPROFILE || '', '.bun', 'bin', 'bun.exe');
+const bunCommand = isWindows && existsSync(defaultWindowsBun) ? defaultWindowsBun : 'bun';
 
 let child = null;
 let shuttingDown = false;
@@ -45,14 +48,13 @@ async function shutdown(code = 0) {
 }
 
 child = spawn(
-  isWindows
-    ? `${npxCommand} tauri dev --config src-tauri/tauri.playwright.conf.json`
-    : npxCommand,
-  isWindows ? [] : ['tauri', 'dev', '--config', 'src-tauri/tauri.playwright.conf.json'],
+  bunCommand,
+  ['run', 'tauri', 'dev', '--config', 'src-tauri/tauri.playwright.conf.json'],
   {
     stdio: 'inherit',
     detached: !isWindows,
     shell: isWindows,
+    windowsHide: true,
   },
 );
 

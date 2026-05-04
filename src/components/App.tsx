@@ -30,19 +30,22 @@ import {
   settingsNeedUpgradeSetupPrompt,
 } from '../utils/uxSettings';
 import type {
+  Environment,
   ExperienceMode,
   AppUpdateChannel,
   AppUpdatePreferences,
   AppUpdateStatus,
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
-import { DownloadsPanel } from './DownloadsPanel';
 import { Icon } from './Icon';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
 import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 
 const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const LAST_ENV_KEY = 'simm:lastEnvId';
+const SIMM_RELEASES_URL = 'https://api.github.com/repos/SirTidez/simm/releases?per_page=4';
+const SIMM_CHANGELOG_URL = 'https://raw.githubusercontent.com/SirTidez/simm/master/CHANGELOG.md';
 
 const lazyNamed = <T,>(
   loader: () => Promise<T>,
@@ -135,6 +138,391 @@ const compareVersionCores = (left: string, right: string) => {
   return 0;
 };
 
+function formatDashboardTime(value: string | number | undefined) {
+  if (!value) return 'Not checked yet';
+  const date = typeof value === 'number'
+    ? new Date(value > 1_000_000_000_000 ? value : value * 1000)
+    : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Not checked yet';
+  }
+
+  return date.toLocaleString();
+}
+
+type HomeFeedItem = {
+  id: string;
+  source: 'Release' | 'Changelog';
+  title: string;
+  detail?: string;
+  bullets: string[];
+  date?: string;
+  url?: string;
+};
+
+type GitHubReleasePayload = {
+  html_url?: string;
+  name?: string | null;
+  tag_name?: string;
+  body?: string | null;
+  published_at?: string | null;
+  prerelease?: boolean;
+};
+
+function cleanFeedText(value: string | null | undefined): string {
+  return (value ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\s+by\s+@\S+(?:\s+in\s*)?$/i, '')
+    .replace(/\s+by\s+@\S+\s+in\s*$/i, '')
+    .replace(/\s+in\s*$/i, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function summarizeFeedText(value: string | null | undefined): string {
+  const cleaned = cleanFeedText(value);
+  if (!cleaned) return '';
+  return cleaned.length > 132 ? `${cleaned.slice(0, 129).trimEnd()}...` : cleaned;
+}
+
+function formatFeedDate(value: string | undefined): string {
+  if (!value) return 'Recent';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Recent';
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function normalizeReleaseTitle(value: string | null | undefined, tag: string | undefined): string {
+  return (value?.trim() || tag || 'Release').replace(/^release\s+/i, '');
+}
+
+function extractReleaseBullets(body: string | null | undefined): string[] {
+  if (!body) return [];
+
+  return body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*]\s+/.test(line))
+    .filter((line) => !/full changelog/i.test(line))
+    .map((line) => {
+      const withoutMarker = line.replace(/^[-*]\s+/, '');
+      const withoutVersionPrefix = withoutMarker.replace(/^\d+(?:\.\d+)+(?:-[\w.-]+)?\s*[-:]\s*/i, '');
+      return summarizeFeedText(withoutVersionPrefix);
+    })
+    .filter((line) => line.length > 0)
+    .slice(0, 2);
+}
+
+function extractChangelogBullets(body: string): string[] {
+  const bullets: string[] = [];
+  const lines = body.split(/\r?\n/);
+
+  for (const line of lines) {
+    if (/^\s*-\s+contributors\s*:/i.test(line)) break;
+    if (/^\s+-\s+`/.test(line)) continue;
+    if (!/^\s*-\s+/.test(line)) continue;
+
+    const cleaned = summarizeFeedText(line.replace(/^\s*-\s+/, ''));
+    if (cleaned) {
+      bullets.push(cleaned);
+    }
+    if (bullets.length >= 2) break;
+  }
+
+  return bullets;
+}
+
+function parseChangelogFeed(markdown: string): HomeFeedItem[] {
+  const sections: Array<{ version: string; body: string }> = [];
+  const headingPattern = /^##\s+\[?([^\]\n]+)\]?\s*$/gm;
+  const headings = [...markdown.matchAll(headingPattern)];
+
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index];
+    const nextHeading = headings[index + 1];
+    const bodyStart = (heading.index ?? 0) + heading[0].length;
+    const bodyEnd = nextHeading?.index ?? markdown.length;
+    sections.push({
+      version: heading[1].trim(),
+      body: markdown.slice(bodyStart, bodyEnd),
+    });
+  }
+
+  return sections.slice(0, 2).map((section, index) => {
+    const version = section.version;
+    const body = section.body;
+    const bullets = extractChangelogBullets(body);
+
+    return {
+      id: `changelog-${version}-${index}`,
+      source: 'Changelog' as const,
+      title: `SIMM ${version}`,
+      detail: 'Project changelog',
+      bullets,
+      url: 'https://github.com/SirTidez/simm/blob/master/CHANGELOG.md',
+    };
+  }).filter((item) => item.bullets.length > 0);
+}
+
+async function loadHomeFeed(): Promise<HomeFeedItem[]> {
+  if (typeof fetch !== 'function') {
+    return [];
+  }
+
+  const [releaseResult, changelogResult] = await Promise.allSettled([
+    fetch(SIMM_RELEASES_URL, { headers: { Accept: 'application/vnd.github+json' } }),
+    fetch(SIMM_CHANGELOG_URL),
+  ]);
+
+  const feed: HomeFeedItem[] = [];
+
+  if (releaseResult.status === 'fulfilled' && releaseResult.value.ok) {
+    const releases = await releaseResult.value.json() as GitHubReleasePayload[];
+    for (const release of releases) {
+      const tag = release.tag_name ?? 'release';
+      const bullets = extractReleaseBullets(release.body);
+      if (bullets.length === 0) {
+        continue;
+      }
+      feed.push({
+        id: `release-${tag}`,
+        source: 'Release',
+        title: normalizeReleaseTitle(release.name, tag),
+        detail: release.prerelease ? 'Beta release' : 'Stable release',
+        bullets,
+        date: release.published_at ?? undefined,
+        url: release.html_url,
+      });
+      if (feed.filter((item) => item.source === 'Release').length >= 2) {
+        break;
+      }
+    }
+  }
+
+  if (changelogResult.status === 'fulfilled' && changelogResult.value.ok) {
+    const markdown = await changelogResult.value.text();
+    feed.push(...parseChangelogFeed(markdown));
+  }
+
+  return feed.slice(0, 4);
+}
+
+function HomeDashboard({
+  environments,
+  downloadsInProgress,
+  appUpdateState,
+  onOpenEnvironments,
+  onOpenModLibrary,
+  onOpenModUpdates,
+  onOpenWizard,
+  onOpenSettings,
+}: {
+  environments: Environment[];
+  downloadsInProgress: number;
+  appUpdateState:
+    | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
+    | { status: 'available'; result: AppUpdateStatus };
+  onOpenEnvironments: () => void;
+  onOpenModLibrary: () => void;
+  onOpenModUpdates: () => void;
+  onOpenWizard: () => void;
+  onOpenSettings: () => void;
+}) {
+  const completed = environments.filter((env) => env.status === 'completed');
+  const updateCount = completed.filter((env) => env.updateAvailable).length;
+  const steamCount = completed.filter((env) => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')).length;
+  const lastChecked = completed
+    .map((env) => env.lastUpdateCheck)
+    .filter((value): value is string | number => Boolean(value))
+    .map((value) => ({
+      raw: value,
+      time: typeof value === 'number'
+        ? (value > 1_000_000_000_000 ? value : value * 1000)
+        : Date.parse(value),
+    }))
+    .filter((entry) => Number.isFinite(entry.time))
+    .sort((a, b) => b.time - a.time)[0]?.raw;
+  const primaryEnvironment = completed.find((env) => env.updateAvailable) ?? completed[0] ?? environments[0] ?? null;
+  const [feedItems, setFeedItems] = useState<HomeFeedItem[]>([]);
+  const [feedStatus, setFeedStatus] = useState<'loading' | 'ready' | 'empty'>('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadFeed = async () => {
+      setFeedStatus('loading');
+      try {
+        const items = await loadHomeFeed();
+        if (cancelled) return;
+        setFeedItems(items);
+        setFeedStatus(items.length > 0 ? 'ready' : 'empty');
+      } catch (error) {
+        logger.warn('Failed to load home news feed', { error });
+        if (!cancelled) {
+          setFeedStatus('empty');
+        }
+      }
+    };
+
+    void loadFeed();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <section className="home-dashboard" aria-label="Home dashboard">
+      <div className="home-dashboard__header">
+        <div>
+          <span className="workspace-eyebrow">Home</span>
+          <h1>Welcome back to SIMM</h1>
+          <p>Review install health, updates, and common mod manager actions from one desktop workspace.</p>
+        </div>
+        <div className="home-dashboard__header-actions">
+          <button type="button" className="btn btn-primary" onClick={onOpenModLibrary} aria-label="Open Mod Library from dashboard">
+            <Icon name="boxOpen" />
+            Mod Library
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onOpenWizard}>
+            <Icon name="plus" />
+            Add Environment
+          </button>
+        </div>
+      </div>
+
+      <div className="home-dashboard__stats">
+        <article className="home-dashboard__stat">
+          <span>Installs</span>
+          <strong>{completed.length}</strong>
+          <small>{steamCount} Steam linked</small>
+        </article>
+        <article className="home-dashboard__stat">
+          <span>Game Updates</span>
+          <strong>{updateCount}</strong>
+          <small>{updateCount > 0 ? 'Attention needed' : 'Everything current'}</small>
+        </article>
+        <article className="home-dashboard__stat">
+          <span>Downloads</span>
+          <strong>{downloadsInProgress}</strong>
+          <small>{downloadsInProgress > 0 ? 'In progress' : 'Queue is clear'}</small>
+        </article>
+        <article className="home-dashboard__stat">
+          <span>Last Check</span>
+          <strong title={formatDashboardTime(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
+          <small>Environment metadata</small>
+        </article>
+      </div>
+
+      <div className="home-dashboard__layout">
+        <section className="home-dashboard__panel home-dashboard__panel--wide">
+          <div className="home-dashboard__panel-header">
+            <div>
+              <span className="workspace-eyebrow">Status</span>
+              <h2>{updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}</h2>
+            </div>
+            <button type="button" className="btn btn-secondary btn-small" onClick={onOpenEnvironments} aria-label="Open Environments from dashboard">
+              <Icon name="hardDrive" />
+              Environments
+            </button>
+          </div>
+          <button
+            type="button"
+            className="home-dashboard__focus home-dashboard__focus--action"
+            onClick={primaryEnvironment ? onOpenEnvironments : onOpenWizard}
+            aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
+          >
+            <div>
+              <strong>{primaryEnvironment?.name ?? 'No environments yet'}</strong>
+              <p>
+                {primaryEnvironment
+                  ? `${primaryEnvironment.runtime} ${primaryEnvironment.currentGameVersion ?? primaryEnvironment.updateGameVersion ?? 'version unknown'} on ${primaryEnvironment.branch}.`
+                  : 'Add or import a Schedule I install to start managing mods.'}
+              </p>
+            </div>
+            {primaryEnvironment?.updateAvailable && (
+              <span className="home-dashboard__badge home-dashboard__badge--warn">
+                Update available
+              </span>
+            )}
+          </button>
+          <div className="home-dashboard__quick-grid">
+            <button type="button" onClick={onOpenModUpdates}>
+              <Icon name="arrowUp" />
+              Mod Updates
+            </button>
+            <button type="button" onClick={onOpenModLibrary}>
+              <Icon name="boxOpen" />
+              Discover Mods
+            </button>
+            <button type="button" onClick={onOpenSettings}>
+              <Icon name="sliders" />
+              Preferences
+            </button>
+          </div>
+        </section>
+
+        <aside className="home-dashboard__panel home-dashboard__feed" aria-label="News and changes">
+          <div className="home-dashboard__panel-header">
+            <div>
+              <span className="workspace-eyebrow">Updates</span>
+              <h2>News & Changes</h2>
+            </div>
+          </div>
+          <div className="home-dashboard__feed-list">
+            {appUpdateState.status === 'available' && (
+              <article className="home-dashboard__feed-item home-dashboard__feed-item--action">
+                <span>{appUpdateState.result.channel} channel</span>
+                <strong>SIMM {appUpdateState.result.version} is available</strong>
+                <p>{summarizeFeedText(appUpdateState.result.notes) || 'A new SIMM build is ready to install.'}</p>
+              </article>
+            )}
+
+            {feedStatus === 'loading' && (
+              <article className="home-dashboard__feed-item">
+                <span>GitHub</span>
+                <strong>Loading project updates</strong>
+                <p>Checking recent releases and changelog entries.</p>
+              </article>
+            )}
+
+            {feedStatus === 'empty' && (
+              <article className="home-dashboard__feed-item">
+                <span>Offline</span>
+                <strong>Project feed unavailable</strong>
+                <p>Recent SIMM releases and changelog entries will appear here when GitHub can be reached.</p>
+              </article>
+            )}
+
+            {feedItems.map((item) => (
+              <article className="home-dashboard__feed-item" key={item.id}>
+                <span>{item.source}{item.date ? ` / ${formatFeedDate(item.date)}` : ''}</span>
+                {item.url ? (
+                  <a href={item.url} target="_blank" rel="noreferrer">{item.title}</a>
+                ) : (
+                  <strong>{item.title}</strong>
+                )}
+                {item.detail && <p>{item.detail}</p>}
+                <ul className="home-dashboard__feed-points">
+                  {item.bullets.map((bullet) => (
+                    <li key={bullet}>{bullet}</li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
 function AppContent() {
   type PendingNexusRuntimeSelection = {
     nxmUrl: string;
@@ -164,7 +552,7 @@ function AppContent() {
     | { status: 'available'; result: AppUpdateStatus };
 
   const appWindow = getCurrentWindow();
-  const { environments } = useEnvironmentStore();
+  const { environments, loading: environmentsLoading } = useEnvironmentStore();
   const { settings, updateSettings } = useSettingsStore();
   const workspaceIdRef = useRef(0);
   const libraryFocusRequestIdRef = useRef(0);
@@ -183,7 +571,6 @@ function AppContent() {
   ]);
   const [showStartupSplash, setShowStartupSplash] = useState(true);
   const [isMaximized, setIsMaximized] = useState(false);
-  const [lastEnvironmentWorkspaceView, setLastEnvironmentWorkspaceView] = useState<'mods' | 'plugins' | 'userLibs' | 'logs' | 'config'>('mods');
   const completedNexusCallbackRef = useRef<string | null>(null);
   const inFlightNexusCallbackRef = useRef<string | null>(null);
   const completedNxmCallbackRef = useRef(new Set<string>());
@@ -199,12 +586,6 @@ function AppContent() {
   const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
-  const canGoBack = workspaceStack.length > 1;
-  const isToolbarWorkspaceActive = useCallback(
-    (view: WorkspaceRoute['view']) => activeWorkspace.view === view,
-    [activeWorkspace.view],
-  );
-
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
       return false;
@@ -332,53 +713,15 @@ function AppContent() {
     return environments.find((env) => env.id === environmentId) ?? null;
   }, [environments]);
 
-  useEffect(() => {
-    if (
-      activeWorkspace.view === 'mods' ||
-      activeWorkspace.view === 'plugins' ||
-      activeWorkspace.view === 'userLibs' ||
-      activeWorkspace.view === 'logs' ||
-      activeWorkspace.view === 'config'
-    ) {
-      setLastEnvironmentWorkspaceView(activeWorkspace.view);
-    }
-  }, [activeWorkspace.view]);
-
-  const handleWorkspaceEnvironmentSelect = useCallback((environmentId: string) => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        const next = [...previous];
-        const current = next[next.length - 1];
-        if (!current) {
-          return previous;
-        }
-
-        if (!('environmentId' in current.route)) {
-          next[next.length - 1] = {
-            ...current,
-            route: {
-              view: lastEnvironmentWorkspaceView,
-              environmentId,
-            },
-          };
-          return next;
-        }
-
-        next[next.length - 1] = {
-          ...current,
-          route: {
-            ...current.route,
-            environmentId,
-          },
-        };
-        return next;
-      });
-    });
-  }, [lastEnvironmentWorkspaceView]);
-
   const handleInitialDetectionComplete = useCallback(() => {
     setShowStartupSplash(false);
   }, []);
+
+  useEffect(() => {
+    if (!environmentsLoading) {
+      handleInitialDetectionComplete();
+    }
+  }, [environmentsLoading, handleInitialDetectionComplete]);
 
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
@@ -942,6 +1285,13 @@ function AppContent() {
         ) : null;
       case 'wizard':
         return <EnvironmentCreationWizard onClose={onCloseHandler} />;
+      case 'environments':
+        return (
+          <EnvironmentList
+            onInitialDetectionComplete={handleInitialDetectionComplete}
+            onOpenWorkspace={openWorkspace}
+          />
+        );
       case 'accounts':
         return <SteamAccountOverlay isOpen={true} onClose={onCloseHandler} />;
       case 'help':
@@ -1039,69 +1389,10 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, pushWorkspace, settings, skipSetupGuide, updateWorkspaceEntry]);
+  }, [completeSetupGuide, getEnvironmentById, handleInitialDetectionComplete, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, settings, skipSetupGuide, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
-  };
-
-  const renderWorkspaceSidebar = (showNavigationControls: boolean) => {
-    const selectedEnvironmentId =
-      'environmentId' in activeWorkspace
-        ? activeWorkspace.environmentId
-        : null;
-    const sortedEnvironments = [...environments].sort((a, b) => a.name.localeCompare(b.name));
-
-    return (
-      <aside className="workspace-sidebar">
-        {showNavigationControls && (
-          <div className="workspace-sidebar__nav">
-            <button
-              onClick={popWorkspace}
-              className="btn btn-secondary app-workspace-home-button"
-              disabled={!canGoBack}
-            >
-              <Icon name="arrowLeft" />
-              Back
-            </button>
-            <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
-              <Icon name="house" />
-              Home
-            </button>
-          </div>
-        )}
-
-        <div className="workspace-environment-sidebar">
-          <h3 className="workspace-environment-sidebar__title">Environments</h3>
-          <p className="workspace-environment-sidebar__copy">
-            Select an environment to open its active tools workspace.
-          </p>
-          <div className="workspace-environment-sidebar__list">
-            {sortedEnvironments.length > 0 ? (
-              sortedEnvironments.map((env) => (
-                <div key={env.id} className="workspace-environment-sidebar__item">
-                  <button
-                    onClick={() => {
-                      localStorage.setItem('simm:lastEnvId', env.id);
-                      handleWorkspaceEnvironmentSelect(env.id);
-                    }}
-                    className={`workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
-                    title={env.name}
-                    aria-current={selectedEnvironmentId === env.id ? 'page' : undefined}
-                  >
-                    <span className="workspace-environment-sidebar__button-label">{env.name}</span>
-                  </button>
-                </div>
-              ))
-            ) : (
-              <div className="workspace-environment-sidebar__empty">No game installs yet.</div>
-            )}
-          </div>
-        </div>
-
-        <DownloadsPanel />
-      </aside>
-    );
   };
 
   const appUpdatePreferences = settings?.appUpdate ?? null;
@@ -1120,6 +1411,79 @@ function AppContent() {
     && !isAppUpdateSnoozed
     && !isAppUpdateSkipped
     && !isAppUpdateDismissedForSession;
+  const currentEnvironmentId =
+    'environmentId' in activeWorkspace
+      ? activeWorkspace.environmentId
+      : localStorage.getItem(LAST_ENV_KEY) ?? environments.find((env) => env.status === 'completed')?.id ?? environments[0]?.id ?? null;
+  const downloadsInProgress = environments.filter((env) => env.status === 'downloading').length;
+  const openEnvironmentsWorkspace = () => openWorkspace({ view: 'environments' });
+  const openEnvironmentWorkspace = (view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
+    if (!currentEnvironmentId) {
+      openWorkspace({ view: 'wizard' });
+      return;
+    }
+    pushWorkspace({ view, environmentId: currentEnvironmentId });
+  };
+  const primaryNavItems = [
+    {
+      key: 'home',
+      label: 'Home',
+      icon: 'house',
+      active: activeWorkspace.view === 'home',
+      onClick: goHome,
+    },
+    {
+      key: 'environments',
+      label: 'Environments',
+      icon: 'hardDrive',
+      active: activeWorkspace.view === 'environments' || activeWorkspace.view === 'wizard',
+      onClick: openEnvironmentsWorkspace,
+    },
+    {
+      key: 'library',
+      label: 'Mod Library',
+      icon: 'boxOpen',
+      active: activeWorkspace.view === 'library',
+      onClick: () => openLibraryWorkspace(),
+    },
+    {
+      key: 'mods',
+      label: 'Installed Mods',
+      icon: 'boxArchive',
+      active: activeWorkspace.view === 'mods',
+      onClick: () => openEnvironmentWorkspace('mods'),
+    },
+    {
+      key: 'config',
+      label: 'Config Files',
+      icon: 'fileCode',
+      active: activeWorkspace.view === 'config',
+      onClick: () => openEnvironmentWorkspace('config'),
+    },
+    {
+      key: 'logs',
+      label: 'Logs',
+      icon: 'fileLines',
+      active: activeWorkspace.view === 'logs',
+      onClick: () => openEnvironmentWorkspace('logs'),
+    },
+  ] as const;
+  const secondaryNavItems = [
+    {
+      key: 'accounts',
+      label: 'Accounts',
+      icon: 'userCircle',
+      active: activeWorkspace.view === 'accounts',
+      onClick: () => openWorkspace({ view: 'accounts' }),
+    },
+    {
+      key: 'help',
+      label: 'Troubleshooting',
+      icon: 'wrench',
+      active: activeWorkspace.view === 'help',
+      onClick: () => openWorkspace({ view: 'help' }),
+    },
+  ] as const;
 
   return (
     <div className="app app-desktop-shell">
@@ -1128,60 +1492,11 @@ function AppContent() {
           <div className="window-brand" data-tauri-drag-region>
             <img src={appIcon256} alt="SIMM" className="window-brand-icon" />
             <div className="window-brand-text">
-              <strong>SIMM</strong>
-              <span>Schedule I Mod Manager</span>
+              <strong>SIMM - Schedule I Mod Manager</strong>
             </div>
           </div>
 
           <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
-
-          <div className="window-toolbar-actions">
-            <button
-              onClick={() => openLibraryWorkspace()}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('library') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Open Mod Library"
-              aria-pressed={isToolbarWorkspaceActive('library')}
-            >
-              <Icon name="layerGroup" />
-              Mod Library
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'wizard' })}
-              className={`btn btn-primary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('wizard') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Add or import a game install"
-              aria-pressed={isToolbarWorkspaceActive('wizard')}
-            >
-              <Icon name="plus" />
-              Add Game
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'accounts' })}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('accounts') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Manage connected accounts"
-              aria-pressed={isToolbarWorkspaceActive('accounts')}
-            >
-              <Icon name="userCircle" />
-              Accounts
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'help' })}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('help') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Open help and guides"
-              aria-pressed={isToolbarWorkspaceActive('help')}
-            >
-              <Icon name="questionCircle" />
-              Help
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'settings' })}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('settings') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Open settings"
-              aria-pressed={isToolbarWorkspaceActive('settings')}
-            >
-              <Icon name="cog" />
-              Settings
-            </button>
-          </div>
 
           <div className="window-controls" aria-label="Window controls">
             <button
@@ -1210,22 +1525,78 @@ function AppContent() {
             </button>
           </div>
         </header>
-
         <div className="app-body">
+          <aside className="app-primary-nav" aria-label="Primary navigation">
+            <div className="app-primary-nav__group">
+              {primaryNavItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`app-primary-nav__item${item.active ? ' app-primary-nav__item--active' : ''}`}
+                  onClick={item.onClick}
+                  aria-current={item.active ? 'page' : undefined}
+                >
+                  <Icon name={item.icon} />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+              <button
+                type="button"
+                className="app-primary-nav__item"
+                onClick={goHome}
+              >
+                <Icon name="download" />
+                <span>Downloads</span>
+                <span className="app-primary-nav__badge">{downloadsInProgress}</span>
+              </button>
+            </div>
+            <div className="app-primary-nav__group app-primary-nav__group--system">
+              {secondaryNavItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`app-primary-nav__item${item.active ? ' app-primary-nav__item--active' : ''}`}
+                  onClick={item.onClick}
+                  aria-current={item.active ? 'page' : undefined}
+                >
+                  <Icon name={item.icon} />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className={`app-primary-nav__item app-primary-nav__item--settings${activeWorkspace.view === 'settings' ? ' app-primary-nav__item--active' : ''}`}
+              onClick={() => openWorkspace({ view: 'settings' })}
+              aria-current={activeWorkspace.view === 'settings' ? 'page' : undefined}
+            >
+              <Icon name="cog" />
+              <span>Settings</span>
+            </button>
+          </aside>
           <div className="app-content workspace-active">
             {activeWorkspace.view === 'home' ? (
               <div className="workspace-layout">
-                {renderWorkspaceSidebar(false)}
                 <main className="app-main app-home-main">
-                  <EnvironmentList
-                    onInitialDetectionComplete={handleInitialDetectionComplete}
-                    onOpenWorkspace={openWorkspace}
+                  <HomeDashboard
+                    environments={environments}
+                    downloadsInProgress={downloadsInProgress}
+                    appUpdateState={appUpdateState}
+                    onOpenEnvironments={openEnvironmentsWorkspace}
+                    onOpenModLibrary={() => openLibraryWorkspace()}
+                    onOpenModUpdates={() => openLibraryWorkspace({
+                      initialTab: 'updates',
+                      navigationState: {
+                        libraryTab: 'updates',
+                      },
+                    })}
+                    onOpenWizard={() => openWorkspace({ view: 'wizard' })}
+                    onOpenSettings={() => openWorkspace({ view: 'settings' })}
                   />
                 </main>
               </div>
             ) : (
               <div className="workspace-layout">
-                {renderWorkspaceSidebar(true)}
                 <main className="app-main workspace-main app-workspace-main">
                   <Suspense fallback={<WorkspacePanelFallback />}>
                     {renderWorkspacePanel()}
