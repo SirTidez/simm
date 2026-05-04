@@ -7,6 +7,7 @@ use crate::types::{
 use crate::utils::http_identity;
 use anyhow::{Context, Result};
 use chrono::Utc;
+use flate2::read::GzDecoder;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -172,14 +173,8 @@ impl SecurityScannerService {
             Err(error) => return Ok(Self::unavailable_report(error.to_string(), settings)),
         };
 
-        let extension = file_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-
-        let files = match extension.as_str() {
-            "dll" => vec![
+        let files = match archive_kind_for_path(file_path) {
+            InputArchiveKind::Dll => vec![
                 self.scan_assembly_file(
                     &executable.path,
                     file_path,
@@ -187,15 +182,23 @@ impl SecurityScannerService {
                 )
                 .await?,
             ],
-            "zip" => {
+            InputArchiveKind::Zip => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::Zip)
                     .await?
             }
-            "rar" => {
+            InputArchiveKind::Rar => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::Rar)
                     .await?
             }
-            _ => Vec::new(),
+            InputArchiveKind::SevenZ => {
+                self.scan_archive(&executable.path, file_path, ArchiveKind::SevenZ)
+                    .await?
+            }
+            InputArchiveKind::TarGz => {
+                self.scan_archive(&executable.path, file_path, ArchiveKind::TarGz)
+                    .await?
+            }
+            InputArchiveKind::Unsupported => Vec::new(),
         };
 
         if files.is_empty() {
@@ -614,6 +617,11 @@ impl SecurityScannerService {
                 self.extract_rar_to_directory(archive_path, &temp_root)
                     .await
             }
+            ArchiveKind::SevenZ => self.extract_7z_to_directory(archive_path, &temp_root).await,
+            ArchiveKind::TarGz => {
+                self.extract_tar_gz_to_directory(archive_path, &temp_root)
+                    .await
+            }
         };
 
         if let Err(error) = extract_result {
@@ -698,6 +706,82 @@ impl SecurityScannerService {
         }
 
         Ok(())
+    }
+
+    async fn extract_7z_to_directory(&self, archive_path: &Path, target_dir: &Path) -> Result<()> {
+        let archive_path = archive_path.to_path_buf();
+        let target_dir = target_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            sevenz_rust::decompress_file_with_extract_fn(
+                &archive_path,
+                &target_dir,
+                |entry, reader, _dest| {
+                    if entry.name().is_empty() && entry.is_directory() {
+                        return Ok(true);
+                    }
+                    let relative_path = safe_archive_relative_path(entry.name())
+                        .map_err(sevenz_rust::Error::other)?;
+                    let output_path = target_dir.join(relative_path);
+
+                    if entry.is_directory() {
+                        std::fs::create_dir_all(&output_path).map_err(sevenz_rust::Error::io)?;
+                    } else {
+                        if let Some(parent) = output_path.parent() {
+                            std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+                        }
+                        let mut output =
+                            File::create(&output_path).map_err(sevenz_rust::Error::io)?;
+                        std::io::copy(reader, &mut output).map_err(sevenz_rust::Error::io)?;
+                    }
+
+                    Ok(true)
+                },
+            )
+            .context("Failed to extract 7z archive")
+        })
+        .await?
+    }
+
+    async fn extract_tar_gz_to_directory(
+        &self,
+        archive_path: &Path,
+        target_dir: &Path,
+    ) -> Result<()> {
+        let archive_path = archive_path.to_path_buf();
+        let target_dir = target_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = File::open(&archive_path).context("Failed to open tar.gz archive")?;
+            let decoder = GzDecoder::new(file);
+            let mut archive = tar::Archive::new(decoder);
+
+            for entry in archive.entries().context("Failed to read tar.gz archive")? {
+                let mut entry = entry.context("Failed to read tar.gz entry")?;
+                let entry_path = entry.path().context("Failed to read tar.gz entry path")?;
+                let entry_name = entry_path.to_string_lossy().replace('\\', "/");
+                let relative_path = safe_archive_relative_path(&entry_name)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                let output_path = target_dir.join(relative_path);
+
+                let entry_type = entry.header().entry_type();
+                if entry_type.is_dir() {
+                    std::fs::create_dir_all(&output_path).with_context(|| {
+                        format!("Failed to create directory {}", output_path.display())
+                    })?;
+                } else if entry_type.is_file() {
+                    if let Some(parent) = output_path.parent() {
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("Failed to create directory {}", parent.display())
+                        })?;
+                    }
+                    entry.unpack(&output_path).with_context(|| {
+                        format!("Failed to extract tar.gz file {}", output_path.display())
+                    })?;
+                }
+            }
+
+            Ok(())
+        })
+        .await?
     }
 
     async fn collect_dll_files(&self, root: &Path) -> Result<Vec<PathBuf>> {
@@ -1255,6 +1339,76 @@ impl Default for SecurityScannerService {
 enum ArchiveKind {
     Zip,
     Rar,
+    SevenZ,
+    TarGz,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputArchiveKind {
+    Dll,
+    Zip,
+    Rar,
+    SevenZ,
+    TarGz,
+    Unsupported,
+}
+
+fn archive_kind_for_path(path: &Path) -> InputArchiveKind {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") {
+        return InputArchiveKind::TarGz;
+    }
+
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "dll" => InputArchiveKind::Dll,
+        "zip" => InputArchiveKind::Zip,
+        "rar" => InputArchiveKind::Rar,
+        "7z" => InputArchiveKind::SevenZ,
+        _ => InputArchiveKind::Unsupported,
+    }
+}
+
+fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, String> {
+    let path = Path::new(entry_name);
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(format!(
+            "Archive entry contains an unsafe path: {}",
+            entry_name
+        ));
+    }
+
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => relative.push(value),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "Archive entry contains an unsafe path: {}",
+                    entry_name
+                ))
+            }
+        }
+    }
+
+    if relative.as_os_str().is_empty() {
+        Err(format!(
+            "Archive entry contains an unsafe path: {}",
+            entry_name
+        ))
+    } else {
+        Ok(relative)
+    }
 }
 
 #[cfg(test)]

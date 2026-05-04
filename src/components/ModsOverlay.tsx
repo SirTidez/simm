@@ -1339,7 +1339,7 @@ export function ModsOverlay({
   };
 
   const extractModNameFromFileName = (fileName: string): string => {
-    let modName = fileName.replace(/\.(dll|zip|rar)$/i, '');
+    let modName = fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, '');
 
     modName = modName.replace(/[-_ ]?v?\d+\.\d+(\.\d+)?([-_ ].*)?$/i, '');
     modName = modName.replace(/[-_ ]?\d+\.\d+\.\d+.*$/i, '');
@@ -1348,7 +1348,7 @@ export function ModsOverlay({
 
     modName = modName.trim().replace(/[-_]+/g, ' ').trim();
 
-    return modName || fileName.replace(/\.(dll|zip|rar)$/i, '');
+    return modName || fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, '');
   };
 
   const fuzzyMatchModName = (searchName: string, modName: string): number => {
@@ -1704,7 +1704,7 @@ export function ModsOverlay({
         multiple: true,
         filters: [{
           name: 'Mod Files',
-          extensions: ['dll', 'zip', 'rar']
+          extensions: ['dll', 'zip', 'rar', '7z', 'tar.gz', 'tgz']
         }],
         title: 'Select Mod Files',
       }) as string | { path: string; name?: string } | Array<string | { path: string; name?: string }> | null;
@@ -1737,7 +1737,7 @@ export function ModsOverlay({
     return null;
   };
 
-  const isArchiveFile = (fileName: string): boolean => /\.(zip|rar)$/i.test(fileName);
+  const isArchiveFile = (fileName: string): boolean => /\.(zip|rar|7z|tar\.gz|tgz)$/i.test(fileName);
 
   const handleRuntimeSelectionConfirm = async (selectedRuntime: 'IL2CPP' | 'Mono') => {
     if (!pendingRuntimeSelection) return;
@@ -2832,7 +2832,7 @@ export function ModsOverlay({
               onClick={handleUploadClick}
               className="btn btn-primary btn-small"
               disabled={uploading}
-              title="Add one or more mod files (.dll, .zip, or .rar)"
+              title="Add one or more mod files (.dll, .zip, .rar, .7z, .tar.gz, or .tgz)"
             >
               {uploading ? (
                 <>
@@ -4007,7 +4007,7 @@ export function ModsOverlay({
                     onClick={handleUploadClick}
                     className="btn btn-primary btn-small"
                     disabled={uploading}
-                    title="Add one or more mod files (.dll, .zip, or .rar)"
+                    title="Add one or more mod files (.dll, .zip, .rar, .7z, .tar.gz, or .tgz)"
                   >
                     {uploading ? uploadButtonBusyLabel : 'Add Mod'}
                   </button>

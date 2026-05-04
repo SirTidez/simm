@@ -37,7 +37,12 @@ pub(crate) enum SecurityGateResult {
 
 fn detect_upload_kind(file_path: &str) -> UploadKind {
     let file_path_lower = file_path.to_lowercase();
-    if file_path_lower.ends_with(".zip") || file_path_lower.ends_with(".rar") {
+    if file_path_lower.ends_with(".zip")
+        || file_path_lower.ends_with(".rar")
+        || file_path_lower.ends_with(".7z")
+        || file_path_lower.ends_with(".tar.gz")
+        || file_path_lower.ends_with(".tgz")
+    {
         UploadKind::Archive
     } else if file_path_lower.ends_with(".dll") {
         UploadKind::Dll
@@ -71,7 +76,9 @@ async fn upload_mod_impl(
 
     let upload_kind = detect_upload_kind(&file_path);
     if matches!(upload_kind, UploadKind::Unsupported) {
-        return Err("Only .zip, .rar, and .dll files are supported".to_string());
+        return Err(
+            "Only .zip, .rar, .7z, .tar.gz, .tgz, and .dll files are supported".to_string(),
+        );
     }
 
     let (metadata, security_report) =
@@ -1565,6 +1572,12 @@ mod tests {
         assert_eq!(detect_upload_kind("C:/mods/a.ZIP"), UploadKind::Archive);
         assert_eq!(detect_upload_kind("C:/mods/a.rar"), UploadKind::Archive);
         assert_eq!(detect_upload_kind("C:/mods/a.RAR"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.7z"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.7Z"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.tar.gz"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.TAR.GZ"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.tgz"), UploadKind::Archive);
+        assert_eq!(detect_upload_kind("C:/mods/a.TGZ"), UploadKind::Archive);
         assert_eq!(detect_upload_kind("C:/mods/a.dll"), UploadKind::Dll);
         assert_eq!(detect_upload_kind("C:/mods/a.DLL"), UploadKind::Dll);
         assert_eq!(
@@ -1787,7 +1800,10 @@ mod tests {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         assert!(error.contains("RAR"));
-        assert_ne!(error, "Only .zip, .rar, and .dll files are supported");
+        assert_ne!(
+            error,
+            "Only .zip, .rar, .7z, .tar.gz, .tgz, and .dll files are supported"
+        );
 
         Ok(())
     }

@@ -10,6 +10,7 @@ use crate::types::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
+use flate2::read::GzDecoder;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use reqwest::header::CONTENT_LENGTH;
@@ -67,6 +68,64 @@ enum LinkedSourceProvider {
         mod_id: u32,
         normalized_url: String,
     },
+}
+
+fn archive_format_for_path(path: &Path) -> &'static str {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") {
+        return "tar.gz";
+    }
+
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "7z" => "7z",
+        "rar" => "rar",
+        "zip" => "zip",
+        "dll" => "dll",
+        _ => "zip",
+    }
+}
+
+fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, String> {
+    let path = Path::new(entry_name);
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(format!(
+            "Archive entry contains an unsafe path: {}",
+            entry_name
+        ));
+    }
+
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => relative.push(value),
+            Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "Archive entry contains an unsafe path: {}",
+                    entry_name
+                ))
+            }
+        }
+    }
+
+    if relative.as_os_str().is_empty() {
+        Err(format!(
+            "Archive entry contains an unsafe path: {}",
+            entry_name
+        ))
+    } else {
+        Ok(relative)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4722,11 +4781,7 @@ impl ModsService {
             .await
             .context("Failed to create mod storage UserData directory")?;
 
-        let file_ext = archive_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let file_ext = archive_format_for_path(archive_path);
 
         let mut installed_files = Vec::new();
         if file_ext == "dll" {
@@ -4764,7 +4819,31 @@ impl ModsService {
             fs::create_dir_all(&temp_dir).await?;
 
             let runtime_label = runtime.as_ref().map(|r| Self::runtime_label(r));
-            let result = match file_ext.as_str() {
+            let result = match file_ext {
+                "7z" => {
+                    self.extract_and_install_7z(
+                        archive_path,
+                        &mod_storage_mods,
+                        &mod_storage_plugins,
+                        &mod_storage_userlibs,
+                        &mod_storage_userdata,
+                        &temp_dir,
+                        runtime_label,
+                    )
+                    .await
+                }
+                "tar.gz" => {
+                    self.extract_and_install_tar_gz(
+                        archive_path,
+                        &mod_storage_mods,
+                        &mod_storage_plugins,
+                        &mod_storage_userlibs,
+                        &mod_storage_userdata,
+                        &temp_dir,
+                        runtime_label,
+                    )
+                    .await
+                }
                 "rar" => {
                     self.extract_and_install_rar(
                         archive_path,
@@ -6257,17 +6336,65 @@ exit 1
             .context("Failed to create mod storage UserData directory")?;
 
         // Detect file type and call appropriate extraction function
-        let file_ext = archive_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let file_ext = archive_format_for_path(archive_path);
 
         eprintln!("[DEBUG] Archive file: {}", zip_path);
         eprintln!("[DEBUG] Detected extension: {}", file_ext);
 
         // Extract to storage (extraction methods now copy to mod_storage_base instead of game directories)
-        let installed_files = match file_ext.as_str() {
+        let installed_files = match file_ext {
+            "7z" => {
+                eprintln!("[DEBUG] Using 7z extraction");
+                match self
+                    .extract_and_install_7z(
+                        archive_path,
+                        &mod_storage_mods,
+                        &mod_storage_plugins,
+                        &mod_storage_userlibs,
+                        &mod_storage_userdata,
+                        &temp_dir,
+                        Some(normalized_runtime_label),
+                    )
+                    .await
+                {
+                    Ok(files) => files,
+                    Err(e) => {
+                        let _ = fs::remove_dir_all(&temp_dir).await;
+                        let error_msg = format!("7z extraction failed: {}", e);
+                        eprintln!("[ERROR] {}", error_msg);
+                        return Ok(serde_json::json!({
+                            "success": false,
+                            "error": error_msg
+                        }));
+                    }
+                }
+            }
+            "tar.gz" => {
+                eprintln!("[DEBUG] Using tar.gz extraction");
+                match self
+                    .extract_and_install_tar_gz(
+                        archive_path,
+                        &mod_storage_mods,
+                        &mod_storage_plugins,
+                        &mod_storage_userlibs,
+                        &mod_storage_userdata,
+                        &temp_dir,
+                        Some(normalized_runtime_label),
+                    )
+                    .await
+                {
+                    Ok(files) => files,
+                    Err(e) => {
+                        let _ = fs::remove_dir_all(&temp_dir).await;
+                        let error_msg = format!("tar.gz extraction failed: {}", e);
+                        eprintln!("[ERROR] {}", error_msg);
+                        return Ok(serde_json::json!({
+                            "success": false,
+                            "error": error_msg
+                        }));
+                    }
+                }
+            }
             "rar" => {
                 eprintln!("[DEBUG] Using RAR extraction");
                 match self
@@ -7107,6 +7234,458 @@ exit 1
                 }
             } else if file_name.to_lowercase().ends_with(".dll") {
                 // Check runtime match
+                let file_runtime = self.detect_mod_runtime_from_name(file_name);
+                let matches_runtime = match runtime {
+                    Some(target) => file_runtime == target || file_runtime == "unknown",
+                    None => true,
+                };
+                if matches_runtime {
+                    let dest_path = mods_dir.join(file_name);
+                    fs::copy(&entry_path, &dest_path).await?;
+                    installed_files.push(file_name.to_string());
+                }
+            } else if !is_thunderstore_package
+                || !Self::is_ignored_thunderstore_package_entry(file_name)
+            {
+                self.copy_loose_archive_payload_to_mods(
+                    &entry_path,
+                    file_name,
+                    mods_dir,
+                    runtime,
+                    &mut installed_files,
+                )
+                .await?;
+            }
+        }
+
+        Ok(installed_files)
+    }
+
+    async fn extract_and_install_7z(
+        &self,
+        archive_path: &Path,
+        mods_dir: &Path,
+        plugins_dir: &Path,
+        userlibs_dir: &Path,
+        userdata_dir: &Path,
+        temp_dir: &Path,
+        runtime: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let archive_path = archive_path.to_path_buf();
+        let extract_dir = temp_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            sevenz_rust::decompress_file_with_extract_fn(
+                &archive_path,
+                &extract_dir,
+                |entry, reader, _dest| {
+                    if entry.name().is_empty() && entry.is_directory() {
+                        return Ok(true);
+                    }
+                    let relative_path = safe_archive_relative_path(entry.name())
+                        .map_err(sevenz_rust::Error::other)?;
+                    let output_path = extract_dir.join(relative_path);
+
+                    if entry.is_directory() {
+                        std::fs::create_dir_all(&output_path).map_err(sevenz_rust::Error::io)?;
+                    } else {
+                        if let Some(parent) = output_path.parent() {
+                            std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+                        }
+                        let mut output =
+                            File::create(&output_path).map_err(sevenz_rust::Error::io)?;
+                        std::io::copy(reader, &mut output).map_err(sevenz_rust::Error::io)?;
+                    }
+
+                    Ok(true)
+                },
+            )
+            .context("Failed to extract 7z archive")
+        })
+        .await??;
+
+        let mut installed_files = Vec::new();
+
+        let content_root = self.resolve_archive_content_root(temp_dir).await?;
+        let is_thunderstore_package = content_root.join("manifest.json").exists();
+
+        if let Some(fomod_files) = self
+            .try_extract_fomod_content(
+                &content_root,
+                mods_dir,
+                plugins_dir,
+                userlibs_dir,
+                userdata_dir,
+                runtime,
+            )
+            .await?
+        {
+            return Ok(fomod_files);
+        }
+
+        let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(&content_root).await?;
+
+        let mut entries = fs::read_dir(&content_root).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let file_name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            let metadata = fs::metadata(&entry_path).await?;
+
+            if metadata.is_dir() {
+                let dir_name = file_name.to_lowercase();
+
+                if has_il2cpp_dir || has_mono_dir {
+                    let dir_runtime = self.detect_mod_runtime_from_name(file_name);
+                    let is_runtime_dir =
+                        dir_runtime == RUNTIME_IL2CPP || dir_runtime == RUNTIME_MONO;
+                    let should_process = match runtime {
+                        Some(target) => dir_runtime == target,
+                        None => is_runtime_dir,
+                    };
+
+                    if is_runtime_dir && should_process {
+                        let mods_path = entry_path.join("mods");
+                        let plugins_path = entry_path.join("plugins");
+                        let userlibs_path = entry_path.join("userlibs");
+                        let userdata_path = entry_path.join("userdata");
+
+                        if mods_path.exists() {
+                            self.copy_directory_filtered(
+                                &mods_path,
+                                mods_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
+                        }
+                        if plugins_path.exists() {
+                            self.copy_directory_filtered(
+                                &plugins_path,
+                                plugins_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
+                        }
+                        if userlibs_path.exists() {
+                            Box::pin(self.copy_directory_recursive(&userlibs_path, userlibs_dir))
+                                .await?;
+                        }
+                        if userdata_path.exists() {
+                            Box::pin(self.copy_directory_recursive(&userdata_path, userdata_dir))
+                                .await?;
+                        }
+
+                        let mut runtime_entries = fs::read_dir(&entry_path).await?;
+                        while let Some(runtime_entry) = runtime_entries.next_entry().await? {
+                            let runtime_entry_path = runtime_entry.path();
+                            let runtime_file_name = runtime_entry_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+
+                            let runtime_lower_name = runtime_file_name.to_ascii_lowercase();
+                            if matches!(
+                                runtime_lower_name.as_str(),
+                                "mods" | "plugins" | "userlibs" | "userdata"
+                            ) {
+                                continue;
+                            }
+                            if is_thunderstore_package
+                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
+                            {
+                                continue;
+                            }
+
+                            self.copy_loose_archive_payload_to_mods(
+                                &runtime_entry_path,
+                                runtime_file_name,
+                                mods_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
+                        }
+                    }
+                    if is_runtime_dir {
+                        continue;
+                    }
+                }
+
+                if dir_name == "mods" {
+                    self.copy_directory_filtered(
+                        &entry_path,
+                        mods_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
+                } else if dir_name == "plugins" {
+                    self.copy_directory_filtered(
+                        &entry_path,
+                        plugins_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
+                } else if dir_name == "userlibs" {
+                    Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
+                } else if dir_name == "userdata" {
+                    Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
+                } else if !is_thunderstore_package
+                    || !Self::is_ignored_thunderstore_package_entry(file_name)
+                {
+                    self.copy_loose_archive_payload_to_mods(
+                        &entry_path,
+                        file_name,
+                        mods_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
+                }
+            } else if file_name.to_lowercase().ends_with(".dll") {
+                let file_runtime = self.detect_mod_runtime_from_name(file_name);
+                let matches_runtime = match runtime {
+                    Some(target) => file_runtime == target || file_runtime == "unknown",
+                    None => true,
+                };
+                if matches_runtime {
+                    let dest_path = mods_dir.join(file_name);
+                    fs::copy(&entry_path, &dest_path).await?;
+                    installed_files.push(file_name.to_string());
+                }
+            } else if !is_thunderstore_package
+                || !Self::is_ignored_thunderstore_package_entry(file_name)
+            {
+                self.copy_loose_archive_payload_to_mods(
+                    &entry_path,
+                    file_name,
+                    mods_dir,
+                    runtime,
+                    &mut installed_files,
+                )
+                .await?;
+            }
+        }
+
+        Ok(installed_files)
+    }
+
+    async fn extract_and_install_tar_gz(
+        &self,
+        archive_path: &Path,
+        mods_dir: &Path,
+        plugins_dir: &Path,
+        userlibs_dir: &Path,
+        userdata_dir: &Path,
+        temp_dir: &Path,
+        runtime: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let archive_path = archive_path.to_path_buf();
+        let extract_dir = temp_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = File::open(&archive_path).context("Failed to open tar.gz archive")?;
+            let decoder = GzDecoder::new(file);
+            let mut archive = tar::Archive::new(decoder);
+
+            for entry in archive.entries().context("Failed to read tar.gz archive")? {
+                let mut entry = entry.context("Failed to read tar.gz entry")?;
+                let entry_path = entry.path().context("Failed to read tar.gz entry path")?;
+                let entry_name = entry_path.to_string_lossy().replace('\\', "/");
+                let relative_path = safe_archive_relative_path(&entry_name)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                let output_path = extract_dir.join(relative_path);
+
+                let entry_type = entry.header().entry_type();
+                if entry_type.is_dir() {
+                    std::fs::create_dir_all(&output_path).with_context(|| {
+                        format!("Failed to create directory {}", output_path.display())
+                    })?;
+                } else if entry_type.is_file() {
+                    if let Some(parent) = output_path.parent() {
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("Failed to create directory {}", parent.display())
+                        })?;
+                    }
+                    entry.unpack(&output_path).with_context(|| {
+                        format!("Failed to extract tar.gz file {}", output_path.display())
+                    })?;
+                }
+            }
+
+            Ok(())
+        })
+        .await??;
+
+        self.install_extracted_archive_content(
+            temp_dir,
+            mods_dir,
+            plugins_dir,
+            userlibs_dir,
+            userdata_dir,
+            runtime,
+        )
+        .await
+    }
+
+    async fn install_extracted_archive_content(
+        &self,
+        temp_dir: &Path,
+        mods_dir: &Path,
+        plugins_dir: &Path,
+        userlibs_dir: &Path,
+        userdata_dir: &Path,
+        runtime: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let mut installed_files = Vec::new();
+
+        let content_root = self.resolve_archive_content_root(temp_dir).await?;
+        let is_thunderstore_package = content_root.join("manifest.json").exists();
+
+        if let Some(fomod_files) = self
+            .try_extract_fomod_content(
+                &content_root,
+                mods_dir,
+                plugins_dir,
+                userlibs_dir,
+                userdata_dir,
+                runtime,
+            )
+            .await?
+        {
+            return Ok(fomod_files);
+        }
+
+        let (has_il2cpp_dir, has_mono_dir) = self.detect_runtime_directories(&content_root).await?;
+
+        let mut entries = fs::read_dir(&content_root).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let file_name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            let metadata = fs::metadata(&entry_path).await?;
+
+            if metadata.is_dir() {
+                let dir_name = file_name.to_lowercase();
+
+                if has_il2cpp_dir || has_mono_dir {
+                    let dir_runtime = self.detect_mod_runtime_from_name(file_name);
+                    let is_runtime_dir =
+                        dir_runtime == RUNTIME_IL2CPP || dir_runtime == RUNTIME_MONO;
+                    let should_process = match runtime {
+                        Some(target) => dir_runtime == target,
+                        None => is_runtime_dir,
+                    };
+
+                    if is_runtime_dir && should_process {
+                        let mods_path = entry_path.join("mods");
+                        let plugins_path = entry_path.join("plugins");
+                        let userlibs_path = entry_path.join("userlibs");
+                        let userdata_path = entry_path.join("userdata");
+
+                        if mods_path.exists() {
+                            self.copy_directory_filtered(
+                                &mods_path,
+                                mods_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
+                        }
+                        if plugins_path.exists() {
+                            self.copy_directory_filtered(
+                                &plugins_path,
+                                plugins_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
+                        }
+                        if userlibs_path.exists() {
+                            Box::pin(self.copy_directory_recursive(&userlibs_path, userlibs_dir))
+                                .await?;
+                        }
+                        if userdata_path.exists() {
+                            Box::pin(self.copy_directory_recursive(&userdata_path, userdata_dir))
+                                .await?;
+                        }
+
+                        let mut runtime_entries = fs::read_dir(&entry_path).await?;
+                        while let Some(runtime_entry) = runtime_entries.next_entry().await? {
+                            let runtime_entry_path = runtime_entry.path();
+                            let runtime_file_name = runtime_entry_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("");
+
+                            let runtime_lower_name = runtime_file_name.to_ascii_lowercase();
+                            if matches!(
+                                runtime_lower_name.as_str(),
+                                "mods" | "plugins" | "userlibs" | "userdata"
+                            ) {
+                                continue;
+                            }
+                            if is_thunderstore_package
+                                && Self::is_ignored_thunderstore_package_entry(runtime_file_name)
+                            {
+                                continue;
+                            }
+
+                            self.copy_loose_archive_payload_to_mods(
+                                &runtime_entry_path,
+                                runtime_file_name,
+                                mods_dir,
+                                runtime,
+                                &mut installed_files,
+                            )
+                            .await?;
+                        }
+                    }
+                    if is_runtime_dir {
+                        continue;
+                    }
+                }
+
+                if dir_name == "mods" {
+                    self.copy_directory_filtered(
+                        &entry_path,
+                        mods_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
+                } else if dir_name == "plugins" {
+                    self.copy_directory_filtered(
+                        &entry_path,
+                        plugins_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
+                } else if dir_name == "userlibs" {
+                    Box::pin(self.copy_directory_recursive(&entry_path, userlibs_dir)).await?;
+                } else if dir_name == "userdata" {
+                    Box::pin(self.copy_directory_recursive(&entry_path, userdata_dir)).await?;
+                } else if !is_thunderstore_package
+                    || !Self::is_ignored_thunderstore_package_entry(file_name)
+                {
+                    self.copy_loose_archive_payload_to_mods(
+                        &entry_path,
+                        file_name,
+                        mods_dir,
+                        runtime,
+                        &mut installed_files,
+                    )
+                    .await?;
+                }
+            } else if file_name.to_lowercase().ends_with(".dll") {
                 let file_runtime = self.detect_mod_runtime_from_name(file_name);
                 let matches_runtime = match runtime {
                     Some(target) => file_runtime == target || file_runtime == "unknown",
@@ -9509,6 +10088,110 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .contains("zip"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_extracts_7z_archives() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let payload_dir = temp.path().join("payload");
+        let payload_mods = payload_dir.join("Mods");
+        fs::create_dir_all(&payload_mods).await?;
+        fs::write(payload_mods.join("SevenZipExample.dll"), b"assembly").await?;
+        let archive_path = temp.path().join("SevenZipExample.7z");
+        sevenz_rust::compress_to_path(&payload_dir, &archive_path)?;
+
+        let game_dir = temp.path().join("game");
+        fs::create_dir_all(&game_dir).await?;
+        let result = service
+            .install_zip_mod(
+                game_dir.to_string_lossy().as_ref(),
+                archive_path.to_string_lossy().as_ref(),
+                "SevenZipExample.7z",
+                "IL2CPP",
+                "main",
+                None,
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            service
+                .path_exists_or_symlink(&game_dir.join("Mods").join("SevenZipExample.dll"))
+                .await
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_extracts_tar_gz_archives() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let payload_dll = temp.path().join("TarGzExample.dll");
+        fs::write(&payload_dll, b"assembly").await?;
+        let archive_path = temp.path().join("TarGzExample.tar.gz");
+        {
+            let archive_file = File::create(&archive_path)?;
+            let encoder =
+                flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            archive.append_path_with_name(&payload_dll, "Mods/TarGzExample.dll")?;
+            let encoder = archive.into_inner()?;
+            encoder.finish()?;
+        }
+
+        let game_dir = temp.path().join("game");
+        fs::create_dir_all(&game_dir).await?;
+        let result = service
+            .install_zip_mod(
+                game_dir.to_string_lossy().as_ref(),
+                archive_path.to_string_lossy().as_ref(),
+                "TarGzExample.tar.gz",
+                "IL2CPP",
+                "main",
+                None,
+            )
+            .await?;
+
+        assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            service
+                .path_exists_or_symlink(&game_dir.join("Mods").join("TarGzExample.dll"))
+                .await
+        );
 
         Ok(())
     }

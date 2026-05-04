@@ -408,7 +408,7 @@ const formatVersionTag = (value?: string): string => {
 };
 
 const stripFileExtension = (fileName: string): string =>
-  fileName.replace(/\.(dll|zip|rar)$/i, "");
+  fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, "");
 
 const detectRuntimeFromFileName = (
   fileName: string,
@@ -4639,7 +4639,7 @@ export function ModLibraryOverlay({
         filters: [
           {
             name: "Mod Files",
-            extensions: ["dll", "zip", "rar"],
+            extensions: ["dll", "zip", "rar", "7z", "tar.gz", "tgz"],
           },
         ],
         title: "Select Mod Files",
