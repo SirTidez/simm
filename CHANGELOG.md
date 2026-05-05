@@ -3,9 +3,11 @@
 ## [0.8.5]
 
 - Began the next UI redesign pass while refining release flow behavior, frontend contract sync, featured Thunderstore library curation, and related commit message handling.
+- Expanded the redesign into a new desktop workspace shell with a Home dashboard/news feed, reusable page headers, collapsible sidebar sections, focused environment interactions, refreshed overlay layouts, and supporting UI polish across the app.
+- Switched the frontend/dev workflow guidance over to `bun`/`bunx`, added project ESLint configuration, and followed up with fixes for mod source links and latest-version fallback behavior in the mods flow.
 - Contributors:
   - `SirTidez`: release-flow refinement, frontend contract sync, featured SteamNetworkLib curation, and related commit-message handling. Timestamps: `2026-05-03 17:27:10 PDT`, `2026-05-03 17:49:35 PDT`, `2026-05-03 18:12:00 PDT`
-  - `ifBars`: initial UI redesign work for the next release line. Timestamps: `2026-05-04 01:38:44 PDT`
+  - `ifBars`: initial UI redesign work for the next release line, Home dashboard/news feed, new workspace shell and reusable page headers, collapsible sidebar navigation, `bun`/`bunx` workflow updates, ESLint setup, and mods-flow fixes for source links and latest-version fallback. Timestamps: `2026-05-04 01:38:44 PDT`, `2026-05-04 23:33:07 PDT`, `2026-05-04 23:41:24 PDT`
 
 ## [0.8.4]
 
