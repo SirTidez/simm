@@ -1615,6 +1615,10 @@ export class ApiService {
     return invoke('open_path', { path });
   }
 
+  static async openExternalUrl(url: string): Promise<void> {
+    return invoke('open_external_url', { url });
+  }
+
   static async revealPath(path: string): Promise<void> {
     return invoke('reveal_path', { path });
   }

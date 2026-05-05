@@ -213,6 +213,7 @@ fn main() {
             // Filesystem
             commands::filesystem::open_folder,
             commands::filesystem::open_path,
+            commands::filesystem::open_external_url,
             commands::filesystem::reveal_path,
             commands::filesystem::launch_game,
             commands::filesystem::browse_directory,

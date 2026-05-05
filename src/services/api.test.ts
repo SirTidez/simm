@@ -334,6 +334,7 @@ describe('ApiService', () => {
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
     ['refreshThunderstorePackageCache', () => ApiService.refreshThunderstorePackageCache('schedule-i'), 'refresh_thunderstore_package_cache', { gameId: 'schedule-i' }],
     ['openPath', () => ApiService.openPath('C:/test/file.cfg'), 'open_path', { path: 'C:/test/file.cfg' }],
+    ['openExternalUrl', () => ApiService.openExternalUrl('https://example.com/mod'), 'open_external_url', { url: 'https://example.com/mod' }],
     ['revealPath', () => ApiService.revealPath('C:/test/file.cfg'), 'reveal_path', { path: 'C:/test/file.cfg' }],
   ])('%s invokes correct command contract', async (_label, call, command, payload) => {
     invokeMock.mockResolvedValueOnce({ success: true });

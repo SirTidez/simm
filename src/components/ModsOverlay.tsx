@@ -46,6 +46,12 @@ interface ModInfo {
   securityScan?: SecurityScanSummary;
 }
 
+type ModUpdateInfo = {
+  updateAvailable: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+};
+
 export interface ModViewState {
   id: string;
   storageId?: string;
@@ -129,6 +135,20 @@ const normalizeNexusRuntime = (value?: string | null): 'IL2CPP' | 'Mono' | undef
 const normalizeNexusId = (value: unknown): number | null => {
   const numeric = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+
+const managedRemoteSources = new Set(['thunderstore', 'nexusmods', 'github']);
+
+const getInstalledModLatestVersion = (mod: ModInfo, update?: ModUpdateInfo): string | undefined => {
+  if (update?.latestVersion) {
+    return update.latestVersion;
+  }
+
+  if (mod.managed && mod.source && managedRemoteSources.has(mod.source) && mod.version) {
+    return mod.version;
+  }
+
+  return undefined;
 };
 
 export interface ModsOverlayNavigationState {
@@ -453,7 +473,7 @@ export function ModsOverlay({
   const [nexusRequiresSiteConfirmation, setNexusRequiresSiteConfirmation] = useState<boolean>(true);
 
   // Mod updates state
-  const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
+  const [modUpdates, setModUpdates] = useState<Map<string, ModUpdateInfo>>(new Map());
   const [checkingModUpdates, setCheckingModUpdates] = useState(false);
   const [updatingMod, setUpdatingMod] = useState<string | null>(null);
   const [updatingAllMods, setUpdatingAllMods] = useState(false);
@@ -516,7 +536,9 @@ export function ModsOverlay({
     if (!safeUrl) {
       return;
     }
-    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+    void ApiService.openExternalUrl(safeUrl).catch((err) => {
+      setError(getErrorMessage(err, 'Failed to open source page'));
+    });
   }, []);
   const getUpdateDisabledReason = useCallback((mod: ModInfo, updateAvailable?: boolean) => {
     if (!(mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github')) {
@@ -844,7 +866,7 @@ export function ModsOverlay({
   const loadCachedModUpdates = async () => {
     try {
       const summary = await ApiService.getModUpdatesSummary(environmentId);
-      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
+      const updatesMap = new Map<string, ModUpdateInfo>();
       for (const update of summary.updates || []) {
         updatesMap.set(update.modFileName, {
           updateAvailable: true,
@@ -853,7 +875,7 @@ export function ModsOverlay({
         });
       }
       setModUpdates(updatesMap);
-      onModUpdatesChecked?.(summary.count || updatesMap.size);
+      onModUpdatesChecked?.(summary.count ?? updatesMap.size);
     } catch (err) {
       console.warn('Failed to load cached mod update summary:', err);
     }
@@ -1069,7 +1091,7 @@ export function ModsOverlay({
   const checkModUpdates = async (showErrors: boolean = false) => {
     try {
       const updates = await ApiService.checkModUpdates(environmentId);
-      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
+      const updatesMap = new Map<string, ModUpdateInfo>();
       updates.forEach(update => {
         updatesMap.set(update.modFileName, {
           updateAvailable: update.updateAvailable,
@@ -2532,7 +2554,7 @@ export function ModsOverlay({
       updatedAt: mod.updatedAt,
       tags: mod.tags,
       installedVersion: mod.version,
-      latestVersion: update?.latestVersion,
+      latestVersion: getInstalledModLatestVersion(mod, update),
       installedAt: mod.installedAt,
       securityScan: mod.securityScan,
       kind: 'installed',
@@ -3843,16 +3865,14 @@ export function ModsOverlay({
                   </button>
                 )}
                 {activeModViewSourceUrl && (
-                  <a
-                    href={activeModViewSourceUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
                     className="btn btn-secondary btn-small"
-                    style={{ textDecoration: 'none' }}
+                    onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}
                   >
                     <Icon name="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }} />
                     Open Source Page
-                  </a>
+                  </button>
                 )}
                 <button className="btn btn-secondary btn-small" onClick={closeModView}>
                   Close
@@ -4604,7 +4624,7 @@ export function ModsOverlay({
                 <div className="workspace-inspector-card__metrics">
                   <div><span>Status</span><strong>{selectedInstalledMod.disabled ? 'Disabled' : 'Enabled'}</strong></div>
                   <div><span>Installed</span><strong>{selectedInstalledMod.version || 'unknown'}</strong></div>
-                  <div><span>Latest</span><strong>{modUpdates.get(selectedInstalledMod.fileName)?.latestVersion || 'unknown'}</strong></div>
+                  <div><span>Latest</span><strong>{getInstalledModLatestVersion(selectedInstalledMod, modUpdates.get(selectedInstalledMod.fileName)) || 'unknown'}</strong></div>
                 </div>
                 <div className="workspace-inspector-card__actions">
                   {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
