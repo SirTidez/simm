@@ -580,6 +580,13 @@ function AppContent() {
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
   const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
+  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string | null>(null);
+  const [environmentFocusRequestId, setEnvironmentFocusRequestId] = useState(0);
+  const [launchingEnvironmentId, setLaunchingEnvironmentId] = useState<string | null>(null);
+  const [collapsedShellSections, setCollapsedShellSections] = useState({
+    environments: false,
+    tools: false,
+  });
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
   const startupSetupCheckedRef = useRef(false);
@@ -712,6 +719,29 @@ function AppContent() {
   const getEnvironmentById = useCallback((environmentId: string) => {
     return environments.find((env) => env.id === environmentId) ?? null;
   }, [environments]);
+
+  useEffect(() => {
+    if ('environmentId' in activeWorkspace) {
+      setSelectedEnvironmentId(activeWorkspace.environmentId);
+      localStorage.setItem(LAST_ENV_KEY, activeWorkspace.environmentId);
+      return;
+    }
+
+    setSelectedEnvironmentId((previous) => {
+      if (previous && environments.some((environment) => environment.id === previous)) {
+        return previous;
+      }
+
+      const storedEnvironmentId = localStorage.getItem(LAST_ENV_KEY);
+      if (storedEnvironmentId && environments.some((environment) => environment.id === storedEnvironmentId)) {
+        return storedEnvironmentId;
+      }
+
+      return environments.find((environment) => environment.status === 'completed')?.id
+        ?? environments[0]?.id
+        ?? null;
+    });
+  }, [activeWorkspace, environments]);
 
   const handleInitialDetectionComplete = useCallback(() => {
     setShowStartupSplash(false);
@@ -1290,6 +1320,8 @@ function AppContent() {
           <EnvironmentList
             onInitialDetectionComplete={handleInitialDetectionComplete}
             onOpenWorkspace={openWorkspace}
+            focusedEnvironmentId={selectedEnvironmentId}
+            focusedEnvironmentRequestId={environmentFocusRequestId}
           />
         );
       case 'accounts':
@@ -1389,7 +1421,7 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, getEnvironmentById, handleInitialDetectionComplete, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, settings, skipSetupGuide, updateWorkspaceEntry]);
+  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, handleInitialDetectionComplete, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
@@ -1414,9 +1446,17 @@ function AppContent() {
   const currentEnvironmentId =
     'environmentId' in activeWorkspace
       ? activeWorkspace.environmentId
-      : localStorage.getItem(LAST_ENV_KEY) ?? environments.find((env) => env.status === 'completed')?.id ?? environments[0]?.id ?? null;
+      : selectedEnvironmentId
+        ?? localStorage.getItem(LAST_ENV_KEY)
+        ?? environments.find((env) => env.status === 'completed')?.id
+        ?? environments[0]?.id
+        ?? null;
+  const currentEnvironment = currentEnvironmentId ? getEnvironmentById(currentEnvironmentId) : null;
+  const isShellLaunchInProgress = currentEnvironmentId !== null && launchingEnvironmentId === currentEnvironmentId;
   const downloadsInProgress = environments.filter((env) => env.status === 'downloading').length;
-  const openEnvironmentsWorkspace = () => openWorkspace({ view: 'environments' });
+  const openEnvironmentsWorkspace = useCallback(() => {
+    openWorkspace({ view: 'environments' });
+  }, [openWorkspace]);
   const openEnvironmentWorkspace = (view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
     if (!currentEnvironmentId) {
       openWorkspace({ view: 'wizard' });
@@ -1424,7 +1464,71 @@ function AppContent() {
     }
     pushWorkspace({ view, environmentId: currentEnvironmentId });
   };
-  const primaryNavItems = [
+  const toggleShellSection = (section: 'environments' | 'tools') => {
+    setCollapsedShellSections((previous) => ({
+      ...previous,
+      [section]: !previous[section],
+    }));
+  };
+  const handleShellEnvironmentSelect = useCallback((environmentId: string) => {
+    setSelectedEnvironmentId(environmentId);
+    setEnvironmentFocusRequestId((previous) => previous + 1);
+    localStorage.setItem(LAST_ENV_KEY, environmentId);
+
+    switch (activeWorkspace.view) {
+      case 'mods':
+        openWorkspace({
+          view: 'mods',
+          environmentId,
+          initialTab: activeWorkspace.initialTab,
+        });
+        return;
+      case 'plugins':
+        openWorkspace({ view: 'plugins', environmentId });
+        return;
+      case 'userLibs':
+        openWorkspace({ view: 'userLibs', environmentId });
+        return;
+      case 'logs':
+        openWorkspace({ view: 'logs', environmentId });
+        return;
+      case 'config':
+        openWorkspace({ view: 'config', environmentId });
+        return;
+      case 'home':
+      case 'environments':
+      case 'wizard':
+        openEnvironmentsWorkspace();
+        return;
+      default:
+        return;
+    }
+  }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace]);
+  const handleShellLaunchGame = useCallback(async () => {
+    if (!currentEnvironmentId) {
+      openWorkspace({ view: 'wizard' });
+      return;
+    }
+
+    try {
+      setLaunchingEnvironmentId(currentEnvironmentId);
+      const result = await ApiService.launchGame(currentEnvironmentId, 'steam');
+      if (!result.success) {
+        throw new Error('Launch request was not accepted.');
+      }
+    } catch (error) {
+      await message(
+        error instanceof Error ? error.message : 'Failed to launch the selected environment.',
+        {
+          title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
+          kind: 'error',
+        },
+      );
+    } finally {
+      setLaunchingEnvironmentId(null);
+    }
+  }, [currentEnvironment, currentEnvironmentId, openWorkspace]);
+  const toolNavItems = [
     {
       key: 'home',
       label: 'Home',
@@ -1467,23 +1571,70 @@ function AppContent() {
       active: activeWorkspace.view === 'logs',
       onClick: () => openEnvironmentWorkspace('logs'),
     },
+    {
+      key: 'downloads',
+      label: 'Downloads',
+      icon: 'download',
+      active: false,
+      badge: downloadsInProgress,
+      onClick: goHome,
+    },
   ] as const;
-  const secondaryNavItems = [
+  const utilityActions = [
+    {
+      key: 'launch',
+      label: isShellLaunchInProgress ? 'Launching...' : 'Launch Game',
+      icon: isShellLaunchInProgress ? 'spinner' : 'play',
+      active: false,
+      variant: 'btn-primary' as const,
+      onClick: handleShellLaunchGame,
+      disabled: launchingEnvironmentId !== null || !currentEnvironmentId,
+      title: currentEnvironment
+        ? `Launch ${currentEnvironment.name} via Steam`
+        : 'Select or create an environment to launch the game',
+    },
+    {
+      key: 'wizard',
+      label: 'Add Environment',
+      icon: 'plus',
+      active: activeWorkspace.view === 'wizard',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'wizard' }),
+      disabled: false,
+      title: 'Create or import another environment',
+    },
     {
       key: 'accounts',
       label: 'Accounts',
       icon: 'userCircle',
       active: activeWorkspace.view === 'accounts',
+      variant: 'btn-secondary' as const,
       onClick: () => openWorkspace({ view: 'accounts' }),
+      disabled: false,
+      title: 'Open connected accounts and services',
     },
     {
       key: 'help',
-      label: 'Troubleshooting',
-      icon: 'wrench',
+      label: 'Help',
+      icon: 'circleQuestion',
       active: activeWorkspace.view === 'help',
+      variant: 'btn-secondary' as const,
       onClick: () => openWorkspace({ view: 'help' }),
+      disabled: false,
+      title: 'Open help and troubleshooting guidance',
+    },
+    {
+      key: 'settings',
+      label: 'Settings',
+      icon: 'cog',
+      active: activeWorkspace.view === 'settings',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'settings' }),
+      disabled: false,
+      title: 'Open application settings',
     },
   ] as const;
+  const sortedEnvironments = [...environments].sort((left, right) => left.name.localeCompare(right.name));
 
   return (
     <div className="app app-desktop-shell">
@@ -1497,6 +1648,23 @@ function AppContent() {
           </div>
 
           <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
+
+          <div className="window-toolbar-actions window-toolbar-actions--shell" aria-label="Shell actions">
+            {utilityActions.map((action) => (
+              <button
+                key={action.key}
+                type="button"
+                className={`btn ${action.variant} app-shell-toolbar-button${action.active ? ' app-shell-toolbar-button--active' : ''}`}
+                onClick={action.onClick}
+                aria-current={action.active ? 'page' : undefined}
+                disabled={action.disabled}
+                title={action.title}
+              >
+                <Icon name={action.icon} spin={action.key === 'launch' && isShellLaunchInProgress} />
+                <span>{action.label}</span>
+              </button>
+            ))}
+          </div>
 
           <div className="window-controls" aria-label="Window controls">
             <button
@@ -1526,53 +1694,79 @@ function AppContent() {
           </div>
         </header>
         <div className="app-body">
-          <aside className="app-primary-nav" aria-label="Primary navigation">
-            <div className="app-primary-nav__group">
-              {primaryNavItems.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={`app-primary-nav__item${item.active ? ' app-primary-nav__item--active' : ''}`}
-                  onClick={item.onClick}
-                  aria-current={item.active ? 'page' : undefined}
-                >
-                  <Icon name={item.icon} />
-                  <span>{item.label}</span>
-                </button>
-              ))}
+          <aside className="app-shell-sidebar" aria-label="Primary navigation">
+            <section className="app-shell-sidebar__section">
               <button
                 type="button"
-                className="app-primary-nav__item"
-                onClick={goHome}
+                className="app-shell-sidebar__section-toggle"
+                onClick={() => toggleShellSection('environments')}
+                aria-expanded={!collapsedShellSections.environments}
               >
-                <Icon name="download" />
-                <span>Downloads</span>
-                <span className="app-primary-nav__badge">{downloadsInProgress}</span>
+                <span>Environments</span>
+                <Icon name={collapsedShellSections.environments ? 'chevronRight' : 'chevronDown'} />
               </button>
-            </div>
-            <div className="app-primary-nav__group app-primary-nav__group--system">
-              {secondaryNavItems.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={`app-primary-nav__item${item.active ? ' app-primary-nav__item--active' : ''}`}
-                  onClick={item.onClick}
-                  aria-current={item.active ? 'page' : undefined}
-                >
-                  <Icon name={item.icon} />
-                  <span>{item.label}</span>
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className={`app-primary-nav__item app-primary-nav__item--settings${activeWorkspace.view === 'settings' ? ' app-primary-nav__item--active' : ''}`}
-              onClick={() => openWorkspace({ view: 'settings' })}
-              aria-current={activeWorkspace.view === 'settings' ? 'page' : undefined}
-            >
-              <Icon name="cog" />
-              <span>Settings</span>
-            </button>
+              {!collapsedShellSections.environments && (
+                <div className="app-shell-sidebar__section-body">
+                  {sortedEnvironments.length > 0 ? (
+                    <div className="app-shell-sidebar__environment-list">
+                      {sortedEnvironments.map((environment) => (
+                        <button
+                          key={environment.id}
+                          type="button"
+                          className={`app-shell-sidebar__environment-item${currentEnvironmentId === environment.id ? ' app-shell-sidebar__environment-item--active' : ''}`}
+                          onClick={() => handleShellEnvironmentSelect(environment.id)}
+                          aria-current={currentEnvironmentId === environment.id ? 'page' : undefined}
+                          title={environment.name}
+                        >
+                          <span className="app-shell-sidebar__environment-name">{environment.name}</span>
+                          {environment.updateAvailable ? (
+                            <span className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
+                              Update
+                            </span>
+                          ) : environment.status === 'completed' ? (
+                            <span className="app-shell-sidebar__environment-meta">Ready</span>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="app-shell-sidebar__empty">
+                      <span>No environments yet.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+            <section className="app-shell-sidebar__section">
+              <button
+                type="button"
+                className="app-shell-sidebar__section-toggle"
+                onClick={() => toggleShellSection('tools')}
+                aria-expanded={!collapsedShellSections.tools}
+              >
+                <span>Tools</span>
+                <Icon name={collapsedShellSections.tools ? 'chevronRight' : 'chevronDown'} />
+              </button>
+              {!collapsedShellSections.tools && (
+                <div className="app-shell-sidebar__section-body">
+                  <div className="app-shell-sidebar__tool-list">
+                    {toolNavItems.map((item) => (
+                      <button
+                        key={item.key}
+                        type="button"
+                        className={`app-shell-sidebar__tool-item${item.active ? ' app-shell-sidebar__tool-item--active' : ''}`}
+                        onClick={item.onClick}
+                        aria-current={item.active ? 'page' : undefined}
+                      >
+                        <Icon name={item.icon} />
+                        <span>{item.label}</span>
+                        {'badge' in item ? <span className="app-shell-sidebar__tool-badge">{item.badge}</span> : null}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
           </aside>
           <div className="app-content workspace-active">
             {activeWorkspace.view === 'home' ? (

@@ -103,26 +103,32 @@ The installed Windows app is also marked `requireAdministrator`, so every launch
 ### Run Full App (Tauri + Vite)
 
 ```bash
-npm run tauri dev
+bun run tauri dev
 ```
 
 ### Run Frontend Only
 
 ```bash
-npm run dev
+bun run dev
 ```
 
 ### Build
 
 ```bash
-npm run build
-npm run tauri build
+bun run build
+bun run tauri build
 ```
 
 ### Type Check
 
 ```bash
-npx tsc --noEmit
+bunx tsc --noEmit
+```
+
+### Lint
+
+```bash
+bun run lint
 ```
 
 ### Rust Checks

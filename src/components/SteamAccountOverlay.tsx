@@ -3,6 +3,7 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface NexusOAuthStatus {
   connected: boolean;
@@ -177,9 +178,11 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
         className="modal-content workspace-panel accounts-panel"
         aria-label="Account panel"
       >
-        <div className="modal-header">
-          <h2>Accounts</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow="Workspace"
+          title="Accounts"
+          description="Manage Steam and Nexus access, account capabilities, and local credential storage."
+        />
 
         <div className="accounts-pane">
           <div className="accounts-overview">

@@ -4,6 +4,7 @@ import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface UserLibInfo {
   name: string;
@@ -189,9 +190,11 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
 
   return (
     <div className="mods-overlay workspace-collection-shell">
-      <div className="modal-header">
-        <h2>User Libraries</h2>
-      </div>
+      <WorkspacePageHeader
+        eyebrow={environment?.name || 'Environment'}
+        title="UserLibs"
+        description={`Manage shared runtime libraries and UserLibs folder contents for ${environment?.name || 'this environment'}.`}
+      />
 
       <div className="workspace-collection">
         <div className="workspace-collection__main">

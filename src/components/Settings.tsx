@@ -12,6 +12,7 @@ import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 type SettingsProps = {
   isOpen: boolean;
@@ -661,9 +662,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
           className="modal-content workspace-panel settings-panel"
           aria-label="Settings panel"
         >
-          <div className="modal-header">
-            <h2>Settings</h2>
-          </div>
+          <WorkspacePageHeader
+            eyebrow="Workspace"
+            title="Settings"
+            description="Adjust appearance, download locations, update checks, diagnostics, and setup defaults."
+          />
 
           {error && <div className="settings-error-banner">{error}</div>}
 

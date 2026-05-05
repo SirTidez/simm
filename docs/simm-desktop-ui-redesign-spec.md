@@ -411,6 +411,7 @@ Required frontend validation:
 ```powershell
 bun install --prefer-offline
 bunx tsc --noEmit
+bun run lint
 bun run test
 bun run build
 ```

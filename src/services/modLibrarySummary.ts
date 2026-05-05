@@ -1,7 +1,7 @@
 import type { ModLibraryEntry, ModLibraryResult } from '../types';
 
 const runtimeSuffixPatterns = [
-  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
+  /\s*(?:\(|\[)\s*(mono|il2cpp)\s*(?:\)|\])\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
   /\s+(mono|il2cpp)\s*$/i,
 ];

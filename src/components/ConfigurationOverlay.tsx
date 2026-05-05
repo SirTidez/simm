@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent as R
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 import type {
   ConfigDocument,
   ConfigEditOperation,
@@ -737,14 +738,11 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
         isNested
       />
 
-      <div className="modal-header">
-        <div>
-          <h2>Configuration</h2>
-          <p className="config-editor__subtitle">
-            Manage loader, mod, and auxiliary configuration files for {environment.name}.
-          </p>
-        </div>
-      </div>
+      <WorkspacePageHeader
+        eyebrow={environment.name}
+        title="Configuration"
+        description={`Manage loader, mod, and auxiliary configuration files for ${environment.name}.`}
+      />
 
       {error && <div className="settings-error-banner">{error}</div>}
 

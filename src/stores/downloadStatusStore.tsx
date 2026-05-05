@@ -195,15 +195,17 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
 
     void bindListeners();
 
+    const removalTimers = removalTimersRef.current;
+
     return () => {
       unlistenProgress?.();
       unlistenComplete?.();
       unlistenError?.();
       unlistenTrackedDownload?.();
-      for (const timeoutId of removalTimersRef.current.values()) {
+      for (const timeoutId of removalTimers.values()) {
         window.clearTimeout(timeoutId);
       }
-      removalTimersRef.current.clear();
+      removalTimers.clear();
     };
   }, [resolveGameLabel, updateDownload, updateGameDownload]);
 

@@ -22,6 +22,7 @@ import type {
 } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface ModInfo {
   name: string;
@@ -237,7 +238,7 @@ export interface ThunderstorePackage {
 }
 
 const runtimeSuffixPatterns = [
-  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
+  /\s*(?:\(|\[)\s*(mono|il2cpp)\s*(?:\)|\])\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
   /\s+(mono|il2cpp)\s*$/i,
 ];
@@ -2457,8 +2458,6 @@ export function ModsOverlay({
     await prepareLocalOwnershipStep(mod, preview, resolvedVersion);
   }, [localModRequiresLinkConfirmation, prepareLocalOwnershipStep, requestLocalSourcePreview]);
 
-  if (!isOpen) return null;
-
   const envRuntime = environment?.runtime;
   const downloadedNotInstalled = visibleDownloadedMods.filter(entry => {
     const installedIn = envRuntime ? entry.installedInByRuntime?.[envRuntime] || entry.installedIn : entry.installedIn;
@@ -2600,21 +2599,21 @@ export function ModsOverlay({
   };
 
   const selectedInstalledMod = useMemo(() => {
-    if (activeModView?.kind !== 'installed') {
+    if (!isOpen || activeModView?.kind !== 'installed') {
       return null;
     }
     return mods.find((mod) => `${mod.fileName}-${mod.path}` === activeModView.id) || null;
-  }, [activeModView, mods]);
+  }, [activeModView, isOpen, mods]);
   const selectedInstalledSecurityBadge = getSecurityBadgeConfig(selectedInstalledMod?.securityScan);
 
   useEffect(() => {
-    if (!localSourceLinkState) {
+    if (!isOpen || !localSourceLinkState) {
       return;
     }
     if (!selectedInstalledMod || `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` !== localSourceLinkState.modId) {
       setLocalSourceLinkState(null);
     }
-  }, [localSourceLinkState, selectedInstalledMod]);
+  }, [isOpen, localSourceLinkState, selectedInstalledMod]);
 
   useEffect(() => {
     if (!isOpen || filteredMods.length === 0) {
@@ -2628,6 +2627,8 @@ export function ModsOverlay({
       openInstalledModView(filteredMods[0]);
     }
   }, [activeModView, filteredMods, isOpen]);
+
+  if (!isOpen) return null;
 
   const openContextMenu = (event: ReactMouseEvent, items: AnchoredContextMenuItem[]) => {
     event.preventDefault();
@@ -2774,9 +2775,16 @@ export function ModsOverlay({
         </div>
       )}
       <div className="mods-overlay mods-overlay--environment" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
-        <div className="modal-header">
-          <h2>Mods</h2>
-          <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+        <WorkspacePageHeader
+          eyebrow={environment?.name || 'Environment'}
+          title="Mods"
+          description={`Manage installed mods, updates, source links, and local files for ${environment?.name || 'this environment'}.`}
+        />
+        <div className="workspace-page-toolbar">
+          <div className="workspace-page-toolbar__meta">
+            <span className="workspace-section-eyebrow">Installed mods</span>
+          </div>
+          <div className="workspace-page-toolbar__actions">
             <button
               onClick={() => {
                 const next = !showSearchInOverlay;
@@ -3930,9 +3938,11 @@ export function ModsOverlay({
       )}
 
       <div className="mods-overlay mods-overlay--environment workspace-collection-shell">
-        <div className="modal-header">
-          <h2>Mods</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow={environment?.name || 'Environment'}
+          title="Mods"
+          description={`Manage installed mods, updates, source links, and local files for ${environment?.name || 'this environment'}.`}
+        />
 
         <div className="workspace-collection">
           <div className="workspace-collection__main">
@@ -4046,6 +4056,12 @@ export function ModsOverlay({
               )}
               {!error && filteredMods.length > 0 && (
                 <div className="workspace-collection__list">
+                  <div className="workspace-collection__table-head workspace-collection__table-head--installed">
+                    <span>Name</span>
+                    <span>Source</span>
+                    <span>Version</span>
+                    <span>Status</span>
+                  </div>
                   {filteredMods.map((mod) => {
                     const updateInfo = modUpdates.get(mod.fileName);
                     const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;

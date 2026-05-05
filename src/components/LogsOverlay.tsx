@@ -5,6 +5,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
 const INITIAL_LOG_LINE_LIMIT = 4000;
@@ -396,10 +397,11 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const selectedFilePath = selectedLogFile?.path ?? '';
   const isLiveFile = isLiveLogFile(selectedLogFile);
   const showCollapsedInspector = shouldCollapseInspector && isInspectorCollapsed;
+  const effectiveStreamViewportHeight = streamViewportHeight > 0 ? streamViewportHeight : 720;
   const virtualStartIndex = Math.max(0, Math.floor(streamScrollTop / LOG_ROW_ESTIMATED_HEIGHT) - LOG_ROW_OVERSCAN);
   const virtualEndIndex = Math.min(
     visibleLines.length,
-    Math.ceil((streamScrollTop + streamViewportHeight) / LOG_ROW_ESTIMATED_HEIGHT) + LOG_ROW_OVERSCAN,
+    Math.ceil((streamScrollTop + effectiveStreamViewportHeight) / LOG_ROW_ESTIMATED_HEIGHT) + LOG_ROW_OVERSCAN,
   );
   const virtualLines = visibleLines.slice(virtualStartIndex, virtualEndIndex);
   const virtualTopPadding = virtualStartIndex * LOG_ROW_ESTIMATED_HEIGHT;
@@ -839,20 +841,11 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
   return (
     <div className="modal-content workspace-panel logs-panel">
-      <div className="modal-header logs-panel__header">
-        <div className="logs-panel__header-title">
-          <div className="logs-panel__header-title-row">
-            <h2>Logs</h2>
-            <div className="logs-panel__header-pills">
-              <span className="logs-panel__header-pill">{logFiles.length} Sources</span>
-              <span className="logs-panel__header-pill">{modActivity.length} Mods</span>
-            </div>
-          </div>
-          <p className="logs-panel__subtitle">
-            Review live and archived environment logs for {environment.name}.
-          </p>
-        </div>
-      </div>
+      <WorkspacePageHeader
+        eyebrow={environment.name}
+        title="Logs"
+        description={`Review live and archived logs, mod activity, and selected log lines for ${environment.name}.`}
+      />
 
       <div
         className={[
@@ -954,10 +947,8 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         <section className="logs-panel__viewer">
           <header className="logs-panel__viewer-header">
             <div>
-              <span className="settings-eyebrow">Selected File</span>
               <div className="logs-panel__viewer-title-row">
                 <h3>{selectedLogFile?.name ?? 'No log file selected'}</h3>
-                {isLiveFile && <span className="logs-panel__badge logs-panel__badge--live">Follow Live</span>}
                 {selectedLogFile && isSharedPlayerLogFile(selectedLogFile) && <span className="logs-panel__badge">Shared Player.log</span>}
               </div>
               <p className="logs-panel__file-meta">
@@ -1087,16 +1078,16 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   <strong>{summaryCounts.mods}</strong>
                 </div>
                 <div className="logs-panel__summary-pill">
-                  <span>Visible Lines</span>
+                  <span>Lines</span>
                   <strong>{summaryCounts.visible}</strong>
                 </div>
               </div>
               <div className="logs-panel__summary-actions">
                 <button type="button" className="btn btn-secondary btn-small" onClick={() => setFilterLevel('ERROR')}>
-                  Show Errors
+                  Errors
                 </button>
                 <button type="button" className="btn btn-secondary btn-small" onClick={() => setFilterLevel('WARN')}>
-                  Show Warnings
+                  Warnings
                 </button>
                 <button type="button" className="btn btn-secondary btn-small" onClick={resetFilters}>
                   Reset Filters

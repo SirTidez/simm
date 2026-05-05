@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface HelpOverlayProps {
   isOpen: boolean;
@@ -147,9 +148,11 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
 
   return (
     <section className="modal-content help-overlay workspace-panel" aria-label="Help panel">
-      <div className="modal-header">
-        <h2>Help Center</h2>
-      </div>
+      <WorkspacePageHeader
+        eyebrow="Workspace"
+        title="Help Center"
+        description="Find setup guidance, account help, update diagnostics, and common recovery steps."
+      />
 
       <div className="help-pane">
         <div className="help-overview">

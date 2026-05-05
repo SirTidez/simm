@@ -146,6 +146,8 @@ interface EnvironmentListProps {
   onInitialDetectionComplete?: () => void;
   compactMode?: boolean;
   activeWorkspace?: WorkspaceRoute;
+  focusedEnvironmentId?: string | null;
+  focusedEnvironmentRequestId?: number;
   onOpenWorkspace?: (workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => void;
   onSelectEnvironment?: (environmentId: string) => void;
 }
@@ -170,6 +172,8 @@ export function EnvironmentList({
   onInitialDetectionComplete,
   compactMode = false,
   activeWorkspace,
+  focusedEnvironmentId,
+  focusedEnvironmentRequestId = 0,
   onOpenWorkspace,
   onSelectEnvironment
 }: EnvironmentListProps) {
@@ -184,6 +188,7 @@ export function EnvironmentList({
   const [nameValue, setNameValue] = useState<string>('');
   const [checkingEnvironments, setCheckingEnvironments] = useState<Set<string>>(new Set());
   const checkInProgressRef = useRef(false);
+  const environmentCardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const [modsOverlay, setModsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [pluginsOverlay, setPluginsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [userLibsOverlay, setUserLibsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
@@ -296,6 +301,20 @@ export function EnvironmentList({
     localStorage.setItem('simm-preferred-launch-method', JSON.stringify(obj));
   }, [preferredLaunchMethod]);
   const initialDetectionNotifiedRef = useRef(false);
+
+  useEffect(() => {
+    if (!focusedEnvironmentId || compactMode || loading || error) {
+      return;
+    }
+
+    const card = environmentCardRefs.current.get(focusedEnvironmentId);
+    if (!card) {
+      return;
+    }
+
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    card.focus({ preventScroll: true });
+  }, [compactMode, error, focusedEnvironmentId, focusedEnvironmentRequestId, loading, environments]);
 
   const notifyInitialDetectionComplete = useCallback(() => {
     if (initialDetectionNotifiedRef.current) {
@@ -812,6 +831,10 @@ export function EnvironmentList({
 
     setupListeners();
 
+    const modsRefreshTimerMap = modsRefreshTimers.current;
+    const pluginsRefreshTimerMap = pluginsRefreshTimers.current;
+    const userLibsRefreshTimerMap = userLibsRefreshTimers.current;
+
     return () => {
       window.removeEventListener(batchUpdateCheckEventName, handleBatchUpdateCheckStarted as EventListener);
       if (unlistenWaiting) unlistenWaiting();
@@ -830,12 +853,12 @@ export function EnvironmentList({
       if (unlistenUserLibsChanged) unlistenUserLibsChanged();
 
       // Clear all debounce timers
-      modsRefreshTimers.current.forEach(timer => clearTimeout(timer));
-      pluginsRefreshTimers.current.forEach(timer => clearTimeout(timer));
-      userLibsRefreshTimers.current.forEach(timer => clearTimeout(timer));
-      modsRefreshTimers.current.clear();
-      pluginsRefreshTimers.current.clear();
-      userLibsRefreshTimers.current.clear();
+      modsRefreshTimerMap.forEach(timer => clearTimeout(timer));
+      pluginsRefreshTimerMap.forEach(timer => clearTimeout(timer));
+      userLibsRefreshTimerMap.forEach(timer => clearTimeout(timer));
+      modsRefreshTimerMap.clear();
+      pluginsRefreshTimerMap.clear();
+      userLibsRefreshTimerMap.clear();
     };
   }, [authModal.isOpen, authModal.envId, environments, progress]);
 
@@ -999,14 +1022,15 @@ export function EnvironmentList({
       const pluginCounts = new Map<string, number>();
       const userLibsCounts = new Map<string, number>();
       const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
-      let library = null;
-      try {
-        library = await normalizeLibraryFeaturedDownloads(
-          await ApiService.getModLibrary(),
-        );
-      } catch {
-        library = null;
-      }
+      const library = await (async () => {
+        try {
+          return await normalizeLibraryFeaturedDownloads(
+            await ApiService.getModLibrary(),
+          );
+        } catch {
+          return null;
+        }
+      })();
       for (const env of environments) {
         if (env.status === 'completed') {
           const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, library);
@@ -1613,7 +1637,15 @@ export function EnvironmentList({
     return (
       <div
         key={env.id}
-        className="environment-card environment-card--workspace"
+        ref={(node) => {
+          if (node) {
+            environmentCardRefs.current.set(env.id, node);
+          } else {
+            environmentCardRefs.current.delete(env.id);
+          }
+        }}
+        className={`environment-card environment-card--workspace${focusedEnvironmentId === env.id ? ' environment-card--focused' : ''}`}
+        tabIndex={-1}
         onContextMenu={(event) => {
           const target = event.target as HTMLElement;
           if (target.closest('input, textarea, button, a, [contenteditable="true"]')) {
@@ -1931,29 +1963,6 @@ export function EnvironmentList({
 
   return (
     <div className="environment-list">
-      <div className="environment-list__header">
-        <div>
-          <h2 className="environment-list__title">Environments</h2>
-          <p className="environment-list__subtitle">Manage your Schedule I installs and environments.</p>
-        </div>
-        <div className="environment-list__toolbar">
-          {onOpenWorkspace && (
-            <button
-              type="button"
-              className="btn btn-primary btn-small"
-              onClick={() => onOpenWorkspace({ view: 'wizard' })}
-            >
-              <Icon name="plus" />
-              Add Environment
-            </button>
-          )}
-          <div className="environment-list__runtime-strip" aria-label="Supported runtimes">
-            <span className="badge badge-orange-red environment-list__runtime-badge">Mono</span>
-            <span className="badge badge-blue environment-list__runtime-badge">IL2CPP</span>
-          </div>
-        </div>
-      </div>
-
       <AuthenticationModal
         isOpen={authModal.isOpen}
         onClose={() => {

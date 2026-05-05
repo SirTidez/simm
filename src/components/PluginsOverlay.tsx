@@ -6,6 +6,7 @@ import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface PluginInfo {
   name: string;
@@ -319,9 +320,11 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
       />
 
       <div className="mods-overlay workspace-collection-shell">
-        <div className="modal-header">
-          <h2>Plugins</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow={environment?.name || 'Environment'}
+          title="Plugins"
+          description={`Manage plugin DLLs, disabled state, and the Plugins folder for ${environment?.name || 'this environment'}.`}
+        />
 
         <div className="workspace-collection">
           <div className="workspace-collection__main">

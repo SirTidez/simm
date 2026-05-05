@@ -5,6 +5,7 @@ import { ApiService } from '../services/api';
 import type { AppConfig, BranchConfig } from '../types';
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from '../utils/uxSettings';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface Props {
   onClose: () => void;
@@ -447,9 +448,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       }}
       aria-label="Create environment panel"
     >
-      <div className="modal-header">
-        <h2>Add Game</h2>
-      </div>
+      <WorkspacePageHeader
+        eyebrow="Workspace"
+        title="Add Game"
+        description="Create or import a Schedule I environment and choose runtime, branch, and install settings."
+      />
 
       {error && <div className="settings-error-banner">{error}</div>}
 

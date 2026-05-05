@@ -11,7 +11,7 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
     await page.getByRole('button', { name: 'Environments', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Add Environment' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Accounts' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Troubleshooting' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Help' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
 
     const createEnvironmentHeading = page.getByRole('heading', { name: 'Add Game' });

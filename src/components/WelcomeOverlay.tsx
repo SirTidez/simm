@@ -4,6 +4,7 @@ import { ApiService } from '../services/api';
 import type { ExperienceMode, SecurityScannerStatus } from '../types';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 type WelcomeMode = 'setup' | 'upgradePrompt';
 type SetupStep = 'mode' | 'game' | 'safety';
@@ -291,9 +292,11 @@ export function WelcomeOverlay({
   if (!setupStarted) {
     return (
       <section className="modal-content workspace-panel welcome-panel" aria-label="Setup guide prompt">
-        <div className="modal-header">
-          <h2>Setup Guide</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow="Workspace"
+          title="Setup Guide"
+          description="Choose the default experience mode and confirm the setup path for this install."
+        />
 
         {error && <div className="settings-error-banner">{error}</div>}
 
@@ -346,9 +349,11 @@ export function WelcomeOverlay({
 
   return (
     <section className="modal-content workspace-panel welcome-panel" aria-label="Setup guide">
-      <div className="modal-header">
-        <h2>Setup Guide</h2>
-      </div>
+      <WorkspacePageHeader
+        eyebrow={`Step ${currentStepIndex + 1} of ${setupSteps.length}`}
+        title="Setup Guide"
+        description="Choose the default experience mode and confirm the setup path for this install."
+      />
 
       {error && <div className="settings-error-banner">{error}</div>}
 

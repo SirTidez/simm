@@ -31,6 +31,7 @@ import {
   InstallTargetsDialog,
   getNormalizedRuntime,
 } from "./InstallTargetsDialog";
+import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
   areVersionsEquivalent,
@@ -6633,9 +6634,11 @@ export function ModLibraryOverlay({
           position: "relative",
         }}
       >
-        <div className="modal-header">
-          <h2>Mod Library</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow="Workspace"
+          title="Mod Library"
+          description="Browse sources, manage downloaded entries, and install library versions into environments."
+        />
 
         <div className="mods-content" ref={libraryScrollContainerRef}>
           <div
@@ -8686,12 +8689,11 @@ export function ModLibraryOverlay({
       )}
 
       <div className="mods-overlay mods-overlay--library workspace-collection-shell">
-        <div className="modal-header workspace-page-header">
-          <div>
-            <h2>Mod Library</h2>
-            <p>Discover and install mods from supported sources.</p>
-          </div>
-        </div>
+        <WorkspacePageHeader
+          eyebrow="Workspace"
+          title="Mod Library"
+          description="Browse sources, manage downloaded entries, and install library versions into environments."
+        />
 
         <div className="workspace-collection">
           <div className="workspace-collection__main">

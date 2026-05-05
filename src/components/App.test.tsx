@@ -415,7 +415,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
     await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Environment' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add Environment' })[0]);
     expect(await screen.findByText('Wizard Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Wizard' }));
     await waitFor(() => expect(screen.queryByText('Wizard Overlay')).toBeNull());
@@ -425,7 +425,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Steam' }));
     await waitFor(() => expect(screen.queryByText('Steam Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Troubleshooting' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
@@ -479,7 +479,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
 
     expect(await screen.findByText('Loading workspace panel...')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Downloads0' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Downloads/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
 
     modLibraryOverlayMocks.releaseSuspense();
@@ -538,7 +538,7 @@ describe('App', () => {
 
     const libraryButton = screen.getByRole('button', { name: 'Mod Library' });
     const accountsButton = screen.getByRole('button', { name: 'Accounts' });
-    const helpButton = screen.getByRole('button', { name: 'Troubleshooting' });
+    const helpButton = screen.getByRole('button', { name: 'Help' });
 
     expect(libraryButton).not.toHaveAttribute('aria-current');
     expect(accountsButton).not.toHaveAttribute('aria-current');

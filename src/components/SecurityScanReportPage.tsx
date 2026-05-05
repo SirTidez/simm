@@ -4,6 +4,7 @@ import {
   SecurityScanReportView,
   type SecurityScanReportOption,
 } from './SecurityScanReportOverlay';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 export interface SecurityReportWorkspaceRequest {
   title: string;
@@ -57,20 +58,11 @@ export function SecurityScanReportPage({
 
   return (
     <div className="mods-overlay security-report-page workspace-collection-shell">
-      <div className="modal-header">
-        <div>
-          <h2>Security Findings</h2>
-          <p
-            style={{
-              margin: '0.3rem 0 0',
-              color: '#8fa7c5',
-              lineHeight: 1.5,
-            }}
-          >
-            Review all scanned files and use the sidebar Back button to return to the previous workspace.
-          </p>
-        </div>
-      </div>
+      <WorkspacePageHeader
+        eyebrow="Security scan"
+        title="Security Findings"
+        description="Review scanned files, selected actions, and risk details before returning to the previous workspace."
+      />
       <div className="workspace-collection">
         <div className="workspace-collection__main" style={{ padding: '1rem', minHeight: 0 }}>
           <SecurityScanReportView
