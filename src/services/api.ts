@@ -1353,18 +1353,6 @@ export class ApiService {
     // Check if mod is already installed before downloading
     // Thunderstore mods use "owner/name" format for sourceId (matches manifest.json format)
     const sourceId = owner && modName ? `${owner}/${modName}` : packageUuid;
-    const storageCheck = await invoke<any>('find_existing_mod_storage', {
-      sourceId,
-      sourceVersion: versionNumber,
-      runtime,
-    });
-    if (storageCheck?.found && storageCheck.storageId) {
-      await this.installDownloadedMod(storageCheck.storageId, [environmentId]);
-      return {
-        success: true,
-        message: 'Installed from library',
-      };
-    }
     const checkResult = await invoke<any>('check_mod_installed', {
       environmentId,
       sourceId: sourceId,
@@ -1452,15 +1440,6 @@ export class ApiService {
     const updatedAt = selectedVersion?.date_updated || packageInfo.date_updated || '';
     const tags = Array.isArray(packageInfo.categories) ? packageInfo.categories : [];
 
-    const storageCheck = await invoke<any>('find_existing_mod_storage', {
-      sourceId,
-      sourceVersion: versionNumber,
-      runtime,
-    });
-    if (storageCheck?.found && storageCheck.storageId) {
-      return { success: true, storageId: storageCheck.storageId, alreadyStored: true };
-    }
-
     const zipPath = await invoke<string>('download_thunderstore_package', {
       packageUuid,
       gameId,
@@ -1538,6 +1517,13 @@ export class ApiService {
 
   static async getModSecurityScanReport(storageId: string): Promise<SecurityScanReport | null> {
     return invoke('get_mod_security_scan_report', { storageId });
+  }
+
+  static async scanInstalledModForSecurity(
+    environmentId: string,
+    fileName: string
+  ): Promise<SecurityScanReport> {
+    return invoke('scan_installed_mod_for_security', { environmentId, fileName });
   }
 
   // Logs

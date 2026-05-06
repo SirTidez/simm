@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 
@@ -9,6 +9,7 @@ import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
 const INITIAL_LOG_LINE_LIMIT = 4000;
+const LOG_FILE_CACHE_LIMIT = 10;
 const LOG_ROW_ESTIMATED_HEIGHT = 58;
 const LOG_ROW_OVERSCAN = 14;
 
@@ -27,6 +28,12 @@ interface LogLine {
   timestamp: string | null;
   modTag: string | null;
   category: 'melonloader' | 'mod' | 'general';
+}
+
+interface CachedLogFile {
+  size: number;
+  modified: string | null;
+  lines: LogLine[];
 }
 
 interface Props {
@@ -233,6 +240,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const toastTimeoutRef = useRef<number | null>(null);
   const scrollFrameRef = useRef<number | null>(null);
+  const logFileCacheRef = useRef<Map<string, CachedLogFile>>(new Map());
 
   const selectedLogFile = useMemo(
     () => logFiles.find((file) => file.path === selectedLogPath) ?? null,
@@ -245,11 +253,55 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     return normalizedPath.endsWith('/player.log') || normalizedPath.endsWith('/player-prev.log');
   };
 
-  const isLiveLogFile = (file: LogFile | null): boolean => {
+  const isLiveLogFile = useCallback((file: LogFile | null): boolean => {
     if (!file) return false;
     const normalizedPath = file.path.replace(/\\/g, '/').toLowerCase();
     return file.isLatest || normalizedPath.endsWith('/player.log');
-  };
+  }, []);
+
+  const getCachedLogLines = useCallback((file: LogFile): LogLine[] | null => {
+    const cached = logFileCacheRef.current.get(file.path);
+    if (!cached) return null;
+
+    if (cached.size !== file.size || cached.modified !== file.modified) {
+      logFileCacheRef.current.delete(file.path);
+      return null;
+    }
+
+    logFileCacheRef.current.delete(file.path);
+    logFileCacheRef.current.set(file.path, cached);
+    return cached.lines;
+  }, []);
+
+  const cacheLogLines = useCallback((file: LogFile, lines: LogLine[]) => {
+    logFileCacheRef.current.set(file.path, {
+      size: file.size,
+      modified: file.modified,
+      lines,
+    });
+
+    while (logFileCacheRef.current.size > LOG_FILE_CACHE_LIMIT) {
+      const oldestPath = logFileCacheRef.current.keys().next().value;
+      if (!oldestPath) break;
+      logFileCacheRef.current.delete(oldestPath);
+    }
+  }, []);
+
+  const resetLogViewport = useCallback(() => {
+    setSelectedLineKey(null);
+    setStreamScrollTop(0);
+  }, []);
+
+  const showLogLines = useCallback((lines: LogLine[]) => {
+    setLogLines(lines);
+    setAutoScroll(true);
+    setIsAtBottom(true);
+    requestAnimationFrame(() => {
+      if (logContainerRef.current) {
+        logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      }
+    });
+  }, []);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -438,6 +490,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     setIsAtBottom(true);
     setStreamScrollTop(0);
     setStreamViewportHeight(0);
+    logFileCacheRef.current.clear();
 
     if (toastTimeoutRef.current) {
       clearTimeout(toastTimeoutRef.current);
@@ -459,19 +512,18 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   }, [environmentId]);
 
   const reloadSelectedLogFile = async (logPath: string) => {
+    const file = logFiles.find((item) => item.path === logPath) ?? null;
+
     try {
       setLoading(true);
       setError(null);
+      resetLogViewport();
+      setLogLines([]);
       const lines = await ApiService.readLogFile(logPath, INITIAL_LOG_LINE_LIMIT);
-      setLogLines(lines);
-      setSelectedLineKey(null);
-      setAutoScroll(true);
-      setIsAtBottom(true);
-      requestAnimationFrame(() => {
-        if (logContainerRef.current) {
-          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-        }
-      });
+      if (file) {
+        cacheLogLines(file, lines);
+      }
+      showLogLines(lines);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load log file');
       setLogLines([]);
@@ -552,20 +604,27 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     let cancelled = false;
     const loadSelectedLogFile = async () => {
+      resetLogViewport();
+      setError(null);
+
+      const cachedLines = getCachedLogLines(selectedLogFile);
+      if (cachedLines) {
+        setLoading(false);
+        showLogLines(cachedLines);
+        if (!isLiveLogFile(selectedLogFile)) {
+          return;
+        }
+      }
+
       try {
         setLoading(true);
-        setError(null);
+        if (!cachedLines) {
+          setLogLines([]);
+        }
         const lines = await ApiService.readLogFile(selectedLogFile.path, INITIAL_LOG_LINE_LIMIT);
         if (cancelled) return;
-        setLogLines(lines);
-        setSelectedLineKey(null);
-        setAutoScroll(true);
-        setIsAtBottom(true);
-        requestAnimationFrame(() => {
-          if (!cancelled && logContainerRef.current) {
-            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-          }
-        });
+        cacheLogLines(selectedLogFile, lines);
+        showLogLines(lines);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load log file');
@@ -583,7 +642,23 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     return () => {
       cancelled = true;
     };
-  }, [selectedLogFile]);
+  }, [cacheLogLines, getCachedLogLines, isLiveLogFile, resetLogViewport, selectedLogFile, showLogLines]);
+
+  const selectLogFile = (logPath: string) => {
+    if (logPath === selectedLogPath) {
+      return;
+    }
+    const nextFile = logFiles.find((file) => file.path === logPath) ?? null;
+    const cachedLines = nextFile ? getCachedLogLines(nextFile) : null;
+
+    resetLogViewport();
+    setError(null);
+    if (cachedLines) {
+      setLoading(false);
+      showLogLines(cachedLines);
+    }
+    setSelectedLogPath(logPath);
+  };
 
   useEffect(() => {
     if (!selectedLogFile) return;
@@ -611,7 +686,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     };
 
     void syncWatching();
-  }, [isWatching, selectedLogFile, watchedPath]);
+  }, [isLiveLogFile, isWatching, selectedLogFile, watchedPath]);
 
   useEffect(() => {
     if (!isWatching) return;
@@ -619,7 +694,13 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     let unlisten: (() => void) | null = null;
     const bindListener = async () => {
       unlisten = await listen<{ lines: LogLine[] }>('log-update', (event) => {
-        setLogLines((current) => [...current, ...event.payload.lines].slice(-INITIAL_LOG_LINE_LIMIT));
+        setLogLines((current) => {
+          const nextLines = [...current, ...event.payload.lines].slice(-INITIAL_LOG_LINE_LIMIT);
+          if (selectedLogFile) {
+            cacheLogLines(selectedLogFile, nextLines);
+          }
+          return nextLines;
+        });
       });
     };
 
@@ -630,7 +711,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         unlisten();
       }
     };
-  }, [isWatching]);
+  }, [cacheLogLines, isWatching, selectedLogFile]);
 
   useEffect(() => {
     if (selectedModTag && !modActivity.some((item) => normalizeModTag(item.modTag) === normalizeModTag(selectedModTag))) {
@@ -865,7 +946,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   key={file.path}
                   type="button"
                   className={`logs-panel__source-button ${selectedLogPath === file.path ? 'logs-panel__source-button--active' : ''}`}
-                  onClick={() => setSelectedLogPath(file.path)}
+                  onClick={() => selectLogFile(file.path)}
                 >
                   <div className="logs-panel__source-head">
                     <strong>{file.name}</strong>
@@ -894,7 +975,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   key={file.path}
                   type="button"
                   className={`logs-panel__source-button ${selectedLogPath === file.path ? 'logs-panel__source-button--active' : ''}`}
-                  onClick={() => setSelectedLogPath(file.path)}
+                  onClick={() => selectLogFile(file.path)}
                 >
                   <div className="logs-panel__source-head">
                     <strong>{file.name}</strong>

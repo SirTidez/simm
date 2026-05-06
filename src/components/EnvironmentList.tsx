@@ -11,6 +11,7 @@ import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import { logger } from '../services/logger';
+import { isSteamEnvironment, sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import { Icon } from './Icon';
 import {
   onAuthWaiting,
@@ -88,8 +89,36 @@ function OverlayFallback() {
   );
 }
 
-function isSteamEnvironment(env: Pick<Environment, 'environmentType' | 'id'>): boolean {
-  return env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-');
+function EnvironmentListSkeleton() {
+  return (
+    <div className="environment-loading-skeleton" role="status" aria-live="polite" aria-label="Loading game installs">
+      <section className="environment-loading-skeleton__header">
+        <span className="loading-skeleton loading-skeleton--eyebrow" aria-hidden="true" />
+        <strong className="loading-skeleton loading-skeleton--heading" aria-hidden="true" />
+        <span className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
+      </section>
+      <div className="environments-grid environments-grid--loading">
+        {[0, 1, 2, 3].map((index) => (
+          <article key={index} className="environment-card environment-card--skeleton">
+            <div className="environment-card-skeleton__top">
+              <span className="loading-skeleton loading-skeleton--icon" aria-hidden="true" />
+              <div>
+                <strong className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
+                <span className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+              </div>
+            </div>
+            <div className="environment-card-skeleton__meta">
+              <span className="loading-skeleton loading-skeleton--pill" aria-hidden="true" />
+              <span className="loading-skeleton loading-skeleton--pill" aria-hidden="true" />
+              <span className="loading-skeleton loading-skeleton--pill" aria-hidden="true" />
+            </div>
+            <span className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
+            <span className="loading-skeleton loading-skeleton--line loading-skeleton--short" aria-hidden="true" />
+          </article>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function countUnmanagedLocalMods(installedMods: InstalledModsResponse | null | undefined): number {
@@ -1900,7 +1929,7 @@ export function EnvironmentList({
   };
 
   if (loading) {
-    return <div className="loading">Loading game installs...</div>;
+    return <EnvironmentListSkeleton />;
   }
 
   if (error) {
@@ -1938,7 +1967,7 @@ export function EnvironmentList({
           Select an environment to open its active tools workspace.
         </p>
         <div className="workspace-environment-sidebar__list">
-          {[...environments].sort((a, b) => a.name.localeCompare(b.name)).map((env) => (
+          {sortEnvironmentsForDisplay(environments).map((env) => (
             <div
               key={env.id}
               className="workspace-environment-sidebar__item"
@@ -2246,13 +2275,7 @@ export function EnvironmentList({
       )}
 
       <div className="environments-grid">
-        {[...environments].sort((a, b) => {
-          const aIsSteam = isSteamEnvironment(a);
-          const bIsSteam = isSteamEnvironment(b);
-          if (aIsSteam && !bIsSteam) return -1;
-          if (!aIsSteam && bIsSteam) return 1;
-          return 0;
-        }).map(renderEnvironmentCard)}
+        {sortEnvironmentsForDisplay(environments).map(renderEnvironmentCard)}
       </div>
 
       {environmentMenu && (() => {

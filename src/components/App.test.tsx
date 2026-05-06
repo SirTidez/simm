@@ -407,6 +407,67 @@ describe('App', () => {
     });
   });
 
+  it('orders shell environments the same way as the environments page', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-alt',
+          name: 'Alternate Beta',
+          appId: '3164500',
+          branch: 'alternate',
+          outputDir: 'C:/Games/Alternate',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+        {
+          id: 'env-beta',
+          name: 'Beta',
+          appId: '3164500',
+          branch: 'beta',
+          outputDir: 'C:/Games/Beta',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+        {
+          id: 'env-il2cpp',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Il2Cpp',
+          runtime: 'IL2CPP',
+          status: 'completed',
+          updateAvailable: true,
+        },
+        {
+          id: 'steam-main',
+          name: 'Steam Installation',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Steam/Schedule I',
+          runtime: 'Mono',
+          status: 'completed',
+          environmentType: 'Steam',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('.app-shell-sidebar__environment-item')).toHaveLength(4);
+    });
+    const environmentButtons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.app-shell-sidebar__environment-item'),
+    );
+
+    expect(environmentButtons.map((button) => button.textContent)).toEqual([
+      'Steam InstallationReady',
+      'Alternate BetaReady',
+      'BetaReady',
+      'Il2CppUpdate',
+    ]);
+  });
+
   it('opens and closes overlays from sidebar/header controls', async () => {
     render(<App />);
 

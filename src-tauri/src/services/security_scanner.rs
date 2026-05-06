@@ -173,7 +173,7 @@ impl SecurityScannerService {
             Err(error) => return Ok(Self::unavailable_report(error.to_string(), settings)),
         };
 
-        let files = match archive_kind_for_path(file_path) {
+        let files = match archive_kind_for_path_or_signature(file_path) {
             InputArchiveKind::Dll => vec![
                 self.scan_assembly_file(
                     &executable.path,
@@ -1362,6 +1362,9 @@ fn archive_kind_for_path(path: &Path) -> InputArchiveKind {
     if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") {
         return InputArchiveKind::TarGz;
     }
+    if file_name.ends_with(".dll.disabled") {
+        return InputArchiveKind::Dll;
+    }
 
     match path
         .extension()
@@ -1376,6 +1379,45 @@ fn archive_kind_for_path(path: &Path) -> InputArchiveKind {
         "7z" => InputArchiveKind::SevenZ,
         _ => InputArchiveKind::Unsupported,
     }
+}
+
+fn archive_kind_for_path_or_signature(path: &Path) -> InputArchiveKind {
+    let extension_kind = archive_kind_for_path(path);
+    if extension_kind != InputArchiveKind::Unsupported {
+        return extension_kind;
+    }
+
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return InputArchiveKind::Unsupported,
+    };
+    let mut header = [0u8; 8];
+    let bytes_read = match file.read(&mut header) {
+        Ok(bytes_read) => bytes_read,
+        Err(_) => return InputArchiveKind::Unsupported,
+    };
+    let header = &header[..bytes_read];
+
+    if header.starts_with(&[0x50, 0x4b, 0x03, 0x04])
+        || header.starts_with(&[0x50, 0x4b, 0x05, 0x06])
+        || header.starts_with(&[0x50, 0x4b, 0x07, 0x08])
+    {
+        return InputArchiveKind::Zip;
+    }
+
+    if header.starts_with(b"Rar!\x1A\x07\x00") || header.starts_with(b"Rar!\x1A\x07\x01\x00") {
+        return InputArchiveKind::Rar;
+    }
+
+    if header.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]) {
+        return InputArchiveKind::SevenZ;
+    }
+
+    if header.starts_with(&[0x1f, 0x8b]) {
+        return InputArchiveKind::TarGz;
+    }
+
+    InputArchiveKind::Unsupported
 }
 
 fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, String> {
@@ -1474,6 +1516,15 @@ mod tests {
             threat_family_count: SecurityScannerService::threat_family_count(&result),
             result,
         }
+    }
+
+    fn write_zip_with_file(path: &Path, entry_name: &str, contents: &[u8]) -> Result<()> {
+        let archive_file = File::create(path)?;
+        let mut archive = ZipWriter::new(archive_file);
+        archive.start_file(entry_name, FileOptions::default())?;
+        archive.write_all(contents)?;
+        archive.finish()?;
+        Ok(())
     }
 
     #[test]
@@ -1690,6 +1741,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn archive_kind_falls_back_to_zip_signature_when_path_has_no_extension() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("downloaded-artifact");
+        write_zip_with_file(&archive_path, "RootMod.dll", b"fake assembly bytes")?;
+
+        assert_eq!(
+            archive_kind_for_path(&archive_path),
+            InputArchiveKind::Unsupported
+        );
+        assert_eq!(
+            archive_kind_for_path_or_signature(&archive_path),
+            InputArchiveKind::Zip
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_zip_to_directory_collects_single_root_dll() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("single-dll.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+        write_zip_with_file(&archive_path, "RootMod.dll", b"fake assembly bytes")?;
+
+        let service = SecurityScannerService::new();
+        service
+            .extract_zip_to_directory(&archive_path, &target_dir)
+            .await?;
+        let dlls = service.collect_dll_files(&target_dir).await?;
+
+        assert_eq!(dlls, vec![target_dir.join("RootMod.dll")]);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn extract_zip_to_directory_rejects_traversal_paths() -> Result<()> {
         let temp = tempdir()?;
@@ -1697,11 +1785,7 @@ mod tests {
         let target_dir = temp.path().join("extract");
         std::fs::create_dir_all(&target_dir)?;
 
-        let archive_file = File::create(&archive_path)?;
-        let mut archive = ZipWriter::new(archive_file);
-        archive.start_file("../escape.txt", FileOptions::default())?;
-        archive.write_all(b"unsafe")?;
-        archive.finish()?;
+        write_zip_with_file(&archive_path, "../escape.txt", b"unsafe")?;
 
         let service = SecurityScannerService::new();
         let err = service

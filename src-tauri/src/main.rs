@@ -83,52 +83,58 @@ fn main() {
 
             app.manage(db_pool.clone());
 
-            if let Err(error) = tauri::async_runtime::block_on(
-                crate::commands::nexus_mods::cleanup_stale_nxm_runtime_registration(
-                    db_pool.clone(),
-                ),
-            ) {
-                log::warn!(
-                    "Failed to clean up stale runtime nxm registration: {}",
-                    error
-                );
-            }
-
-            if let Err(error) = tauri::async_runtime::block_on(
-                crate::commands::nexus_mods::ensure_nxm_runtime_registration(db_pool.clone()),
-            ) {
-                log::warn!(
-                    "Failed to claim nxm protocol handler for app lifetime: {}",
-                    error
-                );
-            }
-
             #[cfg(windows)]
-            {
-                let should_register_runtime_scheme = cfg!(debug_assertions)
-                    || std::env::current_exe()
-                        .ok()
-                        .map(|path| {
-                            path.components().any(|component| {
-                                component
-                                    .as_os_str()
-                                    .to_string_lossy()
-                                    .eq_ignore_ascii_case("target")
-                            })
+            let should_register_runtime_scheme = cfg!(debug_assertions)
+                || std::env::current_exe()
+                    .ok()
+                    .map(|path| {
+                        path.components().any(|component| {
+                            component
+                                .as_os_str()
+                                .to_string_lossy()
+                                .eq_ignore_ascii_case("target")
                         })
-                        .unwrap_or(false);
-
-                if should_register_runtime_scheme {
-                    if let Err(error) = app.deep_link().register_all() {
-                        log::warn!("Failed to register deep-link scheme at runtime: {}", error);
-                    }
-                }
-            }
+                    })
+                    .unwrap_or(false);
 
             // Store startup state so frontend can choose fresh-install and upgrade setup flows.
             app.manage(crate::types::AppStartupState {
                 simm_directory_created: simm_was_created,
                 database_created: database_was_created,
+            });
+
+            let registration_app = app.handle().clone();
+            let registration_db_pool = db_pool.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    crate::commands::nexus_mods::cleanup_stale_nxm_runtime_registration(
+                        registration_db_pool.clone(),
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "Failed to clean up stale runtime nxm registration: {}",
+                        error
+                    );
+                }
+
+                if let Err(error) = crate::commands::nexus_mods::ensure_nxm_runtime_registration(
+                    registration_db_pool.clone(),
+                )
+                .await
+                {
+                    log::warn!(
+                        "Failed to claim nxm protocol handler for app lifetime: {}",
+                        error
+                    );
+                }
+
+                #[cfg(windows)]
+                if should_register_runtime_scheme {
+                    if let Err(error) = registration_app.deep_link().register_all() {
+                        log::warn!("Failed to register deep-link scheme at runtime: {}", error);
+                    }
+                }
             });
 
             // Initialize services (async)
@@ -194,6 +200,7 @@ fn main() {
             commands::security_scanner::get_security_scanner_status,
             commands::security_scanner::install_security_scanner,
             commands::security_scanner::get_mod_security_scan_report,
+            commands::security_scanner::scan_installed_mod_for_security,
             // Environments
             commands::environments::get_environments,
             commands::environments::get_environment,

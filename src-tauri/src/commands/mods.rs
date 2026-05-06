@@ -258,6 +258,11 @@ pub(crate) async fn persist_security_scan_report(
         .get("alreadyStored")
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
+        && mods_service
+            .get_security_scan_report(storage_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some()
     {
         return Ok(());
     }
@@ -1739,6 +1744,79 @@ mod tests {
                 .as_ref()
                 .map(|value| value.classification),
             Some(SecurityScanDispositionClassification::Clean)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn persist_security_scan_report_backfills_already_stored_without_report(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let report = SecurityScanReport {
+            summary: SecurityScanSummary {
+                state: SecurityScanState::Verified,
+                verified: true,
+                disposition: Some(SecurityScanDisposition {
+                    classification: SecurityScanDispositionClassification::Clean,
+                    headline: "Clean".to_string(),
+                    summary: "Backfilled report".to_string(),
+                    blocking_recommended: false,
+                    primary_threat_family_id: None,
+                    related_finding_ids: Vec::new(),
+                }),
+                highest_severity: None,
+                total_findings: 0,
+                threat_family_count: 0,
+                scanned_at: None,
+                scanner_version: None,
+                schema_version: None,
+                status_message: Some("Backfilled report".to_string()),
+            },
+            policy: SecurityScanPolicy {
+                enabled: true,
+                requires_confirmation: false,
+                blocked: false,
+                prompt_on_high_findings: false,
+                block_critical_findings: false,
+                status_message: Some("Backfilled report".to_string()),
+            },
+            files: Vec::new(),
+        };
+
+        persist_security_scan_report(
+            &service,
+            &serde_json::json!({
+                "storageId": "missing-report-storage",
+                "alreadyStored": true
+            }),
+            Some(&report),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let persisted = service
+            .get_security_scan_report("missing-report-storage")
+            .await?
+            .expect("report should be backfilled");
+        assert_eq!(
+            persisted.summary.status_message.as_deref(),
+            Some("Backfilled report")
         );
 
         Ok(())

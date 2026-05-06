@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   updateMod: vi.fn(),
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
+  scanInstalledModForSecurity: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   beginNexusManualDownloadSession: vi.fn(),
   openExternalUrl: vi.fn(),
@@ -65,6 +66,7 @@ describe('ModsOverlay', () => {
     apiMocks.updateMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
+    apiMocks.scanInstalledModForSecurity.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.beginNexusManualDownloadSession.mockReset();
     apiMocks.openExternalUrl.mockReset();
@@ -89,6 +91,22 @@ describe('ModsOverlay', () => {
     apiMocks.updateMod.mockResolvedValue({ success: true });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.getModSecurityScanReport.mockResolvedValue(null);
+    apiMocks.scanInstalledModForSecurity.mockResolvedValue({
+      summary: {
+        state: 'verified',
+        verified: true,
+        totalFindings: 0,
+        threatFamilyCount: 0,
+      },
+      policy: {
+        enabled: true,
+        requiresConfirmation: false,
+        blocked: false,
+        promptOnHighFindings: false,
+        blockCriticalFindings: false,
+      },
+      files: [],
+    });
     apiMocks.getNexusOAuthStatus.mockResolvedValue({ connected: false, account: { canDirectDownload: false, requiresSiteConfirmation: true } });
     apiMocks.beginNexusManualDownloadSession.mockResolvedValue({ success: true });
     apiMocks.openExternalUrl.mockResolvedValue(undefined);
@@ -299,6 +317,94 @@ describe('ModsOverlay', () => {
           title: 'Security Report - Trusted Mod',
         }),
       );
+    });
+  });
+
+  it('scans a selected local installed mod and refreshes the installed list', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'UnityExplorer.ML.Mono',
+          fileName: 'UnityExplorer.ML.Mono.dll',
+          path: 'C:/env/Mods/UnityExplorer.ML.Mono.dll',
+          source: 'local',
+          managed: false,
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByText('UnityExplorer.ML.Mono'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan Security' }));
+
+    await waitFor(() => {
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith(
+        'env-1',
+        'UnityExplorer.ML.Mono.dll',
+      );
+      expect(apiMocks.getMods).toHaveBeenCalledWith('env-1', true);
+    });
+    expect(await screen.findByText('Security Report - UnityExplorer.ML.Mono')).toBeTruthy();
+  });
+
+  it('bulk scans local installed mods without rescanning managed library entries', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Local One',
+          fileName: 'LocalOne.dll',
+          path: 'C:/env/Mods/LocalOne.dll',
+          source: 'local',
+          managed: false,
+          disabled: false,
+        },
+        {
+          name: 'Local Two',
+          fileName: 'LocalTwo.dll',
+          path: 'C:/env/Mods/LocalTwo.dll',
+          source: 'local',
+          managed: false,
+          disabled: false,
+        },
+        {
+          name: 'Managed Mod',
+          fileName: 'Managed.dll',
+          path: 'C:/env/Mods/Managed.dll',
+          source: 'thunderstore',
+          managed: true,
+          modStorageId: 'managed-storage',
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 3,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan Local Mods' }));
+
+    await waitFor(() => {
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledTimes(2);
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith('env-1', 'LocalOne.dll');
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith('env-1', 'LocalTwo.dll');
+      expect(apiMocks.scanInstalledModForSecurity).not.toHaveBeenCalledWith('env-1', 'Managed.dll');
     });
   });
 

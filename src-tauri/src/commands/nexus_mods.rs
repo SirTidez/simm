@@ -2222,30 +2222,6 @@ pub async fn download_nexus_mod_to_library(
         .to_string();
 
     let mods_service = ModsService::new(db_pool.clone());
-    match mods_service
-        .find_existing_mod_storage_by_source_version(
-            &mod_id.to_string(),
-            &version,
-            requested_runtime.clone(),
-        )
-        .await
-    {
-        Ok(Some(existing_mod_id)) => {
-            return Ok(json!({
-                "success": true,
-                "fromStorage": true,
-                "alreadyStored": true,
-                "storageId": existing_mod_id,
-            }));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            nexus_warn(format!(
-                "Failed to check existing Nexus mod storage for mod {} version {}: {}",
-                mod_id, version, error
-            ));
-        }
-    }
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2472,38 +2448,6 @@ pub async fn install_nexus_mods_mod(
         .to_string();
 
     let mods_service = ModsService::new(db_pool.clone());
-    match mods_service
-        .find_existing_mod_storage_by_source_version(
-            &mod_id.to_string(),
-            &version,
-            Some(env.runtime.clone()),
-        )
-        .await
-    {
-        Ok(Some(existing_mod_id)) => {
-            let install_result = mods_service
-                .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
-                .await
-                .map_err(|e| {
-                    nexus_error(format!(
-                        "Failed to install cached Nexus mod {} into environment {}: {}",
-                        existing_mod_id, environment_id, e
-                    ))
-                })?;
-            return Ok(json!({
-                "success": true,
-                "fromStorage": true,
-                "result": install_result
-            }));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            nexus_warn(format!(
-                "Failed to check existing Nexus mod storage for mod {} version {}: {}",
-                mod_id, version, error
-            ));
-        }
-    }
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2891,6 +2835,8 @@ mod tests {
             "success": false,
             "runtimeSelectionRequired": true,
         }));
-        assert!(!should_clear_pending_after_manual_completion(&runtime_selection));
+        assert!(!should_clear_pending_after_manual_completion(
+            &runtime_selection
+        ));
     }
 }

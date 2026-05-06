@@ -2133,6 +2133,109 @@ impl ModsService {
         Ok(fallback_summary.map(Self::build_summary_only_security_scan_report))
     }
 
+    fn safe_installed_mod_relative_path(file_name: &str) -> Result<PathBuf> {
+        let trimmed = file_name.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow::anyhow!("Installed mod path is empty"));
+        }
+
+        let path = Path::new(trimmed);
+        if path.is_absolute() {
+            return Err(anyhow::anyhow!("Installed mod path is unsafe"));
+        }
+
+        let mut relative = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(value) => relative.push(value),
+                std::path::Component::CurDir => {}
+                _ => return Err(anyhow::anyhow!("Installed mod path is unsafe")),
+            }
+        }
+
+        if relative.as_os_str().is_empty() {
+            Err(anyhow::anyhow!("Installed mod path is unsafe"))
+        } else {
+            Ok(relative)
+        }
+    }
+
+    pub async fn resolve_installed_mod_path(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+    ) -> Result<PathBuf> {
+        let relative_path = Self::safe_installed_mod_relative_path(file_name)?;
+        let mods_directory = self.get_mods_directory(game_dir);
+        let active_path = mods_directory.join(&relative_path);
+        if active_path.exists() {
+            return Ok(active_path);
+        }
+
+        let mut disabled_relative_path = relative_path.clone();
+        let disabled_file_name = disabled_relative_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Unsafe installed mod path"))?;
+        disabled_relative_path.set_file_name(format!("{disabled_file_name}.disabled"));
+        let disabled_path = mods_directory.join(disabled_relative_path);
+        if disabled_path.exists() {
+            return Ok(disabled_path);
+        }
+
+        Err(anyhow::anyhow!("Installed mod file not found"))
+    }
+
+    pub async fn persist_installed_mod_security_scan_summary(
+        &self,
+        game_dir: &str,
+        file_name: &str,
+        summary: SecurityScanSummary,
+    ) -> Result<()> {
+        self.resolve_installed_mod_path(game_dir, file_name).await?;
+
+        let mods_directory = self.get_mods_directory(game_dir);
+        let mut metadata = self
+            .load_mod_metadata(&mods_directory)
+            .await
+            .unwrap_or_else(|_| HashMap::new());
+        let entry = metadata
+            .entry(file_name.to_string())
+            .or_insert_with(|| ModMetadata {
+                source: Some(ModSource::Local),
+                source_id: None,
+                source_version: None,
+                author: None,
+                mod_name: Path::new(file_name)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.replace(".dll", "").replace(".DLL", "")),
+                source_url: None,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
+                installed_version: None,
+                library_added_at: None,
+                installed_at: None,
+                last_update_check: None,
+                metadata_last_refreshed: None,
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: None,
+                symlink_paths: None,
+                security_scan: None,
+            });
+
+        entry.security_scan = Some(summary);
+        self.save_mod_metadata(&mods_directory, &metadata).await
+    }
+
     pub async fn upsert_storage_metadata_by_id(
         &self,
         storage_id: &str,
@@ -3902,6 +4005,13 @@ impl ModsService {
                 .as_ref()
                 .and_then(|m| m.mod_storage_id.clone());
             let managed = mod_storage_id.is_some();
+            let storage_metadata = if let Some(storage_id) = mod_storage_id.as_deref() {
+                let storage_root = self.get_mods_storage_dir().await?;
+                let storage_path = Self::validated_storage_path(&storage_root, storage_id)?;
+                self.load_storage_metadata(&storage_path).await?
+            } else {
+                None
+            };
             let confident_hint_metadata = if managed {
                 None
             } else {
@@ -3913,6 +4023,7 @@ impl ModsService {
             let source = file_metadata
                 .as_ref()
                 .and_then(|m| m.source.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.source.clone()))
                 .or_else(|| {
                     if managed {
                         None
@@ -3920,30 +4031,82 @@ impl ModsService {
                         Some(ModSource::Local)
                     }
                 });
-            let source_url = file_metadata.as_ref().and_then(|m| m.source_url.clone());
+            let source_url = file_metadata
+                .as_ref()
+                .and_then(|m| m.source_url.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.source_url.clone()));
             let author = file_metadata
                 .as_ref()
                 .and_then(|m| m.author.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.author.clone()))
                 .or_else(|| {
                     confident_hint_metadata
                         .as_ref()
                         .and_then(|meta| meta.author.clone())
                 });
-            let summary = file_metadata.as_ref().and_then(|m| m.summary.clone());
-            let icon_url = file_metadata.as_ref().and_then(|m| m.icon_url.clone());
+            let summary = file_metadata
+                .as_ref()
+                .and_then(|m| m.summary.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.summary.clone()))
+                .or_else(|| {
+                    confident_hint_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.summary.clone())
+                });
+            let icon_url = file_metadata
+                .as_ref()
+                .and_then(|m| m.icon_url.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.icon_url.clone()))
+                .or_else(|| {
+                    confident_hint_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.icon_url.clone())
+                });
             let icon_cache_path = file_metadata
                 .as_ref()
-                .and_then(|m| m.icon_cache_path.clone());
-            let downloads = file_metadata.as_ref().and_then(|m| m.downloads);
-            let likes_or_endorsements =
-                file_metadata.as_ref().and_then(|m| m.likes_or_endorsements);
-            let updated_at = file_metadata.as_ref().and_then(|m| m.updated_at.clone());
-            let tags = file_metadata.as_ref().and_then(|m| m.tags.clone());
+                .and_then(|m| m.icon_cache_path.clone())
+                .or_else(|| {
+                    storage_metadata
+                        .as_ref()
+                        .and_then(|m| m.icon_cache_path.clone())
+                })
+                .or_else(|| {
+                    confident_hint_metadata
+                        .as_ref()
+                        .and_then(|meta| meta.icon_cache_path.clone())
+                });
+            let downloads = file_metadata
+                .as_ref()
+                .and_then(|m| m.downloads)
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.downloads));
+            let likes_or_endorsements = file_metadata
+                .as_ref()
+                .and_then(|m| m.likes_or_endorsements)
+                .or_else(|| {
+                    storage_metadata
+                        .as_ref()
+                        .and_then(|m| m.likes_or_endorsements)
+                });
+            let updated_at = file_metadata
+                .as_ref()
+                .and_then(|m| m.updated_at.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.updated_at.clone()));
+            let tags = file_metadata
+                .as_ref()
+                .and_then(|m| m.tags.clone())
+                .or_else(|| storage_metadata.as_ref().and_then(|m| m.tags.clone()));
             let installed_at = file_metadata.as_ref().and_then(|m| m.installed_at);
             let security_scan = if let Some(storage_id) = mod_storage_id.as_deref() {
                 self.resolve_storage_security_scan_summary(
                     storage_id,
-                    file_metadata.as_ref().and_then(|m| m.security_scan.clone()),
+                    file_metadata
+                        .as_ref()
+                        .and_then(|m| m.security_scan.clone())
+                        .or_else(|| {
+                            storage_metadata
+                                .as_ref()
+                                .and_then(|m| m.security_scan.clone())
+                        }),
                 )
                 .await?
             } else {
@@ -9143,6 +9306,113 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn list_mods_uses_storage_metadata_for_managed_display_fields() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-managed-display");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+
+        let storage_id = "managed-display";
+        let mut env_metadata = HashMap::new();
+        env_metadata.insert(
+            "ManagedDisplay.dll".to_string(),
+            sample_metadata(Some(storage_id), Some("local"), Some("1.0.0")),
+        );
+        service.save_mod_metadata(&mods_dir, &env_metadata).await?;
+
+        let storage_dir = download_dir.join("Mods").join(storage_id);
+        fs::create_dir_all(storage_dir.join("Mods")).await?;
+        let storage_file = storage_dir.join("Mods").join("ManagedDisplay.dll");
+        fs::write(&storage_file, b"data").await?;
+        fs::write(
+            storage_dir.join(STORAGE_METADATA_FILE),
+            serde_json::json!({
+                "source": "nexusmods",
+                "modStorageId": storage_id,
+                "modName": "Managed Display",
+                "author": "xvilho",
+                "summary": "A popup will appear if your mod list has changed since you last saved.",
+                "iconUrl": "https://example.test/icon.png",
+                "downloads": 42,
+                "endorsementCount": 7,
+                "updatedAt": "2026-03-05T10:00:00Z",
+                "tags": ["utility"]
+            })
+            .to_string(),
+        )
+        .await?;
+        service
+            .create_symlink_file(&storage_file, &mods_dir.join("ManagedDisplay.dll"))
+            .await?;
+        if !service
+            .is_symlink(&mods_dir.join("ManagedDisplay.dll"))
+            .await?
+        {
+            return Ok(());
+        }
+
+        let result = service
+            .list_mods(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let mods = result
+            .get("mods")
+            .and_then(|v| v.as_array())
+            .expect("mods array");
+        let entry = mods.first().expect("mod entry");
+
+        assert_eq!(entry.get("managed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            entry.get("source").and_then(|v| v.as_str()),
+            Some("nexusmods")
+        );
+        assert_eq!(entry.get("author").and_then(|v| v.as_str()), Some("xvilho"));
+        assert_eq!(
+            entry.get("summary").and_then(|v| v.as_str()),
+            Some("A popup will appear if your mod list has changed since you last saved.")
+        );
+        assert_eq!(
+            entry.get("iconUrl").and_then(|v| v.as_str()),
+            Some("https://example.test/icon.png")
+        );
+        assert_eq!(entry.get("downloads").and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(
+            entry.get("likesOrEndorsements").and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert_eq!(
+            entry.get("updatedAt").and_then(|v| v.as_str()),
+            Some("2026-03-05T10:00:00Z")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn list_mods_keeps_plain_file_copies_local_even_when_library_has_matching_storage(
     ) -> Result<()> {
         let temp = tempdir()?;
@@ -9182,6 +9452,8 @@ mod tests {
         storage_meta.source = Some(ModSource::Thunderstore);
         storage_meta.author = Some("Recovered Author".to_string());
         storage_meta.mod_name = Some("Recovered Managed".to_string());
+        storage_meta.summary = Some("Recovered display metadata.".to_string());
+        storage_meta.icon_url = Some("https://example.test/recovered.png".to_string());
         service
             .save_storage_metadata(&storage_base, &storage_meta)
             .await?;
@@ -9218,6 +9490,14 @@ mod tests {
         assert_eq!(
             entry.get("author").and_then(|value| value.as_str()),
             Some("Recovered Author")
+        );
+        assert_eq!(
+            entry.get("summary").and_then(|value| value.as_str()),
+            Some("Recovered display metadata.")
+        );
+        assert_eq!(
+            entry.get("iconUrl").and_then(|value| value.as_str()),
+            Some("https://example.test/recovered.png")
         );
         assert!(
             entry.get("sourceUrl").is_none()
@@ -11014,6 +11294,88 @@ mod tests {
                 .map(|value| value.classification),
             Some(SecurityScanDispositionClassification::Clean)
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn persist_installed_mod_security_scan_summary_updates_local_metadata() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-local-scan");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("LocalOnly.dll"), b"data").await?;
+
+        let summary = SecurityScanSummary {
+            state: SecurityScanState::Verified,
+            verified: true,
+            disposition: None,
+            highest_severity: None,
+            total_findings: 0,
+            threat_family_count: 0,
+            scanned_at: Some(chrono::Utc::now()),
+            scanner_version: Some("1.2.3".to_string()),
+            schema_version: Some("2026-03".to_string()),
+            status_message: Some("MLVScan classified this file as safe.".to_string()),
+        };
+
+        service
+            .persist_installed_mod_security_scan_summary(
+                output_dir.to_string_lossy().as_ref(),
+                "LocalOnly.dll",
+                summary.clone(),
+            )
+            .await?;
+
+        let metadata = service.load_mod_metadata(&mods_dir).await?;
+        assert_eq!(
+            metadata
+                .get("LocalOnly.dll")
+                .and_then(|meta| meta.security_scan.as_ref())
+                .map(|scan| scan.state.clone()),
+            Some(SecurityScanState::Verified)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resolve_installed_mod_path_rejects_traversal() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let output_dir = temp.path().join("envs").join("env-local-scan");
+        let err = service
+            .resolve_installed_mod_path(
+                output_dir.to_string_lossy().as_ref(),
+                "../Plugins/Escape.dll",
+            )
+            .await
+            .expect_err("expected traversal path to be rejected");
+
+        assert!(err.to_string().contains("unsafe"));
 
         Ok(())
     }

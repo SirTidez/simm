@@ -438,6 +438,8 @@ export function ModsOverlay({
   const [deletingMod, setDeletingMod] = useState<string | null>(null);
   const [enablingMod, setEnablingMod] = useState<string | null>(null);
   const [disablingMod, setDisablingMod] = useState<string | null>(null);
+  const [scanningInstalledMod, setScanningInstalledMod] = useState<string | null>(null);
+  const [scanningLocalMods, setScanningLocalMods] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<ManualUploadItem[]>([]);
   const [currentUploadItem, setCurrentUploadItem] = useState<ManualUploadItem | null>(null);
@@ -776,6 +778,76 @@ export function ModsOverlay({
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load security report');
+    }
+  };
+
+  const handleScanInstalledMod = async (mod: ModInfo) => {
+    const modKey = `${mod.fileName}-${mod.path}`;
+    setScanningInstalledMod(modKey);
+    setError(null);
+
+    try {
+      const report = await ApiService.scanInstalledModForSecurity(environmentId, mod.fileName);
+      setMods(previous => previous.map((entry) => (
+        `${entry.fileName}-${entry.path}` === modKey
+          ? { ...entry, securityScan: report.summary }
+          : entry
+      )));
+      openSecurityReport({
+        title: `Security Report - ${mod.name}`,
+        report,
+        onConfirm: null,
+      });
+      await loadInstalledMods(false, true);
+      if (onModsChanged) {
+        onModsChanged();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to scan installed mod');
+    } finally {
+      setScanningInstalledMod(null);
+    }
+  };
+
+  const handleScanLocalInstalledMods = async () => {
+    const candidates = mods.filter((mod) => !mod.managed && !mod.modStorageId);
+    if (candidates.length === 0) {
+      showToast('No local installed mods need scanning.');
+      return;
+    }
+
+    setScanningLocalMods(true);
+    setError(null);
+    let scannedCount = 0;
+    const failures: string[] = [];
+
+    try {
+      for (const mod of candidates) {
+        try {
+          const report = await ApiService.scanInstalledModForSecurity(environmentId, mod.fileName);
+          scannedCount += 1;
+          setMods(previous => previous.map((entry) => (
+            `${entry.fileName}-${entry.path}` === `${mod.fileName}-${mod.path}`
+              ? { ...entry, securityScan: report.summary }
+              : entry
+          )));
+        } catch (err) {
+          failures.push(`${mod.name}: ${getErrorMessage(err, 'scan failed')}`);
+        }
+      }
+
+      await loadInstalledMods(false, true);
+      if (onModsChanged && scannedCount > 0) {
+        onModsChanged();
+      }
+
+      if (failures.length > 0) {
+        setError(`Scanned ${scannedCount}/${candidates.length} local mods. ${failures[0]}`);
+      } else {
+        showToast(`Scanned ${scannedCount} local mod${scannedCount === 1 ? '' : 's'}.`);
+      }
+    } finally {
+      setScanningLocalMods(false);
     }
   };
 
@@ -4034,6 +4106,13 @@ export function ModsOverlay({
                     {checkingModUpdates ? 'Checking...' : 'Check Updates'}
                   </button>
                   <button
+                    onClick={() => void handleScanLocalInstalledMods()}
+                    className="btn btn-secondary btn-small"
+                    disabled={scanningLocalMods || mods.length === 0}
+                  >
+                    {scanningLocalMods ? 'Scanning...' : 'Scan Local Mods'}
+                  </button>
+                  <button
                     onClick={handleUploadClick}
                     className="btn btn-primary btn-small"
                     disabled={uploading}
@@ -4116,6 +4195,13 @@ export function ModsOverlay({
                             icon: 'fas fa-sliders-h',
                             disabled: !onOpenConfig,
                             onSelect: () => onOpenConfig?.(),
+                          },
+                          {
+                            key: 'security',
+                            label: mod.securityScan ? 'Rescan Security' : 'Scan Security',
+                            icon: 'fas fa-shield-halved',
+                            disabled: scanningInstalledMod === `${mod.fileName}-${mod.path}`,
+                            onSelect: () => void handleScanInstalledMod(mod),
                           },
                           {
                             key: 'library',
@@ -4635,6 +4721,17 @@ export function ModsOverlay({
                       Security Report
                     </button>
                   )}
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
+                    disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
+                  >
+                    {scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
+                      ? 'Scanning...'
+                      : selectedInstalledMod.securityScan
+                        ? 'Rescan Security'
+                        : 'Scan Security'}
+                  </button>
                   {selectedInstalledMod.disabled ? (
                     <button className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</button>
                   ) : (

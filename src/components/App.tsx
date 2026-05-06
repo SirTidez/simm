@@ -29,6 +29,7 @@ import {
   resolveExperienceMode,
   settingsNeedUpgradeSetupPrompt,
 } from '../utils/uxSettings';
+import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import type {
   Environment,
   ExperienceMode,
@@ -315,6 +316,7 @@ async function loadHomeFeed(): Promise<HomeFeedItem[]> {
 
 function HomeDashboard({
   environments,
+  environmentsLoading,
   downloadsInProgress,
   appUpdateState,
   onOpenEnvironments,
@@ -324,6 +326,7 @@ function HomeDashboard({
   onOpenSettings,
 }: {
   environments: Environment[];
+  environmentsLoading: boolean;
   downloadsInProgress: number;
   appUpdateState:
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
@@ -400,13 +403,31 @@ function HomeDashboard({
       <div className="home-dashboard__stats">
         <article className="home-dashboard__stat">
           <span>Installs</span>
-          <strong>{completed.length}</strong>
-          <small>{steamCount} Steam linked</small>
+          {environmentsLoading ? (
+            <>
+              <strong className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
+              <small className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <strong>{completed.length}</strong>
+              <small>{steamCount} Steam linked</small>
+            </>
+          )}
         </article>
         <article className="home-dashboard__stat">
           <span>Game Updates</span>
-          <strong>{updateCount}</strong>
-          <small>{updateCount > 0 ? 'Attention needed' : 'Everything current'}</small>
+          {environmentsLoading ? (
+            <>
+              <strong className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
+              <small className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <strong>{updateCount}</strong>
+              <small>{updateCount > 0 ? 'Attention needed' : 'Everything current'}</small>
+            </>
+          )}
         </article>
         <article className="home-dashboard__stat">
           <span>Downloads</span>
@@ -415,8 +436,17 @@ function HomeDashboard({
         </article>
         <article className="home-dashboard__stat">
           <span>Last Check</span>
-          <strong title={formatDashboardTime(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
-          <small>Environment metadata</small>
+          {environmentsLoading ? (
+            <>
+              <strong className="loading-skeleton loading-skeleton--wide" aria-hidden="true" />
+              <small className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <strong title={formatDashboardTime(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
+              <small>Environment metadata</small>
+            </>
+          )}
         </article>
       </div>
 
@@ -425,33 +455,47 @@ function HomeDashboard({
           <div className="home-dashboard__panel-header">
             <div>
               <span className="workspace-eyebrow">Status</span>
-              <h2>{updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}</h2>
+              <h2>
+                {environmentsLoading
+                  ? 'Loading your game installs'
+                  : updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}
+              </h2>
             </div>
             <button type="button" className="btn btn-secondary btn-small" onClick={onOpenEnvironments} aria-label="Open Environments from dashboard">
               <Icon name="hardDrive" />
               Environments
             </button>
           </div>
-          <button
-            type="button"
-            className="home-dashboard__focus home-dashboard__focus--action"
-            onClick={primaryEnvironment ? onOpenEnvironments : onOpenWizard}
-            aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
-          >
-            <div>
-              <strong>{primaryEnvironment?.name ?? 'No environments yet'}</strong>
-              <p>
-                {primaryEnvironment
-                  ? `${primaryEnvironment.runtime} ${primaryEnvironment.currentGameVersion ?? primaryEnvironment.updateGameVersion ?? 'version unknown'} on ${primaryEnvironment.branch}.`
-                  : 'Add or import a Schedule I install to start managing mods.'}
-              </p>
+          {environmentsLoading ? (
+            <div className="home-dashboard__focus home-dashboard__focus--loading" role="status" aria-live="polite">
+              <div>
+                <strong className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
+                <p className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
+              </div>
+              <span className="home-dashboard__badge home-dashboard__badge--loading">Scanning</span>
             </div>
-            {primaryEnvironment?.updateAvailable && (
-              <span className="home-dashboard__badge home-dashboard__badge--warn">
-                Update available
-              </span>
-            )}
-          </button>
+          ) : (
+            <button
+              type="button"
+              className="home-dashboard__focus home-dashboard__focus--action"
+              onClick={primaryEnvironment ? onOpenEnvironments : onOpenWizard}
+              aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
+            >
+              <div>
+                <strong>{primaryEnvironment?.name ?? 'No environments yet'}</strong>
+                <p>
+                  {primaryEnvironment
+                    ? `${primaryEnvironment.runtime} ${primaryEnvironment.currentGameVersion ?? primaryEnvironment.updateGameVersion ?? 'version unknown'} on ${primaryEnvironment.branch}.`
+                    : 'Add or import a Schedule I install to start managing mods.'}
+                </p>
+              </div>
+              {primaryEnvironment?.updateAvailable && (
+                <span className="home-dashboard__badge home-dashboard__badge--warn">
+                  Update available
+                </span>
+              )}
+            </button>
+          )}
           <div className="home-dashboard__quick-grid">
             <button type="button" onClick={onOpenModUpdates}>
               <Icon name="arrowUp" />
@@ -569,7 +613,6 @@ function AppContent() {
   const [workspaceStack, setWorkspaceStack] = useState<WorkspaceEntry[]>(() => [
     createWorkspaceEntry({ view: 'home' }),
   ]);
-  const [showStartupSplash, setShowStartupSplash] = useState(true);
   const [isMaximized, setIsMaximized] = useState(false);
   const completedNexusCallbackRef = useRef<string | null>(null);
   const inFlightNexusCallbackRef = useRef<string | null>(null);
@@ -743,16 +786,6 @@ function AppContent() {
     });
   }, [activeWorkspace, environments]);
 
-  const handleInitialDetectionComplete = useCallback(() => {
-    setShowStartupSplash(false);
-  }, []);
-
-  useEffect(() => {
-    if (!environmentsLoading) {
-      handleInitialDetectionComplete();
-    }
-  }, [environmentsLoading, handleInitialDetectionComplete]);
-
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
 
@@ -871,7 +904,7 @@ function AppContent() {
   }, [updateSettings]);
 
   useEffect(() => {
-    if (!hasSettings || showStartupSplash) {
+    if (!hasSettings || environmentsLoading) {
       return;
     }
 
@@ -957,7 +990,7 @@ function AppContent() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [appUpdateChannel, hasSettings, persistAppUpdateSettings, showStartupSplash]);
+  }, [appUpdateChannel, environmentsLoading, hasSettings, persistAppUpdateSettings]);
 
   const handleSkipAppUpdateVersion = useCallback(() => {
     if (appUpdateState.status !== 'available') {
@@ -1318,7 +1351,6 @@ function AppContent() {
       case 'environments':
         return (
           <EnvironmentList
-            onInitialDetectionComplete={handleInitialDetectionComplete}
             onOpenWorkspace={openWorkspace}
             focusedEnvironmentId={selectedEnvironmentId}
             focusedEnvironmentRequestId={environmentFocusRequestId}
@@ -1421,7 +1453,7 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, handleInitialDetectionComplete, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, updateWorkspaceEntry]);
+  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
@@ -1634,7 +1666,7 @@ function AppContent() {
       title: 'Open application settings',
     },
   ] as const;
-  const sortedEnvironments = [...environments].sort((left, right) => left.name.localeCompare(right.name));
+  const sortedEnvironments = sortEnvironmentsForDisplay(environments);
 
   return (
     <div className="app app-desktop-shell">
@@ -1707,7 +1739,16 @@ function AppContent() {
               </button>
               {!collapsedShellSections.environments && (
                 <div className="app-shell-sidebar__section-body">
-                  {sortedEnvironments.length > 0 ? (
+                  {environmentsLoading && sortedEnvironments.length === 0 ? (
+                    <div className="app-shell-sidebar__environment-list app-shell-sidebar__environment-list--loading" role="status" aria-live="polite" aria-label="Loading environments">
+                      {[0, 1, 2].map((index) => (
+                        <div key={index} className="app-shell-sidebar__environment-item app-shell-sidebar__environment-item--skeleton">
+                          <span className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
+                          <span className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
+                        </div>
+                      ))}
+                    </div>
+                  ) : sortedEnvironments.length > 0 ? (
                     <div className="app-shell-sidebar__environment-list">
                       {sortedEnvironments.map((environment) => (
                         <button
@@ -1774,6 +1815,7 @@ function AppContent() {
                 <main className="app-main app-home-main">
                   <HomeDashboard
                     environments={environments}
+                    environmentsLoading={environmentsLoading}
                     downloadsInProgress={downloadsInProgress}
                     appUpdateState={appUpdateState}
                     onOpenEnvironments={openEnvironmentsWorkspace}
@@ -1885,23 +1927,6 @@ function AppContent() {
                   </button>
                 </div>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showStartupSplash && (
-        <div className="boot-screen-shell">
-          <div className="boot-screen" role="status" aria-live="polite">
-            <div className="boot-card">
-              <div className="boot-title">Schedule I</div>
-              <div className="boot-subtitle">Detecting game and MelonLoader versions</div>
-              <div className="boot-loader" aria-hidden="true">
-                <span className="boot-dot"></span>
-                <span className="boot-dot"></span>
-                <span className="boot-dot"></span>
-              </div>
-              <div className="boot-bar"></div>
             </div>
           </div>
         </div>
