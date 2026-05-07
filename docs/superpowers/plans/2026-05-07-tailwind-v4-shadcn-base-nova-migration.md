@@ -8,7 +8,7 @@
 
 **Tech Stack:** Bun, Vite, React 18, Tauri 2, Tailwind CSS v4, `@tailwindcss/vite`, shadcn/ui `base-nova`, lucide icons, Vitest, TypeScript.
 
-**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. `DownloadsPanel` has started the first low-risk surface migration for action/status atoms. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload.
+**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. `DownloadsPanel` and the shared security report view have started the first low-risk surface migrations for action/status atoms. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload.
 
 ---
 
@@ -490,7 +490,7 @@ bun run build
 
 Expected: no behavior regression.
 
-- [ ] **Step 6: Commit first surface**
+- [x] **Step 6: Commit first surface**
 
 ```powershell
 git add vite.config.ts src/components/DownloadsPanel.tsx docs/superpowers/plans/2026-05-07-tailwind-v4-shadcn-base-nova-migration.md
@@ -502,9 +502,9 @@ git commit -m "refactor(frontend): migrate downloads panel primitives"
 ### Task 7: Expand Page by Page
 
 **Order:**
-1. `src/components/DownloadsPanel.tsx`
-2. `src/components/SecurityScanReportPage.tsx`
-3. `src/components/SecurityScanReportOverlay.tsx`
+1. [x] `src/components/DownloadsPanel.tsx`
+2. [x] `src/components/SecurityScanReportPage.tsx`
+3. [x] `src/components/SecurityScanReportOverlay.tsx`
 4. `src/components/ConfigurationOverlay.tsx`
 5. `src/components/LogsOverlay.tsx`
 6. `src/components/Settings.tsx`
@@ -552,6 +552,13 @@ Expected: regressions are tied to one surface.
 git add src/components/<SurfaceName>.tsx src/components/<SurfaceName>.test.tsx src/style.css
 git commit -m "refactor(frontend): migrate <surface> shadcn primitives"
 ```
+
+Current Task 7 checkpoint:
+
+- `SecurityScanReportPage.tsx` remains a thin wrapper around the shared report view.
+- `SecurityScanReportOverlay.tsx` now uses `SimmButton` for close/back/confirm actions and `SimmBadge` for report/severity/disposition chips.
+- Selector, filter, and finding buttons intentionally remain raw buttons in this pass because they carry richer active-state layout and inline presentation.
+- Validation passed with `bun install`, `bun run test src/components/SecurityScanReportPage.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 
 ---
 

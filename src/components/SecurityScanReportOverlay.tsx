@@ -8,6 +8,7 @@ import type {
 } from '../types';
 import { getSecurityDispositionBadgeConfig } from './securityScanHelpers';
 import { Icon } from './Icon';
+import { SimmBadge, SimmButton } from './primitives';
 
 interface SecurityScanReportOverlayProps {
   isOpen: boolean;
@@ -287,7 +288,8 @@ export function SecurityScanReportView({
         <div className="modal-header security-report-view__header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
             <span>{title}</span>
-            <span
+            <SimmBadge
+              variant="outline"
               style={{
                 fontSize: '0.74rem',
                 letterSpacing: '0.03em',
@@ -304,23 +306,23 @@ export function SecurityScanReportView({
             >
               <Icon name={`fas ${summaryStyle.icon}`} />
               {summaryStyle.label}
-            </span>
+            </SimmBadge>
           </h2>
           {showReturnActions && (
             <>
               {onConfirm && (
-                <button className="btn btn-primary btn-small" onClick={onConfirm} disabled={busy}>
+                <SimmButton className="btn btn-primary btn-small" onClick={onConfirm} disabled={busy}>
                   {busy ? 'Working...' : confirmLabel}
-                </button>
+                </SimmButton>
               )}
-              <button className="btn btn-secondary btn-small" onClick={onClose}>
+              <SimmButton className="btn btn-secondary btn-small" onClick={onClose}>
                 <Icon name="fas fa-arrow-left" />
                 Back
-              </button>
+              </SimmButton>
             </>
           )}
           {showCloseActions && (
-            <button className="modal-close" onClick={onClose}>×</button>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose}>×</SimmButton>
           )}
         </div>
 
@@ -406,7 +408,8 @@ export function SecurityScanReportView({
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
                         <strong style={{ color: '#eef5ff' }}>{option.label}</strong>
-                        <span
+                        <SimmBadge
+                          variant="outline"
                           style={{
                             fontSize: '0.72rem',
                             letterSpacing: '0.03em',
@@ -423,7 +426,7 @@ export function SecurityScanReportView({
                         >
                           <Icon name={`fas ${optionStyle.icon}`} />
                           {optionStyle.label}
-                        </span>
+                        </SimmBadge>
                       </div>
                       {option.description && (
                         <span style={{ color: '#8fa7c5', fontSize: '0.82rem', lineHeight: 1.45 }}>
@@ -443,19 +446,20 @@ export function SecurityScanReportView({
                 <h3 style={{ margin: 0, fontSize: '1.35rem', color: '#edf5ff' }}>{summaryStyle.label}</h3>
                 <p style={{ margin: 0, color: '#b9c9de', lineHeight: 1.55 }}>{activeReport.summary.statusMessage || 'MLVScan completed this scan.'}</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem' }}>
-                  <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
+                  <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
                     {activeReport.summary.totalFindings} finding{activeReport.summary.totalFindings === 1 ? '' : 's'}
-                  </span>
-                  <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
+                  </SimmBadge>
+                  <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
                     {activeReport.summary.threatFamilyCount} threat match{activeReport.summary.threatFamilyCount === 1 ? '' : 'es'}
-                  </span>
+                  </SimmBadge>
                   {activeReport.summary.highestSeverity && (
-                    <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: `1px solid ${severityBadgeStyles[activeReport.summary.highestSeverity].border}`, background: severityBadgeStyles[activeReport.summary.highestSeverity].bg, color: severityBadgeStyles[activeReport.summary.highestSeverity].color, fontSize: '0.74rem' }}>
+                    <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: `1px solid ${severityBadgeStyles[activeReport.summary.highestSeverity].border}`, background: severityBadgeStyles[activeReport.summary.highestSeverity].bg, color: severityBadgeStyles[activeReport.summary.highestSeverity].color, fontSize: '0.74rem' }}>
                       Highest: {activeReport.summary.highestSeverity}
-                    </span>
+                    </SimmBadge>
                   )}
                   {summaryDispositionBadge && (
-                    <span
+                    <SimmBadge
+                      variant="outline"
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
@@ -472,7 +476,7 @@ export function SecurityScanReportView({
                       }}
                     >
                       {summaryDispositionBadge.label}
-                    </span>
+                    </SimmBadge>
                   )}
                 </div>
                 {summaryDisposition && (summaryDisposition.headline || summaryDisposition.summary) && (
@@ -515,7 +519,8 @@ export function SecurityScanReportView({
                 {activeDispositionBadge && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
                     <span style={{ color: '#8ea7c6' }}>Disposition</span>
-                    <span
+                    <SimmBadge
+                      variant="outline"
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
@@ -530,7 +535,7 @@ export function SecurityScanReportView({
                       }}
                     >
                       {activeDispositionBadge.label}
-                    </span>
+                    </SimmBadge>
                   </div>
                 )}
                 <div style={{ display: 'grid', gap: '0.35rem' }}>
@@ -634,9 +639,9 @@ export function SecurityScanReportView({
                           gap: '0.45rem',
                         }}
                       >
-                        <span style={{ alignSelf: 'start', justifySelf: 'start', borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...badge }}>
+                        <SimmBadge variant="outline" style={{ alignSelf: 'start', justifySelf: 'start', borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...badge }}>
                           {finding.severity}
-                        </span>
+                        </SimmBadge>
                         <strong style={{ color: '#edf5ff', lineHeight: 1.45 }}>{finding.description}</strong>
                         <span style={{ color: '#8fa7c5', fontSize: '0.82rem' }}>{finding.location || activeFile?.displayPath}</span>
                       </button>
@@ -657,9 +662,9 @@ export function SecurityScanReportView({
               <div style={{ display: 'grid', gap: '0.8rem', gridTemplateColumns: 'minmax(0, 1fr)' }}>
                 <div style={{ borderRadius: '12px', border: '1px solid #324158', background: 'rgba(21, 28, 42, 0.9)', padding: '0.95rem', display: 'grid', gap: '0.5rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap' }}>
-                    <span style={{ borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...severityBadgeStyles[selectedFinding.severity] }}>
+                    <SimmBadge variant="outline" style={{ borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...severityBadgeStyles[selectedFinding.severity] }}>
                       {selectedFinding.severity}
-                    </span>
+                    </SimmBadge>
                     {selectedFinding.ruleId && (
                       <span style={{ color: '#9fb6d2', fontSize: '0.8rem' }}>Rule {selectedFinding.ruleId}</span>
                     )}
@@ -702,14 +707,14 @@ export function SecurityScanReportView({
             }}
           >
             {showCloseActions && (
-              <button className="btn btn-secondary" onClick={onClose}>
+              <SimmButton className="btn btn-secondary" onClick={onClose}>
                 Close
-              </button>
+              </SimmButton>
             )}
             {onConfirm && (
-              <button className="btn btn-primary" onClick={onConfirm} disabled={busy}>
+              <SimmButton className="btn btn-primary" onClick={onConfirm} disabled={busy}>
                 {busy ? 'Working...' : confirmLabel}
-              </button>
+              </SimmButton>
             )}
           </div>
         )}
