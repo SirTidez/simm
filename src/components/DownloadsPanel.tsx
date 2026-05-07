@@ -4,6 +4,7 @@ import type { TrackedDownload } from '../types';
 import { useDownloadStatusStore } from '../stores/downloadStatusStore';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
+import { resolveImageSource } from './modCardHelpers';
 
 function statusLabel(status: TrackedDownload['status']) {
   switch (status) {
@@ -21,21 +22,6 @@ function statusLabel(status: TrackedDownload['status']) {
       return 'Cancelled';
     default:
       return status;
-  }
-}
-
-function kindLabel(kind: TrackedDownload['kind']) {
-  switch (kind) {
-    case 'game':
-      return 'Game';
-    case 'mod':
-      return 'Mod';
-    case 'plugin':
-      return 'Plugin';
-    case 'framework':
-      return 'Framework';
-    default:
-      return kind;
   }
 }
 
@@ -65,10 +51,15 @@ function isIndeterminate(download: TrackedDownload) {
   );
 }
 
+interface DownloadsPanelProps {
+  presentation?: 'panel' | 'popup';
+  onClose?: () => void;
+}
+
 function progressText(download: TrackedDownload) {
   if (download.kind === 'game') {
     if (hasUsableFileCounts(download)) {
-      return `${Math.round(download.progress)}% • ${download.downloadedFiles} / ${download.totalFiles} files`;
+      return `${Math.round(download.progress)}% - ${download.downloadedFiles} / ${download.totalFiles} files`;
     }
     return `${Math.round(download.progress)}%`;
   }
@@ -88,25 +79,41 @@ function hasUsableFileCounts(download: Pick<TrackedDownload, 'downloadedFiles' |
 
 function renderDownloadRow(download: TrackedDownload) {
   const recentRow = !isActiveStatus(download.status);
+  const localIcon = resolveImageSource(download.iconCachePath);
+  const remoteIcon = resolveImageSource(download.iconUrl);
+  const iconSource = localIcon || remoteIcon;
   return (
     <article className={`downloads-panel__row downloads-panel__row--${download.status} ${recentRow ? 'downloads-panel__row--recent' : 'downloads-panel__row--active'}`} key={download.id}>
-      <div className="downloads-panel__row-top">
-        <span className="downloads-panel__label">{download.label}</span>
-      </div>
+      <div className="downloads-panel__row-main">
+        <div className="downloads-panel__identity">
+          {iconSource ? (
+            <img
+              src={iconSource}
+              alt=""
+              className="downloads-panel__icon-image"
+              aria-hidden="true"
+              onError={(event) => {
+                if (remoteIcon && event.currentTarget.src !== remoteIcon) {
+                  event.currentTarget.src = remoteIcon;
+                  return;
+                }
+                event.currentTarget.style.display = 'none';
+              }}
+            />
+          ) : (
+            <span className="downloads-panel__icon" aria-hidden="true">
+              <Icon name={kindIcon(download.kind)} />
+            </span>
+          )}
+          <span className="downloads-panel__label">
+            {download.label}
+            <span className="downloads-panel__context" title={download.contextLabel}> - {download.contextLabel}</span>
+          </span>
+        </div>
 
-      <div className="downloads-panel__row-meta">
-        <span className="downloads-panel__kind">
-          <Icon name={kindIcon(download.kind)} />
-          {kindLabel(download.kind)}
+        <span className={`downloads-panel__status-text downloads-panel__status-text--${download.status}`}>
+          {isActiveStatus(download.status) ? progressText(download) : statusLabel(download.status)}
         </span>
-        <span className={`downloads-panel__status downloads-panel__status--${download.status}`}>
-          {statusLabel(download.status)}
-        </span>
-        <span className="downloads-panel__context" title={download.contextLabel}>{download.contextLabel}</span>
-      </div>
-
-      <div className="downloads-panel__row-middle">
-        <span className="downloads-panel__progress-text">{progressText(download)}</span>
       </div>
 
       <div className="downloads-panel__progress-bar">
@@ -122,7 +129,7 @@ function renderDownloadRow(download: TrackedDownload) {
 
       {(download.message || download.error) && (
         <div className="downloads-panel__row-bottom">
-          {download.message && !isIndeterminate(download) && <span>{download.message}</span>}
+          {download.message && !isIndeterminate(download) && download.status !== 'completed' && <span>{download.message}</span>}
           {download.error && <span className="downloads-panel__error">{download.error}</span>}
         </div>
       )}
@@ -130,19 +137,12 @@ function renderDownloadRow(download: TrackedDownload) {
   );
 }
 
-export function DownloadsPanel() {
+export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPanelProps = {}) {
   const { downloads } = useDownloadStatusStore();
 
-  const { activeDownloads, recentDownloads, summary } = useMemo(() => {
+  const { activeDownloads, recentDownloads } = useMemo(() => {
     const grouped = downloads.reduce(
       (aggregate, download) => {
-        if (typeof download.totalFiles === 'number') {
-          aggregate.summary.totalFiles += download.totalFiles;
-        }
-        if (typeof download.downloadedFiles === 'number') {
-          aggregate.summary.downloadedFiles += download.downloadedFiles;
-        }
-
         if (isActiveStatus(download.status)) {
           aggregate.activeDownloads.push(download);
         } else {
@@ -154,43 +154,31 @@ export function DownloadsPanel() {
       {
         activeDownloads: [] as TrackedDownload[],
         recentDownloads: [] as TrackedDownload[],
-        summary: {
-          activeCount: 0,
-          recentCount: 0,
-          downloadedFiles: 0,
-          totalFiles: 0,
-        },
       }
     );
-
-    grouped.summary.activeCount = grouped.activeDownloads.length;
-    grouped.summary.recentCount = grouped.recentDownloads.length;
 
     return grouped;
   }, [downloads]);
 
+  const visibleRecentDownloads = presentation === 'popup' ? recentDownloads.slice(0, 2) : recentDownloads;
+
   return (
-    <section className="downloads-panel" aria-label="Downloads">
+    <section className={`downloads-panel downloads-panel--${presentation}`} aria-label="Downloads">
       <div className="downloads-panel__header">
         <div className="downloads-panel__header-copy">
           <h3>Downloads</h3>
-          <p>Track active transfers and the most recent results.</p>
         </div>
-        <span className="downloads-panel__count">{summary.activeCount}</span>
-      </div>
-
-      <div className="downloads-panel__summary-strip">
-        <div className="downloads-panel__summary-chip">
-          <span>Active</span>
-          <strong>{summary.activeCount}</strong>
-        </div>
-        <div className="downloads-panel__summary-chip">
-          <span>Recent</span>
-          <strong>{summary.recentCount}</strong>
-        </div>
-        <div className="downloads-panel__summary-chip downloads-panel__summary-chip--files">
-          <span>Files</span>
-          <strong>{summary.totalFiles > 0 ? `${summary.downloadedFiles}/${summary.totalFiles}` : '0'}</strong>
+        <div className="downloads-panel__header-actions">
+          {onClose && (
+            <button
+              type="button"
+              className="downloads-panel__close"
+              onClick={onClose}
+              aria-label="Close downloads"
+            >
+              <Icon name="times" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -207,11 +195,11 @@ export function DownloadsPanel() {
             </div>
           )}
 
-          {recentDownloads.length > 0 && (
+          {visibleRecentDownloads.length > 0 && (
             <div className="downloads-panel__section">
               <div className="downloads-panel__section-header">Recent</div>
               <div className="downloads-panel__list">
-                {recentDownloads.map(renderDownloadRow)}
+                {visibleRecentDownloads.map(renderDownloadRow)}
               </div>
             </div>
           )}

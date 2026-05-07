@@ -14,6 +14,18 @@ pub fn start_file_download(
     context_label: impl Into<String>,
     message: Option<String>,
 ) -> TrackedDownload {
+    start_file_download_with_icon(id, kind, label, context_label, None, None, message)
+}
+
+pub fn start_file_download_with_icon(
+    id: String,
+    kind: TrackedDownloadKind,
+    label: impl Into<String>,
+    context_label: impl Into<String>,
+    icon_url: Option<String>,
+    icon_cache_path: Option<String>,
+    message: Option<String>,
+) -> TrackedDownload {
     TrackedDownload {
         id,
         kind,
@@ -23,6 +35,8 @@ pub fn start_file_download(
         progress: 0.0,
         downloaded_files: Some(0),
         total_files: Some(1),
+        icon_url,
+        icon_cache_path,
         message,
         error: None,
         started_at: Utc::now(),

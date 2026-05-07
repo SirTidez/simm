@@ -17,7 +17,7 @@ describe('DownloadsPanel', () => {
     vi.clearAllMocks();
   });
 
-  it('renders active and recent downloads in separate groups with summary metrics', () => {
+  it('renders active and recent downloads in separate groups', () => {
     downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
       downloads: [
         {
@@ -29,6 +29,7 @@ describe('DownloadsPanel', () => {
           progress: 40,
           downloadedFiles: 4,
           totalFiles: 10,
+          iconUrl: 'https://example.com/main-branch.png',
           startedAt: Date.now(),
         },
         {
@@ -54,7 +55,8 @@ describe('DownloadsPanel', () => {
     expect(screen.getAllByText('Recent').length).toBeGreaterThan(0);
     expect(screen.getByText('Main Branch')).toBeTruthy();
     expect(screen.getByText('ExampleMod.zip')).toBeTruthy();
-    expect(screen.getByText('5/11')).toBeTruthy();
+    expect(document.querySelector('.downloads-panel__icon-image')).not.toBeNull();
+    expect(screen.getByText('40% - 4 / 10 files')).toBeTruthy();
   });
 
   it('renders an indeterminate bar for active non-game downloads', () => {
@@ -112,7 +114,6 @@ describe('DownloadsPanel', () => {
     render(<DownloadsPanel />);
 
     expect(screen.getByText('Active and recent downloads will appear here while SIMM is working.')).toBeTruthy();
-    expect(screen.getByText('Files')).toBeTruthy();
-    expect(screen.getAllByText('0').length).toBeGreaterThan(0);
+    expect(screen.queryByText('0')).toBeNull();
   });
 });

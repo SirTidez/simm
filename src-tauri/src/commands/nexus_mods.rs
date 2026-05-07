@@ -2257,11 +2257,18 @@ pub async fn download_nexus_mod_to_library(
         .get("file_name")
         .and_then(|f| f.as_str())
         .unwrap_or(&default_filename);
-    let tracked_download = crate::services::tracked_downloads::start_file_download(
+    let icon_url = mod_info
+        .get("picture_url")
+        .or_else(|| mod_info.get("pictureUrl"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let tracked_download = crate::services::tracked_downloads::start_file_download_with_icon(
         crate::services::tracked_downloads::new_download_id("nexus-library"),
         crate::types::TrackedDownloadKind::Mod,
         original_filename.to_string(),
         "Nexus Mods",
+        icon_url,
+        None,
         Some("Downloading archive".to_string()),
     );
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());

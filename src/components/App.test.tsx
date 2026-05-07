@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App } from './App';
 import type { ReactNode } from 'react';
 
@@ -14,6 +14,9 @@ const environmentStoreMocks = vi.hoisted(() => ({
 }));
 const settingsStoreMocks = vi.hoisted(() => ({
   useSettingsStore: vi.fn(),
+}));
+const downloadStatusStoreMocks = vi.hoisted(() => ({
+  useDownloadStatusStore: vi.fn(),
 }));
 const modLibraryOverlayMocks = vi.hoisted(() => ({
   lastNavigationState: null as any,
@@ -84,6 +87,7 @@ vi.mock('../stores/environmentStore', () => ({
 
 vi.mock('../stores/downloadStatusStore', () => ({
   DownloadStatusStoreProvider: ({ children }: { children: ReactNode }) => children,
+  useDownloadStatusStore: downloadStatusStoreMocks.useDownloadStatusStore,
 }));
 
 vi.mock('../stores/settingsStore', () => ({
@@ -288,7 +292,13 @@ vi.mock('./Footer', () => ({
 }));
 
 vi.mock('./DownloadsPanel', () => ({
-  DownloadsPanel: () => <div>Downloads Panel</div>,
+  DownloadsPanel: ({ onClose, presentation }: { onClose?: () => void; presentation?: string }) => (
+    <div>
+      <span>Downloads Panel</span>
+      <span>{presentation}</span>
+      {onClose && <button onClick={onClose}>Close downloads</button>}
+    </div>
+  ),
 }));
 
 describe('App', () => {
@@ -308,7 +318,11 @@ describe('App', () => {
     processMocks.relaunch.mockReset();
     dialogMocks.confirm.mockResolvedValue(true);
     dialogMocks.message.mockResolvedValue(undefined);
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [],
+    });
     processMocks.relaunch.mockResolvedValue(undefined);
+    localStorage.clear();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url.includes('/releases')) {
         return {
@@ -468,6 +482,81 @@ describe('App', () => {
     ]);
   });
 
+  it('hides expanded sidebar content at collapse start while the rail animates', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main Environment',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    expect(screen.getByRole('button', { name: 'Collapse navigation sidebar' })).toBeTruthy();
+    expect(within(sidebar).getByText('Main Environment')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse navigation sidebar' }));
+
+    expect(sidebar.classList.contains('app-shell-sidebar--collapsed')).toBe(true);
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(true);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Expand navigation sidebar' })).toBeTruthy();
+    expect(within(sidebar).queryByText('Main Environment')).toBeNull();
+
+    fireEvent.transitionEnd(sidebar, { propertyName: 'width' });
+
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(false);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(false);
+    expect(within(sidebar).queryByText('Main Environment')).toBeNull();
+  });
+
+  it('restores expanded sidebar content before the expand transition finishes', async () => {
+    localStorage.setItem('simm:shellNavCollapsed', 'true');
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main Environment',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    expect(sidebar.classList.contains('app-shell-sidebar--collapsed')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Expand navigation sidebar' })).toBeTruthy();
+    expect(within(sidebar).queryByText('Main Environment')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand navigation sidebar' }));
+
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(true);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(true);
+    expect(within(sidebar).getByText('Main Environment')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(sidebar.classList.contains('app-shell-sidebar--collapsed')).toBe(false);
+    });
+
+    fireEvent.transitionEnd(sidebar, { propertyName: 'width' });
+
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(false);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(true);
+  });
+
   it('opens and closes overlays from sidebar/header controls', async () => {
     render(<App />);
 
@@ -490,6 +579,36 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('opens downloads as a bottom-docked sidebar popup', async () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'mod-1',
+          kind: 'mod',
+          label: 'ExampleMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'downloading',
+          progress: 0,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Downloads/ }));
+
+    const popup = await screen.findByRole('dialog', { name: 'Downloads' });
+    const downloadsButton = screen.getByRole('button', { name: /Downloads/ });
+    expect(popup.classList.contains('downloads-popover')).toBe(true);
+    expect(downloadsButton.classList.contains('app-shell-sidebar__tool-item--active')).toBe(false);
+    expect(await within(popup).findByText('Downloads Panel')).toBeTruthy();
+    expect(within(popup).getByText('popup')).toBeTruthy();
+
+    fireEvent.click(downloadsButton);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Downloads' })).toBeNull());
   });
 
   it('opens the setup guide on a fresh startup', async () => {

@@ -250,6 +250,7 @@ export function SecurityScanReportView({
   const activeDispositionBadge = getSecurityDispositionBadgeConfig(activeDisposition);
 
   const showCloseActions = presentation === 'overlay' && !!onClose;
+  const showReturnActions = presentation === 'page' && !!onClose;
   const shellStyle: CSSProperties = presentation === 'overlay'
     ? {
         maxWidth: '1240px',
@@ -271,10 +272,10 @@ export function SecurityScanReportView({
         flexDirection: 'column',
         padding: 0,
         overflow: 'hidden',
-        border: '1px solid #324158',
-        borderRadius: '16px',
-        background: 'linear-gradient(180deg, rgba(18, 24, 36, 0.98) 0%, rgba(11, 16, 25, 0.98) 100%)',
-        boxShadow: '0 18px 44px rgba(0, 0, 0, 0.28)',
+        border: '0',
+        borderRadius: 0,
+        background: 'transparent',
+        boxShadow: 'none',
       };
 
   const shell = (
@@ -283,7 +284,7 @@ export function SecurityScanReportView({
       onClick={presentation === 'overlay' ? (event) => event.stopPropagation() : undefined}
       style={shellStyle}
     >
-        <div className="modal-header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
+        <div className="modal-header security-report-view__header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
             <span>{title}</span>
             <span
@@ -305,6 +306,19 @@ export function SecurityScanReportView({
               {summaryStyle.label}
             </span>
           </h2>
+          {showReturnActions && (
+            <>
+              {onConfirm && (
+                <button className="btn btn-primary btn-small" onClick={onConfirm} disabled={busy}>
+                  {busy ? 'Working...' : confirmLabel}
+                </button>
+              )}
+              <button className="btn btn-secondary btn-small" onClick={onClose}>
+                <Icon name="fas fa-arrow-left" />
+                Back
+              </button>
+            </>
+          )}
           {showCloseActions && (
             <button className="modal-close" onClick={onClose}>×</button>
           )}
@@ -326,6 +340,8 @@ export function SecurityScanReportView({
                 <button
                   key={`${file.fileName}-${index}`}
                   type="button"
+                  className={`security-report-selector ${index === activeFileIndex ? 'security-report-selector--active' : ''}`}
+                  aria-pressed={index === activeFileIndex}
                   onClick={() => setActiveFileIndex(index)}
                   style={{
                     width: '100%',
@@ -335,7 +351,6 @@ export function SecurityScanReportView({
                     background: index === activeFileIndex ? 'rgba(35, 74, 114, 0.45)' : 'rgba(23, 31, 46, 0.8)',
                     color: '#d7e4f6',
                     padding: '0.75rem 0.95rem',
-                    cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
                     gap: '0.7rem',
@@ -353,7 +368,7 @@ export function SecurityScanReportView({
 
           {normalizedReportOptions.length > 1 && (
             <section
-              className="mod-card"
+              className="mod-card security-report-panel"
               style={{
                 padding: '1rem',
                 display: 'grid',
@@ -374,6 +389,8 @@ export function SecurityScanReportView({
                     <button
                       key={option.key}
                       type="button"
+                      className={`security-report-selector ${isActive ? 'security-report-selector--active' : ''}`}
+                      aria-pressed={isActive}
                       onClick={() => setActiveReportIndex(index)}
                       style={{
                         width: '100%',
@@ -383,7 +400,6 @@ export function SecurityScanReportView({
                         background: isActive ? optionStyle.glow : 'rgba(18, 24, 36, 0.82)',
                         color: '#d7e4f6',
                         padding: '0.85rem 1rem',
-                        cursor: 'pointer',
                         display: 'grid',
                         gap: '0.35rem',
                       }}
@@ -422,7 +438,7 @@ export function SecurityScanReportView({
           )}
 
           <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(320px, 0.95fr)' }}>
-            <section className="mod-card" style={{ padding: '1rem', border: `1px solid ${summaryStyle.border}`, background: `linear-gradient(180deg, ${summaryStyle.glow} 0%, rgba(17, 23, 34, 0.86) 100%)` }}>
+            <section className="mod-card security-report-panel security-report-panel--verdict" style={{ padding: '1rem', border: `1px solid ${summaryStyle.border}`, background: `linear-gradient(180deg, ${summaryStyle.glow} 0%, rgba(17, 23, 34, 0.86) 100%)` }}>
               <div style={{ display: 'grid', gap: '0.55rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1.35rem', color: '#edf5ff' }}>{summaryStyle.label}</h3>
                 <p style={{ margin: 0, color: '#b9c9de', lineHeight: 1.55 }}>{activeReport.summary.statusMessage || 'MLVScan completed this scan.'}</p>
@@ -434,7 +450,7 @@ export function SecurityScanReportView({
                     {activeReport.summary.threatFamilyCount} threat match{activeReport.summary.threatFamilyCount === 1 ? '' : 'es'}
                   </span>
                   {activeReport.summary.highestSeverity && (
-                    <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', fontSize: '0.74rem', ...severityBadgeStyles[activeReport.summary.highestSeverity] }}>
+                    <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: `1px solid ${severityBadgeStyles[activeReport.summary.highestSeverity].border}`, background: severityBadgeStyles[activeReport.summary.highestSeverity].bg, color: severityBadgeStyles[activeReport.summary.highestSeverity].color, fontSize: '0.74rem' }}>
                       Highest: {activeReport.summary.highestSeverity}
                     </span>
                   )}
@@ -478,7 +494,7 @@ export function SecurityScanReportView({
               </div>
             </section>
 
-            <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.7rem' }}>
+            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.7rem' }}>
               <div>
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>File details</h3>
                 <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Verify the exact file and scan metadata before installing.</p>
@@ -528,7 +544,7 @@ export function SecurityScanReportView({
           </div>
 
           <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1.3fr)' }}>
-            <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
+            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
               <div>
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>What it means</h3>
                 <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Key behaviors MLVScan detected in this download.</p>
@@ -565,7 +581,7 @@ export function SecurityScanReportView({
               </div>
             </section>
 
-            <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
+            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>Findings</h3>
                 <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
@@ -573,6 +589,8 @@ export function SecurityScanReportView({
                     <button
                       key={option}
                       type="button"
+                      className={`security-report-filter ${activeSeverity === option ? 'security-report-filter--active' : ''}`}
+                      aria-pressed={activeSeverity === option}
                       onClick={() => setActiveSeverity(option)}
                       style={{
                         borderRadius: '8px',
@@ -581,7 +599,6 @@ export function SecurityScanReportView({
                         color: activeSeverity === option ? '#eef6ff' : '#9bb2ce',
                         padding: '0.28rem 0.62rem',
                         fontSize: '0.76rem',
-                        cursor: 'pointer',
                       }}
                     >
                       {option}
@@ -604,6 +621,8 @@ export function SecurityScanReportView({
                       <button
                         key={key}
                         type="button"
+                        className={`security-report-finding ${isActive ? 'security-report-finding--active' : ''}`}
+                        aria-pressed={isActive}
                         onClick={() => setSelectedFindingKey(key)}
                         style={{
                           textAlign: 'left',
@@ -611,7 +630,6 @@ export function SecurityScanReportView({
                           border: isActive ? '1px solid #3db4a255' : '1px solid #324158',
                           background: isActive ? 'rgba(30, 73, 66, 0.5)' : 'rgba(18, 24, 36, 0.86)',
                           padding: '0.9rem',
-                          cursor: 'pointer',
                           display: 'grid',
                           gap: '0.45rem',
                         }}
@@ -629,7 +647,7 @@ export function SecurityScanReportView({
             </section>
           </div>
 
-          <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
+          <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
             <div>
               <h3 style={{ margin: 0, color: '#edf5ff' }}>Evidence</h3>
               <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Use this context to understand why MLVScan flagged the selected finding.</p>
@@ -662,22 +680,6 @@ export function SecurityScanReportView({
                   </div>
                 )}
 
-                {selectedFinding.developerGuidance && (
-                  <div style={{ borderRadius: '12px', border: '1px solid #33506f', background: 'rgba(28, 46, 65, 0.45)', padding: '0.95rem', display: 'grid', gap: '0.45rem' }}>
-                    <div style={{ color: '#9fd4ff', fontSize: '0.74rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Developer guidance</div>
-                    <strong style={{ color: '#edf5ff' }}>{selectedFinding.developerGuidance.remediation}</strong>
-                    {selectedFinding.developerGuidance.documentationUrl && (
-                      <a href={selectedFinding.developerGuidance.documentationUrl} target="_blank" rel="noreferrer" style={{ color: '#87c8ff', textDecoration: 'none', fontSize: '0.85rem' }}>
-                        Open documentation
-                      </a>
-                    )}
-                    {selectedFinding.developerGuidance.alternativeApis && selectedFinding.developerGuidance.alternativeApis.length > 0 && (
-                      <div style={{ color: '#b6cce6', fontSize: '0.82rem' }}>
-                        Suggested APIs: {selectedFinding.developerGuidance.alternativeApis.join(', ')}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             ) : (
               <div style={{ borderRadius: '12px', border: '1px dashed #33445a', padding: '1rem', color: '#8fa7c5' }}>
@@ -687,7 +689,7 @@ export function SecurityScanReportView({
           </section>
         </div>
 
-        {(showCloseActions || onConfirm) && (
+        {(showCloseActions || (presentation === 'overlay' && onConfirm)) && (
           <div
             style={{
               flexShrink: 0,

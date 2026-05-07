@@ -318,6 +318,73 @@ describe('LogsOverlay', () => {
     expect(await screen.findByText('Fresh latest log line')).toBeTruthy();
   });
 
+  it('keeps the rendered latest log rows stable when revalidation returns unchanged content', async () => {
+    const latestReload = createDeferred<Array<ReturnType<typeof makeLogLine>>>();
+    const latestLine = makeLogLine({
+      lineNumber: 1,
+      content: 'Stable latest log line',
+    });
+
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Latest.log',
+        path: 'C:/Games/Schedule I/Logs/Latest.log',
+        size: 1024,
+        modified: '2026-03-24T18:00:00.000Z',
+        isLatest: true,
+      }),
+      makeLogFile({
+        name: 'Archived.log',
+        path: 'C:/Games/Schedule I/Logs/Archived.log',
+        size: 2048,
+        modified: '2026-03-23T18:00:00.000Z',
+        isLatest: false,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce([latestLine])
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 2,
+          content: 'Archived log line',
+        }),
+      ])
+      .mockImplementationOnce(() => latestReload.promise);
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Stable latest log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived\.log/i }));
+    expect(await screen.findByText('Archived log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Latest\.log/i }));
+    expect(await screen.findByText('Stable latest log line')).toBeTruthy();
+
+    const renderedLine = screen.getByText('Stable latest log line').closest('.logs-panel__line');
+    expect(renderedLine).toBeTruthy();
+    expect(screen.getByText('Stable latest log line').closest('.logs-panel__line')).toBe(renderedLine);
+
+    latestReload.resolve([
+      makeLogLine({
+        lineNumber: 1,
+        content: 'Stable latest log line',
+      }),
+    ]);
+
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenCalledTimes(3);
+    });
+    expect(screen.getByText('Stable latest log line').closest('.logs-panel__line')).toBe(renderedLine);
+  });
+
   it('keeps the last ten archived log files cached and evicts only the oldest entry', async () => {
     const files = Array.from({ length: 11 }, (_, index) => {
       const logNumber = index + 1;
@@ -736,7 +803,7 @@ describe('LogsOverlay', () => {
     );
 
     expect(await screen.findByText('Large log line 1')).toBeTruthy();
-    expect(screen.getByText(/500 Lines loaded/)).toBeTruthy();
+    expect(screen.queryByText(/500 Lines loaded/)).toBeNull();
     expect(container.querySelectorAll('.logs-panel__line').length).toBeLessThan(80);
     expect(container.querySelector('.logs-panel__virtual-spacer')).toBeTruthy();
   });

@@ -162,14 +162,14 @@ describe('ConfigurationOverlay', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Custom\.cfg/i }));
 
-    expect(await screen.findByText('Raw editing is safer for part of this file.')).toBeTruthy();
-    expect(screen.getByText('Structured Disabled')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Raw Editor/i })).toBeTruthy();
+    expect(await screen.findByText('Structured editing is unavailable for part of this file.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Structured' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Raw' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Loader\.cfg/i }));
 
     await waitFor(() => {
-      expect(screen.getByText('Structured Editor')).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'General' })).toBeTruthy();
     });
   });
 
@@ -219,6 +219,74 @@ describe('ConfigurationOverlay', () => {
     });
   });
 
+  it('matches config explorer searches against loaded file contents', async () => {
+    apiMocks.getConfigCatalog.mockResolvedValue([
+      makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
+      makeSummary({
+        name: 'Gameplay.cfg',
+        path: 'C:/Games/Schedule I/UserData/SomeMod/Gameplay.cfg',
+        fileType: 'Other',
+        relativePath: 'UserData/SomeMod/Gameplay.cfg',
+        groupName: 'SomeMod',
+      }),
+    ]);
+
+    apiMocks.getConfigDocument.mockImplementation(async (_environmentId: string, filePath: string) => {
+      if (filePath.endsWith('Gameplay.cfg')) {
+        return makeDocument({
+          summary: makeSummary({
+            name: 'Gameplay.cfg',
+            path: filePath,
+            fileType: 'Other',
+            relativePath: 'UserData/SomeMod/Gameplay.cfg',
+            groupName: 'SomeMod',
+          }),
+          rawContent: '[Economy]\nDealerCutMultiplier = 1.25',
+          sections: [
+            {
+              name: 'Economy',
+              entries: [
+                { key: 'DealerCutMultiplier', value: '1.25', comment: 'Adjusts dealer payouts' },
+              ],
+            },
+          ],
+        });
+      }
+
+      return makeDocument({
+        summary: makeSummary({ name: 'Loader.cfg', path: filePath }),
+        rawContent: '[General]\nfoo = bar',
+      });
+    });
+
+    render(
+      <ConfigurationOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByRole('button', { name: /Loader\.cfg/i })).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText('Search config files'), {
+      target: { value: 'DealerCutMultiplier' },
+    });
+
+    expect(await screen.findByRole('button', { name: /Gameplay\.cfg/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Economy/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /DealerCutMultiplier/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Loader\.cfg/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Economy/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Gameplay.cfg' })).toBeTruthy();
+      expect(screen.getByRole('heading', { name: 'Economy' })).toBeTruthy();
+    });
+  });
+
   it('saves structured edits through applyConfigEdits', async () => {
     apiMocks.getConfigCatalog.mockResolvedValue([
       makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
@@ -252,5 +320,37 @@ describe('ConfigurationOverlay', () => {
         [{ kind: 'setValue', section: 'General', key: 'foo', value: 'baz' }]
       );
     });
+  });
+
+  it('lets CodeMirror handle wheel scrolling in raw mode', async () => {
+    apiMocks.getConfigCatalog.mockResolvedValue([
+      makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
+    ]);
+    apiMocks.getConfigDocument.mockResolvedValue(
+      makeDocument({
+        summary: makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
+        rawContent: Array.from({ length: 80 }, (_, index) => `key_${index} = value_${index}`).join('\n'),
+      })
+    );
+
+    const { container } = render(
+      <ConfigurationOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByRole('button', { name: /Loader\.cfg/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Raw' }));
+
+    const rawEditor = await waitFor(() => {
+      const element = container.querySelector('.config-raw__editor');
+      expect(element).toBeTruthy();
+      return element as HTMLElement;
+    });
+
+    expect(fireEvent.wheel(rawEditor, { deltaY: 120 })).toBe(true);
   });
 });
