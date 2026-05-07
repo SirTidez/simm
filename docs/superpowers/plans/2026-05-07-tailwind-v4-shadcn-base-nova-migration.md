@@ -8,7 +8,7 @@
 
 **Tech Stack:** Bun, Vite, React 18, Tauri 2, Tailwind CSS v4, `@tailwindcss/vite`, shadcn/ui `base-nova`, lucide icons, Vitest, TypeScript.
 
-**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. `DownloadsPanel` and the shared security report view have started the first low-risk surface migrations for action/status atoms. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload.
+**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-6 are complete, and `DownloadsPanel`, the shared security report view, and `ConfigurationOverlay` have started low-risk surface migrations for action/status atoms. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload.
 
 ---
 
@@ -57,7 +57,7 @@ bun run build
 - Read: `src/style.css`
 - Read: `docs/simm-desktop-ui-redesign-spec.md`
 
-- [ ] **Step 1: Create a branch**
+- [x] **Step 1: Create a branch**
 
 ```powershell
 git switch -c fix/tailwind-shadcn-base-nova-migration
@@ -65,7 +65,7 @@ git switch -c fix/tailwind-shadcn-base-nova-migration
 
 Expected: new branch checked out.
 
-- [ ] **Step 2: Record current working tree**
+- [x] **Step 2: Record current working tree**
 
 ```powershell
 git status --short
@@ -73,7 +73,7 @@ git status --short
 
 Expected: unrelated existing user changes are identified and left alone.
 
-- [ ] **Step 3: Run baseline frontend validation**
+- [x] **Step 3: Run baseline frontend validation**
 
 ```powershell
 bun install
@@ -85,7 +85,7 @@ bun run build
 
 Expected: current frontend baseline is known before migration. If a command fails before changes, capture the failure text in the task notes and do not attribute it to Tailwind.
 
-- [ ] **Step 4: Commit nothing**
+- [x] **Step 4: Commit nothing**
 
 This task is discovery only. Do not stage or commit unless the branch command itself needs to be recorded externally.
 
@@ -100,7 +100,7 @@ This task is discovery only. Do not stage or commit unless the branch command it
 - Modify: `tsconfig.json`
 - Modify: `src/style.css`
 
-- [ ] **Step 1: Install Tailwind v4 for Vite**
+- [x] **Step 1: Install Tailwind v4 for Vite**
 
 ```powershell
 bun add -d tailwindcss @tailwindcss/vite
@@ -108,7 +108,7 @@ bun add -d tailwindcss @tailwindcss/vite
 
 Expected: `package.json` devDependencies include `tailwindcss` and `@tailwindcss/vite`; `bun.lock` updates.
 
-- [ ] **Step 2: Add the Vite plugin and alias**
+- [x] **Step 2: Add the Vite plugin and alias**
 
 Update `vite.config.ts` so the imports include:
 
@@ -134,7 +134,7 @@ resolve: {
 
 Expected: only Tailwind plugin and alias are added; `base: './'`, fixed port `1420`, `envPrefix`, and build target logic remain unchanged.
 
-- [ ] **Step 3: Add TypeScript alias support**
+- [x] **Step 3: Add TypeScript alias support**
 
 Update `tsconfig.json` under `compilerOptions`:
 
@@ -147,7 +147,7 @@ Update `tsconfig.json` under `compilerOptions`:
 
 Expected: `@/components/...` and `@/lib/...` imports typecheck.
 
-- [ ] **Step 4: Add Tailwind import without deleting current CSS**
+- [x] **Step 4: Add Tailwind import without deleting current CSS**
 
 Add this as the first line of `src/style.css`:
 
@@ -157,7 +157,7 @@ Add this as the first line of `src/style.css`:
 
 Expected: existing `:root`, scrollbar, shell, overlay, and theme rules remain in the file.
 
-- [ ] **Step 5: Validate bootstrap**
+- [x] **Step 5: Validate bootstrap**
 
 ```powershell
 bunx tsc --noEmit
@@ -168,7 +168,7 @@ bun run build
 
 Expected: app still builds before any UI conversion.
 
-- [ ] **Step 6: Commit bootstrap**
+- [x] **Step 6: Commit bootstrap**
 
 ```powershell
 git add package.json bun.lock vite.config.ts tsconfig.json src/style.css
@@ -186,7 +186,7 @@ git commit -m "build(frontend): add Tailwind v4 bootstrap"
 - Modify: `package.json`
 - Modify: `bun.lock`
 
-- [ ] **Step 1: Run shadcn init with Bun**
+- [x] **Step 1: Run shadcn init with Bun**
 
 ```powershell
 bunx --bun shadcn@latest init --preset base-nova
@@ -208,7 +208,7 @@ Icon library: lucide
 
 Expected: `components.json`, shadcn CSS variables, `src/lib/utils.ts`, and dependencies are generated or updated.
 
-- [ ] **Step 2: Normalize `components.json`**
+- [x] **Step 2: Normalize `components.json`**
 
 Ensure it has this shape:
 
@@ -238,13 +238,13 @@ Ensure it has this shape:
 
 Expected: Tailwind `config` remains empty for v4, and aliases match `tsconfig.json` / `vite.config.ts`.
 
-- [ ] **Step 3: Review generated CSS placement**
+- [x] **Step 3: Review generated CSS placement**
 
 Keep shadcn tokens near the top of `src/style.css`, after `@import "tailwindcss";` and before SIMM's existing `:root` rules when possible. If shadcn generated duplicate `:root` blocks, merge variables carefully and keep existing SIMM variables such as `--sidebar-collapsed-width`, `--scrollbar-size`, and theme colors.
 
 Expected: existing SIMM UI still renders with old classes, while Tailwind utilities and shadcn tokens are available.
 
-- [ ] **Step 4: Validate shadcn project context**
+- [x] **Step 4: Validate shadcn project context**
 
 ```powershell
 bunx --bun shadcn@latest info --json
@@ -252,7 +252,7 @@ bunx --bun shadcn@latest info --json
 
 Expected: output reports Vite, TypeScript, Tailwind v4, `base-nova`, `base`, `lucide`, and paths under `src/components/ui` / `src/lib/utils.ts`.
 
-- [ ] **Step 5: Validate init**
+- [x] **Step 5: Validate init**
 
 ```powershell
 bunx tsc --noEmit
@@ -263,7 +263,7 @@ bun run build
 
 Expected: no behavior changes yet.
 
-- [ ] **Step 6: Commit shadcn init**
+- [x] **Step 6: Commit shadcn init**
 
 ```powershell
 git add components.json package.json bun.lock src/style.css src/lib/utils.ts
@@ -284,7 +284,7 @@ git commit -m "build(frontend): initialize shadcn base nova"
 - Create: `src/components/ui/scroll-area.tsx`
 - Create: `src/components/ui/skeleton.tsx`
 
-- [ ] **Step 1: Fetch component docs before generation**
+- [x] **Step 1: Fetch component docs before generation**
 
 ```powershell
 bunx --bun shadcn@latest docs button badge separator tooltip dialog alert-dialog scroll-area skeleton
@@ -292,7 +292,7 @@ bunx --bun shadcn@latest docs button badge separator tooltip dialog alert-dialog
 
 Expected: docs URLs are printed for the exact components being introduced.
 
-- [ ] **Step 2: Add the smallest reusable set**
+- [x] **Step 2: Add the smallest reusable set**
 
 ```powershell
 bunx --bun shadcn@latest add button badge separator tooltip dialog alert-dialog scroll-area skeleton
@@ -300,11 +300,11 @@ bunx --bun shadcn@latest add button badge separator tooltip dialog alert-dialog 
 
 Expected: only files under `src/components/ui` and dependency updates are added.
 
-- [ ] **Step 3: Review generated component APIs**
+- [x] **Step 3: Review generated component APIs**
 
 Read each generated component. For `base-nova`, verify trigger composition uses the current base API instead of Radix-only assumptions. Do not import these components into app surfaces yet.
 
-- [ ] **Step 4: Validate generated components**
+- [x] **Step 4: Validate generated components**
 
 ```powershell
 bunx tsc --noEmit
@@ -315,7 +315,7 @@ bun run build
 
 Expected: generated components compile unused.
 
-- [ ] **Step 5: Commit foundations**
+- [x] **Step 5: Commit foundations**
 
 ```powershell
 git add package.json bun.lock src/components/ui
@@ -332,7 +332,7 @@ git commit -m "build(frontend): add shadcn foundation components"
 - Create: `src/components/primitives/index.ts`
 - Create: `src/components/primitives/SimmButton.test.tsx`
 
-- [ ] **Step 1: Add a button adapter test**
+- [x] **Step 1: Add a button adapter test**
 
 Create `src/components/primitives/SimmButton.test.tsx`:
 
@@ -354,7 +354,7 @@ describe('SimmButton', () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused failing test**
+- [x] **Step 2: Run the focused failing test**
 
 ```powershell
 bun run test src/components/primitives/SimmButton.test.tsx
@@ -362,7 +362,7 @@ bun run test src/components/primitives/SimmButton.test.tsx
 
 Expected: fails because `SimmButton` does not exist.
 
-- [ ] **Step 3: Implement `SimmButton`**
+- [x] **Step 3: Implement `SimmButton`**
 
 Create `src/components/primitives/SimmButton.tsx`:
 
@@ -382,7 +382,7 @@ export function SimmButton({ className, ...props }: ButtonProps) {
 
 If the generated `Button` type name differs, use the exported prop type from `src/components/ui/button.tsx`.
 
-- [ ] **Step 4: Implement `SimmBadge`**
+- [x] **Step 4: Implement `SimmBadge`**
 
 Create `src/components/primitives/SimmBadge.tsx`:
 
@@ -402,7 +402,7 @@ export function SimmBadge({ className, ...props }: BadgeProps) {
 
 If the generated `Badge` type name differs, use the exported prop type from `src/components/ui/badge.tsx`.
 
-- [ ] **Step 5: Export primitives**
+- [x] **Step 5: Export primitives**
 
 Create `src/components/primitives/index.ts`:
 
@@ -411,7 +411,7 @@ export { SimmButton } from './SimmButton';
 export { SimmBadge } from './SimmBadge';
 ```
 
-- [ ] **Step 6: Validate primitives**
+- [x] **Step 6: Validate primitives**
 
 ```powershell
 bun run test src/components/primitives/SimmButton.test.tsx
@@ -423,7 +423,7 @@ bun run build
 
 Expected: adapter test and full frontend validation pass.
 
-- [ ] **Step 7: Commit adapters**
+- [x] **Step 7: Commit adapters**
 
 ```powershell
 git add src/components/primitives
@@ -505,7 +505,7 @@ git commit -m "refactor(frontend): migrate downloads panel primitives"
 1. [x] `src/components/DownloadsPanel.tsx`
 2. [x] `src/components/SecurityScanReportPage.tsx`
 3. [x] `src/components/SecurityScanReportOverlay.tsx`
-4. `src/components/ConfigurationOverlay.tsx`
+4. [x] `src/components/ConfigurationOverlay.tsx`
 5. `src/components/LogsOverlay.tsx`
 6. `src/components/Settings.tsx`
 7. `src/components/App.tsx` shell atoms only
@@ -559,6 +559,9 @@ Current Task 7 checkpoint:
 - `SecurityScanReportOverlay.tsx` now uses `SimmButton` for close/back/confirm actions and `SimmBadge` for report/severity/disposition chips.
 - Selector, filter, and finding buttons intentionally remain raw buttons in this pass because they carry richer active-state layout and inline presentation.
 - Validation passed with `bun install`, `bun run test src/components/SecurityScanReportPage.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
+- `ConfigurationOverlay.tsx` now uses `SimmButton` for generic file, reload, add/remove section, discard, and save actions, plus `SimmBadge` for the raw fallback chip.
+- Configuration explorer, mode switch, section tabs, entry delete controls, and boolean toggles intentionally remain raw buttons in this pass because they carry richer active-state layout and editor-specific behavior.
+- Validation passed with `bun install`, `bun run test src/components/ConfigurationOverlay.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 
 ---
 

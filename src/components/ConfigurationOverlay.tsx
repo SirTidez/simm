@@ -6,6 +6,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
+import { SimmBadge, SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
 import type {
   ConfigDocument,
@@ -1336,18 +1337,18 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                     <span>{activeDocument.summary.sectionCount} sections</span>
                     <span>Modified {formatRelativeTimestamp(activeDocument.summary.lastModified)}</span>
                   </div>
-                  <button type="button" className="btn btn-secondary" onClick={() => void ApiService.openPath(activeDocument.summary.path)}>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void ApiService.openPath(activeDocument.summary.path)}>
                     <Icon name="fas fa-file-lines" />
                     Open File
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={() => void ApiService.revealPath(activeDocument.summary.path)}>
+                  </SimmButton>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void ApiService.revealPath(activeDocument.summary.path)}>
                     <Icon name="fas fa-folder-open" />
                     Open Folder
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={() => void handleReload()} disabled={loadingDocument || saving}>
+                  </SimmButton>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void handleReload()} disabled={loadingDocument || saving}>
                     <Icon name={loadingDocument ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
                     Reload
-                  </button>
+                  </SimmButton>
                 </div>
               </header>
 
@@ -1414,14 +1415,14 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                       />
                     </div>
                     {activeSectionId && activeSectionId !== ALL_SECTIONS_TAB && (
-                      <button
+                      <SimmButton
                         type="button"
                         className="btn btn-secondary btn-small"
                         onClick={() => handleAddEntry(activeSectionId)}
                       >
                         <Icon name="fas fa-plus" />
                         Add Entry
-                      </button>
+                      </SimmButton>
                     )}
                   </div>
                 </div>
@@ -1430,9 +1431,9 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
               {activeDocument.parseWarnings.length > 0 && (
                 <div className="config-editor__warning">
                   <Icon name="fas fa-triangle-exclamation" />
-                  <span className="settings-chip">
+                  <SimmBadge variant="outline" className="settings-chip">
                     Raw Fallback
-                  </span>
+                  </SimmBadge>
                   <div>
                     <strong>Structured editing is unavailable for part of this file.</strong>
                     <p>{activeDocument.parseWarnings[0]}</p>
@@ -1451,14 +1452,15 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                             <p>{formatSettingCount(visibleEntryCount)}</p>
                           </div>
                           <div className="config-structured__header-actions">
-                            <button
+                            <SimmButton
                               type="button"
+                              variant="destructive"
                               className="btn btn-danger btn-small"
                               onClick={() => handleDeleteSection(activeSection.id)}
                             >
                               <Icon name="fas fa-trash" />
                               Remove Section
-                            </button>
+                            </SimmButton>
                           </div>
                         </div>
                       )}
@@ -1480,14 +1482,14 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                                     <p>{formatSettingCount(section.entries.length)}</p>
                                   </div>
                                   <div className="config-section-card__header-actions">
-                                    <button type="button" className="btn btn-secondary btn-small" onClick={() => handleAddEntry(section.id)}>
+                                    <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => handleAddEntry(section.id)}>
                                       <Icon name="fas fa-plus" />
                                       Add Entry
-                                    </button>
-                                    <button type="button" className="btn btn-danger btn-small" onClick={() => handleDeleteSection(section.id)}>
+                                    </SimmButton>
+                                    <SimmButton type="button" variant="destructive" className="btn btn-danger btn-small" onClick={() => handleDeleteSection(section.id)}>
                                       <Icon name="fas fa-trash" />
                                       Remove Section
-                                    </button>
+                                    </SimmButton>
                                   </div>
                                 </div>
                               )}
@@ -1580,11 +1582,11 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                   <span>{visibleEntryCount} visible setting{visibleEntryCount === 1 ? '' : 's'}</span>
                 </div>
                 <div className="config-workspace__draft-actions">
-                  <button type="button" className="btn btn-secondary" onClick={handleDiscard} disabled={!activeDraft.dirty || saving}>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={handleDiscard} disabled={!activeDraft.dirty || saving}>
                     <Icon name="fas fa-rotate-left" />
                     Discard
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
                     type="button"
                     className="btn btn-primary"
                     aria-label="Save"
@@ -1593,7 +1595,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                   >
                     <Icon name={saving ? 'fas fa-spinner fa-spin' : 'fas fa-save'} />
                     {saving ? 'Saving...' : 'Save Changes'}
-                  </button>
+                  </SimmButton>
                 </div>
               </footer>
             </>
