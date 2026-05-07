@@ -8,6 +8,8 @@
 
 **Tech Stack:** Bun, Vite, React 18, Tauri 2, Tailwind CSS v4, `@tailwindcss/vite`, shadcn/ui `base-nova`, lucide icons, Vitest, TypeScript.
 
+**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. `DownloadsPanel` has started the first low-risk surface migration for action/status atoms. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload.
+
 ---
 
 ## Constraints
@@ -438,8 +440,9 @@ git commit -m "feat(frontend): add SIMM shadcn primitives"
 - Modify: `src/components/DownloadsPanel.tsx`
 - Modify: `src/components/DownloadsPanel.test.tsx`
 - Modify: `src/style.css`
+- Modify: `vite.config.ts`
 
-- [ ] **Step 1: Snapshot current behavior through tests**
+- [x] **Step 1: Snapshot current behavior through tests**
 
 ```powershell
 bun run test src/components/DownloadsPanel.test.tsx
@@ -447,7 +450,13 @@ bun run test src/components/DownloadsPanel.test.tsx
 
 Expected: existing tests pass before styling changes.
 
-- [ ] **Step 2: Replace only action/status atoms**
+- [x] **Step 2: Split shadcn runtime into a stable UI vendor chunk**
+
+Add a `vendor-ui` manual chunk for Base UI, class variance, lucide, and class-merge helpers before importing shadcn primitives into small lazy-loaded panels.
+
+Expected: `DownloadsPanel` can use SIMM shadcn adapters without absorbing the entire Base UI runtime into its own lazy chunk.
+
+- [x] **Step 3: Replace only action/status atoms**
 
 Use `SimmButton`, `SimmBadge`, `Separator`, or `Skeleton` for local atoms. Keep the panel structure and existing class names for layout until the surface is fully stable.
 
@@ -458,7 +467,7 @@ import { SimmBadge, SimmButton } from '@/components/primitives';
 import { Separator } from '@/components/ui/separator';
 ```
 
-- [ ] **Step 3: Remove only dead CSS selectors for this surface**
+- [x] **Step 4: Remove only dead CSS selectors for this surface**
 
 Use `rg` to confirm selectors are unused before removal:
 
@@ -466,11 +475,12 @@ Use `rg` to confirm selectors are unused before removal:
 rg -n "downloads-panel__old-selector" src
 ```
 
-Expected: delete only selectors with no remaining JSX references.
+Expected: delete only selectors with no remaining JSX references. Current pass intentionally removed no CSS selectors because existing class names still preserve layout and visual behavior.
 
-- [ ] **Step 4: Validate surface**
+- [x] **Step 5: Validate surface**
 
 ```powershell
+bun install
 bun run test src/components/DownloadsPanel.test.tsx
 bunx tsc --noEmit
 bun run lint
@@ -480,10 +490,10 @@ bun run build
 
 Expected: no behavior regression.
 
-- [ ] **Step 5: Commit first surface**
+- [ ] **Step 6: Commit first surface**
 
 ```powershell
-git add src/components/DownloadsPanel.tsx src/components/DownloadsPanel.test.tsx src/style.css
+git add vite.config.ts src/components/DownloadsPanel.tsx docs/superpowers/plans/2026-05-07-tailwind-v4-shadcn-base-nova-migration.md
 git commit -m "refactor(frontend): migrate downloads panel primitives"
 ```
 

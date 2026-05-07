@@ -51,5 +51,28 @@ export default defineConfig({
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
     // produce sourcemaps for debug builds
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalizedId = id.replace(/\\/g, '/')
+
+          if (!normalizedId.includes('/node_modules/')) {
+            return undefined
+          }
+
+          if (
+            normalizedId.includes('/@base-ui/') ||
+            normalizedId.includes('/class-variance-authority/') ||
+            normalizedId.includes('/clsx/') ||
+            normalizedId.includes('/lucide-react/') ||
+            normalizedId.includes('/tailwind-merge/')
+          ) {
+            return 'vendor-ui'
+          }
+
+          return undefined
+        },
+      },
+    },
   },
 })

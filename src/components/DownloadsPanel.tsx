@@ -5,6 +5,7 @@ import { useDownloadStatusStore } from '../stores/downloadStatusStore';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
 import { resolveImageSource } from './modCardHelpers';
+import { SimmBadge, SimmButton } from './primitives';
 
 function statusLabel(status: TrackedDownload['status']) {
   switch (status) {
@@ -111,9 +112,12 @@ function renderDownloadRow(download: TrackedDownload) {
           </span>
         </div>
 
-        <span className={`downloads-panel__status-text downloads-panel__status-text--${download.status}`}>
+        <SimmBadge
+          variant={isActiveStatus(download.status) ? 'secondary' : 'outline'}
+          className={`downloads-panel__status-text downloads-panel__status-text--${download.status}`}
+        >
           {isActiveStatus(download.status) ? progressText(download) : statusLabel(download.status)}
-        </span>
+        </SimmBadge>
       </div>
 
       <div className="downloads-panel__progress-bar">
@@ -170,14 +174,16 @@ export function DownloadsPanel({ presentation = 'panel', onClose }: DownloadsPan
         </div>
         <div className="downloads-panel__header-actions">
           {onClose && (
-            <button
+            <SimmButton
               type="button"
+              variant="ghost"
+              size="icon-sm"
               className="downloads-panel__close"
               onClick={onClose}
               aria-label="Close downloads"
             >
               <Icon name="times" />
-            </button>
+            </SimmButton>
           )}
         </div>
       </div>
