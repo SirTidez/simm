@@ -15,6 +15,9 @@
   "scripts": {
     "dev": "vite",
     "dev:scan": "vite --mode react-scan",
+    "doctor": "react-doctor . --offline --fail-on none",
+    "doctor:verbose": "react-doctor . --verbose --offline --fail-on none",
+    "doctor:json": "react-doctor . --json --offline --fail-on none",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -74,6 +77,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
     "jsdom": "^29.0.2",
+    "react-doctor": "^0.0.47",
     "react-scan": "^0.5.6",
     "tailwindcss": "^4.2.4",
     "typescript": "~5.9.3",

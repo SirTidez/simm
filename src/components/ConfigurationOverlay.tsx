@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent as ReactWheelEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { RangeSetBuilder } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
@@ -359,30 +359,35 @@ function buildConfigDraftSearchText(draft: FileDraft) {
   return [draft.rawContent, sectionText].join('\n').toLowerCase();
 }
 
+function textMatchesQuery(value: string, query: string): boolean {
+  return value.toLowerCase().includes(query);
+}
+
 function getConfigExplorerMatches(draft: FileDraft | undefined, query: string): ConfigExplorerSectionMatch[] {
   if (!draft || !query) return [];
 
-  return draft.sections
-    .map((section) => {
-      const sectionMatches = section.name.toLowerCase().includes(query);
-      const entries = section.entries.filter((entry) =>
-        entry.key.toLowerCase().includes(query) ||
-        entry.value.toLowerCase().includes(query) ||
-        entry.comment.toLowerCase().includes(query)
-      );
+  const matches: ConfigExplorerSectionMatch[] = [];
+  for (const section of draft.sections) {
+    const sectionMatches = textMatchesQuery(section.name, query);
+    const entries = section.entries.filter((entry) =>
+      textMatchesQuery(entry.key, query) ||
+      textMatchesQuery(entry.value, query) ||
+      textMatchesQuery(entry.comment, query)
+    );
 
-      if (!sectionMatches && entries.length === 0) {
-        return null;
-      }
+    if (!sectionMatches && entries.length === 0) {
+      continue;
+    }
 
-      return {
-        id: section.id,
-        name: section.name,
-        entries: sectionMatches ? section.entries : entries,
-        sectionMatches,
-      };
-    })
-    .filter((section): section is ConfigExplorerSectionMatch => Boolean(section));
+    matches.push({
+      id: section.id,
+      name: section.name,
+      entries: sectionMatches ? section.entries : entries,
+      sectionMatches,
+    });
+  }
+
+  return matches;
 }
 
 function buildOperations(originalSections: ConfigSection[], draftSections: EditableSection[]): ConfigEditOperation[] {
@@ -494,7 +499,7 @@ interface ConfigEntryValueEditorProps {
   onChange: (sectionId: string, entryId: string, field: 'key' | 'value' | 'comment', value: string) => void;
 }
 
-function ConfigEntryValueEditor({ sectionId, entry, onChange }: ConfigEntryValueEditorProps) {
+const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId, entry, onChange }: ConfigEntryValueEditorProps) {
   const valueKind = getConfigValueKind(entry.value);
   const booleanValue = getBooleanValue(entry.value);
 
@@ -542,7 +547,86 @@ function ConfigEntryValueEditor({ sectionId, entry, onChange }: ConfigEntryValue
       />
     </div>
   );
+});
+
+interface ConfigEntryRowProps {
+  sectionId: string;
+  entry: EditableEntry;
+  onChange: ConfigEntryValueEditorProps['onChange'];
+  onDelete: (sectionId: string, entryId: string) => void;
 }
+
+const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange, onDelete }: ConfigEntryRowProps) {
+  const keyInputId = `config-key-${sectionId}-${entry.id}`;
+  const commentInputId = `config-comment-${sectionId}-${entry.id}`;
+  const entryLabel = entry.key || 'entry';
+
+  const handleKeyChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    onChange(sectionId, entry.id, 'key', event.target.value);
+  }, [entry.id, onChange, sectionId]);
+
+  const handleCommentChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
+    onChange(sectionId, entry.id, 'comment', event.target.value);
+  }, [entry.id, onChange, sectionId]);
+
+  const handleDeleteClick = useCallback(() => {
+    onDelete(sectionId, entry.id);
+  }, [entry.id, onDelete, sectionId]);
+
+  return (
+    <div className="config-entry-row">
+      <div className="config-entry-row__header">
+        <div className="config-entry-row__key">
+          {entry.isNew ? (
+            <>
+              <label htmlFor={keyInputId}>Key</label>
+              <input
+                id={keyInputId}
+                type="text"
+                value={entry.key}
+                onChange={handleKeyChange}
+                placeholder="settingName"
+              />
+            </>
+          ) : (
+            <div className="config-entry-row__key-label" title={entry.key}>
+              {entry.key}
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          className="config-entry-row__delete"
+          aria-label={`Delete ${entryLabel}`}
+          onClick={handleDeleteClick}
+        >
+          <Icon name="fas fa-trash" />
+        </button>
+      </div>
+
+      <div className="config-entry-row__value">
+        <ConfigEntryValueEditor
+          sectionId={sectionId}
+          entry={entry}
+          onChange={onChange}
+        />
+      </div>
+
+      <div className="config-entry-row__comment">
+        <label htmlFor={commentInputId}>Comment</label>
+        <textarea
+          id={commentInputId}
+          aria-label={`Comment for ${entryLabel}`}
+          value={entry.comment}
+          onChange={handleCommentChange}
+          rows={2}
+          placeholder="Optional inline comment"
+        />
+      </div>
+    </div>
+  );
+});
 
 export function ConfigurationOverlay({ isOpen, environmentId, environment }: Props) {
   const [catalog, setCatalog] = useState<ConfigFileSummary[]>([]);
@@ -767,28 +851,33 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
         ? activeDraft.sections.filter((section) => section.id === activeSectionId)
         : activeDraft.sections;
 
-    return sourceSections
-      .map((section) => {
-        if (!query) return section;
+    const nextSections: EditableSection[] = [];
+    for (const section of sourceSections) {
+      if (!query) {
+        nextSections.push(section);
+        continue;
+      }
 
-        const sectionMatches = section.name.toLowerCase().includes(query);
-        const entries = section.entries.filter((entry) =>
-          entry.key.toLowerCase().includes(query) ||
-          entry.value.toLowerCase().includes(query) ||
-          entry.comment.toLowerCase().includes(query)
-        );
+      const sectionMatches = textMatchesQuery(section.name, query);
+      const entries = section.entries.filter((entry) =>
+        textMatchesQuery(entry.key, query) ||
+        textMatchesQuery(entry.value, query) ||
+        textMatchesQuery(entry.comment, query)
+      );
 
-        if (sectionMatches && entries.length === 0) {
-          return section;
-        }
+      if (sectionMatches && entries.length === 0) {
+        nextSections.push(section);
+        continue;
+      }
 
-        if (entries.length === 0) {
-          return null;
-        }
+      if (entries.length === 0) {
+        continue;
+      }
 
-        return { ...section, entries };
-      })
-      .filter((section): section is EditableSection => Boolean(section));
+      nextSections.push({ ...section, entries });
+    }
+
+    return nextSections;
   }, [activeDraft, activeSectionId, sectionFilter]);
 
   const dirtyCount = useMemo(() => Object.values(drafts).filter((draft) => draft.dirty).length, [drafts]);
@@ -828,7 +917,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
     }
   }, []);
 
-  const updateActiveDraft = (updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
+  const updateActiveDraft = useCallback((updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
     if (!selectedFilePath) return;
     setDrafts((current) => {
       const existingDraft = current[selectedFilePath];
@@ -843,7 +932,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
         },
       };
     });
-  };
+  }, [selectedFilePath]);
 
   const requestConfirm = (title: string, message: string, onConfirmAction: () => void) => {
     setPendingConfirm({ title, message, onConfirm: onConfirmAction });
@@ -876,19 +965,31 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
       return;
     }
 
-    const syncOverflow = () => updateSectionTabOverflow();
-    syncOverflow();
-    element.addEventListener('scroll', syncOverflow, { passive: true });
-    window.addEventListener('resize', syncOverflow);
+    let overflowFrameId: number | null = null;
+    const syncOverflow = () => {
+      overflowFrameId = null;
+      updateSectionTabOverflow();
+    };
+    const scheduleOverflowSync = () => {
+      if (overflowFrameId !== null) return;
+      overflowFrameId = window.requestAnimationFrame(syncOverflow);
+    };
+
+    scheduleOverflowSync();
+    element.addEventListener('scroll', scheduleOverflowSync, { passive: true });
+    window.addEventListener('resize', scheduleOverflowSync);
 
     const resizeObserver = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(syncOverflow)
+      ? new ResizeObserver(scheduleOverflowSync)
       : null;
     resizeObserver?.observe(element);
 
     return () => {
-      element.removeEventListener('scroll', syncOverflow);
-      window.removeEventListener('resize', syncOverflow);
+      if (overflowFrameId !== null) {
+        window.cancelAnimationFrame(overflowFrameId);
+      }
+      element.removeEventListener('scroll', scheduleOverflowSync);
+      window.removeEventListener('resize', scheduleOverflowSync);
       resizeObserver?.disconnect();
     };
   }, [editorMode, sectionTabs, updateSectionTabOverflow]);
@@ -1017,14 +1118,14 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
     setEditorMode(nextMode);
   };
 
-  const handleDeleteSection = (sectionId: string) => {
+  const handleDeleteSection = useCallback((sectionId: string) => {
     updateActiveDraft((draft) => ({
       ...draft,
       sections: draft.sections.filter((section) => section.id !== sectionId),
     }), 'structured');
-  };
+  }, [updateActiveDraft]);
 
-  const handleAddEntry = (sectionId: string) => {
+  const handleAddEntry = useCallback((sectionId: string) => {
     updateActiveDraft((draft) => ({
       ...draft,
       sections: draft.sections.map((section) =>
@@ -1046,9 +1147,9 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           : section
       ),
     }), 'structured');
-  };
+  }, [updateActiveDraft]);
 
-  const handleDeleteEntry = (sectionId: string, entryId: string) => {
+  const handleDeleteEntry = useCallback((sectionId: string, entryId: string) => {
     updateActiveDraft((draft) => ({
       ...draft,
       sections: draft.sections.map((section) =>
@@ -1057,9 +1158,9 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           : section
       ),
     }), 'structured');
-  };
+  }, [updateActiveDraft]);
 
-  const handleEntryChange = (
+  const handleEntryChange = useCallback((
     sectionId: string,
     entryId: string,
     field: 'key' | 'value' | 'comment',
@@ -1078,14 +1179,14 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           : section
       ),
     }), 'structured');
-  };
+  }, [updateActiveDraft]);
 
-  const handleRawChange = (value: string) => {
+  const handleRawChange = useCallback((value: string) => {
     updateActiveDraft((draft) => ({
       ...draft,
       rawContent: value,
     }), 'raw');
-  };
+  }, [updateActiveDraft]);
 
   const handleSave = async () => {
     if (!selectedFilePath || !activeDocument || !activeDraft) return;
@@ -1513,57 +1614,13 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
                               <div className="config-section-card__entries">
                                 {section.entries.map((entry) => (
-                                  <div key={entry.id} className="config-entry-row">
-                                    <div className="config-entry-row__header">
-                                      <div className="config-entry-row__key">
-                                        {entry.isNew ? (
-                                          <>
-                                            <label htmlFor={`config-key-${section.id}-${entry.id}`}>Key</label>
-                                            <input
-                                              id={`config-key-${section.id}-${entry.id}`}
-                                              type="text"
-                                              value={entry.key}
-                                              onChange={(e) => handleEntryChange(section.id, entry.id, 'key', e.target.value)}
-                                              placeholder="settingName"
-                                            />
-                                          </>
-                                        ) : (
-                                          <div className="config-entry-row__key-label" title={entry.key}>
-                                            {entry.key}
-                                          </div>
-                                        )}
-                                      </div>
-
-                                      <button
-                                        type="button"
-                                        className="config-entry-row__delete"
-                                        aria-label={`Delete ${entry.key || 'entry'}`}
-                                        onClick={() => handleDeleteEntry(section.id, entry.id)}
-                                      >
-                                        <Icon name="fas fa-trash" />
-                                      </button>
-                                    </div>
-
-                                    <div className="config-entry-row__value">
-                                      <ConfigEntryValueEditor
-                                        sectionId={section.id}
-                                        entry={entry}
-                                        onChange={handleEntryChange}
-                                      />
-                                    </div>
-
-                                    <div className="config-entry-row__comment">
-                                      <label htmlFor={`config-comment-${section.id}-${entry.id}`}>Comment</label>
-                                      <textarea
-                                        id={`config-comment-${section.id}-${entry.id}`}
-                                        aria-label={`Comment for ${entry.key || 'new entry'}`}
-                                        value={entry.comment}
-                                        onChange={(e) => handleEntryChange(section.id, entry.id, 'comment', e.target.value)}
-                                        rows={2}
-                                        placeholder="Optional inline comment"
-                                      />
-                                    </div>
-                                  </div>
+                                  <ConfigEntryRow
+                                    key={entry.id}
+                                    sectionId={section.id}
+                                    entry={entry}
+                                    onChange={handleEntryChange}
+                                    onDelete={handleDeleteEntry}
+                                  />
                                 ))}
                               </div>
                             </article>

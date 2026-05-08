@@ -89,6 +89,17 @@ function OverlayFallback() {
   );
 }
 
+function SteamBadge() {
+  return (
+    <span
+      className="badge badge-blue environment-card__steam-badge"
+      title="Steam-managed installation"
+    >
+      <Icon name="fab fa-steam" />
+    </span>
+  );
+}
+
 function EnvironmentListSkeleton() {
   return (
     <div className="environment-loading-skeleton" role="status" aria-live="polite" aria-label="Loading game installs">
@@ -1497,18 +1508,6 @@ export function EnvironmentList({
 
   const handleCloseModsOverlay = () => {
     setModsOverlay({ isOpen: false, envId: null });
-  };
-
-  // Component for Steam badge
-  const SteamBadge = () => {
-    return (
-      <span
-        className="badge badge-blue environment-card__steam-badge"
-        title="Steam-managed installation"
-      >
-        <Icon name="fab fa-steam" />
-      </span>
-    );
   };
 
   const formatLastChecked = (value: Environment['lastUpdateCheck']) => {

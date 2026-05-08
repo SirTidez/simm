@@ -3926,6 +3926,13 @@ body::before {
   transition: border-color 0.16s ease, background-color 0.16s ease;
 }
 
+@supports (content-visibility: auto) {
+  .config-entry-row {
+    content-visibility: auto;
+    contain-intrinsic-size: 170px;
+  }
+}
+
 .config-entry-row:hover {
   border-color: rgba(118, 151, 194, 0.34);
   background:
