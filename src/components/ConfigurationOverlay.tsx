@@ -26,6 +26,27 @@ interface Props {
 type EditorMode = 'structured' | 'raw';
 type ConfigValueKind = 'boolean' | 'number' | 'text' | 'empty';
 const ALL_SECTIONS_TAB = '__all__';
+const SECTION_TAB_OVERFLOW_NONE = { left: false, right: false };
+
+function resolveSectionTabOverflow(element: HTMLDivElement | null) {
+  if (!element) {
+    return SECTION_TAB_OVERFLOW_NONE;
+  }
+
+  const { scrollLeft, scrollWidth, clientWidth } = element;
+  const maxScrollLeft = Math.max(0, scrollWidth - clientWidth);
+  return {
+    left: scrollLeft > 2,
+    right: scrollLeft < maxScrollLeft - 2,
+  };
+}
+
+function sectionTabOverflowEquals(
+  current: typeof SECTION_TAB_OVERFLOW_NONE,
+  next: typeof SECTION_TAB_OVERFLOW_NONE,
+) {
+  return current.left === next.left && current.right === next.right;
+}
 
 const rawConfigEditorTheme = EditorView.theme(
   {
@@ -540,7 +561,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const selectedFilePathRef = useRef<string | null>(null);
   const sectionTabsRef = useRef<HTMLDivElement | null>(null);
-  const [sectionTabOverflow, setSectionTabOverflow] = useState({ left: false, right: false });
+  const [sectionTabOverflow, setSectionTabOverflow] = useState(SECTION_TAB_OVERFLOW_NONE);
 
   const activeDocument = selectedFilePath ? documentCache[selectedFilePath] ?? null : null;
   const activeDraft = selectedFilePath ? drafts[selectedFilePath] ?? null : null;
@@ -778,18 +799,10 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   const structuredAvailable = activeDocument?.summary.supportsStructuredEdit ?? false;
 
   const updateSectionTabOverflow = useCallback(() => {
-    const element = sectionTabsRef.current;
-    if (!element) {
-      setSectionTabOverflow({ left: false, right: false });
-      return;
-    }
-
-    const { scrollLeft, scrollWidth, clientWidth } = element;
-    const maxScrollLeft = Math.max(0, scrollWidth - clientWidth);
-    setSectionTabOverflow({
-      left: scrollLeft > 2,
-      right: scrollLeft < maxScrollLeft - 2,
-    });
+    const nextOverflow = resolveSectionTabOverflow(sectionTabsRef.current);
+    setSectionTabOverflow((currentOverflow) =>
+      sectionTabOverflowEquals(currentOverflow, nextOverflow) ? currentOverflow : nextOverflow
+    );
   }, []);
 
   const scrollSectionTabs = useCallback((delta: number) => {
@@ -855,7 +868,11 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   useEffect(() => {
     const element = sectionTabsRef.current;
     if (!element || editorMode !== 'structured') {
-      setSectionTabOverflow({ left: false, right: false });
+      setSectionTabOverflow((currentOverflow) =>
+        sectionTabOverflowEquals(currentOverflow, SECTION_TAB_OVERFLOW_NONE)
+          ? currentOverflow
+          : SECTION_TAB_OVERFLOW_NONE
+      );
       return;
     }
 
