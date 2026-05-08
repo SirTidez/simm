@@ -4,10 +4,13 @@
 
 - Began the next UI redesign pass while refining release flow behavior, frontend contract sync, featured Thunderstore library curation, and related commit message handling.
 - Expanded the redesign into a new desktop workspace shell with a Home dashboard/news feed, reusable page headers, collapsible sidebar sections, focused environment interactions, refreshed overlay layouts, and supporting UI polish across the app.
-- Switched the frontend/dev workflow guidance over to `bun`/`bunx`, added project ESLint configuration, and followed up with fixes for mod source links and latest-version fallback behavior in the mods flow.
+- Added installed-mod scan visibility, safer mod-path/security handling, and clearer UI loading states while tightening Mods and Logs behavior around the new shell.
+- Polished the configuration editor, downloads, MLVScan, logs, settings, and shared shell UX while reducing rerenders and commit cost in the heaviest desktop overlays.
+- Started the Tailwind v4 + shadcn base-nova migration with shared SIMM primitives, migrated key desktop surfaces onto the new component foundation, and added opt-in React Scan profiling for frontend performance work.
+- Switched the frontend/dev workflow guidance over to `bun`/`bunx`, added project ESLint configuration, fixed mod source links and mod ownership checks, and temporarily disabled featured downloads until package data finishes loading.
 - Contributors:
   - `SirTidez`: release-flow refinement, frontend contract sync, featured SteamNetworkLib curation, and related commit-message handling. Timestamps: `2026-05-03 17:27:10 PDT`, `2026-05-03 17:49:35 PDT`, `2026-05-03 18:12:00 PDT`
-  - `ifBars`: initial UI redesign work for the next release line, Home dashboard/news feed, new workspace shell and reusable page headers, collapsible sidebar navigation, `bun`/`bunx` workflow updates, ESLint setup, and mods-flow fixes for source links and latest-version fallback. Timestamps: `2026-05-04 01:38:44 PDT`, `2026-05-04 23:33:07 PDT`, `2026-05-04 23:41:24 PDT`
+  - `ifBars`: initial UI redesign work for the next release line, Home dashboard/news feed, new workspace shell and reusable page headers, collapsible sidebar navigation, installed-mod scanning and safer path/security flows, configuration/downloads/MLVScan/logs/settings polish, Tailwind v4 + shadcn migration scaffolding, shell/log/config performance work, `bun`/`bunx` workflow updates, ESLint setup, and mods/webpanel fixes for source links, ownership checks, and featured-download loading states. Timestamps: `2026-05-04 01:38:44 PDT`, `2026-05-04 23:33:07 PDT`, `2026-05-04 23:41:24 PDT`, `2026-05-06 13:14:24 PDT`, `2026-05-06 18:29:16 PDT`, `2026-05-07 11:30:58 PDT`, `2026-05-07 11:34:33 PDT`, `2026-05-07 11:38:06 PDT`, `2026-05-07 11:39:52 PDT`, `2026-05-07 11:42:23 PDT`, `2026-05-07 11:45:32 PDT`, `2026-05-07 11:47:01 PDT`, `2026-05-07 11:51:51 PDT`, `2026-05-07 16:41:55 PDT`, `2026-05-07 16:56:07 PDT`, `2026-05-07 17:08:59 PDT`, `2026-05-07 17:16:10 PDT`, `2026-05-07 17:18:19 PDT`, `2026-05-07 17:32:55 PDT`, `2026-05-07 17:40:45 PDT`, `2026-05-07 17:45:38 PDT`, `2026-05-07 17:49:35 PDT`, `2026-05-07 17:51:48 PDT`, `2026-05-07 18:02:00 PDT`, `2026-05-07 18:13:07 PDT`, `2026-05-07 18:27:20 PDT`, `2026-05-07 21:48:13 PDT`, `2026-05-07 21:54:23 PDT`
 
 ## [0.8.4]
 
@@ -98,6 +101,8 @@
 - Consolidated the remaining legacy settings and account surfaces into denser desktop forms, including preset-only theme selection, a simpler Accounts identity view, and maintenance controls that fit the current app layout.
 - Added unified SQLite database backups with automatic snapshots before version-upgrade or migration work, a manual backup action in Settings, and retention controls for how many backups SIMM keeps in the `SIMM/backups` directory.
 - Consolidated frontend and backend logging into a single per-launch session file, improved sanitization of external tool output, and reduced log-file churn to one session log per app launch.
+- Contributors:
+  - `SirTidez`: docked desktop-shell rollout work across the Mod Library, Mod View, Settings, Accounts, Help, and Home surfaces; the `0.7.5` UI refactor integration; CI/review cleanup; wizard and library-helper fixes; branch-name preservation; and beta release staging. Timestamps: `2026-03-20 01:17:55 PDT`, `2026-03-20 02:55:29 PDT`, `2026-03-20 03:28:27 PDT`, `2026-03-26 04:09:33 PDT`, `2026-03-26 12:48:06 PDT`, `2026-03-26 13:21:57 PDT`, `2026-03-26 13:30:39 PDT`, `2026-03-26 13:55:37 PDT`, `2026-03-26 14:02:54 PDT`, `2026-03-26 14:06:13 PDT`, `2026-03-26 14:14:34 PDT`, `2026-03-26 14:23:54 PDT`
 
 ## [0.7.3]
 
@@ -107,6 +112,9 @@
 - Added Nexus free-user website-confirmation support, `nxm` handoff handling for Schedule I while SIMM is open, runtime prompting including `Both`, and tighter library linking for multi-file Nexus downloads.
 - Polished the mod library presentation with source badges, immediate refresh after Nexus/manual downloads, and improved title/badge layout behavior.
 - Fixed frontend CI/typecheck regressions in the mod overlays and updated GitHub Actions Node/npm install steps to be more reliable without a committed npm lockfile.
+- Contributors:
+  - `SirTidez`: grid-first mod management redesign, metadata/icon recovery, log-to-library navigation, Nexus OAuth and `nxm` handoff flow, runtime-aware Nexus prompts, mod-library presentation polish, CI/typecheck fixes, the NSIS setup wizard/runtime checks, and related UI follow-up across Accounts, Help, and Settings. Timestamps: `2026-03-03 00:17:29 PST`, `2026-03-05 00:32:27 PST`, `2026-03-05 00:32:51 PST`, `2026-03-05 00:33:11 PST`, `2026-03-05 02:30:04 PST`, `2026-03-05 02:30:28 PST`, `2026-03-05 02:37:08 PST`, `2026-03-05 03:07:00 PST`, `2026-03-05 03:24:50 PST`, `2026-03-05 04:11:18 PST`, `2026-03-05 04:14:39 PST`, `2026-03-05 04:50:45 PST`, `2026-03-05 05:10:00 PST`, `2026-03-05 05:11:14 PST`, `2026-03-07 20:56:55 PST`, `2026-03-07 21:07:29 PST`, `2026-03-07 22:49:24 PST`, `2026-03-12 15:13:18 PDT`, `2026-03-12 15:26:11 PDT`, `2026-03-12 15:33:09 PDT`, `2026-03-12 15:40:07 PDT`, `2026-03-12 15:48:27 PDT`, `2026-03-12 16:07:50 PDT`, `2026-03-12 16:09:14 PDT`, `2026-03-12 17:13:20 PDT`, `2026-03-12 18:46:05 PDT`, `2026-03-12 18:49:09 PDT`, `2026-03-14 02:33:01 PDT`, `2026-03-14 22:30:33 PDT`, `2026-03-15 01:33:19 PDT`, `2026-03-19 21:30:41 PDT`, `2026-03-19 21:56:26 PDT`
+  - `ESTONlA`: Steam overlay compatibility work that landed during the `0.7.3` line. Timestamps: `2026-02-28 05:24:50 PST`
 
 ## [0.7.1]
 
@@ -118,6 +126,8 @@
   - `https://github.com/SirTidez/nexusmods-api-handler`
   - `https://github.com/SirTidez/thunderstore-api-handler`
 - Updated integration docs and smoke matrix to reflect full crate coverage and crate-only runtime behavior.
+- Contributors:
+  - `SirTidez`: crate-only NexusMods/Thunderstore backend migration, GraphQL/rate-limit/download integration work, supporting CI/workflow fixes, and `0.7.1` release alignment. Timestamps: `2026-03-01 00:20:51 PST`, `2026-03-01 01:08:14 PST`, `2026-03-01 02:10:14 PST`, `2026-03-01 22:43:43 PST`, `2026-03-01 23:41:32 PST`, `2026-03-02 00:38:32 PST`, `2026-03-02 21:50:06 PST`, `2026-03-02 23:14:57 PST`
 
 ## [0.6.1]
 
@@ -126,6 +136,8 @@
 - Shipped docked panel conversions for mods, tooling, system, and onboarding views with unified workspace styling.
 - Finalized custom titlebar behavior support for desktop ergonomics (drag region + window controls) within the redesigned shell.
 - Retained roadmap carry-forward for developer-gated tabbed workspace mode.
+- Contributors:
+  - `SirTidez`: primary workspace-redesign implementation across the docked shell, compact status/navigation model, environment/mod/plugin handling improvements, migration/retryable-save support, update notifications, desktop polish, cached mods-panel loading, Windows release automation, and release metadata follow-up. Timestamps: `2026-02-21 04:22:11 PST`, `2026-02-21 12:36:00 PST`, `2026-02-21 13:20:00 PST`, `2026-02-21 15:01:18 PST`, `2026-02-24 03:21:22 PST`, `2026-02-24 03:50:29 PST`, `2026-02-24 04:02:49 PST`, `2026-02-24 04:06:28 PST`, `2026-02-28 11:23:58 PST`, `2026-02-28 22:50:01 PST`
 
 ## [0.1.0]
 
@@ -138,3 +150,8 @@
 - Config file management
 - Log viewing and management
 - Custom theme support
+- Contributors:
+  - `SirTidez`: the initial Tauri/frontend foundation plus early theme, config, logging, environment-management, database, mod-library, runtime, branding, and update-surface work that underpins the first public release line captured in this repo. Timestamps: `2025-12-29 23:52:56 PST`, `2025-12-30 02:47:13 PST`, `2026-01-11 10:08:25 PST`, `2026-01-19 02:11:59 PST`, `2026-01-20 23:31:11 PST`, `2026-02-03 09:42:45 PST`, `2026-02-05 00:59:29 PST`, `2026-02-05 01:00:10 PST`, `2026-02-05 19:56:51 PST`, `2026-02-05 20:02:00 PST`, `2026-02-05 22:00:11 PST`, `2026-02-05 23:03:07 PST`, `2026-02-05 23:22:43 PST`, `2026-02-05 23:29:53 PST`, `2026-02-05 23:37:37 PST`, `2026-02-05 23:46:35 PST`, `2026-02-07 02:41:40 PST`, `2026-02-07 02:50:24 PST`, `2026-02-07 02:56:45 PST`, `2026-02-09 01:28:45 PST`, `2026-02-09 01:33:56 PST`, `2026-02-09 01:40:47 PST`, `2026-02-12 16:47:19 PST`, `2026-02-12 16:56:07 PST`, `2026-02-12 19:13:16 PST`, `2026-02-12 19:17:12 PST`, `2026-02-12 19:22:23 PST`, `2026-02-12 19:31:22 PST`, `2026-02-12 19:45:30 PST`
+  - `ifBars`: early quality-of-life and UI follow-up for ignore rules, Welcome overlay path handling, footer theme controls, dependency refreshes, and the loading screen. Timestamps: `2026-01-21 03:37:35 PST`, `2026-01-21 03:38:12 PST`, `2026-01-21 03:43:07 PST`, `2026-01-21 03:51:16 PST`, `2026-01-21 03:56:14 PST`
+  - `HazDS`: local environment import/delete support. Timestamps: `2026-01-22 10:05:56 PST`
+  - `ESTONlA`: early Discord RPC integration groundwork. Timestamps: `2026-01-22 23:43:53 PST`, `2026-01-23 00:00:08 PST`

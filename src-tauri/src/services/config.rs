@@ -132,6 +132,12 @@ impl ConfigService {
                 .await?;
         }
 
+        let mods_path = game_path.join("Mods");
+        if mods_path.exists() {
+            self.collect_mods_config_files(&mods_path, &mut config_files)
+                .await?;
+        }
+
         config_files.sort_by(|(a, _), (b, _)| {
             a.file_name()
                 .and_then(|name| name.to_str())
@@ -597,9 +603,70 @@ impl ConfigService {
         Ok(())
     }
 
+    async fn collect_mods_config_files(
+        &self,
+        directory: &Path,
+        config_files: &mut Vec<(PathBuf, ConfigFileType)>,
+    ) -> Result<()> {
+        let mut pending = vec![directory.to_path_buf()];
+
+        while let Some(current_dir) = pending.pop() {
+            let mut entries = match fs::read_dir(&current_dir).await {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let metadata = match entry.metadata().await {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+
+                if metadata.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+
+                if !metadata.is_file() {
+                    continue;
+                }
+
+                let relative = match path.strip_prefix(directory) {
+                    Ok(relative) => relative,
+                    Err(_) => continue,
+                };
+                if relative.components().count() < 2 {
+                    continue;
+                }
+
+                let is_cfg = path
+                    .extension()
+                    .map(|ext| ext.eq_ignore_ascii_case("cfg"))
+                    .unwrap_or(false);
+                let is_json = path
+                    .extension()
+                    .map(|ext| ext.eq_ignore_ascii_case("json"))
+                    .unwrap_or(false);
+
+                if !is_cfg && !is_json {
+                    continue;
+                }
+
+                let file_type = self.detect_file_type(&path);
+                config_files.push((path, file_type));
+            }
+        }
+
+        Ok(())
+    }
+
     fn relative_config_path(path: &Path) -> String {
         let path_str = path.to_string_lossy();
         if let Some(index) = path_str.find("UserData") {
+            return path_str[index..].replace('\\', "/");
+        }
+        if let Some(index) = path_str.find("Mods") {
             return path_str[index..].replace('\\', "/");
         }
         if let Some(index) = path_str.find("MelonLoader") {
@@ -624,6 +691,18 @@ impl ConfigService {
                     return match (first, second) {
                         (Some(folder), Some(_)) => folder.to_string(),
                         (Some(_file), None) => "UserData Root".to_string(),
+                        _ => "Other Config Files".to_string(),
+                    };
+                }
+                if let Some(index) = path_str.find("Mods") {
+                    let relative = path_str[index + "Mods".len()..].trim_start_matches(['\\', '/']);
+                    let mut parts = relative.split(['\\', '/']).filter(|part| !part.is_empty());
+                    let first = parts.next();
+                    let second = parts.next();
+
+                    return match (first, second) {
+                        (Some(folder), Some(_)) => folder.to_string(),
+                        (Some(_file), None) => "Mods Root".to_string(),
                         _ => "Other Config Files".to_string(),
                     };
                 }
@@ -789,6 +868,78 @@ mod tests {
         assert_eq!(
             nested_cfg.relative_path,
             "UserData/AnotherMod/Profiles/profile.cfg"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn catalog_discovers_nested_mods_json_and_cfg_files() -> Result<()> {
+        let temp = tempdir()?;
+        let game_dir = temp.path();
+        fs::create_dir_all(game_dir.join("Mods").join("FolderConfigMod")).await?;
+        fs::create_dir_all(
+            game_dir
+                .join("Mods")
+                .join("NestedConfigMod")
+                .join("Profiles"),
+        )
+        .await?;
+
+        fs::write(
+            game_dir.join("Mods").join(".mods-metadata.json"),
+            "{\n  \"metadata\": true\n}",
+        )
+        .await?;
+        fs::write(
+            game_dir
+                .join("Mods")
+                .join("FolderConfigMod")
+                .join("settings.json"),
+            "{\n  \"enabled\": true\n}",
+        )
+        .await?;
+        fs::write(
+            game_dir
+                .join("Mods")
+                .join("NestedConfigMod")
+                .join("Profiles")
+                .join("profile.cfg"),
+            "[General]\nfoo = bar",
+        )
+        .await?;
+
+        let service = ConfigService::new();
+        let catalog = service
+            .get_config_catalog(game_dir.to_string_lossy().as_ref())
+            .await?;
+
+        assert!(!catalog
+            .iter()
+            .any(|file| file.name == ".mods-metadata.json"));
+
+        let json_file = catalog
+            .iter()
+            .find(|file| file.name == "settings.json")
+            .expect("expected nested Mods json config");
+        assert_eq!(json_file.file_type, ConfigFileType::Json);
+        assert_eq!(json_file.group_name, "FolderConfigMod");
+        assert_eq!(
+            json_file.relative_path,
+            "Mods/FolderConfigMod/settings.json"
+        );
+        assert!(!json_file.supports_structured_edit);
+
+        let nested_cfg = catalog
+            .iter()
+            .find(|file| file.name == "profile.cfg")
+            .expect("expected nested Mods cfg config");
+        assert_eq!(nested_cfg.file_type, ConfigFileType::Other);
+        assert_eq!(nested_cfg.group_name, "NestedConfigMod");
+        assert_eq!(
+            nested_cfg.relative_path,
+            "Mods/NestedConfigMod/Profiles/profile.cfg"
         );
 
         Ok(())
