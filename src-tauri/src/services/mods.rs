@@ -1328,7 +1328,42 @@ impl ModsService {
     ) -> Option<String> {
         let metadata = fs::symlink_metadata(mod_file_path).await.ok()?;
         if !metadata.file_type().is_symlink() {
-            return None;
+            if !metadata.is_file() {
+                return None;
+            }
+
+            let file_name = mod_file_path.file_name()?;
+            let mut matches = Vec::new();
+            let mut entries = fs::read_dir(storage_root).await.ok()?;
+            while let Some(entry) = entries.next_entry().await.ok()? {
+                let entry_path = entry.path();
+                if !entry.metadata().await.ok()?.is_dir() {
+                    continue;
+                }
+
+                for bucket in ["Mods", "Plugins", "UserLibs"] {
+                    let candidate = entry_path.join(bucket).join(file_name);
+                    let Ok(candidate_metadata) = fs::metadata(&candidate).await else {
+                        continue;
+                    };
+                    if !candidate_metadata.is_file() {
+                        continue;
+                    }
+                    if Self::metadata_is_same_file(&metadata, &candidate_metadata)
+                        || Self::paths_are_same_hard_link(mod_file_path, &candidate)
+                    {
+                        if let Some(storage_id) =
+                            entry_path.file_name().and_then(|value| value.to_str())
+                        {
+                            matches.push(storage_id.to_string());
+                        }
+                    }
+                }
+            }
+
+            matches.sort();
+            matches.dedup();
+            return (matches.len() == 1).then(|| matches.remove(0));
         }
 
         let link_target = fs::read_link(mod_file_path).await.ok()?;
@@ -3152,26 +3187,39 @@ impl ModsService {
 
     /// Creates a symbolic link for a directory.
     pub async fn create_symlink_dir(&self, src: &Path, dst: &Path) -> Result<()> {
-        let src_owned = src.to_owned();
-        let dst_owned = dst.to_owned();
-        tokio::task::spawn_blocking(move || {
-            #[cfg(target_os = "windows")]
-            {
-                std::os::windows::fs::symlink_dir(&src_owned, &dst_owned).context(format!(
-                    "Failed to create directory symlink from {:?} to {:?}",
-                    src_owned, dst_owned
-                ))?;
+        #[cfg(target_os = "windows")]
+        {
+            match std::os::windows::fs::symlink_dir(src, dst) {
+                Ok(()) => return Ok(()),
+                Err(error) if matches!(error.raw_os_error(), Some(1314) | Some(5)) => {
+                    log::warn!(
+                        "Symlink privilege unavailable for {}. Used directory copy fallback.",
+                        dst.display()
+                    );
+                    return self.copy_directory_recursive(src, dst).await;
+                }
+                Err(error) => {
+                    return Err(error).context(format!(
+                        "Failed to create directory symlink from {:?} to {:?}",
+                        src, dst
+                    ));
+                }
             }
-            #[cfg(target_family = "unix")]
-            {
+        }
+
+        #[cfg(target_family = "unix")]
+        {
+            let src_owned = src.to_owned();
+            let dst_owned = dst.to_owned();
+            tokio::task::spawn_blocking(move || {
                 std::os::unix::fs::symlink(&src_owned, &dst_owned).context(format!(
                     "Failed to create directory symlink from {:?} to {:?}",
                     src_owned, dst_owned
                 ))?;
-            }
-            Ok(())
-        })
-        .await?
+                Ok(())
+            })
+            .await?
+        }
     }
 
     /// Removes a symbolic link.
@@ -3302,6 +3350,94 @@ impl ModsService {
         false
     }
 
+    #[cfg(target_os = "windows")]
+    fn metadata_is_same_file(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "windows")]
+    fn file_identity(path: &Path) -> Option<(u32, u32, u32, u32)> {
+        use std::iter;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+        use winapi::um::fileapi::{
+            CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, OPEN_EXISTING,
+        };
+        use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+        use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+        use winapi::um::winnt::{
+            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        if ok == 0 || info.nNumberOfLinks <= 1 {
+            return None;
+        }
+
+        Some((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+            info.nNumberOfLinks,
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn paths_are_same_hard_link(left: &Path, right: &Path) -> bool {
+        match (Self::file_identity(left), Self::file_identity(right)) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn metadata_is_same_file(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+        false
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn paths_are_same_hard_link(_left: &Path, _right: &Path) -> bool {
+        false
+    }
+
+    async fn path_is_hard_link_to_storage_source(&self, path: &Path, source_path: &Path) -> bool {
+        let path_metadata = match fs::metadata(path).await {
+            Ok(value) if value.is_file() => value,
+            _ => return false,
+        };
+        let source_metadata = match fs::metadata(source_path).await {
+            Ok(value) if value.is_file() => value,
+            _ => return false,
+        };
+
+        Self::metadata_is_same_file(&path_metadata, &source_metadata)
+            || Self::paths_are_same_hard_link(path, source_path)
+    }
+
     fn tracked_candidate_paths(
         &self,
         output_dir: &str,
@@ -3346,6 +3482,18 @@ impl ModsService {
                 == Some(storage_id)
             {
                 return true;
+            }
+
+            let storage_base = storage_root.join(storage_id);
+            if let Some(source_path) =
+                self.storage_source_path_for_env_path(&storage_base, output_dir, &path)
+            {
+                if self
+                    .path_is_hard_link_to_storage_source(&path, &source_path)
+                    .await
+                {
+                    return true;
+                }
             }
         }
 

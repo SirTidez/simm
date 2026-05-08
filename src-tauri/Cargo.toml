@@ -55,7 +55,7 @@ tempfile = "3.10"
 serial_test = "3.0"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "shellapi"] }
+winapi = { version = "0.3", features = ["fileapi", "handleapi", "minwinbase", "winbase", "winnt", "winuser", "shellapi"] }
 winreg = "0.55"
 tauri-plugin-single-instance = { version = "2.4.1", features = ["deep-link"] }
 
