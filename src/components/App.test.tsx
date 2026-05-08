@@ -647,6 +647,33 @@ describe('App', () => {
     expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeOpen);
   });
 
+  it('collapses sidebar sections without re-rendering the app shell', async () => {
+    render(<App />);
+
+    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    const renderCountBeforeToggle = appRenderMocks.footerRenderCount;
+
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Tools' }));
+
+    expect(within(sidebar).queryByRole('button', { name: 'Home' })).toBeNull();
+    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeToggle);
+  });
+
+  it('updates window chrome state without re-rendering the app shell', async () => {
+    render(<App />);
+
+    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
+
+    const renderCountBeforeMaximize = appRenderMocks.footerRenderCount;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }));
+
+    await waitFor(() => expect(windowMocks.toggleMaximize).toHaveBeenCalled());
+    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeMaximize);
+  });
+
   it('opens the setup guide on a fresh startup', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'get_app_startup_state') {

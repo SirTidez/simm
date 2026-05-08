@@ -1,6 +1,7 @@
 import {
   Suspense,
   lazy,
+  memo,
   startTransition,
   useState,
   useEffect,
@@ -39,6 +40,7 @@ import type {
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { Icon } from './Icon';
+import type { IconName } from './icons';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
 import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
@@ -682,6 +684,331 @@ function AppShellDownloadsDock({
   );
 }
 
+const AppShellSidebar = memo(function AppShellSidebar({
+  activeWorkspace,
+  currentEnvironmentId,
+  downloadsInProgress,
+  environments,
+  environmentsLoading,
+  onEnvironmentSelect,
+  onOpenEnvironmentWorkspace,
+  onOpenEnvironmentsWorkspace,
+  onOpenHome,
+  onOpenLibrary,
+  onShellNavTransitionEnd,
+  onToggleShellNavigation,
+  shellNavAnimating,
+  shellNavCollapsed,
+  shellNavExpandedContentVisible,
+}: {
+  activeWorkspace: WorkspaceRoute;
+  currentEnvironmentId: string | null;
+  downloadsInProgress: number;
+  environments: Environment[];
+  environmentsLoading: boolean;
+  onEnvironmentSelect: (environmentId: string) => void;
+  onOpenEnvironmentWorkspace: (view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => void;
+  onOpenEnvironmentsWorkspace: () => void;
+  onOpenHome: () => void;
+  onOpenLibrary: () => void;
+  onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
+  onToggleShellNavigation: () => void;
+  shellNavAnimating: boolean;
+  shellNavCollapsed: boolean;
+  shellNavExpandedContentVisible: boolean;
+}) {
+  const [collapsedShellSections, setCollapsedShellSections] = useState({
+    environments: false,
+    tools: false,
+  });
+
+  const toggleShellSection = useCallback((section: 'environments' | 'tools') => {
+    setCollapsedShellSections((previous) => ({
+      ...previous,
+      [section]: !previous[section],
+    }));
+  }, []);
+
+  const sortedEnvironments = sortEnvironmentsForDisplay(environments);
+  const shellSidebarClassName = [
+    'app-shell-sidebar',
+    shellNavCollapsed ? 'app-shell-sidebar--collapsed' : '',
+    shellNavAnimating ? 'app-shell-sidebar--animating' : '',
+    shellNavExpandedContentVisible ? 'app-shell-sidebar--expanded-content-visible' : '',
+  ].filter(Boolean).join(' ');
+  const toolNavItems = [
+    {
+      key: 'home',
+      label: 'Home',
+      icon: 'house',
+      active: activeWorkspace.view === 'home',
+      onClick: onOpenHome,
+    },
+    {
+      key: 'environments',
+      label: 'Environments',
+      icon: 'hardDrive',
+      active: activeWorkspace.view === 'environments' || activeWorkspace.view === 'wizard',
+      onClick: onOpenEnvironmentsWorkspace,
+    },
+    {
+      key: 'library',
+      label: 'Mod Library',
+      icon: 'boxOpen',
+      active: activeWorkspace.view === 'library',
+      onClick: onOpenLibrary,
+    },
+    {
+      key: 'mods',
+      label: 'Installed Mods',
+      icon: 'boxArchive',
+      active: activeWorkspace.view === 'mods',
+      onClick: () => onOpenEnvironmentWorkspace('mods'),
+    },
+    {
+      key: 'config',
+      label: 'Config Files',
+      icon: 'fileCode',
+      active: activeWorkspace.view === 'config',
+      onClick: () => onOpenEnvironmentWorkspace('config'),
+    },
+    {
+      key: 'logs',
+      label: 'Logs',
+      icon: 'fileLines',
+      active: activeWorkspace.view === 'logs',
+      onClick: () => onOpenEnvironmentWorkspace('logs'),
+    },
+  ] as const;
+
+  return (
+    <aside className={shellSidebarClassName} aria-label="Primary navigation" onTransitionEnd={onShellNavTransitionEnd}>
+      <button
+        type="button"
+        className="app-shell-sidebar__collapse-toggle"
+        onClick={onToggleShellNavigation}
+        aria-label={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+        title={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+      >
+        <Icon name={shellNavCollapsed ? 'anglesRight' : 'anglesLeft'} />
+      </button>
+      {shellNavExpandedContentVisible ? (
+        <section className="app-shell-sidebar__section app-shell-sidebar__section--environments">
+          <button
+            type="button"
+            className="app-shell-sidebar__section-toggle"
+            onClick={() => toggleShellSection('environments')}
+            aria-expanded={!collapsedShellSections.environments}
+          >
+            <span>Environments</span>
+            <Icon name={collapsedShellSections.environments ? 'chevronRight' : 'chevronDown'} />
+          </button>
+          {!collapsedShellSections.environments ? (
+            <div className="app-shell-sidebar__section-body">
+              {environmentsLoading && sortedEnvironments.length === 0 ? (
+                <div className="app-shell-sidebar__environment-list app-shell-sidebar__environment-list--loading" role="status" aria-live="polite" aria-label="Loading environments">
+                  {[0, 1, 2].map((index) => (
+                    <div key={index} className="app-shell-sidebar__environment-item app-shell-sidebar__environment-item--skeleton">
+                      <span className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
+                      <span className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
+                    </div>
+                  ))}
+                </div>
+              ) : sortedEnvironments.length > 0 ? (
+                <div className="app-shell-sidebar__environment-list">
+                  {sortedEnvironments.map((environment) => (
+                    <button
+                      key={environment.id}
+                      type="button"
+                      className={`app-shell-sidebar__environment-item${currentEnvironmentId === environment.id ? ' app-shell-sidebar__environment-item--active' : ''}`}
+                      onClick={() => onEnvironmentSelect(environment.id)}
+                      aria-current={currentEnvironmentId === environment.id ? 'page' : undefined}
+                      title={`${environment.name}${environment.updateAvailable ? ' - Update available' : environment.status === 'completed' ? ' - Ready' : ''}`}
+                    >
+                      <span className="app-shell-sidebar__environment-icon" aria-hidden="true">
+                        <Icon name={environment.environmentType === 'Steam' ? 'steam' : 'hardDrive'} />
+                      </span>
+                      <span className="app-shell-sidebar__environment-name">{environment.name}</span>
+                      {environment.updateAvailable ? (
+                        <span className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
+                          Update
+                        </span>
+                      ) : environment.status === 'completed' ? (
+                        <span className="app-shell-sidebar__environment-meta">Ready</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="app-shell-sidebar__empty">
+                  <span>No environments yet.</span>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      <section className="app-shell-sidebar__section app-shell-sidebar__section--tools">
+        <button
+          type="button"
+          className="app-shell-sidebar__section-toggle"
+          onClick={() => toggleShellSection('tools')}
+          aria-expanded={!collapsedShellSections.tools}
+        >
+          <span>Tools</span>
+          <Icon name={collapsedShellSections.tools ? 'chevronRight' : 'chevronDown'} />
+        </button>
+        {!collapsedShellSections.tools || shellNavCollapsed ? (
+          <div className="app-shell-sidebar__section-body">
+            <div className="app-shell-sidebar__tool-list">
+              {toolNavItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`app-shell-sidebar__tool-item${item.active ? ' app-shell-sidebar__tool-item--active' : ''}`}
+                  onClick={item.onClick}
+                  aria-current={item.active ? 'page' : undefined}
+                  title={item.label}
+                >
+                  <Icon name={item.icon} />
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+      <AppShellDownloadsDock
+        badge={downloadsInProgress}
+        label="Downloads"
+        icon="download"
+        shellNavCollapsed={shellNavCollapsed}
+      />
+    </aside>
+  );
+});
+
+type ShellUtilityAction = {
+  key: string;
+  label: string;
+  icon: IconName;
+  active: boolean;
+  variant: 'btn-primary' | 'btn-secondary';
+  onClick: () => void;
+  disabled: boolean;
+  title: string;
+};
+
+function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUtilityAction[] }) {
+  const appWindow = getCurrentWindow();
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const bindWindowState = async () => {
+      try {
+        setIsMaximized(await appWindow.isMaximized());
+        unlisten = await appWindow.onResized(async () => {
+          setIsMaximized(await appWindow.isMaximized());
+        });
+      } catch (error) {
+        console.error('Failed to bind window state:', error);
+      }
+    };
+
+    bindWindowState();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [appWindow]);
+
+  const handleMinimize = async () => {
+    try {
+      await appWindow.minimize();
+    } catch (error) {
+      console.error('Failed to minimize window:', error);
+    }
+  };
+
+  const handleToggleMaximize = async () => {
+    try {
+      await appWindow.toggleMaximize();
+      setIsMaximized(await appWindow.isMaximized());
+    } catch (error) {
+      console.error('Failed to toggle maximize:', error);
+    }
+  };
+
+  const handleCloseWindow = async () => {
+    try {
+      await appWindow.close();
+    } catch (error) {
+      console.error('Failed to close window:', error);
+    }
+  };
+
+  return (
+    <header className="window-chrome">
+      <div className="window-brand" data-tauri-drag-region>
+        <img src={appIcon256} alt="SIMM" className="window-brand-icon" />
+        <div className="window-brand-text">
+          <strong>SIMM - Schedule I Mod Manager</strong>
+        </div>
+      </div>
+
+      <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
+
+      <div className="window-toolbar-actions window-toolbar-actions--shell" aria-label="Shell actions">
+        {utilityActions.map((action) => (
+          <button
+            key={action.key}
+            type="button"
+            className={`btn ${action.variant} app-shell-toolbar-button${action.active ? ' app-shell-toolbar-button--active' : ''}`}
+            onClick={action.onClick}
+            aria-current={action.active ? 'page' : undefined}
+            disabled={action.disabled}
+            title={action.title}
+          >
+            <Icon name={action.icon} spin={action.icon === 'spinner'} />
+            <span>{action.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="window-controls" aria-label="Window controls">
+        <button
+          onClick={handleMinimize}
+          className="window-control-btn"
+          title="Minimize"
+          aria-label="Minimize"
+        >
+          <Icon name="minus" />
+        </button>
+        <button
+          onClick={handleToggleMaximize}
+          className="window-control-btn"
+          title={isMaximized ? 'Restore Down' : 'Maximize'}
+          aria-label={isMaximized ? 'Restore Down' : 'Maximize'}
+        >
+          <Icon name={isMaximized ? 'windowRestore' : 'square'} />
+        </button>
+        <button
+          onClick={handleCloseWindow}
+          className="window-control-btn window-control-btn-close"
+          title="Close"
+          aria-label="Close"
+        >
+          <Icon name="times" />
+        </button>
+      </div>
+    </header>
+  );
+}
+
 function AppContent() {
   type PendingNexusRuntimeSelection = {
     nxmUrl: string;
@@ -710,7 +1037,6 @@ function AppContent() {
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
     | { status: 'available'; result: AppUpdateStatus };
 
-  const appWindow = getCurrentWindow();
   const { environments, loading: environmentsLoading } = useEnvironmentStore();
   const { downloads } = useDownloadStatusStore();
   const { settings, updateSettings } = useSettingsStore();
@@ -729,7 +1055,6 @@ function AppContent() {
   const [workspaceStack, setWorkspaceStack] = useState<WorkspaceEntry[]>(() => [
     createWorkspaceEntry({ view: 'home' }),
   ]);
-  const [isMaximized, setIsMaximized] = useState(false);
   const completedNexusCallbackRef = useRef<string | null>(null);
   const inFlightNexusCallbackRef = useRef<string | null>(null);
   const completedNxmCallbackRef = useRef(new Set<string>());
@@ -742,10 +1067,6 @@ function AppContent() {
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string | null>(null);
   const [environmentFocusRequestId, setEnvironmentFocusRequestId] = useState(0);
   const [launchingEnvironmentId, setLaunchingEnvironmentId] = useState<string | null>(null);
-  const [collapsedShellSections, setCollapsedShellSections] = useState({
-    environments: false,
-    tools: false,
-  });
   const [shellNavCollapsed, setShellNavCollapsed] = useState(readStoredShellNavCollapsed);
   const [shellNavAnimating, setShellNavAnimating] = useState(false);
   const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
@@ -985,29 +1306,6 @@ function AppContent() {
     };
     checkWelcome();
   }, [hasSettings, pushWorkspace, settings]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-
-    const bindWindowState = async () => {
-      try {
-        setIsMaximized(await appWindow.isMaximized());
-        unlisten = await appWindow.onResized(async () => {
-          setIsMaximized(await appWindow.isMaximized());
-        });
-      } catch (error) {
-        console.error('Failed to bind window state:', error);
-      }
-    };
-
-    bindWindowState();
-
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, [appWindow]);
 
   const dispatchNexusOAuthResult = useCallback((detail: { success: boolean; error?: string }) => {
     window.dispatchEvent(new CustomEvent('nexus-oauth-result', { detail }));
@@ -1454,31 +1752,6 @@ function AppContent() {
     };
   }, [dispatchNexusOAuthResult, handleExternalProtocolUrl]);
 
-  const handleMinimize = async () => {
-    try {
-      await appWindow.minimize();
-    } catch (error) {
-      console.error('Failed to minimize window:', error);
-    }
-  };
-
-  const handleToggleMaximize = async () => {
-    try {
-      await appWindow.toggleMaximize();
-      setIsMaximized(await appWindow.isMaximized());
-    } catch (error) {
-      console.error('Failed to toggle maximize:', error);
-    }
-  };
-
-  const handleCloseWindow = async () => {
-    try {
-      await appWindow.close();
-    } catch (error) {
-      console.error('Failed to close window:', error);
-    }
-  };
-
   const renderWorkspacePanelFor = useCallback((entry: WorkspaceEntry, onCloseHandler: () => void) => {
     const workspace = entry.route;
     switch (workspace.view) {
@@ -1663,19 +1936,16 @@ function AppContent() {
   const openEnvironmentsWorkspace = useCallback(() => {
     openWorkspace({ view: 'environments' });
   }, [openWorkspace]);
-  const openEnvironmentWorkspace = (view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
+  const openEnvironmentWorkspace = useCallback((view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
     if (!currentEnvironmentId) {
       openWorkspace({ view: 'wizard' });
       return;
     }
     pushWorkspace({ view, environmentId: currentEnvironmentId });
-  };
-  const toggleShellSection = (section: 'environments' | 'tools') => {
-    setCollapsedShellSections((previous) => ({
-      ...previous,
-      [section]: !previous[section],
-    }));
-  };
+  }, [currentEnvironmentId, openWorkspace, pushWorkspace]);
+  const openLibraryWorkspaceFromShell = useCallback(() => {
+    openLibraryWorkspace();
+  }, [openLibraryWorkspace]);
   const handleShellEnvironmentSelect = useCallback((environmentId: string) => {
     setSelectedEnvironmentId(environmentId);
     setEnvironmentFocusRequestId((previous) => previous + 1);
@@ -1734,56 +2004,6 @@ function AppContent() {
       setLaunchingEnvironmentId(null);
     }
   }, [currentEnvironment, currentEnvironmentId, openWorkspace]);
-  const toolNavItems = [
-    {
-      key: 'home',
-      label: 'Home',
-      icon: 'house',
-      active: activeWorkspace.view === 'home',
-      onClick: goHome,
-    },
-    {
-      key: 'environments',
-      label: 'Environments',
-      icon: 'hardDrive',
-      active: activeWorkspace.view === 'environments' || activeWorkspace.view === 'wizard',
-      onClick: openEnvironmentsWorkspace,
-    },
-    {
-      key: 'library',
-      label: 'Mod Library',
-      icon: 'boxOpen',
-      active: activeWorkspace.view === 'library',
-      onClick: () => openLibraryWorkspace(),
-    },
-    {
-      key: 'mods',
-      label: 'Installed Mods',
-      icon: 'boxArchive',
-      active: activeWorkspace.view === 'mods',
-      onClick: () => openEnvironmentWorkspace('mods'),
-    },
-    {
-      key: 'config',
-      label: 'Config Files',
-      icon: 'fileCode',
-      active: activeWorkspace.view === 'config',
-      onClick: () => openEnvironmentWorkspace('config'),
-    },
-    {
-      key: 'logs',
-      label: 'Logs',
-      icon: 'fileLines',
-      active: activeWorkspace.view === 'logs',
-      onClick: () => openEnvironmentWorkspace('logs'),
-    },
-  ] as const;
-  const downloadsNavItem = {
-    key: 'downloads',
-    label: 'Downloads',
-    icon: 'download',
-    badge: downloadsInProgress,
-  } as const;
   const utilityActions = [
     {
       key: 'launch',
@@ -1838,175 +2058,29 @@ function AppContent() {
       title: 'Open application settings',
     },
   ] as const;
-  const sortedEnvironments = sortEnvironmentsForDisplay(environments);
-  const shellSidebarClassName = [
-    'app-shell-sidebar',
-    shellNavCollapsed ? 'app-shell-sidebar--collapsed' : '',
-    shellNavAnimating ? 'app-shell-sidebar--animating' : '',
-    shellNavExpandedContentVisible ? 'app-shell-sidebar--expanded-content-visible' : '',
-  ].filter(Boolean).join(' ');
 
   return (
     <div className="app app-desktop-shell">
       <div className="app-window">
-        <header className="window-chrome">
-          <div className="window-brand" data-tauri-drag-region>
-            <img src={appIcon256} alt="SIMM" className="window-brand-icon" />
-            <div className="window-brand-text">
-              <strong>SIMM - Schedule I Mod Manager</strong>
-            </div>
-          </div>
-
-          <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
-
-          <div className="window-toolbar-actions window-toolbar-actions--shell" aria-label="Shell actions">
-            {utilityActions.map((action) => (
-              <button
-                key={action.key}
-                type="button"
-                className={`btn ${action.variant} app-shell-toolbar-button${action.active ? ' app-shell-toolbar-button--active' : ''}`}
-                onClick={action.onClick}
-                aria-current={action.active ? 'page' : undefined}
-                disabled={action.disabled}
-                title={action.title}
-              >
-                <Icon name={action.icon} spin={action.key === 'launch' && isShellLaunchInProgress} />
-                <span>{action.label}</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="window-controls" aria-label="Window controls">
-            <button
-              onClick={handleMinimize}
-              className="window-control-btn"
-              title="Minimize"
-              aria-label="Minimize"
-            >
-              <Icon name="minus" />
-            </button>
-            <button
-              onClick={handleToggleMaximize}
-              className="window-control-btn"
-              title={isMaximized ? 'Restore Down' : 'Maximize'}
-              aria-label={isMaximized ? 'Restore Down' : 'Maximize'}
-            >
-              <Icon name={isMaximized ? 'windowRestore' : 'square'} />
-            </button>
-            <button
-              onClick={handleCloseWindow}
-              className="window-control-btn window-control-btn-close"
-              title="Close"
-              aria-label="Close"
-            >
-              <Icon name="times" />
-            </button>
-          </div>
-        </header>
+        <AppWindowChrome utilityActions={utilityActions} />
         <div className={`app-body ${shellNavCollapsed ? 'app-body--nav-collapsed' : ''}`}>
-          <aside className={shellSidebarClassName} aria-label="Primary navigation" onTransitionEnd={handleShellNavTransitionEnd}>
-            <button
-              type="button"
-              className="app-shell-sidebar__collapse-toggle"
-              onClick={toggleShellNavigation}
-              aria-label={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
-              title={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
-            >
-              <Icon name={shellNavCollapsed ? 'anglesRight' : 'anglesLeft'} />
-            </button>
-            {shellNavExpandedContentVisible && (
-              <section className="app-shell-sidebar__section app-shell-sidebar__section--environments">
-                <button
-                  type="button"
-                  className="app-shell-sidebar__section-toggle"
-                  onClick={() => toggleShellSection('environments')}
-                  aria-expanded={!collapsedShellSections.environments}
-                >
-                  <span>Environments</span>
-                  <Icon name={collapsedShellSections.environments ? 'chevronRight' : 'chevronDown'} />
-                </button>
-                {!collapsedShellSections.environments && (
-                  <div className="app-shell-sidebar__section-body">
-                    {environmentsLoading && sortedEnvironments.length === 0 ? (
-                      <div className="app-shell-sidebar__environment-list app-shell-sidebar__environment-list--loading" role="status" aria-live="polite" aria-label="Loading environments">
-                        {[0, 1, 2].map((index) => (
-                          <div key={index} className="app-shell-sidebar__environment-item app-shell-sidebar__environment-item--skeleton">
-                            <span className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
-                            <span className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
-                          </div>
-                        ))}
-                      </div>
-                    ) : sortedEnvironments.length > 0 ? (
-                      <div className="app-shell-sidebar__environment-list">
-                        {sortedEnvironments.map((environment) => (
-                          <button
-                            key={environment.id}
-                            type="button"
-                            className={`app-shell-sidebar__environment-item${currentEnvironmentId === environment.id ? ' app-shell-sidebar__environment-item--active' : ''}`}
-                            onClick={() => handleShellEnvironmentSelect(environment.id)}
-                            aria-current={currentEnvironmentId === environment.id ? 'page' : undefined}
-                            title={`${environment.name}${environment.updateAvailable ? ' - Update available' : environment.status === 'completed' ? ' - Ready' : ''}`}
-                          >
-                            <span className="app-shell-sidebar__environment-icon" aria-hidden="true">
-                              <Icon name={environment.environmentType === 'Steam' ? 'steam' : 'hardDrive'} />
-                            </span>
-                            <span className="app-shell-sidebar__environment-name">{environment.name}</span>
-                            {environment.updateAvailable ? (
-                              <span className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
-                                Update
-                              </span>
-                            ) : environment.status === 'completed' ? (
-                              <span className="app-shell-sidebar__environment-meta">Ready</span>
-                            ) : null}
-                          </button>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="app-shell-sidebar__empty">
-                        <span>No environments yet.</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-            )}
-            <section className="app-shell-sidebar__section app-shell-sidebar__section--tools">
-              <button
-                type="button"
-                className="app-shell-sidebar__section-toggle"
-                onClick={() => toggleShellSection('tools')}
-                aria-expanded={!collapsedShellSections.tools}
-              >
-                <span>Tools</span>
-                <Icon name={collapsedShellSections.tools ? 'chevronRight' : 'chevronDown'} />
-              </button>
-              {(!collapsedShellSections.tools || shellNavCollapsed) && (
-                <div className="app-shell-sidebar__section-body">
-                  <div className="app-shell-sidebar__tool-list">
-                    {toolNavItems.map((item) => (
-                      <button
-                        key={item.key}
-                        type="button"
-                        className={`app-shell-sidebar__tool-item${item.active ? ' app-shell-sidebar__tool-item--active' : ''}`}
-                        onClick={item.onClick}
-                        aria-current={item.active ? 'page' : undefined}
-                        title={item.label}
-                      >
-                        <Icon name={item.icon} />
-                        <span>{item.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </section>
-            <AppShellDownloadsDock
-              badge={downloadsNavItem.badge}
-              label={downloadsNavItem.label}
-              icon={downloadsNavItem.icon}
-              shellNavCollapsed={shellNavCollapsed}
-            />
-          </aside>
+          <AppShellSidebar
+            activeWorkspace={activeWorkspace}
+            currentEnvironmentId={currentEnvironmentId}
+            downloadsInProgress={downloadsInProgress}
+            environments={environments}
+            environmentsLoading={environmentsLoading}
+            onEnvironmentSelect={handleShellEnvironmentSelect}
+            onOpenEnvironmentWorkspace={openEnvironmentWorkspace}
+            onOpenEnvironmentsWorkspace={openEnvironmentsWorkspace}
+            onOpenHome={goHome}
+            onOpenLibrary={openLibraryWorkspaceFromShell}
+            onShellNavTransitionEnd={handleShellNavTransitionEnd}
+            onToggleShellNavigation={toggleShellNavigation}
+            shellNavAnimating={shellNavAnimating}
+            shellNavCollapsed={shellNavCollapsed}
+            shellNavExpandedContentVisible={shellNavExpandedContentVisible}
+          />
           <div className="app-content workspace-active">
             {activeWorkspace.view === 'home' ? (
               <div className="workspace-layout">
