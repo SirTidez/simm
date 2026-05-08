@@ -3548,6 +3548,10 @@ body::before {
   min-width: 0;
 }
 
+.config-workspace__identity {
+  flex: 1 1 auto;
+}
+
 .config-workspace__identity h3,
 .config-structured__header h4,
 .config-section-card__header h4,
@@ -3616,6 +3620,18 @@ body::before {
   cursor: not-allowed;
 }
 
+@media (max-width: 1320px) {
+  .config-workspace__mode-switch {
+    grid-template-columns: repeat(2, minmax(72px, 1fr));
+  }
+
+  .config-workspace__mode-button {
+    min-height: 32px;
+    padding-inline: 0.58rem;
+    font-size: 0.86rem;
+  }
+}
+
 .config-workspace__meta-row,
 .config-workspace__path,
 .config-raw__header p,
@@ -3630,13 +3646,19 @@ body::before {
 .config-workspace__title-row {
   display: flex;
   align-items: center;
-  gap: 1.25rem;
+  gap: clamp(0.55rem, 1.4vw, 1.25rem);
   min-width: 0;
-  flex-wrap: wrap;
+  width: 100%;
+  flex-wrap: nowrap;
 }
 
 .config-workspace__title-row h3 {
-  overflow-wrap: anywhere;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .config-workspace__meta-row {
@@ -3834,7 +3856,7 @@ body::before {
   border-radius: 0;
   border: 0;
   background: rgba(7, 12, 20, 0.42);
-  padding: 0.64rem 0.84rem 0;
+  padding: 0.64rem 0 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0.62rem;
@@ -3843,25 +3865,49 @@ body::before {
 
 .config-structured__header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 1rem;
   min-width: 0;
+  padding: 0 0.84rem 0.28rem;
+  border-bottom: 1px solid rgba(88, 116, 154, 0.16);
+}
+
+.config-structured__heading {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, auto) auto;
+  align-items: baseline;
+  gap: 0.46rem;
+}
+
+.config-structured__heading h4 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .config-structured__header p {
-  margin: 0.16rem 0 0;
+  margin: 0;
   color: #97afcc;
   font-size: 0.74rem;
   line-height: 1.4;
+  white-space: nowrap;
 }
 
 .config-structured__header-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.5rem;
-  flex-wrap: wrap;
+  gap: 0.38rem;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+}
+
+.config-structured__header-actions .btn-small {
+  min-height: 32px;
+  padding: 0.34rem 0.68rem;
 }
 
 .config-structured__sections {
@@ -3871,7 +3917,7 @@ body::before {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0 0.18rem 0 0;
+  padding: 0 0 0 0.84rem;
   align-content: start;
 }
 

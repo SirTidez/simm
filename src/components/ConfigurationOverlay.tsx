@@ -549,6 +549,10 @@ const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId,
   );
 });
 
+const ConfigTrashIcon = memo(function ConfigTrashIcon() {
+  return <Icon name="fas fa-trash" />;
+});
+
 interface ConfigEntryRowProps {
   sectionId: string;
   entry: EditableEntry;
@@ -601,7 +605,7 @@ const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange
           aria-label={`Delete ${entryLabel}`}
           onClick={handleDeleteClick}
         >
-          <Icon name="fas fa-trash" />
+          <ConfigTrashIcon />
         </button>
       </div>
 
@@ -918,21 +922,22 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
   }, []);
 
   const updateActiveDraft = useCallback((updater: (draft: FileDraft) => FileDraft, dirtyMode: EditorMode) => {
-    if (!selectedFilePath) return;
+    const currentSelectedFilePath = selectedFilePathRef.current;
+    if (!currentSelectedFilePath) return;
     setDrafts((current) => {
-      const existingDraft = current[selectedFilePath];
+      const existingDraft = current[currentSelectedFilePath];
       if (!existingDraft) return current;
 
       return {
         ...current,
-        [selectedFilePath]: {
+        [currentSelectedFilePath]: {
           ...updater(existingDraft),
           dirty: true,
           dirtyMode,
         },
       };
     });
-  }, [selectedFilePath]);
+  }, []);
 
   const requestConfirm = (title: string, message: string, onConfirmAction: () => void) => {
     setPendingConfirm({ title, message, onConfirm: onConfirmAction });
@@ -1565,7 +1570,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                     <div className="config-structured__sheet">
                       {activeSection && (
                         <div className="config-structured__header">
-                          <div>
+                          <div className="config-structured__heading">
                             <h4>{activeSection.name}</h4>
                             <p>{formatSettingCount(visibleEntryCount)}</p>
                           </div>
