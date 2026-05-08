@@ -507,7 +507,7 @@ git commit -m "refactor(frontend): migrate downloads panel primitives"
 3. [x] `src/components/SecurityScanReportOverlay.tsx`
 4. [x] `src/components/ConfigurationOverlay.tsx`
 5. [x] `src/components/LogsOverlay.tsx`
-6. `src/components/Settings.tsx`
+6. [x] `src/components/Settings.tsx`
 7. `src/components/App.tsx` shell atoms only
 8. `src/components/ModsOverlay.tsx`
 9. `src/components/ModLibraryOverlay.tsx`
@@ -565,6 +565,9 @@ Current Task 7 checkpoint:
 - `LogsOverlay.tsx` now uses `SimmButton` for generic file, reload, export, summary filter, inspector collapse, quick action, and Mod Library actions, plus `SimmBadge` for passive live/shared/mod context chips.
 - Log source buttons, mod activity buttons, active filters, live follow controls, line chips, virtualized row interactions, and line-level labels intentionally remain raw controls in this pass because they carry richer active-state, accent-color, or row-selection behavior.
 - Validation passed with `bun run test src/components/LogsOverlay.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
+- `Settings.tsx` now uses `SimmButton` for generic setup guide, theme file, directory browser, update check, database backup, scanner management, and directory picker actions.
+- Settings switches, modal close controls, and directory row navigation intentionally remain raw buttons in this pass because they carry custom switch semantics or list-row selection behavior.
+- Validation passed with `bun run test src/components/Settings.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 
 ---
 

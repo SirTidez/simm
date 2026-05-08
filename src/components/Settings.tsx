@@ -12,6 +12,7 @@ import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
 import { Icon } from './Icon';
+import { SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 type SettingsProps = {
@@ -832,14 +833,14 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     {onRunSetupGuide && (
                       <div className="settings-field settings-field--span">
                         <label>Setup guide</label>
-                        <button
+                        <SimmButton
                           type="button"
                           className="btn btn-secondary"
                           onClick={onRunSetupGuide}
                         >
                           <Icon name="sliders" />
                           Run setup guide again
-                        </button>
+                        </SimmButton>
                         <small>
                           Revisit Player and Power User choices without changing
                           installed mods or environments.
@@ -899,7 +900,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         rescan the directory without restarting SIMM.
                       </small>
                       <div className="settings-backup-panel__actions">
-                        <button
+                        <SimmButton
                           type="button"
                           onClick={() => void handleOpenThemesFolder()}
                           disabled={openingThemesFolder || !themesDirectory}
@@ -908,15 +909,15 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           {openingThemesFolder
                             ? "Opening..."
                             : "Open Themes Folder"}
-                        </button>
-                        <button
+                        </SimmButton>
+                        <SimmButton
                           type="button"
                           onClick={() => void handleReloadThemes()}
                           disabled={reloadingThemes}
                           className="btn btn-secondary btn-small"
                         >
                           {reloadingThemes ? "Reloading..." : "Reload Theme Files"}
-                        </button>
+                        </SimmButton>
                       </div>
                     </div>
                   </div>
@@ -966,13 +967,13 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           }
                           placeholder="C:\DevEnvironments"
                         />
-                        <button
+                        <SimmButton
                           type="button"
                           onClick={() => void openDirectoryPicker()}
                           className="btn btn-secondary"
                         >
                           Browse
-                        </button>
+                        </SimmButton>
                       </div>
                       <small>
                         New downloads and extracted install payloads default to
@@ -1185,7 +1186,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>Manual batch actions</label>
-                      <button
+                      <SimmButton
                         type="button"
                         onClick={() => void runCheckAllUpdates()}
                         disabled={checkingAllUpdates}
@@ -1194,7 +1195,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         {checkingAllUpdates
                           ? "Checking..."
                           : "Check All Updates"}
-                      </button>
+                      </SimmButton>
                       <small>
                         Run an immediate check across all completed
                         environments.
@@ -1261,7 +1262,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     </div>
 
                     <div className="settings-backup-panel__actions">
-                      <button
+                      <SimmButton
                         type="button"
                         onClick={() => void handleBackupDatabase()}
                         disabled={backingUpDatabase}
@@ -1270,8 +1271,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         {backingUpDatabase
                           ? "Backing Up..."
                           : "Back Up Database"}
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
                         onClick={() => void handleOpenBackupsFolder()}
                         disabled={openingBackupsFolder}
@@ -1280,7 +1281,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         {openingBackupsFolder
                           ? "Opening..."
                           : "Open Backups Folder"}
-                      </button>
+                      </SimmButton>
                     </div>
 
                     {databaseBackupFeedback && (
@@ -1423,7 +1424,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         scanner is still missing.
                       </small>
                       <div className="settings-backup-panel__actions">
-                        <button
+                        <SimmButton
                           type="button"
                           className="btn btn-secondary btn-small"
                           disabled={
@@ -1449,9 +1450,9 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           {loadingSecurityScannerStatus
                             ? "Refreshing..."
                             : "Refresh"}
-                        </button>
+                        </SimmButton>
                         {!securityScannerStatus?.installed && (
-                          <button
+                          <SimmButton
                             type="button"
                             className="btn btn-secondary btn-small"
                             disabled={installingSecurityScanner || loadingSecurityScannerStatus}
@@ -1475,7 +1476,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                             {installingSecurityScanner
                               ? "Installing..."
                               : "Fallback Install"}
-                          </button>
+                          </SimmButton>
                         )}
                       </div>
                     </div>
@@ -1542,7 +1543,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     }}
                     placeholder="C:\\Users\\YourName"
                   />
-                  <button
+                  <SimmButton
                     type="button"
                     onClick={() => void loadDirectory(directoryPath)}
                     className="btn btn-secondary"
@@ -1556,7 +1557,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       aria-hidden="true"
                      />
                     {browsing ? "Loading…" : "Go to Path"}
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
@@ -1578,7 +1579,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     placeholder="Folder name"
                     disabled={creatingFolder || !directoryPath}
                   />
-                  <button
+                  <SimmButton
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void handleCreateFolder()}
@@ -1594,7 +1595,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       aria-hidden="true"
                      />
                     {creatingFolder ? "Creating…" : "Create Folder"}
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
@@ -1646,21 +1647,21 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
               </div>
 
               <div className="wizard-panel__actions wizard-panel__actions--dialog">
-                <button
+                <SimmButton
                   type="button"
                   onClick={() => setShowDirectoryPicker(false)}
                   className="btn btn-secondary"
                 >
                   Cancel
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
                   type="button"
                   onClick={() => handleDirectorySelect(directoryPath)}
                   className="btn btn-primary"
                   disabled={!directoryPath}
                 >
                   Select This Directory
-                </button>
+                </SimmButton>
               </div>
             </div>
           </div>
