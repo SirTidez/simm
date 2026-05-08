@@ -359,12 +359,12 @@ describe("ModLibraryOverlay", () => {
         IL2CPP: [
           makeThunderstorePackage(
             "SteamNetworkLib_Il2Cpp",
-            "1.2.1",
+            "1.2.4",
             "IL2CPP",
           ),
         ],
         Mono: [
-          makeThunderstorePackage("SteamNetworkLib_Mono", "1.2.1", "Mono"),
+          makeThunderstorePackage("SteamNetworkLib_Mono", "1.2.4", "Mono"),
         ],
       },
     });
@@ -373,6 +373,9 @@ describe("ModLibraryOverlay", () => {
 
     const steamNetworkLibButtons = await screen.findAllByRole("button", {
       name: /SteamNetworkLib/i,
+    });
+    await waitFor(() => {
+      expect(steamNetworkLibButtons[0]).not.toBeDisabled();
     });
     fireEvent.click(steamNetworkLibButtons[0]);
 

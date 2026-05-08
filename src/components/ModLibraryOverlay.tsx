@@ -8969,6 +8969,7 @@ export function ModLibraryOverlay({
                         type="button"
                         className="workspace-feature-card"
                         onClick={handleDownloadMeshVaultClick}
+                        disabled={!meshVaultFeaturedPackage}
                       >
                         <div>
                           <strong>MeshVault</strong>
@@ -8983,6 +8984,7 @@ export function ModLibraryOverlay({
                         type="button"
                         className="workspace-feature-card"
                         onClick={handleDownloadS1MapiClick}
+                        disabled={!s1mapiFeaturedPackage}
                       >
                         <div>
                           <strong>S1MAPI</strong>
@@ -8997,6 +8999,7 @@ export function ModLibraryOverlay({
                         type="button"
                         className="workspace-feature-card"
                         onClick={handleDownloadSteamNetworkLibClick}
+                        disabled={!steamNetworkLibFeaturedPackage}
                       >
                         <div>
                           <strong>SteamNetworkLib</strong>
