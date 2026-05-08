@@ -603,6 +603,85 @@ function HomeDashboard({
   );
 }
 
+function AppShellDownloadsDock({
+  badge,
+  icon,
+  label,
+  shellNavCollapsed,
+}: {
+  badge: number;
+  icon: 'download';
+  label: string;
+  shellNavCollapsed: boolean;
+}) {
+  const [downloadsPanelOpen, setDownloadsPanelOpen] = useState(false);
+  const downloadsPanelDismissTimerRef = useRef<number | null>(null);
+
+  const clearDownloadsPanelDismissTimer = useCallback(() => {
+    if (downloadsPanelDismissTimerRef.current !== null) {
+      window.clearTimeout(downloadsPanelDismissTimerRef.current);
+      downloadsPanelDismissTimerRef.current = null;
+    }
+  }, []);
+
+  const closeDownloadsPanel = useCallback(() => {
+    clearDownloadsPanelDismissTimer();
+    setDownloadsPanelOpen(false);
+  }, [clearDownloadsPanelDismissTimer]);
+
+  const scheduleDownloadsPanelDismiss = useCallback(() => {
+    clearDownloadsPanelDismissTimer();
+    downloadsPanelDismissTimerRef.current = window.setTimeout(() => {
+      downloadsPanelDismissTimerRef.current = null;
+      setDownloadsPanelOpen(false);
+    }, 850);
+  }, [clearDownloadsPanelDismissTimer]);
+
+  const toggleDownloadsPanel = useCallback(() => {
+    clearDownloadsPanelDismissTimer();
+    setDownloadsPanelOpen((open) => !open);
+  }, [clearDownloadsPanelDismissTimer]);
+
+  useEffect(() => clearDownloadsPanelDismissTimer, [clearDownloadsPanelDismissTimer]);
+
+  return (
+    <>
+      <div
+        className="app-shell-sidebar__download-dock"
+        onPointerEnter={clearDownloadsPanelDismissTimer}
+        onPointerLeave={scheduleDownloadsPanelDismiss}
+      >
+        <button
+          type="button"
+          className="app-shell-sidebar__tool-item app-shell-sidebar__download-item"
+          onClick={toggleDownloadsPanel}
+          aria-expanded={downloadsPanelOpen}
+          aria-controls="downloads-popover"
+          title={label}
+        >
+          <Icon name={icon} />
+          <span>{label}</span>
+          <span className="app-shell-sidebar__tool-badge">{badge}</span>
+        </button>
+      </div>
+      {downloadsPanelOpen && (
+        <div
+          className={`downloads-popover${shellNavCollapsed ? ' downloads-popover--nav-collapsed' : ''}`}
+          id="downloads-popover"
+          role="dialog"
+          aria-label="Downloads"
+          onPointerEnter={clearDownloadsPanelDismissTimer}
+          onPointerLeave={scheduleDownloadsPanelDismiss}
+        >
+          <Suspense fallback={<WorkspacePanelFallback />}>
+            <DownloadsPanel presentation="popup" onClose={closeDownloadsPanel} />
+          </Suspense>
+        </div>
+      )}
+    </>
+  );
+}
+
 function AppContent() {
   type PendingNexusRuntimeSelection = {
     nxmUrl: string;
@@ -670,32 +749,13 @@ function AppContent() {
   const [shellNavCollapsed, setShellNavCollapsed] = useState(readStoredShellNavCollapsed);
   const [shellNavAnimating, setShellNavAnimating] = useState(false);
   const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
-  const [downloadsPanelOpen, setDownloadsPanelOpen] = useState(false);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
   const startupSetupCheckedRef = useRef(false);
   const shellNavAnimationFrameRef = useRef<number | null>(null);
-  const downloadsPanelDismissTimerRef = useRef<number | null>(null);
   const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
-  const clearDownloadsPanelDismissTimer = useCallback(() => {
-    if (downloadsPanelDismissTimerRef.current !== null) {
-      window.clearTimeout(downloadsPanelDismissTimerRef.current);
-      downloadsPanelDismissTimerRef.current = null;
-    }
-  }, []);
-  const closeDownloadsPanel = useCallback(() => {
-    clearDownloadsPanelDismissTimer();
-    setDownloadsPanelOpen(false);
-  }, [clearDownloadsPanelDismissTimer]);
-  const scheduleDownloadsPanelDismiss = useCallback(() => {
-    clearDownloadsPanelDismissTimer();
-    downloadsPanelDismissTimerRef.current = window.setTimeout(() => {
-      downloadsPanelDismissTimerRef.current = null;
-      setDownloadsPanelOpen(false);
-    }, 850);
-  }, [clearDownloadsPanelDismissTimer]);
   const persistShellNavCollapsed = useCallback((collapsed: boolean) => {
     try {
       localStorage.setItem(SHELL_NAV_COLLAPSED_KEY, String(collapsed));
@@ -745,8 +805,7 @@ function AppContent() {
     if (shellNavAnimationFrameRef.current !== null) {
       cancelShellAnimationFrame(shellNavAnimationFrameRef.current);
     }
-    clearDownloadsPanelDismissTimer();
-  }, [clearDownloadsPanelDismissTimer]);
+  }, []);
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
       return false;
@@ -1724,10 +1783,6 @@ function AppContent() {
     label: 'Downloads',
     icon: 'download',
     badge: downloadsInProgress,
-    onClick: () => {
-      clearDownloadsPanelDismissTimer();
-      setDownloadsPanelOpen((open) => !open);
-    },
   } as const;
   const utilityActions = [
     {
@@ -1945,39 +2000,13 @@ function AppContent() {
                 </div>
               )}
             </section>
-            <div
-              className="app-shell-sidebar__download-dock"
-              onPointerEnter={clearDownloadsPanelDismissTimer}
-              onPointerLeave={scheduleDownloadsPanelDismiss}
-            >
-              <button
-                type="button"
-                className="app-shell-sidebar__tool-item app-shell-sidebar__download-item"
-                onClick={downloadsNavItem.onClick}
-                aria-expanded={downloadsPanelOpen}
-                aria-controls="downloads-popover"
-                title={downloadsNavItem.label}
-              >
-                <Icon name={downloadsNavItem.icon} />
-                <span>{downloadsNavItem.label}</span>
-                <span className="app-shell-sidebar__tool-badge">{downloadsNavItem.badge}</span>
-              </button>
-            </div>
+            <AppShellDownloadsDock
+              badge={downloadsNavItem.badge}
+              label={downloadsNavItem.label}
+              icon={downloadsNavItem.icon}
+              shellNavCollapsed={shellNavCollapsed}
+            />
           </aside>
-          {downloadsPanelOpen && (
-            <div
-              className="downloads-popover"
-              id="downloads-popover"
-              role="dialog"
-              aria-label="Downloads"
-              onPointerEnter={clearDownloadsPanelDismissTimer}
-              onPointerLeave={scheduleDownloadsPanelDismiss}
-            >
-              <Suspense fallback={<WorkspacePanelFallback />}>
-                <DownloadsPanel presentation="popup" onClose={closeDownloadsPanel} />
-              </Suspense>
-            </div>
-          )}
           <div className="app-content workspace-active">
             {activeWorkspace.view === 'home' ? (
               <div className="workspace-layout">

@@ -18,6 +18,9 @@ const settingsStoreMocks = vi.hoisted(() => ({
 const downloadStatusStoreMocks = vi.hoisted(() => ({
   useDownloadStatusStore: vi.fn(),
 }));
+const appRenderMocks = vi.hoisted(() => ({
+  footerRenderCount: 0,
+}));
 const modLibraryOverlayMocks = vi.hoisted(() => ({
   lastNavigationState: null as any,
   suspendOnRender: false,
@@ -281,14 +284,18 @@ vi.mock('./Footer', () => ({
     onOpenModUpdates?: () => void;
     onOpenAppUpdate?: () => void;
     appUpdateAvailable?: boolean;
-  }) => (
-    <div>
-      <button onClick={onOpenModUpdates}>Open Mod Updates</button>
-      {appUpdateAvailable && (
-        <button onClick={onOpenAppUpdate}>Install App Update</button>
-      )}
-    </div>
-  ),
+  }) => {
+    appRenderMocks.footerRenderCount += 1;
+
+    return (
+      <div>
+        <button onClick={onOpenModUpdates}>Open Mod Updates</button>
+        {appUpdateAvailable && (
+          <button onClick={onOpenAppUpdate}>Install App Update</button>
+        )}
+      </div>
+    );
+  },
 }));
 
 vi.mock('./DownloadsPanel', () => ({
@@ -351,6 +358,7 @@ describe('App', () => {
     windowMocks.minimize.mockReset();
     windowMocks.toggleMaximize.mockReset();
     windowMocks.close.mockReset();
+    appRenderMocks.footerRenderCount = 0;
 
     windowMocks.isMaximized.mockResolvedValue(false);
     windowMocks.onResized.mockResolvedValue(() => {});
@@ -609,6 +617,34 @@ describe('App', () => {
 
     fireEvent.click(downloadsButton);
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Downloads' })).toBeNull());
+  });
+
+  it('opens downloads without re-rendering the app shell', async () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'mod-1',
+          kind: 'mod',
+          label: 'ExampleMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'downloading',
+          progress: 0,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
+
+    const downloadsButton = screen.getByRole('button', { name: /Downloads/ });
+    const renderCountBeforeOpen = appRenderMocks.footerRenderCount;
+
+    fireEvent.click(downloadsButton);
+
+    expect(await screen.findByRole('dialog', { name: 'Downloads' })).toBeTruthy();
+    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeOpen);
   });
 
   it('opens the setup guide on a fresh startup', async () => {
