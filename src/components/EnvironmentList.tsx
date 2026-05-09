@@ -14,6 +14,12 @@ import { logger } from '../services/logger';
 import { isSteamEnvironment, sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import { Icon } from './Icon';
 import {
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { SimmButton, SimmDialogContent } from './primitives';
+import {
   onAuthWaiting,
   onAuthSuccess,
   onAuthError,
@@ -2122,16 +2128,19 @@ export function EnvironmentList({
 
       {/* MelonLoader Version Selector Modal */}
       {showMelonLoaderVersionSelector && (
-        <div className="modal-overlay" onClick={(e) => {
-          if (e.target === e.currentTarget) {
+        <Dialog open={!!showMelonLoaderVersionSelector} onOpenChange={(open) => {
+          if (!open) {
             closeMelonLoaderVersionSelector();
           }
         }}>
-          <div className="modal-content melonloader-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Select MelonLoader Version</h2>
-              <button className="modal-close" onClick={closeMelonLoaderVersionSelector}>×</button>
-            </div>
+          <SimmDialogContent
+            className="melonloader-dialog"
+            showCloseButton={false}
+          >
+            <DialogHeader className="modal-header">
+              <DialogTitle>Select MelonLoader Version</DialogTitle>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={closeMelonLoaderVersionSelector} aria-label="Close MelonLoader version selector">×</SimmButton>
+            </DialogHeader>
 
             <div className="melonloader-dialog__body">
                 <div className="melonloader-dialog__overview">
@@ -2242,13 +2251,13 @@ export function EnvironmentList({
                   </div>
 
                   <div className="melonloader-dialog__footer">
-                    <button
+                    <SimmButton
                       className="btn btn-secondary"
                       onClick={closeMelonLoaderVersionSelector}
                     >
                       Cancel
-                    </button>
-                    <button
+                    </SimmButton>
+                    <SimmButton
                       className="btn btn-primary"
                       onClick={() => handleMelonLoaderVersionSelected(showMelonLoaderVersionSelector)}
                       disabled={!selectedMelonLoaderVersion.get(showMelonLoaderVersionSelector) || installingMelonLoader.has(showMelonLoaderVersionSelector)}
@@ -2264,13 +2273,13 @@ export function EnvironmentList({
                           {currentMelonLoaderVersion === 'Not installed' ? 'Install' : 'Change Version'}
                         </>
                       )}
-                    </button>
+                    </SimmButton>
                   </div>
                 </>
               )}
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
 
       <div className="environments-grid">

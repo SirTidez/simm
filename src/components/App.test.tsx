@@ -110,11 +110,17 @@ vi.mock('./EnvironmentList', () => ({
   EnvironmentList: ({
     onInitialDetectionComplete,
     onOpenWorkspace,
+    focusedEnvironmentId,
+    focusedEnvironmentRequestId,
   }: {
     onInitialDetectionComplete?: () => void;
     onOpenWorkspace?: (workspace: { view: 'wizard' }) => void;
+    focusedEnvironmentId?: string | null;
+    focusedEnvironmentRequestId?: number;
   }) => (
     <div>
+      <span>Focused Environment: {focusedEnvironmentId ?? 'none'}</span>
+      <span>Focus Request: {focusedEnvironmentRequestId ?? 0}</span>
       <button onClick={onInitialDetectionComplete}>Finish Detection</button>
       <button onClick={() => onOpenWorkspace?.({ view: 'wizard' })}>Add Environment</button>
     </div>
@@ -427,6 +433,81 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.getByText('Finish Detection')).toBeTruthy();
     });
+    expect(screen.getByText('Focused Environment: env-update')).toBeTruthy();
+  });
+
+  it('opens Home status for the currently selected environment and requests focus', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-update',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Schedule I',
+          runtime: 'IL2CPP',
+          status: 'completed',
+          currentGameVersion: '0.4.5f1',
+          updateAvailable: true,
+        },
+        {
+          id: 'steam-main',
+          name: 'Steam Installation',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Steam/Schedule I',
+          runtime: 'Mono',
+          status: 'completed',
+          currentGameVersion: '0.4.5f1',
+          environmentType: 'Steam',
+        },
+      ],
+    });
+    localStorage.setItem('simm:lastEnvId', 'steam-main');
+
+    render(<App />);
+
+    const statusButton = await screen.findByRole('button', { name: 'Open Environments for Steam Installation' });
+    fireEvent.click(statusButton);
+
+    expect(await screen.findByText('Focused Environment: steam-main')).toBeTruthy();
+    expect(screen.getByText('Focus Request: 1')).toBeTruthy();
+  });
+
+  it('changes the focused environment from the sidebar while Environments is open', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+        {
+          id: 'env-beta',
+          name: 'Beta',
+          appId: '3164500',
+          branch: 'beta',
+          outputDir: 'C:/Games/Beta',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByTitle('Environments'));
+    expect(await screen.findByText('Focused Environment: env-main')).toBeTruthy();
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    fireEvent.click(within(sidebar).getByRole('button', { name: /Beta/ }));
+
+    expect(await screen.findByText('Focused Environment: env-beta')).toBeTruthy();
+    expect(screen.getByText('Focus Request: 2')).toBeTruthy();
   });
 
   it('orders shell environments the same way as the environments page', async () => {
@@ -619,6 +700,29 @@ describe('App', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Downloads' })).toBeNull());
   });
 
+  it('counts recent completed downloads in the sidebar downloads badge', () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'mod-update-1',
+          kind: 'mod',
+          label: 'UpdatedMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'completed',
+          progress: 100,
+          downloadedFiles: 1,
+          totalFiles: 1,
+          startedAt: Date.now() - 1000,
+          finishedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    expect(screen.getByRole('button', { name: /Downloads\s*1/ })).toBeTruthy();
+  });
+
   it('opens downloads without re-rendering the app shell', async () => {
     downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
       downloads: [
@@ -801,6 +905,46 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     expect(helpButton).toHaveAttribute('aria-current', 'page');
     expect(accountsButton).not.toHaveAttribute('aria-current');
+  });
+
+  it('switches directly between top-level panels without falling back to Home', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    expect(await screen.findByText('Help Overlay')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Settings From Help' }));
+
+    expect(await screen.findByRole('button', { name: 'Run setup guide again' })).toBeTruthy();
+    expect(screen.queryByText('Help Overlay')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Welcome back to SIMM' })).toBeNull();
+  });
+
+  it('opens the downloads tray from another panel without navigating Home', async () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'download-1',
+          kind: 'mod',
+          label: 'Pack Rat.zip',
+          contextLabel: 'Mod download',
+          status: 'downloading',
+          progress: 50,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    expect(await screen.findByText('Help Overlay')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Downloads/ }));
+
+    expect(await screen.findByText('Downloads Panel')).toBeTruthy();
+    expect(screen.getByText('Help Overlay')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Welcome back to SIMM' })).toBeNull();
   });
 
   it('uses window close for the custom close button', async () => {

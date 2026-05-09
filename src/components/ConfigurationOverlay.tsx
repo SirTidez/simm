@@ -1,5 +1,8 @@
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type WheelEvent as ReactWheelEvent } from 'react';
 
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
@@ -381,7 +384,7 @@ const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId,
         <label htmlFor={`config-value-${sectionId}-${entry.id}`}>Value</label>
         <span className="config-entry-row__value-kind">{formatValueKind(valueKind)}</span>
       </div>
-      <input
+      <Input
         id={`config-value-${sectionId}-${entry.id}`}
         type="text"
         inputMode={valueKind === 'number' ? 'decimal' : 'text'}
@@ -429,7 +432,7 @@ const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange
           {entry.isNew ? (
             <>
               <label htmlFor={keyInputId}>Key</label>
-              <input
+              <Input
                 id={keyInputId}
                 type="text"
                 value={entry.key}
@@ -464,7 +467,7 @@ const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange
 
       <div className="config-entry-row__comment">
         <label htmlFor={commentInputId}>Comment</label>
-        <textarea
+        <Textarea
           id={commentInputId}
           aria-label={`Comment for ${entryLabel}`}
           value={entry.comment}
@@ -1208,7 +1211,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
           <div className="config-explorer__search">
             <Icon name="fas fa-search" />
-            <input
+            <Input
               type="text"
               value={fileFilter}
               onChange={(e) => setFileFilter(e.target.value)}
@@ -1374,7 +1377,7 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                   <div className="config-workspace__toolbar-actions">
                     <div className="config-editor__search config-editor__search--workspace">
                       <Icon name="fas fa-search" />
-                      <input
+                      <Input
                         type="text"
                         value={sectionFilter}
                         onChange={(e) => setSectionFilter(e.target.value)}

@@ -2,7 +2,6 @@ import {
   Suspense,
   lazy,
   memo,
-  startTransition,
   useState,
   useEffect,
   useCallback,
@@ -40,6 +39,14 @@ import type {
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { Icon } from './Icon';
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { SimmButton, SimmDialogContent } from './primitives';
 import type { IconName } from './icons';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
@@ -357,6 +364,7 @@ function HomeDashboard({
   environmentsLoading,
   downloadsInProgress,
   appUpdateState,
+  selectedEnvironmentId,
   onOpenEnvironments,
   onOpenModLibrary,
   onOpenModUpdates,
@@ -369,7 +377,8 @@ function HomeDashboard({
   appUpdateState:
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
     | { status: 'available'; result: AppUpdateStatus };
-  onOpenEnvironments: () => void;
+  selectedEnvironmentId?: string | null;
+  onOpenEnvironments: (environmentId?: string | null) => void;
   onOpenModLibrary: () => void;
   onOpenModUpdates: () => void;
   onOpenWizard: () => void;
@@ -389,7 +398,10 @@ function HomeDashboard({
     }))
     .filter((entry) => Number.isFinite(entry.time))
     .sort((a, b) => b.time - a.time)[0]?.raw;
-  const primaryEnvironment = completed.find((env) => env.updateAvailable) ?? completed[0] ?? environments[0] ?? null;
+  const selectedEnvironment = selectedEnvironmentId
+    ? environments.find((env) => env.id === selectedEnvironmentId) ?? null
+    : null;
+  const primaryEnvironment = selectedEnvironment ?? completed.find((env) => env.updateAvailable) ?? completed[0] ?? environments[0] ?? null;
   const [feedItems, setFeedItems] = useState<HomeFeedItem[]>([]);
   const [feedStatus, setFeedStatus] = useState<'loading' | 'ready' | 'empty'>('loading');
 
@@ -499,7 +511,7 @@ function HomeDashboard({
                   : updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}
               </h2>
             </div>
-            <button type="button" className="btn btn-secondary btn-small" onClick={onOpenEnvironments} aria-label="Open Environments from dashboard">
+            <button type="button" className="btn btn-secondary btn-small" onClick={() => onOpenEnvironments()} aria-label="Open Environments from dashboard">
               <Icon name="hardDrive" />
               Environments
             </button>
@@ -516,7 +528,7 @@ function HomeDashboard({
             <button
               type="button"
               className="home-dashboard__focus home-dashboard__focus--action"
-              onClick={primaryEnvironment ? onOpenEnvironments : onOpenWizard}
+              onClick={primaryEnvironment ? () => onOpenEnvironments(primaryEnvironment.id) : onOpenWizard}
               aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
             >
               <div>
@@ -687,7 +699,7 @@ function AppShellDownloadsDock({
 const AppShellSidebar = memo(function AppShellSidebar({
   activeWorkspace,
   currentEnvironmentId,
-  downloadsInProgress,
+  downloadsBadgeCount,
   environments,
   environmentsLoading,
   onEnvironmentSelect,
@@ -703,7 +715,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
 }: {
   activeWorkspace: WorkspaceRoute;
   currentEnvironmentId: string | null;
-  downloadsInProgress: number;
+  downloadsBadgeCount: number;
   environments: Environment[];
   environmentsLoading: boolean;
   onEnvironmentSelect: (environmentId: string) => void;
@@ -749,7 +761,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
       label: 'Environments',
       icon: 'hardDrive',
       active: activeWorkspace.view === 'environments' || activeWorkspace.view === 'wizard',
-      onClick: onOpenEnvironmentsWorkspace,
+      onClick: () => onOpenEnvironmentsWorkspace(),
     },
     {
       key: 'library',
@@ -879,7 +891,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
         ) : null}
       </section>
       <AppShellDownloadsDock
-        badge={downloadsInProgress}
+        badge={downloadsBadgeCount}
         label="Downloads"
         icon="download"
         shellNavCollapsed={shellNavCollapsed}
@@ -1148,46 +1160,65 @@ function AppContent() {
   }, []);
 
   const pushWorkspace = useCallback((route: Exclude<WorkspaceRoute, { view: 'home' }>, seed?: Partial<WorkspaceEntry>) => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        const current = previous[previous.length - 1];
-        if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
-          if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
-            return previous;
-          }
-          return [
-            ...previous.slice(0, -1),
-            {
-              ...current,
-              route,
-              libraryState: seed?.libraryState ?? current.libraryState,
-              modsState: seed?.modsState ?? current.modsState,
-              securityReportState: seed?.securityReportState ?? current.securityReportState,
-            },
-          ];
+    setWorkspaceStack((previous) => {
+      const current = previous[previous.length - 1];
+      if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
+        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+          return previous;
         }
+        return [
+          ...previous.slice(0, -1),
+          {
+            ...current,
+            route,
+            libraryState: seed?.libraryState ?? current.libraryState,
+            modsState: seed?.modsState ?? current.modsState,
+            securityReportState: seed?.securityReportState ?? current.securityReportState,
+          },
+        ];
+      }
+      return [...previous, createWorkspaceEntry(route, seed)];
+    });
+  }, [createWorkspaceEntry, isSameWorkspaceRoute]);
+
+  const replaceWorkspace = useCallback((route: Exclude<WorkspaceRoute, { view: 'home' }>, seed?: Partial<WorkspaceEntry>) => {
+    setWorkspaceStack((previous) => {
+      const current = previous[previous.length - 1];
+      if (!current || current.route.view === 'home') {
         return [...previous, createWorkspaceEntry(route, seed)];
-      });
+      }
+      if (isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
+        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+          return previous;
+        }
+        return [
+          ...previous.slice(0, -1),
+          {
+            ...current,
+            route,
+            libraryState: seed?.libraryState ?? current.libraryState,
+            modsState: seed?.modsState ?? current.modsState,
+            securityReportState: seed?.securityReportState ?? current.securityReportState,
+          },
+        ];
+      }
+      return [...previous.slice(0, -1), createWorkspaceEntry(route, seed)];
     });
   }, [createWorkspaceEntry, isSameWorkspaceRoute]);
 
   const popWorkspace = useCallback(() => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        if (previous.length <= 1) {
-          return previous;
-        }
-        return previous.slice(0, -1);
-      });
+    setWorkspaceStack((previous) => {
+      if (previous.length <= 1) {
+        return previous;
+      }
+      return previous.slice(0, -1);
     });
   }, []);
 
   const goHome = useCallback(() => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        const homeEntry = previous.find((entry) => entry.route.view === 'home');
-        return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
-      });
+    setWorkspaceStack((previous) => {
+      const homeEntry = previous.find((entry) => entry.route.view === 'home');
+      return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
     });
   }, [createWorkspaceEntry]);
 
@@ -1196,8 +1227,20 @@ function AppContent() {
   }, []);
 
   const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
+    const activeIsEnvironmentWorkspace = 'environmentId' in activeWorkspace;
+    const nextIsEnvironmentWorkspace = 'environmentId' in workspace;
+    const shouldReplaceCurrent =
+      !activeIsEnvironmentWorkspace
+      && !nextIsEnvironmentWorkspace
+      && activeWorkspace.view !== 'home';
+
+    if (shouldReplaceCurrent) {
+      replaceWorkspace(workspace);
+      return;
+    }
+
     pushWorkspace(workspace);
-  }, [pushWorkspace]);
+  }, [activeWorkspace, pushWorkspace, replaceWorkspace]);
 
   const openSecurityReportWorkspace = useCallback((reportState: SecurityReportWorkspaceRequest) => {
     pushWorkspace(
@@ -1228,14 +1271,19 @@ function AppContent() {
 
     lastLibraryNavigationStateRef.current = mergedNavigationState;
 
-    pushWorkspace(
-      options?.initialTab ? { view: 'library', initialTab: options.initialTab } : { view: 'library' },
-      {
-        libraryState: mergedNavigationState,
-        libraryFocusRequest: options?.focusRequest ?? null,
-      },
-    );
-  }, [pushWorkspace, workspaceStack]);
+    const route = options?.initialTab ? { view: 'library' as const, initialTab: options.initialTab } : { view: 'library' as const };
+    const seed = {
+      libraryState: mergedNavigationState,
+      libraryFocusRequest: options?.focusRequest ?? null,
+    };
+
+    if (!('environmentId' in activeWorkspace) && activeWorkspace.view !== 'home') {
+      replaceWorkspace(route, seed);
+      return;
+    }
+
+    pushWorkspace(route, seed);
+  }, [activeWorkspace, pushWorkspace, replaceWorkspace, workspaceStack]);
 
   const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
     const requestId = ++libraryFocusRequestIdRef.current;
@@ -1933,9 +1981,20 @@ function AppContent() {
     || download.status === 'downloading'
     || download.status === 'validating'
   )).length;
-  const openEnvironmentsWorkspace = useCallback(() => {
+  const downloadsBadgeCount = downloads.length;
+  const selectEnvironmentForShell = useCallback((environmentId: string) => {
+    setSelectedEnvironmentId(environmentId);
+    setEnvironmentFocusRequestId((previous) => previous + 1);
+    localStorage.setItem(LAST_ENV_KEY, environmentId);
+  }, []);
+
+  const openEnvironmentsWorkspace = useCallback((environmentId?: string | null) => {
+    const targetEnvironmentId = environmentId ?? currentEnvironmentId;
+    if (targetEnvironmentId) {
+      selectEnvironmentForShell(targetEnvironmentId);
+    }
     openWorkspace({ view: 'environments' });
-  }, [openWorkspace]);
+  }, [currentEnvironmentId, openWorkspace, selectEnvironmentForShell]);
   const openEnvironmentWorkspace = useCallback((view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
     if (!currentEnvironmentId) {
       openWorkspace({ view: 'wizard' });
@@ -1947,12 +2006,9 @@ function AppContent() {
     openLibraryWorkspace();
   }, [openLibraryWorkspace]);
   const handleShellEnvironmentSelect = useCallback((environmentId: string) => {
-    setSelectedEnvironmentId(environmentId);
-    setEnvironmentFocusRequestId((previous) => previous + 1);
-    localStorage.setItem(LAST_ENV_KEY, environmentId);
-
     switch (activeWorkspace.view) {
       case 'mods':
+        selectEnvironmentForShell(environmentId);
         openWorkspace({
           view: 'mods',
           environmentId,
@@ -1960,26 +2016,31 @@ function AppContent() {
         });
         return;
       case 'plugins':
+        selectEnvironmentForShell(environmentId);
         openWorkspace({ view: 'plugins', environmentId });
         return;
       case 'userLibs':
+        selectEnvironmentForShell(environmentId);
         openWorkspace({ view: 'userLibs', environmentId });
         return;
       case 'logs':
+        selectEnvironmentForShell(environmentId);
         openWorkspace({ view: 'logs', environmentId });
         return;
       case 'config':
+        selectEnvironmentForShell(environmentId);
         openWorkspace({ view: 'config', environmentId });
         return;
       case 'home':
       case 'environments':
       case 'wizard':
-        openEnvironmentsWorkspace();
+        openEnvironmentsWorkspace(environmentId);
         return;
       default:
+        selectEnvironmentForShell(environmentId);
         return;
     }
-  }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace]);
+  }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace, selectEnvironmentForShell]);
   const handleShellLaunchGame = useCallback(async () => {
     if (!currentEnvironmentId) {
       openWorkspace({ view: 'wizard' });
@@ -2067,7 +2128,7 @@ function AppContent() {
           <AppShellSidebar
             activeWorkspace={activeWorkspace}
             currentEnvironmentId={currentEnvironmentId}
-            downloadsInProgress={downloadsInProgress}
+            downloadsBadgeCount={downloadsBadgeCount}
             environments={environments}
             environmentsLoading={environmentsLoading}
             onEnvironmentSelect={handleShellEnvironmentSelect}
@@ -2090,6 +2151,7 @@ function AppContent() {
                     environmentsLoading={environmentsLoading}
                     downloadsInProgress={downloadsInProgress}
                     appUpdateState={appUpdateState}
+                    selectedEnvironmentId={currentEnvironmentId}
                     onOpenEnvironments={openEnvironmentsWorkspace}
                     onOpenModLibrary={() => openLibraryWorkspace()}
                     onOpenModUpdates={() => openLibraryWorkspace({
@@ -2156,12 +2218,19 @@ function AppContent() {
       )}
 
       {pendingNexusRuntimeSelection && (
-        <div className="modal-overlay" onClick={() => void handleCancelNexusRuntimeSelection()}>
-          <div className="modal-content app-dialog app-dialog--message app-runtime-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Select Runtime</h2>
-              <button className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()}>×</button>
-            </div>
+        <Dialog open={!!pendingNexusRuntimeSelection} onOpenChange={(open) => {
+          if (!open) {
+            void handleCancelNexusRuntimeSelection();
+          }
+        }}>
+          <SimmDialogContent
+            className="app-dialog app-dialog--message app-runtime-dialog"
+            showCloseButton={false}
+          >
+            <DialogHeader className="modal-header">
+              <DialogTitle>Select Runtime</DialogTitle>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()} aria-label="Close runtime selection dialog">×</SimmButton>
+            </DialogHeader>
             <div className="app-dialog__body app-runtime-dialog__body">
               <div className="app-dialog__callout app-dialog__callout--info">
                 <div className="app-dialog__icon">
@@ -2169,9 +2238,9 @@ function AppContent() {
                 </div>
                 <div className="app-dialog__meta">
                   <strong>Runtime selection required</strong>
-                  <p>
+                  <DialogDescription>
                     SIMM could not determine the runtime for this Nexus download. Choose the runtime before it is added to the library or installed.
-                  </p>
+                  </DialogDescription>
                 </div>
               </div>
               <div className="app-runtime-dialog__details">
@@ -2182,26 +2251,26 @@ function AppContent() {
                 )}
               </div>
             </div>
-            <div className="app-dialog__footer">
+            <DialogFooter className="app-dialog__footer">
               <div className="app-runtime-dialog__actions">
-                <button className="btn btn-secondary" onClick={() => void handleCancelNexusRuntimeSelection()}>
+                <SimmButton className="btn btn-secondary" onClick={() => void handleCancelNexusRuntimeSelection()}>
                   Cancel
-                </button>
+                </SimmButton>
                 <div className="app-runtime-dialog__runtime-actions">
-                  <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Mono')}>
+                  <SimmButton className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Mono')}>
                     Use Mono
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Both')}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Both')}>
                     Use Both
-                  </button>
-                  <button className="btn btn-primary" onClick={() => void handleNexusRuntimeSelection('IL2CPP')}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-primary" onClick={() => void handleNexusRuntimeSelection('IL2CPP')}>
                     Use IL2CPP
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
-            </div>
-          </div>
-        </div>
+            </DialogFooter>
+          </SimmDialogContent>
+        </Dialog>
       )}
     </div>
   );

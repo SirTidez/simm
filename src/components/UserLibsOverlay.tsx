@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 
+import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Input } from '@/components/ui/input';
+
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
@@ -31,6 +34,26 @@ function formatFileSize(bytes?: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+  return (
+    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
 }
 
 export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Props) {
@@ -223,7 +246,7 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
 
             <div className="workspace-collection__toolbar">
               <div className="workspace-collection__toolbar-search">
-                <input
+                <Input
                   type="text"
                   value={searchTerm}
                   onChange={(event) => setSearchTerm(event.target.value)}
@@ -249,13 +272,13 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
           </div>
 
           <div className="workspace-collection__content">
-            {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
-            {!error && loading && <div className="workspace-collection__empty">Loading user libraries...</div>}
+            {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
+            {!error && loading && <CollectionEmpty>Loading user libraries...</CollectionEmpty>}
             {!error && !loading && userLibs.length === 0 && (
-              <div className="workspace-collection__empty">No user libraries found for this environment.</div>
+              <CollectionEmpty>No user libraries found for this environment.</CollectionEmpty>
             )}
             {!error && !loading && userLibs.length > 0 && filteredUserLibs.length === 0 && (
-              <div className="workspace-collection__empty">No user libraries match this search.</div>
+              <CollectionEmpty>No user libraries match this search.</CollectionEmpty>
             )}
             {!error && !loading && filteredUserLibs.length > 0 && (
               <div className="workspace-collection__list">
@@ -303,9 +326,9 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
 
         <aside className="workspace-collection__inspector">
           {!selectedUserLib && (
-            <div className="workspace-collection__inspector-empty">
+            <InspectorEmpty>
               Select a user library to review its role and environment actions.
-            </div>
+            </InspectorEmpty>
           )}
           {selectedUserLib && (
               <div className="workspace-inspector-card">

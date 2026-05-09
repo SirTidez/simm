@@ -30,10 +30,16 @@ const FEATURED_THUNDERSTORE_SOURCE_IDS = [
   'ifBars/SteamNetworkLib_Il2Cpp',
 ] as const;
 
+const FEATURED_VERSION_CACHE_ENABLED = import.meta.env.MODE !== 'test';
+
 let thunderstoreFeaturedVersionsCache:
   | { loadedAt: number; latestBySourceId: Map<string, string> }
   | null = null;
 let thunderstoreFeaturedVersionsRequest: Promise<Map<string, string>> | null = null;
+let featuredDownloadVersionsCache:
+  | { loadedAt: number; latestBySourceId: Map<string, string> }
+  | null = null;
+let featuredDownloadVersionsRequest: Promise<Map<string, string>> | null = null;
 const FEATURED_VERSIONS_CACHE_TTL_MS = 15 * 60 * 1000;
 
 async function loadLatestRelease(
@@ -175,9 +181,10 @@ async function loadLatestThunderstoreVersions(
   }
 }
 
-export async function getFeaturedDownloadLatestVersions(): Promise<Map<string, string>> {
+async function resolveFeaturedDownloadLatestVersions(): Promise<Map<string, string>> {
   const thunderstoreVersionsPromise = (() => {
     if (
+      FEATURED_VERSION_CACHE_ENABLED &&
       thunderstoreFeaturedVersionsCache &&
       Date.now() - thunderstoreFeaturedVersionsCache.loadedAt <
         FEATURED_VERSIONS_CACHE_TTL_MS
@@ -187,8 +194,12 @@ export async function getFeaturedDownloadLatestVersions(): Promise<Map<string, s
       );
     }
 
-    if (thunderstoreFeaturedVersionsRequest) {
+    if (FEATURED_VERSION_CACHE_ENABLED && thunderstoreFeaturedVersionsRequest) {
       return thunderstoreFeaturedVersionsRequest.then((versions) => new Map(versions));
+    }
+
+    if (!FEATURED_VERSION_CACHE_ENABLED) {
+      return loadLatestThunderstoreVersions(FEATURED_THUNDERSTORE_SOURCE_IDS);
     }
 
     thunderstoreFeaturedVersionsRequest = loadLatestThunderstoreVersions(
@@ -226,6 +237,40 @@ export async function getFeaturedDownloadLatestVersions(): Promise<Map<string, s
   }
 
   return latestBySourceId;
+}
+
+export async function getFeaturedDownloadLatestVersions(): Promise<Map<string, string>> {
+  if (
+    FEATURED_VERSION_CACHE_ENABLED &&
+    featuredDownloadVersionsCache &&
+    Date.now() - featuredDownloadVersionsCache.loadedAt < FEATURED_VERSIONS_CACHE_TTL_MS
+  ) {
+    return new Map(featuredDownloadVersionsCache.latestBySourceId);
+  }
+
+  if (FEATURED_VERSION_CACHE_ENABLED && featuredDownloadVersionsRequest) {
+    return featuredDownloadVersionsRequest.then((versions) => new Map(versions));
+  }
+
+  if (!FEATURED_VERSION_CACHE_ENABLED) {
+    return resolveFeaturedDownloadLatestVersions();
+  }
+
+  featuredDownloadVersionsRequest = resolveFeaturedDownloadLatestVersions()
+    .then((versions) => {
+      if (versions.size > 0) {
+        featuredDownloadVersionsCache = {
+          loadedAt: Date.now(),
+          latestBySourceId: new Map(versions),
+        };
+      }
+      return versions;
+    })
+    .finally(() => {
+      featuredDownloadVersionsRequest = null;
+    });
+
+  return featuredDownloadVersionsRequest.then((versions) => new Map(versions));
 }
 
 export async function normalizeLibraryFeaturedDownloads(

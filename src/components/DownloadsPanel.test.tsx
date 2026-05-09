@@ -78,8 +78,9 @@ describe('DownloadsPanel', () => {
 
     render(<DownloadsPanel />);
 
-    const progressFill = document.querySelector('.downloads-panel__progress-fill--indeterminate');
-    expect(progressFill).not.toBeNull();
+    const progressBar = document.querySelector('.downloads-panel__progress-bar--indeterminate');
+    expect(progressBar).not.toBeNull();
+    expect(progressBar?.querySelector('[data-slot="progress-indicator"]')).not.toBeNull();
   });
 
   it('shows an error row inside recent downloads', () => {

@@ -2292,6 +2292,15 @@ impl ModsService {
         self.save_storage_metadata(&storage_path, &next).await
     }
 
+    pub async fn load_storage_metadata_by_id(
+        &self,
+        storage_id: &str,
+    ) -> Result<Option<ModMetadata>> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        let storage_path = Self::validated_storage_path(&storage_root, storage_id)?;
+        self.load_storage_metadata(&storage_path).await
+    }
+
     fn merge_metadata(mut primary: ModMetadata, fallback: ModMetadata) -> ModMetadata {
         if primary.source.is_none() {
             primary.source = fallback.source;
@@ -4675,8 +4684,6 @@ impl ModsService {
     }
 
     pub async fn get_mod_library(&self) -> Result<ModLibraryResult> {
-        self.reconcile_tracked_mod_state().await?;
-
         let storage_dir = self.get_mods_storage_dir().await?;
         if !storage_dir.exists() {
             return Ok(ModLibraryResult {

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
+import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Input } from '@/components/ui/input';
+
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
@@ -42,6 +45,26 @@ function getPluginSourceLabel(source?: PluginInfo['source']): string {
     default:
       return 'Unknown';
   }
+}
+
+function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+  return (
+    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
 }
 
 export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Props) {
@@ -353,7 +376,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
 
               <div className="workspace-collection__toolbar">
                 <div className="workspace-collection__toolbar-search">
-                  <input
+                  <Input
                     type="text"
                     value={searchTerm}
                     onChange={(event) => setSearchTerm(event.target.value)}
@@ -382,13 +405,13 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
             </div>
 
             <div className="workspace-collection__content">
-              {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
-              {!error && loading && <div className="workspace-collection__empty">Loading plugins...</div>}
+              {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
+              {!error && loading && <CollectionEmpty>Loading plugins...</CollectionEmpty>}
               {!error && !loading && plugins.length === 0 && (
-                <div className="workspace-collection__empty">No plugins detected for this environment.</div>
+                <CollectionEmpty>No plugins detected for this environment.</CollectionEmpty>
               )}
               {!error && !loading && plugins.length > 0 && filteredPlugins.length === 0 && (
-                <div className="workspace-collection__empty">No plugins match this search.</div>
+                <CollectionEmpty>No plugins match this search.</CollectionEmpty>
               )}
               {!error && !loading && filteredPlugins.length > 0 && (
                 <div className="workspace-collection__list">
@@ -437,9 +460,9 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
 
           <aside className="workspace-collection__inspector">
             {!selectedPlugin && (
-              <div className="workspace-collection__inspector-empty">
+              <InspectorEmpty>
                 Select a plugin to review file details and environment actions.
-              </div>
+              </InspectorEmpty>
             )}
             {selectedPlugin && (
               <div className="workspace-inspector-card">

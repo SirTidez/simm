@@ -2,6 +2,16 @@ import { memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMe
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { Icon } from './Icon';
@@ -50,6 +60,34 @@ type LogLevelFilter = 'ALL' | 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
 type LogCategoryFilter = 'ALL' | 'melonloader' | 'mod' | 'general';
 type EffectiveLevel = 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
 
+type LogsSelectOption<TValue extends string> = {
+  value: TValue;
+  label: string;
+};
+
+const LOG_LEVEL_OPTIONS: LogsSelectOption<LogLevelFilter>[] = [
+  { value: 'ALL', label: 'All Levels' },
+  { value: 'ERROR', label: 'Error' },
+  { value: 'WARN', label: 'Warning' },
+  { value: 'INFO', label: 'Info' },
+  { value: 'DEBUG', label: 'Debug' },
+];
+
+const LOG_CATEGORY_OPTIONS: LogsSelectOption<LogCategoryFilter>[] = [
+  { value: 'ALL', label: 'All Categories' },
+  { value: 'melonloader', label: 'MelonLoader' },
+  { value: 'mod', label: 'Mods' },
+  { value: 'general', label: 'General' },
+];
+
+const TIME_PERIOD_OPTIONS: LogsSelectOption<TimePeriod>[] = [
+  { value: 'all', label: 'All Time' },
+  { value: 'last5min', label: 'Last 5 Minutes' },
+  { value: 'last15min', label: 'Last 15 Minutes' },
+  { value: 'last1hour', label: 'Last Hour' },
+  { value: 'custom', label: 'Custom Range' },
+];
+
 interface ModActivityItem {
   modTag: string;
   count: number;
@@ -85,6 +123,48 @@ function areLogLinesEqual(left: LogLine[], right: LogLine[]): boolean {
   }
 
   return true;
+}
+
+function LogsToolbarSelect<TValue extends string>({
+  id,
+  value,
+  options,
+  onValueChange,
+}: {
+  id: string;
+  value: TValue;
+  options: LogsSelectOption<TValue>[];
+  onValueChange: (value: TValue) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === 'string') {
+          onValueChange(nextValue as TValue);
+        }
+      }}
+    >
+      <SelectTrigger id={id} className="logs-panel__select">
+        <SelectValue>
+          {(selectedValue) =>
+            options.find((option) => option.value === selectedValue)?.label
+            || options.find((option) => option.value === value)?.label
+            || options[0]?.label
+          }
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="logs-panel__select-content" align="start">
+        <SelectGroup>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
 }
 
 function areLogFilesEqual(left: LogFile[], right: LogFile[]): boolean {
@@ -304,8 +384,10 @@ const LogStreamRow = memo(function LogStreamRow({
           </span>
         </div>
         {line.modTag ? (
-          <button
+          <SimmButton
             type="button"
+            variant="ghost"
+            size="xs"
             className="logs-panel__mod-chip"
             style={getModAccentStyle(line.modTag)}
             onClick={(event) => {
@@ -314,7 +396,7 @@ const LogStreamRow = memo(function LogStreamRow({
             }}
           >
             {line.modTag}
-          </button>
+          </SimmButton>
         ) : null}
       </div>
       <div className="logs-panel__line-content">{highlightText(line.content, searchQuery)}</div>
@@ -1194,9 +1276,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             </div>
             <div className="logs-panel__source-list">
               {currentFiles.map((file) => (
-                <button
+                <SimmButton
                   key={file.path}
                   type="button"
+                  variant="ghost"
                   className={`logs-panel__source-button ${selectedLogPath === file.path ? 'logs-panel__source-button--active' : ''}`}
                   onClick={() => selectLogFile(file.path)}
                 >
@@ -1209,7 +1292,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   </div>
                   <span>{formatFileSize(file.size)}</span>
                   <span>{file.modified ? new Date(file.modified).toLocaleDateString() : 'Unknown date'}</span>
-                </button>
+                </SimmButton>
               ))}
               {!loading && currentFiles.length === 0 && (
                 <div className="logs-panel__empty-small">No current log files.</div>
@@ -1223,9 +1306,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             </div>
             <div className="logs-panel__source-list">
               {archivedFiles.map((file) => (
-                <button
+                <SimmButton
                   key={file.path}
                   type="button"
+                  variant="ghost"
                   className={`logs-panel__source-button ${selectedLogPath === file.path ? 'logs-panel__source-button--active' : ''}`}
                   onClick={() => selectLogFile(file.path)}
                 >
@@ -1234,7 +1318,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   </div>
                   <span>{formatFileSize(file.size)}</span>
                   <span>{file.modified ? new Date(file.modified).toLocaleDateString() : 'Unknown date'}</span>
-                </button>
+                </SimmButton>
               ))}
               {!loading && archivedFiles.length === 0 && (
                 <div className="logs-panel__empty-small">No archived log files.</div>
@@ -1246,16 +1330,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             <div className="logs-panel__section-heading">
               <span>Mod Activity</span>
               {selectedModTag && (
-                <button type="button" className="logs-panel__clear-link" onClick={() => setSelectedModTag(null)}>
+                <SimmButton type="button" variant="ghost" size="xs" className="logs-panel__clear-link" onClick={() => setSelectedModTag(null)}>
                   Clear
-                </button>
+                </SimmButton>
               )}
             </div>
             <div className="logs-panel__mod-activity">
               {modActivity.map((item) => (
-                <button
+                <SimmButton
                   key={item.modTag}
                   type="button"
+                  variant="ghost"
                   className={`logs-panel__mod-button ${selectedModTag && normalizeModTag(selectedModTag) === normalizeModTag(item.modTag) ? 'logs-panel__mod-button--active' : ''}`}
                   onClick={() => setSelectedModTag((current) => (current && normalizeModTag(current) === normalizeModTag(item.modTag) ? null : item.modTag))}
                   style={getModAccentStyle(item.modTag)}
@@ -1268,7 +1353,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     <span>{item.errorCount} errors</span>
                     <span>{formatRelativeTime(item.lastLogTime)}</span>
                   </div>
-                </button>
+                </SimmButton>
               ))}
               {!loading && modActivity.length === 0 && (
                 <div className="logs-panel__empty-small">No mod-tagged lines in this file.</div>
@@ -1290,20 +1375,20 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
               </p>
             </div>
             <div className="logs-panel__header-actions">
-              <SimmButton type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void ApiService.openPath(selectedFilePath)} disabled={!selectedLogFile}>
-                <Icon name="fas fa-file-lines" />
+              <SimmButton type="button" variant="outline" size="sm" className="logs-panel__viewer-action" onClick={() => selectedLogFile && void ApiService.openPath(selectedFilePath)} disabled={!selectedLogFile}>
+                <Icon name="fas fa-file-lines" data-icon="inline-start" />
                 Open File
               </SimmButton>
-              <SimmButton type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void ApiService.revealPath(selectedFilePath)} disabled={!selectedLogFile}>
-                <Icon name="fas fa-folder-open" />
+              <SimmButton type="button" variant="outline" size="sm" className="logs-panel__viewer-action" onClick={() => selectedLogFile && void ApiService.revealPath(selectedFilePath)} disabled={!selectedLogFile}>
+                <Icon name="fas fa-folder-open" data-icon="inline-start" />
                 Open Folder
               </SimmButton>
-              <SimmButton type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void reloadSelectedLogFile(selectedLogFile.path)} disabled={!selectedLogFile || loading}>
-                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
+              <SimmButton type="button" variant="outline" size="sm" className="logs-panel__viewer-action" onClick={() => selectedLogFile && void reloadSelectedLogFile(selectedLogFile.path)} disabled={!selectedLogFile || loading}>
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} data-icon="inline-start" />
                 Reload
               </SimmButton>
-              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleExport()} disabled={!selectedLogFile || exporting}>
-                <Icon name={exporting ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
+              <SimmButton type="button" variant="secondary" size="sm" className="logs-panel__viewer-action logs-panel__viewer-action--primary" onClick={() => void handleExport()} disabled={!selectedLogFile || exporting}>
+                <Icon name={exporting ? 'fas fa-spinner fa-spin' : 'fas fa-download'} data-icon="inline-start" />
                 {exporting ? 'Exporting…' : 'Export'}
               </SimmButton>
             </div>
@@ -1313,7 +1398,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             <div className="logs-panel__toolbar">
               <div className="logs-panel__toolbar-group logs-panel__toolbar-group--search">
                 <Icon name="fas fa-search" />
-                <input
+                <Input
                   type="text"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
@@ -1323,45 +1408,43 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
               <div className="logs-panel__toolbar-group">
                 <label htmlFor="logs-level-filter">Level</label>
-                <select id="logs-level-filter" value={filterLevel} onChange={(event) => setFilterLevel(event.target.value as LogLevelFilter)}>
-                  <option value="ALL">All Levels</option>
-                  <option value="ERROR">Error</option>
-                  <option value="WARN">Warning</option>
-                  <option value="INFO">Info</option>
-                  <option value="DEBUG">Debug</option>
-                </select>
+                <LogsToolbarSelect
+                  id="logs-level-filter"
+                  value={filterLevel}
+                  options={LOG_LEVEL_OPTIONS}
+                  onValueChange={setFilterLevel}
+                />
               </div>
 
               <div className="logs-panel__toolbar-group">
                 <label htmlFor="logs-category-filter">Category</label>
-                <select id="logs-category-filter" value={filterCategory} onChange={(event) => setFilterCategory(event.target.value as LogCategoryFilter)}>
-                  <option value="ALL">All Categories</option>
-                  <option value="melonloader">MelonLoader</option>
-                  <option value="mod">Mods</option>
-                  <option value="general">General</option>
-                </select>
+                <LogsToolbarSelect
+                  id="logs-category-filter"
+                  value={filterCategory}
+                  options={LOG_CATEGORY_OPTIONS}
+                  onValueChange={setFilterCategory}
+                />
               </div>
 
               <div className="logs-panel__toolbar-group">
                 <label htmlFor="logs-time-filter">Time</label>
-                <select id="logs-time-filter" value={timePeriod} onChange={(event) => setTimePeriod(event.target.value as TimePeriod)}>
-                  <option value="all">All Time</option>
-                  <option value="last5min">Last 5 Minutes</option>
-                  <option value="last15min">Last 15 Minutes</option>
-                  <option value="last1hour">Last Hour</option>
-                  <option value="custom">Custom Range</option>
-                </select>
+                <LogsToolbarSelect
+                  id="logs-time-filter"
+                  value={timePeriod}
+                  options={TIME_PERIOD_OPTIONS}
+                  onValueChange={setTimePeriod}
+                />
               </div>
 
               {timePeriod === 'custom' && (
                 <div className="logs-panel__toolbar-group logs-panel__toolbar-group--custom">
-                  <input
+                  <Input
                     type="text"
                     value={customTimeStart}
                     onChange={(event) => setCustomTimeStart(event.target.value)}
                     placeholder="Start HH:MM:SS.mmm"
                   />
-                  <input
+                  <Input
                     type="text"
                     value={customTimeEnd}
                     onChange={(event) => setCustomTimeEnd(event.target.value)}
@@ -1371,15 +1454,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
               )}
 
               {selectedModTag && (
-                <button type="button" className="logs-panel__active-filter" onClick={() => setSelectedModTag(null)} style={getModAccentStyle(selectedModTag)}>
+                <SimmButton type="button" variant="outline" size="sm" className="logs-panel__active-filter" onClick={() => setSelectedModTag(null)} style={getModAccentStyle(selectedModTag)}>
                   <span>Mod: {selectedModTag}</span>
-                  <Icon name="fas fa-times" />
-                </button>
+                  <Icon name="fas fa-times" data-icon="inline-end" />
+                </SimmButton>
               )}
 
               {isLiveFile && (
-                <button
+                <SimmButton
                   type="button"
+                  variant="outline"
+                  size="sm"
                   className={`logs-panel__follow-toggle ${autoScroll ? 'logs-panel__follow-toggle--active' : ''}`}
                   onClick={() => {
                     if (autoScroll) {
@@ -1389,9 +1474,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     jumpToLive();
                   }}
                 >
-                  <Icon name={`fas ${autoScroll ? 'fa-pause' : 'fa-play'}`} />
+                  <Icon name={`fas ${autoScroll ? 'fa-pause' : 'fa-play'}`} data-icon="inline-start" />
                   {autoScroll ? 'Pause Live' : 'Follow Live'}
-                </button>
+                </SimmButton>
               )}
             </div>
 
@@ -1415,13 +1500,13 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                 </div>
               </div>
               <div className="logs-panel__summary-actions">
-                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => setFilterLevel('ERROR')}>
+                <SimmButton type="button" variant="outline" size="xs" className="logs-panel__summary-action" onClick={() => setFilterLevel('ERROR')}>
                   Errors
                 </SimmButton>
-                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => setFilterLevel('WARN')}>
+                <SimmButton type="button" variant="outline" size="xs" className="logs-panel__summary-action" onClick={() => setFilterLevel('WARN')}>
                   Warnings
                 </SimmButton>
-                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={resetFilters}>
+                <SimmButton type="button" variant="outline" size="xs" className="logs-panel__summary-action" onClick={resetFilters}>
                   Reset Filters
                 </SimmButton>
               </div>
@@ -1447,10 +1532,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             />
             {!isAtBottom && isLiveFile && (
               <div className="logs-panel__jump-live-overlay">
-                <button type="button" className="logs-panel__jump-live-button" onClick={jumpToLive}>
-                  <Icon name="fas fa-arrow-down" />
+                <SimmButton type="button" variant="outline" size="sm" className="logs-panel__jump-live-button" onClick={jumpToLive}>
+                  <Icon name="fas fa-arrow-down" data-icon="inline-start" />
                   Jump to Live
-                </button>
+                </SimmButton>
               </div>
             )}
           </div>
@@ -1462,7 +1547,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             {shouldCollapseInspector && (
               <SimmButton
                 type="button"
-                className="btn btn-secondary btn-small"
+                variant="outline"
+                size="xs"
+                className="logs-panel__inspector-toggle"
                 onClick={() => setIsInspectorCollapsed((current) => !current)}
                 aria-label={showCollapsedInspector ? 'Expand Inspector' : 'Collapse Inspector'}
               >
@@ -1570,24 +1657,47 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   </>
                 )}
                 <div className="logs-panel__quick-actions logs-panel__quick-actions--compact">
-                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void handleCopySelectedLine()} disabled={!selectedLine}>
+                  <SimmButton
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
+                    onClick={() => void handleCopySelectedLine()}
+                    disabled={!selectedLine}
+                  >
                     <Icon name="fas fa-copy" />
                     Copy Line
                   </SimmButton>
                   <SimmButton
                     type="button"
-                    className="btn btn-secondary"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
                     onClick={() => selectedLine?.modTag && setSelectedModTag(selectedLine.modTag)}
                     disabled={!selectedLine?.modTag}
                   >
                     <Icon name="fas fa-filter" />
                     Filter to Mod
                   </SimmButton>
-                  <SimmButton type="button" className="btn btn-secondary" onClick={() => setSelectedModTag(null)} disabled={!selectedModTag}>
+                  <SimmButton
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
+                    onClick={() => setSelectedModTag(null)}
+                    disabled={!selectedModTag}
+                  >
                     <Icon name="fas fa-filter-circle-xmark" />
                     Clear Filter
                   </SimmButton>
-                  <SimmButton type="button" className="btn btn-secondary" onClick={handleJumpToNewestRelevantLine} disabled={visibleLines.length === 0}>
+                  <SimmButton
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
+                    onClick={handleJumpToNewestRelevantLine}
+                    disabled={visibleLines.length === 0}
+                  >
                     <Icon name="fas fa-arrow-down" />
                     Jump to Live
                   </SimmButton>
@@ -1630,7 +1740,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                         </div>
                         <SimmButton
                           type="button"
-                          className="btn btn-secondary"
+                          variant="outline"
+                          size="sm"
+                          className="logs-panel__inspector-action logs-panel__inspector-action--wide"
                           onClick={() => void handleOpenModLibraryView(selectedModContext.modTag)}
                           disabled={openingModView || !onOpenModLibraryView}
                         >

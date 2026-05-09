@@ -4,9 +4,22 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 import { ApiService } from "../services/api";
 import { logger } from "../services/logger";
 import { ConfirmOverlay } from "./ConfirmOverlay";
@@ -31,6 +44,7 @@ import {
   InstallTargetsDialog,
   getNormalizedRuntime,
 } from "./InstallTargetsDialog";
+import { SimmBadge, SimmButton } from "./primitives";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
@@ -312,6 +326,139 @@ export type DownloadedFilter =
   | "installed";
 export type LibraryTab = "discover" | "library" | "updates";
 type DiscoverSort = "relevance" | "updated" | "popularity" | "newest";
+
+const DISCOVER_SORT_OPTIONS: Array<{ value: DiscoverSort; label: string }> = [
+  { value: "relevance", label: "Relevance" },
+  { value: "updated", label: "Last updated" },
+  { value: "popularity", label: "Popularity" },
+  { value: "newest", label: "Newest" },
+];
+
+function CollectionEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+type WorkspaceBadgeTone = "source" | "success" | "warning" | "danger";
+
+function WorkspaceBadge({
+  children,
+  tone,
+  className,
+  style,
+}: {
+  children: ReactNode;
+  tone?: WorkspaceBadgeTone;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <SimmBadge
+      variant="outline"
+      className={cn(
+        "workspace-pill",
+        tone && `workspace-pill--${tone}`,
+        className,
+      )}
+      style={style}
+    >
+      {children}
+    </SimmBadge>
+  );
+}
+
+function SecurityScanBadge({ summary }: { summary?: SecurityScanSummary }) {
+  const config = getSecurityBadgeConfig(summary);
+
+  if (!config) {
+    return null;
+  }
+
+  return (
+    <div className="workspace-inspector-card__badge-row">
+      <WorkspaceBadge
+        className="workspace-pill--security"
+        style={{
+          borderColor: config.border,
+          background: config.background,
+          color: config.color,
+        }}
+      >
+        <Icon name={`fas ${config.icon}`} style={{ fontSize: "0.7rem" }} />
+        {config.label}
+      </WorkspaceBadge>
+    </div>
+  );
+}
+
+function InspectorCardEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-inspector-card__empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function DiscoverSortSelect({
+  value,
+  onValueChange,
+}: {
+  value: DiscoverSort;
+  onValueChange: (value: DiscoverSort) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === "string") {
+          onValueChange(nextValue as DiscoverSort);
+        }
+      }}
+    >
+      <SelectTrigger
+        aria-label="Sort discover results"
+        className="workspace-collection__toolbar-select-trigger"
+      >
+        <SelectValue>
+          {(selectedValue) =>
+            DISCOVER_SORT_OPTIONS.find((option) => option.value === selectedValue)
+              ?.label || "Last updated"
+          }
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="workspace-collection__select-content" align="start">
+        <SelectGroup>
+          {DISCOVER_SORT_OPTIONS.map((option) => (
+            <SelectItem
+              key={option.value}
+              value={option.value}
+              onClick={() => onValueChange(option.value)}
+            >
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
 
 export interface LibraryModViewState {
   id: string;
@@ -6589,7 +6736,9 @@ export function ModLibraryOverlay({
                   justifyContent: "flex-end",
                 }}
               >
-                <button
+                <SimmButton
+                  type="button"
+                  variant="secondary"
                   className="btn btn-secondary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -6598,8 +6747,10 @@ export function ModLibraryOverlay({
                   }}
                 >
                   Mono
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  type="button"
+                  variant="secondary"
                   className="btn btn-secondary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -6608,8 +6759,9 @@ export function ModLibraryOverlay({
                   }}
                 >
                   IL2CPP
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  type="button"
                   className="btn btn-primary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -6618,7 +6770,7 @@ export function ModLibraryOverlay({
                   }}
                 >
                   Both
-                </button>
+                </SimmButton>
               </div>
             </div>
           </div>
@@ -8652,7 +8804,9 @@ export function ModLibraryOverlay({
                   justifyContent: "flex-end",
                 }}
               >
-                <button
+                <SimmButton
+                  type="button"
+                  variant="secondary"
                   className="btn btn-secondary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -8661,8 +8815,10 @@ export function ModLibraryOverlay({
                   }}
                 >
                   Mono
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  type="button"
+                  variant="secondary"
                   className="btn btn-secondary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -8671,8 +8827,9 @@ export function ModLibraryOverlay({
                   }}
                 >
                   IL2CPP
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  type="button"
                   className="btn btn-primary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -8681,7 +8838,7 @@ export function ModLibraryOverlay({
                   }}
                 >
                   Both
-                </button>
+                </SimmButton>
               </div>
             </div>
           </div>
@@ -8707,15 +8864,16 @@ export function ModLibraryOverlay({
                       ["updates", "Updates", "fas fa-arrow-up"],
                     ] as Array<[LibraryTab, string, string]>
                   ).map(([tab, label, icon]) => (
-                    <button
+                    <SimmButton
                       key={tab}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button ${libraryTab === tab ? "workspace-collection__rail-button--active" : ""}`}
                       onClick={() => setLibraryTab(tab)}
                     >
                       <Icon name={icon} />
                       <span>{label}</span>
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
 
@@ -8746,9 +8904,10 @@ export function ModLibraryOverlay({
                       "installed",
                     ] as DownloadedFilter[]
                   ).map((filter) => (
-                    <button
+                    <SimmButton
                       key={filter}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${downloadedFilter === filter ? "workspace-collection__rail-button--active" : ""}`}
                       onClick={() => setDownloadedFilter(filter)}
                     >
@@ -8761,7 +8920,7 @@ export function ModLibraryOverlay({
                             : filter === "external"
                               ? "External"
                               : "Installed"}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               )}
@@ -8771,8 +8930,9 @@ export function ModLibraryOverlay({
                   <>
                     <div className="workspace-collection__toolbar-group workspace-source-toggle" aria-label="Search source">
                       <span className="workspace-control-label">Sources</span>
-                      <button
+                      <SimmButton
                         type="button"
+                        variant={searchSource === "thunderstore" ? "default" : "secondary"}
                         className={`btn btn-small ${searchSource === "thunderstore" ? "btn-primary" : "btn-secondary"}`}
                         onClick={() => {
                           setSearchSource("thunderstore");
@@ -8782,9 +8942,10 @@ export function ModLibraryOverlay({
                         }}
                       >
                         Thunderstore
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant={searchSource === "nexusmods" ? "default" : "secondary"}
                         className={`btn btn-small ${searchSource === "nexusmods" ? "btn-primary" : "btn-secondary"}`}
                         onClick={() => {
                           setSearchSource("nexusmods");
@@ -8794,10 +8955,10 @@ export function ModLibraryOverlay({
                         }}
                       >
                         Nexus Mods
-                      </button>
+                      </SimmButton>
                     </div>
                     <div className="workspace-collection__toolbar-search">
-                      <input
+                      <Input
                         type="text"
                         placeholder={
                           searchSource === "thunderstore"
@@ -8821,7 +8982,7 @@ export function ModLibraryOverlay({
                           }
                         }}
                       />
-                      <button
+                      <SimmButton
                         type="button"
                         className="btn btn-primary btn-small"
                         onClick={
@@ -8842,33 +9003,20 @@ export function ModLibraryOverlay({
                         )
                           ? "Search"
                           : "Browse"}
-                      </button>
+                      </SimmButton>
                     </div>
                     <div className="workspace-collection__toolbar-group">
                       <span className="workspace-control-label">Sort</span>
-                      <label className="workspace-collection__toolbar-select">
-                        <span className="workspace-collection__toolbar-select-wrap">
-                          <select
-                            aria-label="Sort discover results"
-                            value={discoverSort}
-                            onChange={(event) =>
-                              setDiscoverSort(
-                                event.target.value as DiscoverSort,
-                              )
-                            }
-                          >
-                            <option value="relevance">Relevance</option>
-                            <option value="updated">Last updated</option>
-                            <option value="popularity">Popularity</option>
-                            <option value="newest">Newest</option>
-                          </select>
-                          <Icon name="fas fa-chevron-down"
-                            aria-hidden="true"
-                           />
-                        </span>
-                      </label>
+                      <div className="workspace-collection__toolbar-select">
+                        <DiscoverSortSelect
+                          value={discoverSort}
+                          onValueChange={setDiscoverSort}
+                        />
+                      </div>
                     </div>
-                    <button
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
                       className="btn btn-secondary btn-small"
                       onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
@@ -8876,7 +9024,7 @@ export function ModLibraryOverlay({
                       <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
                        />
                       <span>Refresh</span>
-                    </button>
+                    </SimmButton>
                   </>
                 ) : (
                   <>
@@ -8889,7 +9037,7 @@ export function ModLibraryOverlay({
                       <span>{displayedDownloadedGroups.length} entries</span>
                     </div>
                     <div className="workspace-collection__toolbar-search">
-                      <input
+                      <Input
                         type="text"
                         value={downloadedSearch}
                         onChange={(event) =>
@@ -8899,7 +9047,8 @@ export function ModLibraryOverlay({
                       />
                     </div>
                     {libraryTab === "library" ? (
-                      <button
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary btn-small"
                         onClick={handleAddFilesClick}
                         disabled={downloading === "library-import"}
@@ -8911,9 +9060,11 @@ export function ModLibraryOverlay({
                             ? "Adding..."
                             : "Add Files"}
                         </span>
-                      </button>
+                      </SimmButton>
                     ) : null}
-                    <button
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
                       className="btn btn-secondary btn-small"
                       onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
@@ -8921,7 +9072,7 @@ export function ModLibraryOverlay({
                       <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
                        />
                       <span>Refresh</span>
-                    </button>
+                    </SimmButton>
                   </>
                 )}
               </div>
@@ -9078,24 +9229,24 @@ export function ModLibraryOverlay({
                                 </div>
                                 <div className="workspace-collection__row-meta">
                                   <span>{pkg.owner}</span>
-                                  <span className="workspace-pill workspace-pill--source">
+                                  <WorkspaceBadge tone="source">
                                     Thunderstore
-                                  </span>
+                                  </WorkspaceBadge>
                                   {updatedLabel !== "unknown" && (
-                                    <span className="workspace-pill">
+                                    <WorkspaceBadge>
                                       Updated {updatedLabel}
-                                    </span>
+                                    </WorkspaceBadge>
                                   )}
                                   {downloadedGroup && (
-                                    <span className="workspace-pill workspace-pill--success">
+                                    <WorkspaceBadge tone="success">
                                       Downloaded
-                                    </span>
+                                    </WorkspaceBadge>
                                   )}
                                   {downloadedGroup &&
                                     isGroupUpdateAvailable(downloadedGroup) && (
-                                      <span className="workspace-pill workspace-pill--warning">
+                                      <WorkspaceBadge tone="warning">
                                         Update available
-                                      </span>
+                                      </WorkspaceBadge>
                                     )}
                                 </div>
                                 <p className="workspace-collection__row-summary">
@@ -9142,24 +9293,24 @@ export function ModLibraryOverlay({
                                 </div>
                                 <div className="workspace-collection__row-meta">
                                   <span>{getNexusModAttribution(mod)}</span>
-                                  <span className="workspace-pill workspace-pill--source">
+                                  <WorkspaceBadge tone="source">
                                     Nexus Mods
-                                  </span>
+                                  </WorkspaceBadge>
                                   {updatedLabel !== "unknown" && (
-                                    <span className="workspace-pill">
+                                    <WorkspaceBadge>
                                       Updated {updatedLabel}
-                                    </span>
+                                    </WorkspaceBadge>
                                   )}
                                   {downloadedGroup && (
-                                    <span className="workspace-pill workspace-pill--success">
+                                    <WorkspaceBadge tone="success">
                                       Downloaded
-                                    </span>
+                                    </WorkspaceBadge>
                                   )}
                                   {downloadedGroup &&
                                     isGroupUpdateAvailable(downloadedGroup) && (
-                                      <span className="workspace-pill workspace-pill--warning">
+                                      <WorkspaceBadge tone="warning">
                                         Update available
-                                      </span>
+                                      </WorkspaceBadge>
                                     )}
                                 </div>
                                 <p className="workspace-collection__row-summary">
@@ -9170,15 +9321,11 @@ export function ModLibraryOverlay({
                           );
                         })}
                       {showSearchResults && searchResults.length === 0 && (
-                        <div className="workspace-collection__empty">
-                          No Thunderstore mods matched this search.
-                        </div>
+                        <CollectionEmpty>No Thunderstore mods matched this search.</CollectionEmpty>
                       )}
                       {showNexusModsResults &&
                         nexusModsSearchResults.length === 0 && (
-                          <div className="workspace-collection__empty">
-                            No Nexus Mods matched this search.
-                          </div>
+                          <CollectionEmpty>No Nexus Mods matched this search.</CollectionEmpty>
                         )}
                     </div>
                   </section>
@@ -9195,17 +9342,15 @@ export function ModLibraryOverlay({
                     <span>{displayedDownloadedGroups.length} group(s)</span>
                   </div>
                   {loadingLibrary && (
-                    <div className="workspace-collection__empty">
-                      Loading mod library…
-                    </div>
+                    <CollectionEmpty>Loading mod library...</CollectionEmpty>
                   )}
                   {!loadingLibrary &&
                     displayedDownloadedGroups.length === 0 && (
-                      <div className="workspace-collection__empty">
+                      <CollectionEmpty>
                         {libraryTab === "updates"
                           ? "No downloaded mods currently need updates."
                           : "No downloaded mods match this filter."}
-                      </div>
+                      </CollectionEmpty>
                   )}
                   {!loadingLibrary && displayedDownloadedGroups.length > 0 && (
                     <div className="workspace-collection__list">
@@ -9255,39 +9400,38 @@ export function ModLibraryOverlay({
                                 {group.displayName}
                               </div>
                               <div className="workspace-collection__row-meta">
-                                <span className="workspace-pill workspace-pill--source">
+                                <WorkspaceBadge tone="source">
                                   {getSourceBadgeLabel(activeEntry?.source)}
-                                </span>
-                                <span className="workspace-pill">
+                                </WorkspaceBadge>
+                                <WorkspaceBadge>
                                   {formatVersionTag(
                                     getEntryVersionLabel(activeEntry!),
                                   )}
-                                </span>
-                                <span className="workspace-pill">{`${group.installedIn.length} env${group.installedIn.length === 1 ? "" : "s"}`}</span>
+                                </WorkspaceBadge>
+                                <WorkspaceBadge>{`${group.installedIn.length} env${group.installedIn.length === 1 ? "" : "s"}`}</WorkspaceBadge>
                                 {group.availableRuntimes.map((runtime) => (
-                                  <span
+                                  <WorkspaceBadge
                                     key={`${group.key}-${runtime}`}
-                                    className="workspace-pill"
                                   >
                                     {runtime}
-                                  </span>
+                                  </WorkspaceBadge>
                                 ))}
                                 {isGroupUpdateAvailable(group) && (
-                                  <span className="workspace-pill workspace-pill--warning">
+                                  <WorkspaceBadge tone="warning">
                                     Update available
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                                 {securityBadge && (
-                                  <span
-                                    className="workspace-pill"
+                                  <WorkspaceBadge
+                                    className="workspace-pill--security"
                                     style={{
-                                      border: `1px solid ${securityBadge.border}`,
+                                      borderColor: securityBadge.border,
                                       background: securityBadge.background,
                                       color: securityBadge.color,
                                     }}
                                   >
                                     {securityBadge.label}
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                               </div>
                               <p className="workspace-collection__row-summary">
@@ -9306,9 +9450,7 @@ export function ModLibraryOverlay({
 
           <aside className="workspace-collection__inspector">
             {!activeModView && (
-              <div className="workspace-collection__inspector-empty">
-                Select a mod to review details and actions.
-              </div>
+              <InspectorEmpty>Select a mod to review details and actions.</InspectorEmpty>
             )}
 
             {selectedDownloadedGroup && selectedDownloadedEntry && (
@@ -9329,48 +9471,11 @@ export function ModLibraryOverlay({
                         : ""}
                       {` • ${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? "" : "s"}`}
                     </div>
-                    {settings?.showSecurityScanBadges !== false &&
-                      getSecurityBadgeConfig(
-                        selectedDownloadedEntry.securityScan,
-                      ) && (
-                        <div
-                          style={{
-                            marginTop: "0.55rem",
-                            display: "flex",
-                            gap: "0.45rem",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <span
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "0.35rem",
-                              borderRadius: "999px",
-                              border: `1px solid ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.border}`,
-                              background: getSecurityBadgeConfig(
-                                selectedDownloadedEntry.securityScan,
-                              )?.background,
-                              color: getSecurityBadgeConfig(
-                                selectedDownloadedEntry.securityScan,
-                              )?.color,
-                              padding: "0.1rem 0.4rem",
-                              fontSize: "0.72rem",
-                              whiteSpace: "nowrap",
-                              lineHeight: 1,
-                            }}
-                          >
-                            <Icon name={`fas ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.icon}`}
-                              style={{ fontSize: "0.7rem" }}
-                             />
-                            {
-                              getSecurityBadgeConfig(
-                                selectedDownloadedEntry.securityScan,
-                              )?.label
-                            }
-                          </span>
-                        </div>
-                      )}
+                    {settings?.showSecurityScanBadges !== false && (
+                      <SecurityScanBadge
+                        summary={selectedDownloadedEntry.securityScan}
+                      />
+                    )}
                   </div>
                 </div>
                 <p className="workspace-inspector-card__summary">
@@ -9412,29 +9517,58 @@ export function ModLibraryOverlay({
                   >
                     Available versions
                   </label>
-                  <select
-                    id={`mod-library-version-${selectedDownloadedGroup.key}`}
+                  <Select
                     value={selectedDownloadedEntry.storageId}
-                    onChange={(event) => {
-                      const nextStorageId = event.target.value;
-                      setSelectedStorageByGroup((prev) => ({
-                        ...prev,
-                        [selectedDownloadedGroup.key]: nextStorageId,
-                      }));
+                    onValueChange={(nextStorageId) => {
+                      if (typeof nextStorageId === "string") {
+                        setSelectedStorageByGroup((prev) => ({
+                          ...prev,
+                          [selectedDownloadedGroup.key]: nextStorageId,
+                        }));
+                      }
                     }}
                     disabled={selectedDownloadedGroupEntries.length < 2}
                   >
-                    {selectedDownloadedGroupEntries.map((entry) => (
-                      <option key={entry.storageId} value={entry.storageId}>
-                        {`${formatVersionTag(getEntryVersionLabel(entry))} • ${entry.availableRuntimes?.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger
+                      id={`mod-library-version-${selectedDownloadedGroup.key}`}
+                      className="workspace-inspector-card__select"
+                    >
+                      <SelectValue>
+                        {(selectedStorageId) => {
+                          const selectedEntry =
+                            selectedDownloadedGroupEntries.find(
+                              (entry) => entry.storageId === selectedStorageId,
+                            ) || selectedDownloadedEntry;
+                          return `${formatVersionTag(getEntryVersionLabel(selectedEntry))} - ${selectedEntry.availableRuntimes?.length ? selectedEntry.availableRuntimes.join("/") : "Runtime?"}`;
+                        }}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent className="workspace-inspector-card__select-content" align="start">
+                      <SelectGroup>
+                        {selectedDownloadedGroupEntries.map((entry) => (
+                          <SelectItem
+                            key={entry.storageId}
+                            value={entry.storageId}
+                            onClick={() =>
+                              setSelectedStorageByGroup((prev) => ({
+                                ...prev,
+                                [selectedDownloadedGroup.key]: entry.storageId,
+                              }))
+                            }
+                          >
+                            {`${formatVersionTag(getEntryVersionLabel(entry))} - ${entry.availableRuntimes?.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="workspace-inspector-card__actions">
                   {selectedDownloadedEntry.storageId &&
                     selectedDownloadedEntry.securityScan && (
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() =>
                           void openStoredSecurityReport(
@@ -9444,7 +9578,7 @@ export function ModLibraryOverlay({
                         }
                       >
                         Security Report
-                      </button>
+                      </SimmButton>
                     )}
                   {(() => {
                     const installMoreOnly =
@@ -9474,7 +9608,8 @@ export function ModLibraryOverlay({
                         ).message
                       : undefined;
                     return (
-                      <button
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() =>
                           void promptInstallTargets(
@@ -9487,10 +9622,12 @@ export function ModLibraryOverlay({
                         title={installTitle}
                       >
                         {installMoreOnly ? "Install to more…" : "Install…"}
-                      </button>
+                      </SimmButton>
                     );
                   })()}
-                  <button
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() =>
                       void handleSelectVersion(
@@ -9507,8 +9644,10 @@ export function ModLibraryOverlay({
                     {activatingGroup === selectedDownloadedGroup.key
                       ? "Activating…"
                       : "Activate selected version"}
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() =>
                       void handleUpdateAndActivateGroup(selectedDownloadedGroup)
@@ -9516,15 +9655,17 @@ export function ModLibraryOverlay({
                     disabled={!isGroupUpdateAvailable(selectedDownloadedGroup)}
                   >
                     Update and activate
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="destructive"
                     className="btn btn-danger"
                     onClick={() =>
                       void handleDeleteDownloadedGroup(selectedDownloadedGroup)
                     }
                   >
                     Delete downloaded files
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             )}
@@ -9600,17 +9741,16 @@ export function ModLibraryOverlay({
                         <label>Runtime support</label>
                         <div className="workspace-inspector-card__tags">
                           {runtimeLabels.map((runtime) => (
-                            <span
+                            <WorkspaceBadge
                               key={`${selectedThunderstorePackage.key}-${runtime}`}
-                              className="workspace-pill"
                             >
                               {runtime}
-                            </span>
+                            </WorkspaceBadge>
                           ))}
                           {runtimeLabels.length === 0 && (
-                            <span className="workspace-pill">
+                            <WorkspaceBadge>
                               Unknown runtime
-                            </span>
+                            </WorkspaceBadge>
                           )}
                         </div>
                       </div>
@@ -9619,12 +9759,11 @@ export function ModLibraryOverlay({
                           <label>Categories</label>
                           <div className="workspace-inspector-card__tags">
                             {categories.slice(0, 6).map((category) => (
-                              <span
+                              <WorkspaceBadge
                                 key={`${selectedThunderstorePackage.key}-${category}`}
-                                className="workspace-pill"
                               >
                                 {category}
-                              </span>
+                              </WorkspaceBadge>
                             ))}
                           </div>
                         </div>
@@ -9632,29 +9771,29 @@ export function ModLibraryOverlay({
                       <div className="workspace-inspector-card__field">
                         <label>Status</label>
                         <div className="workspace-inspector-card__tags">
-                          <span className="workspace-pill workspace-pill--source">
+                          <WorkspaceBadge tone="source">
                             Thunderstore
-                          </span>
+                          </WorkspaceBadge>
                           {downloadedGroupForSelectedThunderstore && (
-                            <span className="workspace-pill workspace-pill--success">
+                            <WorkspaceBadge tone="success">
                               Downloaded
-                            </span>
+                            </WorkspaceBadge>
                           )}
                           {downloadedGroupForSelectedThunderstore &&
                             isGroupUpdateAvailable(
                               downloadedGroupForSelectedThunderstore,
                             ) && (
-                              <span className="workspace-pill workspace-pill--warning">
+                              <WorkspaceBadge tone="warning">
                                 Update available
-                              </span>
+                              </WorkspaceBadge>
                             )}
                           {representativePackage?.is_pinned && (
-                            <span className="workspace-pill">Pinned</span>
+                            <WorkspaceBadge>Pinned</WorkspaceBadge>
                           )}
                           {representativePackage?.is_deprecated && (
-                            <span className="workspace-pill workspace-pill--danger">
+                            <WorkspaceBadge tone="danger">
                               Deprecated
-                            </span>
+                            </WorkspaceBadge>
                           )}
                         </div>
                       </div>
@@ -9662,7 +9801,8 @@ export function ModLibraryOverlay({
                   );
                 })()}
                 <div className="workspace-inspector-card__actions">
-                  <button
+                  <SimmButton
+                    type="button"
                     className="btn btn-primary"
                     onClick={() =>
                       void handleDownloadThunderstore(
@@ -9672,10 +9812,12 @@ export function ModLibraryOverlay({
                     }
                   >
                     Download selected version
-                  </button>
+                  </SimmButton>
                   {downloadedGroupForSelectedThunderstore &&
                     selectedThunderstoreDownloadedEntry && (
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() =>
                           void promptInstallTargets(
@@ -9690,7 +9832,7 @@ export function ModLibraryOverlay({
                           .length > 0
                           ? "Install library version…"
                           : "Install library version"}
-                      </button>
+                      </SimmButton>
                     )}
                   {safeExternalUrl(selectedThunderstorePackage.packageUrl) && (
                     <a
@@ -9718,9 +9860,9 @@ export function ModLibraryOverlay({
                         Pick the package version you want to add to the library.
                       </p>
                     </div>
-                    <span className="workspace-inspector-card__subsection-count">
+                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
                       {selectedThunderstoreVersionOptions.length} available
-                    </span>
+                    </WorkspaceBadge>
                   </div>
                   <div
                     className="workspace-version-list"
@@ -9731,9 +9873,10 @@ export function ModLibraryOverlay({
                       const isActive =
                         selectedThunderstoreVersion?.key === versionOption.key;
                       return (
-                        <button
+                        <SimmButton
                           key={versionOption.key}
                           type="button"
+                          variant="ghost"
                           role="option"
                           aria-selected={isActive}
                           className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
@@ -9751,12 +9894,11 @@ export function ModLibraryOverlay({
                             </div>
                             <div className="workspace-version-row__badges">
                               {versionOption.runtimes.map((runtime) => (
-                                <span
+                                <WorkspaceBadge
                                   key={`${versionOption.key}-${runtime}`}
-                                  className="workspace-pill"
                                 >
                                   {runtime}
-                                </span>
+                                </WorkspaceBadge>
                               ))}
                             </div>
                           </div>
@@ -9775,7 +9917,7 @@ export function ModLibraryOverlay({
                               {versionOption.description}
                             </p>
                           )}
-                        </button>
+                        </SimmButton>
                       );
                     })}
                   </div>
@@ -9843,36 +9985,37 @@ export function ModLibraryOverlay({
                 <div className="workspace-inspector-card__field">
                   <label>Status</label>
                   <div className="workspace-inspector-card__tags">
-                    <span className="workspace-pill workspace-pill--source">
+                    <WorkspaceBadge tone="source">
                       Nexus Mods
-                    </span>
+                    </WorkspaceBadge>
                     {downloadedGroupForSelectedNexus && (
-                      <span className="workspace-pill workspace-pill--success">
+                      <WorkspaceBadge tone="success">
                         Downloaded
-                      </span>
+                      </WorkspaceBadge>
                     )}
                     {downloadedGroupForSelectedNexus &&
                       isGroupUpdateAvailable(
                         downloadedGroupForSelectedNexus,
                       ) && (
-                        <span className="workspace-pill workspace-pill--warning">
+                        <WorkspaceBadge tone="warning">
                           Update available
-                        </span>
+                        </WorkspaceBadge>
                       )}
                     {selectedNexusResult.contains_adult_content && (
-                      <span className="workspace-pill workspace-pill--danger">
+                      <WorkspaceBadge tone="danger">
                         Adult content
-                      </span>
+                      </WorkspaceBadge>
                     )}
                     {selectedNexusResult.status && (
-                      <span className="workspace-pill">
+                      <WorkspaceBadge>
                         {selectedNexusResult.status}
-                      </span>
+                      </WorkspaceBadge>
                     )}
                   </div>
                 </div>
                 <div className="workspace-inspector-card__actions">
-                  <button
+                  <SimmButton
+                    type="button"
                     className="btn btn-primary"
                     onClick={() =>
                       void handleDownloadNexusMod(
@@ -9883,7 +10026,7 @@ export function ModLibraryOverlay({
                     disabled={selectedNexusFiles.length === 0}
                   >
                     Download selected version
-                  </button>
+                  </SimmButton>
                   {downloadedGroupForSelectedNexus &&
                     selectedNexusDownloadedEntry &&
                     (() => {
@@ -9914,7 +10057,9 @@ export function ModLibraryOverlay({
                           ).message
                         : undefined;
                       return (
-                        <button
+                        <SimmButton
+                          type="button"
+                          variant="secondary"
                           className="btn btn-secondary"
                           onClick={() =>
                             void promptInstallTargets(
@@ -9929,7 +10074,7 @@ export function ModLibraryOverlay({
                           {installMoreOnly
                             ? "Install library version…"
                             : "Install library version"}
-                        </button>
+                        </SimmButton>
                       );
                     })()}
                   <a
@@ -9953,9 +10098,9 @@ export function ModLibraryOverlay({
                         downloading.
                       </p>
                     </div>
-                    <span className="workspace-inspector-card__subsection-count">
+                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
                       {selectedNexusFiles.length} available
-                    </span>
+                    </WorkspaceBadge>
                   </div>
                   {selectedNexusFiles.length > 0 ? (
                     <div
@@ -9970,9 +10115,10 @@ export function ModLibraryOverlay({
                         const isActive =
                           selectedNexusFile?.file_id === file.file_id;
                         return (
-                          <button
+                          <SimmButton
                             key={file.file_id}
                             type="button"
+                            variant="ghost"
                             role="option"
                             aria-selected={isActive}
                             className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
@@ -9988,18 +10134,18 @@ export function ModLibraryOverlay({
                                 {formatVersionTag(versionLabel)}
                               </div>
                               <div className="workspace-version-row__badges">
-                                <span className="workspace-pill">
+                                <WorkspaceBadge>
                                   {displayKind}
-                                </span>
+                                </WorkspaceBadge>
                                 {file.is_primary && (
-                                  <span className="workspace-pill workspace-pill--success">
+                                  <WorkspaceBadge tone="success">
                                     Primary
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                                 {file.category_name && (
-                                  <span className="workspace-pill workspace-pill--source">
+                                  <WorkspaceBadge tone="source">
                                     {file.category_name}
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                               </div>
                             </div>
@@ -10018,15 +10164,15 @@ export function ModLibraryOverlay({
                                 {file.name}
                               </p>
                             )}
-                          </button>
+                          </SimmButton>
                         );
                       })}
                     </div>
                   ) : (
-                    <div className="workspace-inspector-card__empty">
+                    <InspectorCardEmpty>
                       No downloadable files were returned for this Nexus mod
                       yet.
-                    </div>
+                    </InspectorCardEmpty>
                   )}
                 </section>
               </div>

@@ -1,4 +1,24 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import {
@@ -10,10 +30,13 @@ import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { getSecurityBadgeConfig } from './securityScanHelpers';
+import { SimmBadge, SimmButton } from './primitives';
+import { cn } from '@/lib/utils';
 import type {
   Environment,
   LocalModOwnershipCandidate,
   LocalModSourcePreview,
+  LocalModSourceVersionOption,
   ModLibraryEntry,
   NexusMod,
   NexusModFile,
@@ -168,6 +191,7 @@ export interface ModsOverlayNavigationState {
 
 type LocalSourceLinkStage = 'chooseSource' | 'edit' | 'confirmMismatch' | 'pickOwnership' | 'saving';
 type LocalSourceLinkStrategy = 'existing' | 'manual' | null;
+const LOCAL_SOURCE_VERSION_UNSELECTED = '__select-installed-version__';
 
 interface LocalSourceLinkState {
   modId: string;
@@ -186,6 +210,169 @@ interface LocalSourceLinkState {
   error?: string | null;
   ownershipCandidates: LocalModOwnershipCandidate[];
   selectedOwnershipIds: string[];
+}
+
+function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+  return (
+    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+type WorkspaceBadgeTone = 'source' | 'success' | 'warning' | 'danger';
+
+function WorkspaceBadge({
+  children,
+  tone,
+  className,
+  style,
+}: {
+  children: ReactNode;
+  tone?: WorkspaceBadgeTone;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <SimmBadge
+      variant="outline"
+      className={cn(
+        'workspace-pill',
+        tone && `workspace-pill--${tone}`,
+        className,
+      )}
+      style={style}
+    >
+      {children}
+    </SimmBadge>
+  );
+}
+
+function SecurityScanBadge({
+  config,
+}: {
+  config?: ReturnType<typeof getSecurityBadgeConfig>;
+}) {
+  if (!config) {
+    return null;
+  }
+
+  return (
+    <WorkspaceBadge
+      className="workspace-pill--security"
+      style={{
+        borderColor: config.border,
+        background: config.background,
+        color: config.color,
+      }}
+    >
+      <Icon name={`fas ${config.icon}`} style={{ fontSize: '0.7rem' }} />
+      {config.label}
+    </WorkspaceBadge>
+  );
+}
+
+function InspectorSecurityScanBadge({
+  config,
+}: {
+  config?: ReturnType<typeof getSecurityBadgeConfig>;
+}) {
+  if (!config) {
+    return null;
+  }
+
+  return (
+    <div className="workspace-inspector-card__badge-row">
+      <SecurityScanBadge config={config} />
+    </div>
+  );
+}
+
+function getLocalSourceVersionOptions(
+  versions: LocalModSourceVersionOption[] | undefined,
+  strategy: LocalSourceLinkStrategy,
+  runtime?: string,
+) {
+  return (versions || []).filter((version) => {
+    if (strategy !== 'existing' || !runtime) {
+      return true;
+    }
+    return !version.runtime || version.runtime === runtime;
+  });
+}
+
+function formatLocalSourceVersionOption(version: LocalModSourceVersionOption) {
+  return [
+    version.version,
+    version.runtime,
+    version.isLatest ? 'Latest' : null,
+    version.updatedAt ? new Date(version.updatedAt).toLocaleDateString() : null,
+  ].filter(Boolean).join(' • ');
+}
+
+function LocalSourceVersionSelect({
+  value,
+  preview,
+  strategy,
+  runtime,
+  loadingPreview,
+  onValueChange,
+}: {
+  value?: string;
+  preview?: LocalModSourcePreview;
+  strategy: LocalSourceLinkStrategy;
+  runtime?: string;
+  loadingPreview: boolean;
+  onValueChange: (value: string) => void;
+}) {
+  const options = getLocalSourceVersionOptions(preview?.versions, strategy, runtime);
+  const selectedValue = value || LOCAL_SOURCE_VERSION_UNSELECTED;
+
+  return (
+    <Select
+      value={selectedValue}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === 'string') {
+          onValueChange(nextValue === LOCAL_SOURCE_VERSION_UNSELECTED ? '' : nextValue);
+        }
+      }}
+      disabled={!preview || loadingPreview}
+    >
+      <SelectTrigger id="local-source-version" className="workspace-inspector-link-panel__input">
+        <SelectValue>
+          {(currentValue) => {
+            if (currentValue === LOCAL_SOURCE_VERSION_UNSELECTED) {
+              return 'Select installed version';
+            }
+            const selectedOption = options.find((option) => option.version === currentValue);
+            return selectedOption ? formatLocalSourceVersionOption(selectedOption) : 'Select installed version';
+          }}
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="workspace-inspector-link-panel__select-content" align="start">
+        <SelectGroup>
+          <SelectItem value={LOCAL_SOURCE_VERSION_UNSELECTED}>Select installed version</SelectItem>
+          {options.map((version) => (
+            <SelectItem key={version.key} value={version.version}>
+              {formatLocalSourceVersionOption(version)}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
 }
 
 interface ManualUploadSourceInfo {
@@ -3006,7 +3193,7 @@ export function ModsOverlay({
               {/* Search Input */}
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                 <div style={{ flex: 1, position: 'relative' }}>
-                  <input
+                  <Input
                     type="text"
                     placeholder={searchSource === 'thunderstore'
                       ? `Search Thunderstore for ${environment.runtime} mods...`
@@ -3027,6 +3214,7 @@ export function ModsOverlay({
                       border: '1px solid #3a3a3a',
                       borderRadius: '4px',
                       color: '#fff',
+                      height: 'auto',
                       fontSize: '0.875rem'
                     }}
                   />
@@ -4021,8 +4209,8 @@ export function ModsOverlay({
                 Could not determine the runtime for <strong>{pendingRuntimeSelection.fileName}</strong>.
               </p>
               <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
-                <button className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('Mono')}>Mono</button>
-                <button className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}>IL2CPP</button>
+                <SimmButton type="button" className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('Mono')}>Mono</SimmButton>
+                <SimmButton type="button" className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}>IL2CPP</SimmButton>
               </div>
             </div>
           </div>
@@ -4045,15 +4233,16 @@ export function ModsOverlay({
                     ['installed', 'Installed', 'fas fa-puzzle-piece'],
                     ['updates', 'Updates', 'fas fa-arrow-up'],
                   ] as Array<[ModsTab, string, string]>).map(([tab, label, icon]) => (
-                    <button
+                    <SimmButton
                       key={tab}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button ${modsTab === tab ? 'workspace-collection__rail-button--active' : ''}`}
                       onClick={() => setModsTab(tab)}
                     >
                       <Icon name={icon} />
                       <span>{label}</span>
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
 
@@ -4076,14 +4265,15 @@ export function ModsOverlay({
               {modsTab === 'installed' && (
                 <div className="workspace-collection__rail-group workspace-collection__rail-group--inline workspace-collection__filters-row">
                   {(['all', 'enabled', 'disabled'] as Array<'all' | 'enabled' | 'disabled'>).map((filter) => (
-                    <button
+                    <SimmButton
                       key={filter}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${modListFilter === filter ? 'workspace-collection__rail-button--active' : ''}`}
                       onClick={() => setModListFilter(filter)}
                     >
                       {filter === 'all' ? 'All' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               )}
@@ -4094,7 +4284,7 @@ export function ModsOverlay({
                   <span>{environment?.runtime || 'Unknown'} • {modsTab === 'updates' ? 'Update review' : 'Installed mods'}</span>
                 </div>
                 <div className="workspace-collection__toolbar-search">
-                  <input
+                  <Input
                     type="text"
                     value={installedSearchTerm}
                     onChange={(event) => setInstalledSearchTerm(event.target.value)}
@@ -4102,30 +4292,33 @@ export function ModsOverlay({
                   />
                 </div>
                 <div className="workspace-collection__toolbar-group">
-                  <button onClick={handleCheckModUpdates} className="btn btn-secondary btn-small" disabled={checkingModUpdates}>
+                  <SimmButton type="button" variant="secondary" onClick={handleCheckModUpdates} className="btn btn-secondary btn-small" disabled={checkingModUpdates}>
                     {checkingModUpdates ? 'Checking...' : 'Check Updates'}
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     onClick={() => void handleScanLocalInstalledMods()}
                     className="btn btn-secondary btn-small"
                     disabled={scanningLocalMods || mods.length === 0}
                   >
                     {scanningLocalMods ? 'Scanning...' : 'Scan Local Mods'}
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
                     onClick={handleUploadClick}
                     className="btn btn-primary btn-small"
                     disabled={uploading}
                     title="Add one or more mod files (.dll, .zip, .rar, .7z, .tar.gz, or .tgz)"
                   >
                     {uploading ? uploadButtonBusyLabel : 'Add Mod'}
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
+                  </SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
                     Open Folder
-                  </button>
-                  <button onClick={onOpenModLibrary} className="btn btn-secondary btn-small" disabled={!onOpenModLibrary}>
+                  </SimmButton>
+                  <SimmButton type="button" variant="secondary" onClick={onOpenModLibrary} className="btn btn-secondary btn-small" disabled={!onOpenModLibrary}>
                     Open Mod Library
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             </div>
@@ -4147,11 +4340,11 @@ export function ModsOverlay({
                   {uploadBatchSummary.message}
                 </div>
               )}
-              {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
+              {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
               {!loading && !error && filteredMods.length === 0 && (
-                <div className="workspace-collection__empty">
+                <CollectionEmpty>
                   {modsTab === 'updates' ? 'No installed mods currently need updates.' : 'No installed mods match this filter.'}
-                </div>
+                </CollectionEmpty>
               )}
               {!error && filteredMods.length > 0 && (
                 <div className="workspace-collection__list">
@@ -4230,22 +4423,11 @@ export function ModsOverlay({
                         <div className="workspace-collection__row-body">
                           <div className="workspace-collection__row-title">{mod.name}</div>
                           <div className="workspace-collection__row-meta">
-                            {mod.disabled && <span className="workspace-pill workspace-pill--danger">Disabled</span>}
-                            {updateInfo?.updateAvailable && <span className="workspace-pill workspace-pill--warning">Update available</span>}
-                            {mod.source && <span className="workspace-pill workspace-pill--source">{getSourceLabel(mod.source)}</span>}
-                            {mod.version && <span className="workspace-pill">{mod.version}</span>}
-                            {securityBadge && (
-                              <span
-                                className="workspace-pill"
-                                style={{
-                                  border: `1px solid ${securityBadge.border}`,
-                                  background: securityBadge.background,
-                                  color: securityBadge.color,
-                                }}
-                              >
-                                {securityBadge.label}
-                              </span>
-                            )}
+                            {mod.disabled && <WorkspaceBadge tone="danger">Disabled</WorkspaceBadge>}
+                            {updateInfo?.updateAvailable && <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>}
+                            {mod.source && <WorkspaceBadge tone="source">{getSourceLabel(mod.source)}</WorkspaceBadge>}
+                            {mod.version && <WorkspaceBadge>{mod.version}</WorkspaceBadge>}
+                            <SecurityScanBadge config={securityBadge} />
                           </div>
                           <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
                         </div>
@@ -4258,7 +4440,9 @@ export function ModsOverlay({
           </div>
 
           <aside className="workspace-collection__inspector">
-            {!selectedInstalledMod && <div className="workspace-collection__inspector-empty">Select an installed mod to review details and actions.</div>}
+            {!selectedInstalledMod && (
+              <InspectorEmpty>Select an installed mod to review details and actions.</InspectorEmpty>
+            )}
             {selectedInstalledMod && localSourceLinkState && localSourceLinkState.modId === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` && (
               <div className="workspace-inspector-link-panel">
                 <div className="workspace-inspector-link-panel__header">
@@ -4266,7 +4450,7 @@ export function ModsOverlay({
                     <h3>Link Mod Source</h3>
                     <p>Connect this local install to a known source so SIMM can track updates and add it to Mod Library.</p>
                   </div>
-                  <span className="workspace-pill workspace-pill--source">Local</span>
+                  <WorkspaceBadge tone="source">Local</WorkspaceBadge>
                 </div>
                 <div className="workspace-inspector-link-panel__summary">
                   <strong>{selectedInstalledMod.name}</strong>
@@ -4287,7 +4471,9 @@ export function ModsOverlay({
                           <strong>{localSourceLinkState.existingSourceHint.displayName}</strong>.
                         </p>
                         <div className="workspace-inspector-link-panel__actions">
-                          <button
+                          <SimmButton
+                            type="button"
+                            variant="secondary"
                             className="btn btn-secondary"
                             onClick={() => {
                               setLocalSourceLinkState((current) => current ? {
@@ -4304,8 +4490,9 @@ export function ModsOverlay({
                             }}
                           >
                             Choose Different Source
-                          </button>
-                          <button
+                          </SimmButton>
+                          <SimmButton
+                            type="button"
                             className="btn btn-primary"
                             onClick={() => {
                               const preview = localSourceLinkState.existingSourceHint!;
@@ -4327,15 +4514,16 @@ export function ModsOverlay({
                             }}
                           >
                             Use Existing Source Family
-                          </button>
+                          </SimmButton>
                         </div>
                       </>
                     ) : (
                       <>
                         <p>No existing managed source family confidently matches this local file yet.</p>
                         <div className="workspace-inspector-link-panel__actions">
-                          <button className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</button>
-                          <button
+                          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</SimmButton>
+                          <SimmButton
+                            type="button"
                             className="btn btn-primary"
                             onClick={() => {
                               setLocalSourceLinkState((current) => current ? {
@@ -4352,7 +4540,7 @@ export function ModsOverlay({
                             }}
                           >
                             Link Different Source
-                          </button>
+                          </SimmButton>
                         </div>
                       </>
                     )}
@@ -4362,7 +4550,7 @@ export function ModsOverlay({
                   <>
                     <div className="workspace-inspector-card__field">
                       <label htmlFor="local-source-url">Source URL</label>
-                      <input
+                      <Input
                         id="local-source-url"
                         className="workspace-inspector-link-panel__input"
                         type="url"
@@ -4416,12 +4604,13 @@ export function ModsOverlay({
                     </div>
                     <div className="workspace-inspector-card__field">
                       <label htmlFor="local-source-version">Which version do you currently have installed?</label>
-                      <select
-                        id="local-source-version"
-                        className="workspace-inspector-link-panel__input"
+                      <LocalSourceVersionSelect
                         value={localSourceLinkState.selectedVersion || ''}
-                        onChange={(event) => {
-                          const nextValue = event.target.value;
+                        preview={localSourceLinkState.preview}
+                        strategy={localSourceLinkState.strategy}
+                        runtime={environment?.runtime}
+                        loadingPreview={localSourceLinkState.loadingPreview}
+                        onValueChange={(nextValue) => {
                           setLocalSourceLinkState((current) => current ? {
                             ...current,
                             selectedVersion: nextValue || undefined,
@@ -4429,29 +4618,11 @@ export function ModsOverlay({
                             error: null,
                           } : current);
                         }}
-                        disabled={!localSourceLinkState.preview || localSourceLinkState.loadingPreview}
-                      >
-                        <option value="">Select installed version</option>
-                        {(localSourceLinkState.preview?.versions || [])
-                          .filter((version) => {
-                            if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
-                              return true;
-                            }
-                            return !version.runtime || version.runtime === environment.runtime;
-                          })
-                          .map((version) => (
-                          <option key={version.key} value={version.version}>
-                            {version.version}
-                            {version.runtime ? ` • ${version.runtime}` : ''}
-                            {version.isLatest ? ' • Latest' : ''}
-                            {version.updatedAt ? ` • ${new Date(version.updatedAt).toLocaleDateString()}` : ''}
-                          </option>
-                        ))}
-                      </select>
+                      />
                     </div>
                     <div className="workspace-inspector-card__field">
                       <label htmlFor="local-custom-version">Or enter a custom local version</label>
-                      <input
+                      <Input
                         id="local-custom-version"
                         className="workspace-inspector-link-panel__input"
                         type="text"
@@ -4479,14 +4650,14 @@ export function ModsOverlay({
                                 : 'Pick the remote version that matches this local install.'}
                             </p>
                           </div>
-                          <span className="workspace-inspector-card__subsection-count">
+                          <WorkspaceBadge className="workspace-inspector-card__subsection-count">
                             {(localSourceLinkState.preview.versions || []).filter((version) => {
                               if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
                                 return true;
                               }
                               return !version.runtime || version.runtime === environment.runtime;
                             }).length} available
-                          </span>
+                          </WorkspaceBadge>
                         </div>
                         <div className="workspace-version-list">
                           {(localSourceLinkState.preview.versions || [])
@@ -4497,10 +4668,11 @@ export function ModsOverlay({
                               return !version.runtime || version.runtime === environment.runtime;
                             })
                             .map((version) => (
-                            <button
+                            <SimmButton
                               key={version.key}
                               type="button"
-                              className={`workspace-version-row${localSourceLinkState.selectedVersion === version.version ? ' workspace-version-row--selected' : ''}`}
+                              variant="ghost"
+                              className={`workspace-version-row${localSourceLinkState.selectedVersion === version.version ? ' workspace-version-row--active' : ''}`}
                               onClick={() => {
                                 setLocalSourceLinkState((current) => current ? {
                                   ...current,
@@ -4513,21 +4685,23 @@ export function ModsOverlay({
                               <div className="workspace-version-row__topline">
                                 <strong>{version.version}</strong>
                                 <div className="workspace-version-row__badges">
-                                  {version.runtime && <span className="workspace-pill">{version.runtime}</span>}
-                                  {version.isLatest && <span className="workspace-pill workspace-pill--success">Latest</span>}
+                                  {version.runtime && <WorkspaceBadge>{version.runtime}</WorkspaceBadge>}
+                                  {version.isLatest && <WorkspaceBadge tone="success">Latest</WorkspaceBadge>}
                                 </div>
                               </div>
                               <div className="workspace-version-row__meta">
                                 <span>{version.updatedAt ? `Updated ${new Date(version.updatedAt).toLocaleDateString()}` : 'Updated unknown'}</span>
                                 {version.label && <span>{version.label}</span>}
                               </div>
-                            </button>
+                            </SimmButton>
                           ))}
                         </div>
                       </div>
                     )}
                     <div className="workspace-inspector-link-panel__actions">
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
                           if (localSourceLinkState.existingSourceHint) {
@@ -4542,8 +4716,9 @@ export function ModsOverlay({
                         }}
                       >
                         {localSourceLinkState.existingSourceHint ? 'Back' : 'Cancel'}
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() => void continueLocalSourceLink(selectedInstalledMod, localSourceLinkState)}
                         disabled={
@@ -4554,7 +4729,7 @@ export function ModsOverlay({
                         }
                       >
                         Continue
-                      </button>
+                      </SimmButton>
                     </div>
                   </>
                 )}
@@ -4566,7 +4741,9 @@ export function ModsOverlay({
                       <strong>{localSourceLinkState.preview.displayName}</strong>.
                     </p>
                     <div className="workspace-inspector-link-panel__actions">
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
                           setLocalSourceLinkState((current) => current ? {
@@ -4577,8 +4754,9 @@ export function ModsOverlay({
                         }}
                       >
                         Back
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() => void prepareLocalOwnershipStep(
                           selectedInstalledMod,
@@ -4587,7 +4765,7 @@ export function ModsOverlay({
                         )}
                       >
                         Confirm Link
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 )}
@@ -4600,11 +4778,10 @@ export function ModsOverlay({
                         const checked = localSourceLinkState.selectedOwnershipIds.includes(candidate.id);
                         return (
                           <label key={candidate.id} className="workspace-inspector-link-panel__candidate">
-                            <input
-                              type="checkbox"
+                            <Checkbox
+                              className="workspace-inspector-link-panel__candidate-checkbox"
                               checked={checked}
-                              onChange={(event) => {
-                                const isChecked = event.target.checked;
+                              onCheckedChange={(isChecked) => {
                                 setLocalSourceLinkState((current) => current ? {
                                   ...current,
                                   selectedOwnershipIds: isChecked
@@ -4622,7 +4799,9 @@ export function ModsOverlay({
                       })}
                     </div>
                     <div className="workspace-inspector-link-panel__actions">
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
                           setLocalSourceLinkState((current) => current ? {
@@ -4635,8 +4814,10 @@ export function ModsOverlay({
                         }}
                       >
                         Back
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => void promoteLocalSourceLink(
                           selectedInstalledMod,
@@ -4647,8 +4828,9 @@ export function ModsOverlay({
                         )}
                       >
                         Skip extra files
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() => void promoteLocalSourceLink(
                           selectedInstalledMod,
@@ -4659,7 +4841,7 @@ export function ModsOverlay({
                         )}
                       >
                         Promote Selected Files
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 )}
@@ -4682,28 +4864,7 @@ export function ModsOverlay({
                       {selectedInstalledMod.author ? ` • ${selectedInstalledMod.author}` : ''}
                       {selectedInstalledMod.version ? ` • ${selectedInstalledMod.version}` : ''}
                     </div>
-                    {selectedInstalledSecurityBadge && (
-                      <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
-                        <span
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '0.35rem',
-                            borderRadius: '999px',
-                            border: `1px solid ${selectedInstalledSecurityBadge.border}`,
-                            background: selectedInstalledSecurityBadge.background,
-                            color: selectedInstalledSecurityBadge.color,
-                            padding: '0.1rem 0.4rem',
-                            fontSize: '0.72rem',
-                            whiteSpace: 'nowrap',
-                            lineHeight: 1,
-                          }}
-                        >
-                          <Icon name={`fas ${selectedInstalledSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }} />
-                          {selectedInstalledSecurityBadge.label}
-                        </span>
-                      </div>
-                    )}
+                    <InspectorSecurityScanBadge config={selectedInstalledSecurityBadge} />
                   </div>
                 </div>
                 <p className="workspace-inspector-card__summary">{selectedInstalledMod.summary || selectedInstalledMod.fileName}</p>
@@ -4714,14 +4875,18 @@ export function ModsOverlay({
                 </div>
                 <div className="workspace-inspector-card__actions">
                   {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
-                    <button
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
                       className="btn btn-secondary"
                       onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
                     >
                       Security Report
-                    </button>
+                    </SimmButton>
                   )}
-                  <button
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
                     disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
@@ -4731,13 +4896,15 @@ export function ModsOverlay({
                       : selectedInstalledMod.securityScan
                         ? 'Rescan Security'
                         : 'Scan Security'}
-                  </button>
+                  </SimmButton>
                   {selectedInstalledMod.disabled ? (
-                    <button className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</button>
+                    <SimmButton type="button" className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</SimmButton>
                   ) : (
-                    <button className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</button>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</SimmButton>
                   )}
-                  <button
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() => void handleUpdateMod(selectedInstalledMod)}
                     disabled={!!getUpdateDisabledReason(
@@ -4750,21 +4917,21 @@ export function ModsOverlay({
                     ) || undefined}
                   >
                     Update
-                  </button>
+                  </SimmButton>
                   {activeModViewSourceUrl && (
-                    <button className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
                       Open Source Page
-                    </button>
+                    </SimmButton>
                   )}
-                  <button className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</button>
-                  <button className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</button>
-                  <button className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</button>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</SimmButton>
                   {isLinkableLocalMod(selectedInstalledMod) && (
-                    <button className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
+                    <SimmButton type="button" className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
                       Link Source
-                    </button>
+                    </SimmButton>
                   )}
-                  <button className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</button>
+                  <SimmButton type="button" variant="destructive" className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</SimmButton>
                 </div>
               </div>
             )}

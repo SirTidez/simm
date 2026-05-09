@@ -1,5 +1,7 @@
 import { useMemo } from 'react';
 
+import { Progress } from '@/components/ui/progress';
+
 import type { TrackedDownload } from '../types';
 import { useDownloadStatusStore } from '../stores/downloadStatusStore';
 import { Icon } from './Icon';
@@ -78,11 +80,17 @@ function hasUsableFileCounts(download: Pick<TrackedDownload, 'downloadedFiles' |
   return Number.isFinite(downloaded) && Number.isFinite(total) && total > 0;
 }
 
+function getProgressValue(download: TrackedDownload) {
+  return Math.min(100, Math.max(0, download.progress));
+}
+
 function renderDownloadRow(download: TrackedDownload) {
   const recentRow = !isActiveStatus(download.status);
   const localIcon = resolveImageSource(download.iconCachePath);
   const remoteIcon = resolveImageSource(download.iconUrl);
   const iconSource = localIcon || remoteIcon;
+  const indeterminate = isIndeterminate(download);
+
   return (
     <article className={`downloads-panel__row downloads-panel__row--${download.status} ${recentRow ? 'downloads-panel__row--recent' : 'downloads-panel__row--active'}`} key={download.id}>
       <div className="downloads-panel__row-main">
@@ -120,16 +128,11 @@ function renderDownloadRow(download: TrackedDownload) {
         </SimmBadge>
       </div>
 
-      <div className="downloads-panel__progress-bar">
-        <div
-          className={
-            isIndeterminate(download)
-              ? 'downloads-panel__progress-fill downloads-panel__progress-fill--indeterminate'
-              : 'downloads-panel__progress-fill'
-          }
-          style={isIndeterminate(download) ? undefined : { width: `${Math.min(100, Math.max(0, download.progress))}%` }}
-        />
-      </div>
+      <Progress
+        value={indeterminate ? null : getProgressValue(download)}
+        className={`downloads-panel__progress-bar${indeterminate ? ' downloads-panel__progress-bar--indeterminate' : ''}`}
+        aria-label={`${download.label} download progress`}
+      />
 
       {(download.message || download.error) && (
         <div className="downloads-panel__row-bottom">

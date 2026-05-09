@@ -3,9 +3,9 @@ version = 1
 name = "simmrust"
 
 [setup]
-script = "npm install"
+script = "bun install"
 
 [[actions]]
 name = "Run Development Server"
 icon = "run"
-command = "npm run tauri dev"
+command = "bun run tauri dev"

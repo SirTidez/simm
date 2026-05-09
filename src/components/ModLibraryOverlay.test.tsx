@@ -172,6 +172,11 @@ function renderLibraryOverlay({
   );
 }
 
+async function chooseAvailableLibraryVersion(optionName: RegExp) {
+  fireEvent.click(await screen.findByRole("combobox", { name: "Available versions" }));
+  fireEvent.click(await screen.findByRole("option", { name: optionName }));
+}
+
 vi.mock("../services/events", () => ({
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
@@ -2899,12 +2904,7 @@ describe("ModLibraryOverlay", () => {
     renderLibraryOverlay({ libraryTab: "library" });
 
     await screen.findByText("Sibling Block Mod");
-    fireEvent.change(
-      screen.getByRole("combobox", { name: "Available versions" }),
-      {
-        target: { value: "mono-v2-storage" },
-      },
-    );
+    await chooseAvailableLibraryVersion(/v1\.1\.0 - Mono/);
 
     const button = await screen.findByRole("button", {
       name: "Install to more…",
@@ -2961,9 +2961,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
-    fireEvent.change(await screen.findByLabelText("Available versions"), {
-      target: { value: "storage-old" },
-    });
+    await chooseAvailableLibraryVersion(/v1\.0\.0 - Mono/);
     fireEvent.click(
       await screen.findByRole("button", { name: "Activate selected version" }),
     );
