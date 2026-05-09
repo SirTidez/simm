@@ -4148,16 +4148,6 @@ impl ModsService {
                 .or_else(|| metadata.get(&current_file_name))
                 .cloned();
 
-            // Extract version if not disabled and not in metadata
-            // Prefer source_version (from Thunderstore) over installed_version (extracted from DLL)
-            let version = if let Some(ref meta) = file_metadata {
-                meta.source_version
-                    .clone()
-                    .or(meta.installed_version.clone())
-            } else {
-                None
-            };
-
             let mod_storage_id = file_metadata
                 .as_ref()
                 .and_then(|m| m.mod_storage_id.clone());
@@ -4177,10 +4167,23 @@ impl ModsService {
                     .ok()
                     .flatten()
             };
-            let source = file_metadata
+            let display_metadata = match (managed, storage_metadata.clone(), file_metadata.clone())
+            {
+                (true, Some(storage), Some(file)) => Some(Self::merge_metadata(storage, file)),
+                (true, Some(storage), None) => Some(storage),
+                (_, _, file) => file,
+            };
+
+            // Prefer source_version (from package metadata) over installed_version (extracted from DLL).
+            let version = display_metadata.as_ref().and_then(|meta| {
+                meta.source_version
+                    .clone()
+                    .or(meta.installed_version.clone())
+            });
+
+            let source = display_metadata
                 .as_ref()
                 .and_then(|m| m.source.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.source.clone()))
                 .or_else(|| {
                     if managed {
                         None
@@ -4188,70 +4191,52 @@ impl ModsService {
                         Some(ModSource::Local)
                     }
                 });
-            let source_url = file_metadata
+            let source_url = display_metadata
                 .as_ref()
                 .and_then(|m| m.source_url.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.source_url.clone()));
-            let author = file_metadata
+                .or_else(|| {
+                    confident_hint_metadata
+                        .as_ref()
+                        .and_then(|m| m.source_url.clone())
+                });
+            let author = display_metadata
                 .as_ref()
                 .and_then(|m| m.author.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.author.clone()))
                 .or_else(|| {
                     confident_hint_metadata
                         .as_ref()
                         .and_then(|meta| meta.author.clone())
                 });
-            let summary = file_metadata
+            let summary = display_metadata
                 .as_ref()
                 .and_then(|m| m.summary.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.summary.clone()))
                 .or_else(|| {
                     confident_hint_metadata
                         .as_ref()
                         .and_then(|meta| meta.summary.clone())
                 });
-            let icon_url = file_metadata
+            let icon_url = display_metadata
                 .as_ref()
                 .and_then(|m| m.icon_url.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.icon_url.clone()))
                 .or_else(|| {
                     confident_hint_metadata
                         .as_ref()
                         .and_then(|meta| meta.icon_url.clone())
                 });
-            let icon_cache_path = file_metadata
+            let icon_cache_path = display_metadata
                 .as_ref()
                 .and_then(|m| m.icon_cache_path.clone())
-                .or_else(|| {
-                    storage_metadata
-                        .as_ref()
-                        .and_then(|m| m.icon_cache_path.clone())
-                })
                 .or_else(|| {
                     confident_hint_metadata
                         .as_ref()
                         .and_then(|meta| meta.icon_cache_path.clone())
                 });
-            let downloads = file_metadata
+            let downloads = display_metadata.as_ref().and_then(|m| m.downloads);
+            let likes_or_endorsements = display_metadata
                 .as_ref()
-                .and_then(|m| m.downloads)
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.downloads));
-            let likes_or_endorsements = file_metadata
-                .as_ref()
-                .and_then(|m| m.likes_or_endorsements)
-                .or_else(|| {
-                    storage_metadata
-                        .as_ref()
-                        .and_then(|m| m.likes_or_endorsements)
-                });
-            let updated_at = file_metadata
-                .as_ref()
-                .and_then(|m| m.updated_at.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.updated_at.clone()));
-            let tags = file_metadata
-                .as_ref()
-                .and_then(|m| m.tags.clone())
-                .or_else(|| storage_metadata.as_ref().and_then(|m| m.tags.clone()));
+                .and_then(|m| m.likes_or_endorsements);
+            let updated_at = display_metadata.as_ref().and_then(|m| m.updated_at.clone());
+            let tags = display_metadata.as_ref().and_then(|m| m.tags.clone());
             let installed_at = file_metadata.as_ref().and_then(|m| m.installed_at);
             let security_scan = if let Some(storage_id) = mod_storage_id.as_deref() {
                 self.resolve_storage_security_scan_summary(
@@ -5127,13 +5112,7 @@ impl ModsService {
                 .context("Failed to store DLL file")?;
             installed_files.push(file_name);
         } else {
-            let temp_dir = std::env::temp_dir().join(format!(
-                "mod-store-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            ));
+            let temp_dir = std::env::temp_dir().join(format!("mod-store-{}", Uuid::new_v4()));
             fs::create_dir_all(&temp_dir).await?;
 
             let runtime_label = runtime.as_ref().map(|r| Self::runtime_label(r));
@@ -6412,13 +6391,7 @@ exit 1
         );
 
         // Create temp directory for extraction
-        let temp_dir = std::env::temp_dir().join(format!(
-            "mod-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        ));
+        let temp_dir = std::env::temp_dir().join(format!("mod-{}", Uuid::new_v4()));
 
         fs::create_dir_all(&temp_dir).await?;
 
