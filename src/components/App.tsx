@@ -46,7 +46,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { SimmButton, SimmDialogContent } from './primitives';
+import { Skeleton } from '@/components/ui/skeleton';
+import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
 import type { IconName } from './icons';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
@@ -439,14 +440,14 @@ function HomeDashboard({
           <p>Review install health, updates, and common mod manager actions from one desktop workspace.</p>
         </div>
         <div className="home-dashboard__header-actions">
-          <button type="button" className="btn btn-primary" onClick={onOpenModLibrary} aria-label="Open Mod Library from dashboard">
+          <SimmButton type="button" className="btn btn-primary" onClick={onOpenModLibrary} aria-label="Open Mod Library from dashboard">
             <Icon name="boxOpen" />
             Mod Library
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={onOpenWizard}>
+          </SimmButton>
+          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenWizard}>
             <Icon name="plus" />
             Add Environment
-          </button>
+          </SimmButton>
         </div>
       </div>
 
@@ -455,8 +456,8 @@ function HomeDashboard({
           <span>Installs</span>
           {environmentsLoading ? (
             <>
-              <strong className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
-              <small className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
             </>
           ) : (
             <>
@@ -469,8 +470,8 @@ function HomeDashboard({
           <span>Game Updates</span>
           {environmentsLoading ? (
             <>
-              <strong className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
-              <small className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
             </>
           ) : (
             <>
@@ -488,8 +489,8 @@ function HomeDashboard({
           <span>Last Check</span>
           {environmentsLoading ? (
             <>
-              <strong className="loading-skeleton loading-skeleton--wide" aria-hidden="true" />
-              <small className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--wide" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
             </>
           ) : (
             <>
@@ -511,18 +512,18 @@ function HomeDashboard({
                   : updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}
               </h2>
             </div>
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => onOpenEnvironments()} aria-label="Open Environments from dashboard">
+            <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => onOpenEnvironments()} aria-label="Open Environments from dashboard">
               <Icon name="hardDrive" />
               Environments
-            </button>
+            </SimmButton>
           </div>
           {environmentsLoading ? (
             <div className="home-dashboard__focus home-dashboard__focus--loading" role="status" aria-live="polite">
               <div>
-                <strong className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
-                <p className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
+                <Skeleton className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
+                <Skeleton className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
               </div>
-              <span className="home-dashboard__badge home-dashboard__badge--loading">Scanning</span>
+              <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--loading">Scanning</SimmBadge>
             </div>
           ) : (
             <button
@@ -540,25 +541,25 @@ function HomeDashboard({
                 </p>
               </div>
               {primaryEnvironment?.updateAvailable && (
-                <span className="home-dashboard__badge home-dashboard__badge--warn">
+                <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--warn">
                   Update available
-                </span>
+                </SimmBadge>
               )}
             </button>
           )}
           <div className="home-dashboard__quick-grid">
-            <button type="button" onClick={onOpenModUpdates}>
+            <SimmButton type="button" variant="ghost" onClick={onOpenModUpdates}>
               <Icon name="arrowUp" />
               Mod Updates
-            </button>
-            <button type="button" onClick={onOpenModLibrary}>
+            </SimmButton>
+            <SimmButton type="button" variant="ghost" onClick={onOpenModLibrary}>
               <Icon name="boxOpen" />
               Discover Mods
-            </button>
-            <button type="button" onClick={onOpenSettings}>
+            </SimmButton>
+            <SimmButton type="button" variant="ghost" onClick={onOpenSettings}>
               <Icon name="sliders" />
               Preferences
-            </button>
+            </SimmButton>
           </div>
         </section>
 
@@ -665,8 +666,9 @@ function AppShellDownloadsDock({
         onPointerEnter={clearDownloadsPanelDismissTimer}
         onPointerLeave={scheduleDownloadsPanelDismiss}
       >
-        <button
+        <SimmButton
           type="button"
+          variant="ghost"
           className="app-shell-sidebar__tool-item app-shell-sidebar__download-item"
           onClick={toggleDownloadsPanel}
           aria-expanded={downloadsPanelOpen}
@@ -675,8 +677,8 @@ function AppShellDownloadsDock({
         >
           <Icon name={icon} />
           <span>{label}</span>
-          <span className="app-shell-sidebar__tool-badge">{badge}</span>
-        </button>
+          <SimmBadge variant="secondary" className="app-shell-sidebar__tool-badge">{badge}</SimmBadge>
+        </SimmButton>
       </div>
       {downloadsPanelOpen && (
         <div
@@ -795,43 +797,46 @@ const AppShellSidebar = memo(function AppShellSidebar({
 
   return (
     <aside className={shellSidebarClassName} aria-label="Primary navigation" onTransitionEnd={onShellNavTransitionEnd}>
-      <button
+      <SimmButton
         type="button"
+        variant="ghost"
         className="app-shell-sidebar__collapse-toggle"
         onClick={onToggleShellNavigation}
         aria-label={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
         title={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
       >
         <Icon name={shellNavCollapsed ? 'anglesRight' : 'anglesLeft'} />
-      </button>
+      </SimmButton>
       {shellNavExpandedContentVisible ? (
         <section className="app-shell-sidebar__section app-shell-sidebar__section--environments">
-          <button
+          <SimmButton
             type="button"
+            variant="ghost"
             className="app-shell-sidebar__section-toggle"
             onClick={() => toggleShellSection('environments')}
             aria-expanded={!collapsedShellSections.environments}
           >
             <span>Environments</span>
             <Icon name={collapsedShellSections.environments ? 'chevronRight' : 'chevronDown'} />
-          </button>
+          </SimmButton>
           {!collapsedShellSections.environments ? (
             <div className="app-shell-sidebar__section-body">
               {environmentsLoading && sortedEnvironments.length === 0 ? (
                 <div className="app-shell-sidebar__environment-list app-shell-sidebar__environment-list--loading" role="status" aria-live="polite" aria-label="Loading environments">
                   {[0, 1, 2].map((index) => (
                     <div key={index} className="app-shell-sidebar__environment-item app-shell-sidebar__environment-item--skeleton">
-                      <span className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
-                      <span className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
+                      <Skeleton className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
+                      <Skeleton className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
                     </div>
                   ))}
                 </div>
               ) : sortedEnvironments.length > 0 ? (
                 <div className="app-shell-sidebar__environment-list">
                   {sortedEnvironments.map((environment) => (
-                    <button
+                    <SimmButton
                       key={environment.id}
                       type="button"
+                      variant="ghost"
                       className={`app-shell-sidebar__environment-item${currentEnvironmentId === environment.id ? ' app-shell-sidebar__environment-item--active' : ''}`}
                       onClick={() => onEnvironmentSelect(environment.id)}
                       aria-current={currentEnvironmentId === environment.id ? 'page' : undefined}
@@ -842,13 +847,13 @@ const AppShellSidebar = memo(function AppShellSidebar({
                       </span>
                       <span className="app-shell-sidebar__environment-name">{environment.name}</span>
                       {environment.updateAvailable ? (
-                        <span className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
+                        <SimmBadge variant="secondary" className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
                           Update
-                        </span>
+                        </SimmBadge>
                       ) : environment.status === 'completed' ? (
-                        <span className="app-shell-sidebar__environment-meta">Ready</span>
+                        <SimmBadge variant="outline" className="app-shell-sidebar__environment-meta">Ready</SimmBadge>
                       ) : null}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               ) : (
@@ -861,22 +866,24 @@ const AppShellSidebar = memo(function AppShellSidebar({
         </section>
       ) : null}
       <section className="app-shell-sidebar__section app-shell-sidebar__section--tools">
-        <button
+        <SimmButton
           type="button"
+          variant="ghost"
           className="app-shell-sidebar__section-toggle"
           onClick={() => toggleShellSection('tools')}
           aria-expanded={!collapsedShellSections.tools}
         >
           <span>Tools</span>
           <Icon name={collapsedShellSections.tools ? 'chevronRight' : 'chevronDown'} />
-        </button>
+        </SimmButton>
         {!collapsedShellSections.tools || shellNavCollapsed ? (
           <div className="app-shell-sidebar__section-body">
             <div className="app-shell-sidebar__tool-list">
               {toolNavItems.map((item) => (
-                <button
+                <SimmButton
                   key={item.key}
                   type="button"
+                  variant="ghost"
                   className={`app-shell-sidebar__tool-item${item.active ? ' app-shell-sidebar__tool-item--active' : ''}`}
                   onClick={item.onClick}
                   aria-current={item.active ? 'page' : undefined}
@@ -884,7 +891,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
                 >
                   <Icon name={item.icon} />
                   <span>{item.label}</span>
-                </button>
+                </SimmButton>
               ))}
             </div>
           </div>
@@ -976,9 +983,10 @@ function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUti
 
       <div className="window-toolbar-actions window-toolbar-actions--shell" aria-label="Shell actions">
         {utilityActions.map((action) => (
-          <button
+          <SimmButton
             key={action.key}
             type="button"
+            variant={action.variant === 'btn-primary' ? 'default' : 'secondary'}
             className={`btn ${action.variant} app-shell-toolbar-button${action.active ? ' app-shell-toolbar-button--active' : ''}`}
             onClick={action.onClick}
             aria-current={action.active ? 'page' : undefined}
@@ -987,7 +995,7 @@ function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUti
           >
             <Icon name={action.icon} spin={action.icon === 'spinner'} />
             <span>{action.label}</span>
-          </button>
+          </SimmButton>
         ))}
       </div>
 

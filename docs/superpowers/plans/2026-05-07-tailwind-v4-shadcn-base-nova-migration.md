@@ -508,11 +508,11 @@ git commit -m "refactor(frontend): migrate downloads panel primitives"
 4. [x] `src/components/ConfigurationOverlay.tsx`
 5. [x] `src/components/LogsOverlay.tsx`
 6. [x] `src/components/Settings.tsx`
-7. `src/components/App.tsx` shell atoms only
-8. `src/components/ModsOverlay.tsx`
-9. `src/components/ModLibraryOverlay.tsx`
+7. [x] `src/components/App.tsx` shell atoms only
+8. [x] `src/components/ModsOverlay.tsx`
+9. [x] `src/components/ModLibraryOverlay.tsx`
 
-- [ ] **Step 1: For each surface, run its focused tests first**
+- [x] **Step 1: For each surface, run its focused tests first**
 
 ```powershell
 bun run test src/components/<SurfaceName>.test.tsx
@@ -520,7 +520,7 @@ bun run test src/components/<SurfaceName>.test.tsx
 
 Expected: establish a local baseline.
 
-- [ ] **Step 2: Convert components, not whole pages**
+- [x] **Step 2: Convert components, not whole pages**
 
 Convert in this order inside each surface:
 
@@ -530,11 +530,11 @@ buttons -> badges/status chips -> separators -> dialogs/confirm flows -> skeleto
 
 Expected: each commit has a small visual and behavioral blast radius.
 
-- [ ] **Step 3: Keep layout class names until the final pass**
+- [x] **Step 3: Keep layout class names until the final pass**
 
 Do not replace dense workspace layout CSS with long Tailwind strings until the component atoms are stable. Tailwind utilities are allowed for new component internals and local one-off layout, but old shell/grid classes can remain during migration.
 
-- [ ] **Step 4: Validate after each surface**
+- [x] **Step 4: Validate after each surface**
 
 ```powershell
 bun run test src/components/<SurfaceName>.test.tsx
@@ -547,6 +547,8 @@ bun run build
 Expected: regressions are tied to one surface.
 
 - [ ] **Step 5: Commit each surface separately**
+
+Current workflow note: commits are user-owned. Agents should not create commits for this plan unless explicitly asked. Treat the commands below as suggested staging/commit groupings for the user, not as a required agent step.
 
 ```powershell
 git add src/components/<SurfaceName>.tsx src/components/<SurfaceName>.test.tsx src/style.css
@@ -568,10 +570,20 @@ Current Task 7 checkpoint:
 - `Settings.tsx` now uses `SimmButton` for generic setup guide, theme file, directory browser, update check, database backup, scanner management, and directory picker actions.
 - Settings switches, modal close controls, and directory row navigation intentionally remain raw buttons in this pass because they carry custom switch semantics or list-row selection behavior.
 - Validation passed with `bun run test src/components/Settings.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
+- `App.tsx` now uses `SimmButton` for Home dashboard header actions, the Environments dashboard action, Home quick actions, window toolbar utility actions, downloads dock, sidebar section toggles, sidebar navigation rows, and environment rows. It uses `SimmBadge` for passive Home status chips, downloads count, and sidebar environment status chips, plus `Skeleton` for dashboard/sidebar loading placeholders.
+- The App shell atom pass preserved the latest download-counter, active-environment focus, collapsed-sidebar, hover-dismiss, and keyboard behavior by keeping the original `app-shell-sidebar__*`, `app-shell-sidebar__download-*`, and dashboard class names as the behavior/styling anchors.
+- Window controls are deferred to a separate native-window-control pass. Planned approach: add or reuse a compact icon-button primitive that can preserve the exact `.window-control-btn` / close-button styling, `title` and `aria-label` values, and Tauri minimize/maximize/close handlers. Do not fold window controls into the sidebar/downloads pass unless the focused window chrome tests are updated and passing.
+- `ModsOverlay.tsx` now uses shadcn `Dialog` plus `SimmDialogContent` for the live runtime picker shell. Runtime action buttons were already on `SimmButton`.
+- `ModsOverlay.tsx` still contains an unused `legacyLayout` block with old raw controls. Do not migrate that dead layout. Mark it for a later dead-code cleanup pass once the live workspace collection UI is stable.
+- `ModLibraryOverlay.tsx` now uses `SimmButton` for featured action cards while keeping row/listbox controls and behavior-heavy inspector interactions raw.
+- `ModLibraryOverlay.tsx` also contains unused legacy layout scaffolding. Leave it alone during atom migration and include it in the later dead-code cleanup pass with the Mods legacy layout.
+- Validation passed with `bun run test src/components/App.test.tsx`, `bun run test src/components/ModsOverlay.test.tsx`, `bun run test src/components/ModLibraryOverlay.test.tsx`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 
 ---
 
 ### Task 8: CSS Debt Cleanup After Migration
+
+Status: deferred. Ignore Task 8 until the user explicitly asks for CSS-debt cleanup. Continue Task 7 App shell atom migration first.
 
 **Files:**
 - Modify: `src/style.css`
@@ -589,6 +601,11 @@ Expected: know which selectors are still referenced.
 - [ ] **Step 2: Remove dead selectors in batches**
 
 Each batch should remove selectors from one migrated surface only.
+
+Current Task 8 checkpoint:
+
+- Removed the old native `workspace-collection__toolbar-select-wrap` selector batch after confirming there were no remaining JSX references. Live Mod Library sorting now uses the shadcn `Select` wrapper through `DiscoverSortSelect`.
+- Validation passed with `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 
 - [ ] **Step 3: Validate after each CSS batch**
 

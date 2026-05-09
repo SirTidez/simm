@@ -9,6 +9,13 @@ import React, {
   type ReactNode,
 } from 'react';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
 import {
@@ -30,7 +37,7 @@ import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { getSecurityBadgeConfig } from './securityScanHelpers';
-import { SimmBadge, SimmButton } from './primitives';
+import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
 import { cn } from '@/lib/utils';
 import type {
   Environment,
@@ -4198,23 +4205,32 @@ export function ModsOverlay({
         busy={securityActionBusy}
       />
       {pendingRuntimeSelection && (
-        <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
-          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
-            <div className="modal-header">
-              <h2>Select Mod Runtime</h2>
-              <button className="modal-close" onClick={handleRuntimeSelectionCancel}>×</button>
-            </div>
-            <div style={{ padding: '1.5rem' }}>
-              <p style={{ marginBottom: '1rem', color: '#ccc' }}>
+        <Dialog open={!!pendingRuntimeSelection} onOpenChange={(open) => {
+          if (!open) {
+            handleRuntimeSelectionCancel();
+          }
+        }}>
+          <SimmDialogContent
+            nested
+            className="app-dialog app-dialog--message"
+            style={{ maxWidth: '400px' }}
+            showCloseButton={false}
+          >
+            <DialogHeader className="modal-header">
+              <DialogTitle>Select Mod Runtime</DialogTitle>
+              <SimmButton type="button" variant="ghost" size="icon-sm" className="modal-close" onClick={handleRuntimeSelectionCancel} aria-label="Close runtime selection dialog">×</SimmButton>
+            </DialogHeader>
+            <div className="app-dialog__body">
+              <DialogDescription style={{ marginBottom: '1rem', color: '#ccc' }}>
                 Could not determine the runtime for <strong>{pendingRuntimeSelection.fileName}</strong>.
-              </p>
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+              </DialogDescription>
+              <DialogFooter className="app-dialog__footer" style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
                 <SimmButton type="button" className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('Mono')}>Mono</SimmButton>
                 <SimmButton type="button" className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}>IL2CPP</SimmButton>
-              </div>
+              </DialogFooter>
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
 
       <div className="mods-overlay mods-overlay--environment workspace-collection-shell">

@@ -9088,8 +9088,9 @@ export function ModLibraryOverlay({
                       <span>Core tools and recommended downloads</span>
                     </div>
                     <div className="workspace-feature-grid">
-                      <button
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadS1APIClick}
                       >
@@ -9101,9 +9102,10 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{s1apiActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadMlvscanClick}
                       >
@@ -9115,9 +9117,10 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{mlvscanActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadMeshVaultClick}
                         disabled={!meshVaultFeaturedPackage}
@@ -9130,9 +9133,10 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{meshVaultActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadS1MapiClick}
                         disabled={!s1mapiFeaturedPackage}
@@ -9145,9 +9149,10 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{s1mapiActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadSteamNetworkLibClick}
                         disabled={!steamNetworkLibFeaturedPackage}
@@ -9160,7 +9165,7 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{steamNetworkLibActionLabel}</span>
-                      </button>
+                      </SimmButton>
                     </div>
                   </section>
                 )}
