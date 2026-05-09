@@ -8,7 +8,9 @@
 
 **Tech Stack:** Bun, Vite, React 18, Tauri 2, Tailwind CSS v4, `@tailwindcss/vite`, shadcn/ui `base-nova`, lucide icons, Vitest, TypeScript.
 
-**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-6 are complete, and `DownloadsPanel`, the shared security report view, and `ConfigurationOverlay` have started low-risk surface migrations for action/status atoms. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload.
+**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-6 are complete, and the first broad atom pass has reached `DownloadsPanel`, the shared security report view, `ConfigurationOverlay`, `LogsOverlay`, `Settings`, the App shell, `ModsOverlay`, and `ModLibraryOverlay`. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload. A 2026-05-09 scan still found remaining raw controls and legacy overlay scaffolding; use Task 9 as the current conversion backlog.
+
+**Current docs refresh:** Context7 checked shadcn/ui and Tailwind CSS docs on 2026-05-09. Current shadcn guidance still treats generated components as source-owned project code configured by `components.json` and added with `shadcn@latest add <component>`. Current Tailwind v4 guidance for Vite still uses `@tailwindcss/vite` in `vite.config.ts` and `@import "tailwindcss";` in the app CSS. The active repo matches this shape: `bunx --bun shadcn@latest info --json` reports Vite, TypeScript, Tailwind v4, `base-nova`, `base`, lucide, `src/style.css`, and generated UI components including `alert-dialog`, `alert`, `button`, `checkbox`, `context-menu`, `dialog`, `dropdown-menu`, `empty`, `field`, `input`, `label`, `popover`, `progress`, `radio-group`, `scroll-area`, `select`, `separator`, `skeleton`, `switch`, `tabs`, `textarea`, and `tooltip`.
 
 ---
 
@@ -581,9 +583,9 @@ Current Task 7 checkpoint:
 
 ---
 
-### Task 8: CSS Debt Cleanup After Migration
+### Task 8: CSS Debt Cleanup After Active Conversions
 
-Status: deferred. Ignore Task 8 until the user explicitly asks for CSS-debt cleanup. Continue Task 7 App shell atom migration first.
+Status: pending. Do not run broad CSS cleanup before Task 9 removes dead legacy layouts and converts the remaining active controls that still depend on `.btn`, `.modal-*`, `.window-control-btn`, and workspace row selectors. Small selector cleanup is allowed when it is tied to the same focused conversion batch.
 
 **Files:**
 - Modify: `src/style.css`
@@ -627,11 +629,217 @@ git commit -m "refactor(frontend): prune migrated <surface> css"
 
 ---
 
+### Task 9: Remaining shadcn/Base Nova Conversion Inventory
+
+Status: current backlog from 2026-05-09 scan. This task supersedes older notes that implied Task 7 finished all conversions. Task 7 completed the first atom pass; the files below still have raw active controls, manual dialog shells, or dead legacy layout scaffolding.
+
+**Files:**
+- Modify: `src/components/App.tsx`
+- Modify: `src/components/AppUpdateToast.tsx`
+- Modify: `src/components/AuthenticationModal.tsx`
+- Modify: `src/components/ConfigurationOverlay.tsx`
+- Modify: `src/components/EnvironmentCreationWizard.tsx`
+- Modify: `src/components/EnvironmentList.tsx`
+- Modify: `src/components/ErrorBoundary.tsx`
+- Modify: `src/components/Footer.tsx`
+- Modify: `src/components/InstallTargetsDialog.tsx`
+- Modify: `src/components/ModLibraryOverlay.tsx`
+- Modify: `src/components/ModsOverlay.tsx`
+- Modify: `src/components/PluginsOverlay.tsx`
+- Modify: `src/components/SecurityScanReportOverlay.tsx`
+- Modify: `src/components/Settings.tsx`
+- Modify: `src/components/SteamAccountOverlay.tsx`
+- Modify: `src/components/UserLibsOverlay.tsx`
+- Modify: `src/components/WelcomeOverlay.tsx`
+- Modify: `src/components/primitives/SimmButton.tsx`
+- Modify: `src/components/primitives/SimmDialog.tsx`
+- Modify: `src/components/primitives/SimmAlertDialog.tsx`
+- Modify: `src/style.css`
+- Test: focused `*.test.tsx` files next to each changed component
+
+Current raw-control inventory from:
+
+```powershell
+Get-ChildItem src\components -Filter *.tsx | Where-Object { $_.Name -notlike '*.test.tsx' -and $_.DirectoryName -notmatch '\\ui$' } | ForEach-Object { $content = Get-Content $_.FullName -Raw; [PSCustomObject]@{ File=$_.Name; Buttons=([regex]::Matches($content,'<button')).Count; Inputs=([regex]::Matches($content,'<input')).Count; Textareas=([regex]::Matches($content,'<textarea')).Count; Selects=([regex]::Matches($content,'<select')).Count; SimmButton=([regex]::Matches($content,'SimmButton')).Count; SimmBadge=([regex]::Matches($content,'SimmBadge')).Count; UiImports=([regex]::Matches($content,'@/components/ui')).Count; Legacy=([regex]::Matches($content,'legacyLayout')).Count } } | Sort-Object -Property Buttons -Descending | Format-Table -AutoSize
+```
+
+Expected current high-level counts:
+
+```text
+ModsOverlay.tsx: buttons=26, legacyLayout=2
+ModLibraryOverlay.tsx: buttons=24, inputs=3, checkbox=1, legacyLayout=2
+EnvironmentList.tsx: buttons=20, inputs=3, textareas=1, checkbox=1, radio=1
+EnvironmentCreationWizard.tsx: buttons=19
+WelcomeOverlay.tsx: buttons=14
+ConfigurationOverlay.tsx: buttons=13
+PluginsOverlay.tsx: buttons=7
+App.tsx: buttons=5
+UserLibsOverlay.tsx: buttons=5
+Footer.tsx: buttons=4
+SecurityScanReportOverlay.tsx: buttons=4
+AppUpdateToast.tsx: buttons=4, inputs=1
+Settings.tsx: buttons=3
+SteamAccountOverlay.tsx: buttons=3
+AuthenticationModal.tsx: inputs=1, checkbox=1
+InstallTargetsDialog.tsx: inputs=1, checkbox=1
+ErrorBoundary.tsx: buttons=1
+```
+
+- [ ] **Step 1: Re-run the inventory before each conversion batch**
+
+```powershell
+bunx --bun shadcn@latest info --json
+rg -n '<button|<input|<select|<textarea|type="checkbox"|type="radio"|role="dialog"|legacyLayout' src\components --glob '!*.test.tsx' --glob '!ui/**'
+rg -n "@/components/(ui|primitives)" src\components --glob '!*.test.tsx' --glob '!ui/**'
+```
+
+Expected: confirm the generated component list and the active raw-control list before editing. If another branch already converted one of the items below, remove it from this task instead of reworking it.
+
+- [ ] **Step 2: Delete dead legacy layouts before migrating their controls**
+
+Targets:
+
+```text
+src/components/ModsOverlay.tsx: legacyLayout block and `void legacyLayout`
+src/components/ModLibraryOverlay.tsx: legacyLayout block and `void legacyLayout`
+```
+
+Expected: remove dead raw controls instead of migrating them. Run:
+
+```powershell
+bun run test src/components/ModsOverlay.test.tsx
+bun run test src/components/ModLibraryOverlay.test.tsx
+bunx tsc --noEmit
+```
+
+- [ ] **Step 3: Add or refine compact icon/control primitives for chrome**
+
+Create or extend a primitive only if `SimmButton` cannot preserve the exact chrome affordance cleanly:
+
+```tsx
+// Preferred shape if a new primitive is needed.
+import { SimmButton, type SimmButtonProps } from './SimmButton';
+import { cn } from '@/lib/utils';
+
+export function SimmIconButton({ className, ...props }: SimmButtonProps) {
+  return (
+    <SimmButton
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      className={cn('window-control-btn', className)}
+      {...props}
+    />
+  );
+}
+```
+
+Targets:
+
+```text
+src/components/App.tsx: native minimize/maximize/close buttons and app notice dismiss
+src/components/AppUpdateToast.tsx: dismiss button, snooze input, update/snooze/skip buttons
+src/components/ErrorBoundary.tsx: reload/reset action
+src/components/Footer.tsx: refresh/statusbar actions
+```
+
+Expected: preserve `title`, `aria-label`, Tauri window handlers, app update behavior, and statusbar render behavior. Do not remove `.window-control-btn` CSS until focused chrome tests pass.
+
+- [ ] **Step 4: Finish environment workflow controls**
+
+Targets:
+
+```text
+src/components/EnvironmentList.tsx: edit name/description inputs, textarea, save/cancel buttons, hero actions, command buttons, metadata checkbox, MelonLoader radio selection
+src/components/EnvironmentCreationWizard.tsx: mode/step navigation, Steam detection/show buttons, directory picker actions, back/create/import buttons
+src/components/InstallTargetsDialog.tsx: target checkbox rows
+```
+
+Use existing generated components:
+
+```tsx
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Textarea } from '@/components/ui/textarea';
+import { SimmButton } from '@/components/primitives';
+```
+
+Expected: tests should use user-like interactions and roles (`button`, `checkbox`, `radio`, `textbox`) rather than implementation details.
+
+- [ ] **Step 5: Finish account/setup/app-update surfaces**
+
+Targets:
+
+```text
+src/components/WelcomeOverlay.tsx: all setup-guide action buttons and finish-action choices
+src/components/SteamAccountOverlay.tsx: Steam auth, Nexus login/logout buttons
+src/components/AuthenticationModal.tsx: remember-password checkbox and any remaining input/control semantics
+src/components/AppUpdateToast.tsx: snooze number input and action buttons
+```
+
+Expected: these are smaller than workspace overlays and should be converted before another large Mod Library pass. Keep setup-guide page structure and onboarding copy unchanged.
+
+- [ ] **Step 6: Finish package-management side panels**
+
+Targets:
+
+```text
+src/components/PluginsOverlay.tsx: upload/open/reload/toggle/delete detail actions
+src/components/UserLibsOverlay.tsx: open/reload/toggle detail actions
+src/components/ModsOverlay.tsx: active workspace action buttons after dead legacy layout removal
+src/components/ModLibraryOverlay.tsx: active search/source/install/delete/inspector buttons and local-source checkboxes after dead legacy layout removal
+```
+
+Expected: convert simple buttons to `SimmButton` first. For list rows, listbox controls, inspector candidates, and multi-select checkboxes, prefer generated `Checkbox`, `DropdownMenu`, `ContextMenu`, or `RadioGroup` only when tests can preserve keyboard and selection behavior.
+
+- [ ] **Step 7: Convert deferred behavior-heavy controls last**
+
+Targets:
+
+```text
+src/components/ConfigurationOverlay.tsx: file explorer rows, mode switch, section tabs, entry delete controls, boolean toggles
+src/components/SecurityScanReportOverlay.tsx: selector/filter/finding buttons
+src/components/LogsOverlay.tsx: no raw `<button>` remained in the 2026-05-09 scan, but keep its active filters and row interactions in the audit before CSS cleanup
+```
+
+Expected: use `Tabs` for tab-like section/mode controls only if the keyboard model is acceptable. Use `Switch` or `Checkbox` for boolean controls only when existing labels and test expectations can map to accessible roles without layout churn.
+
+- [ ] **Step 8: Collapse remaining manual modal shells into SIMM dialog primitives**
+
+Targets:
+
+```text
+Manual `modal-overlay` / `modal-content` shells that are still authored directly in app components
+Nested security report overlay shell
+Any remaining close buttons that are raw `<button className="modal-close">`
+```
+
+Expected: prefer `SimmDialogContent` or `SimmAlertDialogContent` wrappers so SIMM keeps its existing modal look while shadcn/Base UI owns focus management and escape behavior. Do not replace Tauri native plugin dialogs.
+
+- [ ] **Step 9: Validate each batch with frontend CI**
+
+Run the focused test first, then the full frontend gate:
+
+```powershell
+bun run test src/components/<ChangedSurface>.test.tsx
+bunx tsc --noEmit
+bun run lint
+bun run test
+bun run build
+```
+
+Expected: focused tests identify surface regressions, and the full gate matches GitHub Actions. Lint warnings are review prompts unless they are correctness issues in touched code.
+
+---
+
 ## Regression Controls
 
 - Do not migrate `ModLibraryOverlay.tsx` first; it is large and behavior-heavy.
 - Do not replace app-wide layout classes and shadcn components in the same commit.
 - Do not delete FontAwesome until every existing icon path has a tested lucide equivalent.
+- Do not migrate dead `legacyLayout` blocks. Delete dead layout scaffolding after confirming tests cover the live workspace UI.
+- Do not use `shadcn add --all`; the repo already has a broad generated set and remaining work is usage migration, not component discovery.
 - Do not rely on Vite build alone; `bunx tsc --noEmit` is the first CI failure point.
 - If a full Rust validation is needed because frontend/backend contracts changed, run:
 
@@ -661,6 +869,7 @@ import { cn } from '@/lib/utils';
 
 - At least one low-risk existing surface has migrated to shadcn primitives.
 - Existing app shell, Tauri window behavior, theme selection, and tests still work.
+- Task 9 inventory is empty or every remaining raw control is explicitly documented as intentionally non-shadcn.
 - Frontend CI validation passes:
 
 ```powershell
