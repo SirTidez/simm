@@ -3,7 +3,7 @@ import type { ComponentProps } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-type SimmButtonProps = ComponentProps<typeof Button>;
+export type SimmButtonProps = ComponentProps<typeof Button>;
 
 export function SimmButton({ className, ...props }: SimmButtonProps) {
   return (

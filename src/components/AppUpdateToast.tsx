@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Icon } from './Icon';
+import { Input } from './ui/input';
+import { SimmButton, SimmIconButton } from './primitives';
 
 type AppUpdateToastProps = {
   currentVersion: string;
@@ -30,14 +32,13 @@ export function AppUpdateToast({
           <span className="app-update-toast__eyebrow">Update ready</span>
           <strong>SIMM update available</strong>
         </div>
-        <button
-          type="button"
+        <SimmIconButton
           className="window-control-btn app-update-toast__dismiss"
           onClick={onDismiss}
           aria-label="Dismiss app update notice"
         >
           <Icon name="times" />
-        </button>
+        </SimmIconButton>
       </header>
 
       <p className="app-update-toast__summary">
@@ -60,7 +61,7 @@ export function AppUpdateToast({
           <label htmlFor="app-update-snooze-range">Remind me again in</label>
           <span>{snoozeLabel}</span>
         </div>
-        <input
+        <Input
           id="app-update-snooze-range"
           className="app-update-toast__slider"
           type="range"
@@ -78,15 +79,15 @@ export function AppUpdateToast({
       </div>
 
       <footer className="app-update-toast__actions">
-        <button type="button" className="btn btn-primary" onClick={onUpdate}>
+        <SimmButton type="button" className="btn btn-primary" onClick={onUpdate}>
           Update
-        </button>
-        <button type="button" className="btn btn-secondary" onClick={() => onSnooze(snoozeDays)}>
+        </SimmButton>
+        <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onSnooze(snoozeDays)}>
           Snooze
-        </button>
-        <button type="button" className="btn btn-secondary" onClick={onSkip}>
+        </SimmButton>
+        <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onSkip}>
           Skip this version
-        </button>
+        </SimmButton>
       </footer>
     </section>
   );

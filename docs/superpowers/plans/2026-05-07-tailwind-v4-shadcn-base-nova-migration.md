@@ -8,7 +8,7 @@
 
 **Tech Stack:** Bun, Vite, React 18, Tauri 2, Tailwind CSS v4, `@tailwindcss/vite`, shadcn/ui `base-nova`, lucide icons, Vitest, TypeScript.
 
-**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-6 are complete, and the first broad atom pass has reached `DownloadsPanel`, the shared security report view, `ConfigurationOverlay`, `LogsOverlay`, `Settings`, the App shell, `ModsOverlay`, and `ModLibraryOverlay`. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload. A 2026-05-09 scan still found remaining raw controls and legacy overlay scaffolding; use Task 9 as the current conversion backlog.
+**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-6 are complete, and the first broad atom pass has reached `DownloadsPanel`, the shared security report view, `ConfigurationOverlay`, `LogsOverlay`, `Settings`, the App shell, `ModsOverlay`, and `ModLibraryOverlay`. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload. Task 9 is the current conversion backlog. The dead `legacyLayout` scaffolding has been removed from `ModsOverlay` and `ModLibraryOverlay`; `ModsOverlay` no longer appears in the raw-control inventory, and `ModLibraryOverlay` has one remaining active raw button.
 
 **Current docs refresh:** Context7 checked shadcn/ui and Tailwind CSS docs on 2026-05-09. Current shadcn guidance still treats generated components as source-owned project code configured by `components.json` and added with `shadcn@latest add <component>`. Current Tailwind v4 guidance for Vite still uses `@tailwindcss/vite` in `vite.config.ts` and `@import "tailwindcss";` in the app CSS. The active repo matches this shape: `bunx --bun shadcn@latest info --json` reports Vite, TypeScript, Tailwind v4, `base-nova`, `base`, lucide, `src/style.css`, and generated UI components including `alert-dialog`, `alert`, `button`, `checkbox`, `context-menu`, `dialog`, `dropdown-menu`, `empty`, `field`, `input`, `label`, `popover`, `progress`, `radio-group`, `scroll-area`, `select`, `separator`, `skeleton`, `switch`, `tabs`, `textarea`, and `tooltip`.
 
@@ -695,7 +695,7 @@ rg -n "@/components/(ui|primitives)" src\components --glob '!*.test.tsx' --glob 
 
 Expected: confirm the generated component list and the active raw-control list before editing. If another branch already converted one of the items below, remove it from this task instead of reworking it.
 
-- [ ] **Step 2: Delete dead legacy layouts before migrating their controls**
+- [x] **Step 2: Delete dead legacy layouts before migrating their controls**
 
 Targets:
 
@@ -712,7 +712,14 @@ bun run test src/components/ModLibraryOverlay.test.tsx
 bunx tsc --noEmit
 ```
 
-- [ ] **Step 3: Add or refine compact icon/control primitives for chrome**
+Current Task 9 Step 2 checkpoint:
+
+- Removed the dead `legacyLayout` blocks and `void legacyLayout` anchors from `src/components/ModsOverlay.tsx` and `src/components/ModLibraryOverlay.tsx`.
+- Pruned helper state and handlers that were only reachable from those dead branches.
+- Fresh raw-control inventory no longer reports `ModsOverlay.tsx`; `ModLibraryOverlay.tsx` has one remaining raw active button.
+- Validation passed with `bun run test src/components/ModsOverlay.test.tsx`, `bun run test src/components/ModLibraryOverlay.test.tsx`, `bun install`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`. Lint remains warning-only with existing hook/dependency and Fast Refresh warnings.
+
+- [x] **Step 3: Add or refine compact icon/control primitives for chrome**
 
 Create or extend a primitive only if `SimmButton` cannot preserve the exact chrome affordance cleanly:
 
@@ -744,6 +751,13 @@ src/components/Footer.tsx: refresh/statusbar actions
 ```
 
 Expected: preserve `title`, `aria-label`, Tauri window handlers, app update behavior, and statusbar render behavior. Do not remove `.window-control-btn` CSS until focused chrome tests pass.
+
+Current Task 9 Step 3 checkpoint:
+
+- Added `SimmIconButton` as a compact `SimmButton` wrapper for window-style icon controls without changing generated shadcn button internals.
+- Converted native window controls, app notice dismiss, app update toast dismiss/actions/snooze input, error-boundary reload, footer refresh/statusbar update actions, and the remaining App shell focus action to SIMM/shadcn primitives.
+- Fresh raw-control inventory reports no remaining raw controls in `App.tsx`, `AppUpdateToast.tsx`, `ErrorBoundary.tsx`, or `Footer.tsx`.
+- Validation passed with `bunx tsc --noEmit`, `bun run test src/components/App.test.tsx`, `bun run test src/components/primitives/SimmButton.test.tsx`, `bun run lint`, `bun run test`, `bun run build`, and `bun install`. Lint remains warning-only with the existing hook/dependency and Fast Refresh warning baseline.
 
 - [ ] **Step 4: Finish environment workflow controls**
 

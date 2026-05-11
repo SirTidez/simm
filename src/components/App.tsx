@@ -47,7 +47,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
+import { SimmBadge, SimmButton, SimmDialogContent, SimmIconButton } from './primitives';
 import type { IconName } from './icons';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
@@ -551,9 +551,10 @@ function HomeDashboard({
               <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--loading">Scanning</SimmBadge>
             </div>
           ) : (
-            <button
+            <SimmButton
               type="button"
-              className="home-dashboard__focus home-dashboard__focus--action"
+              variant="ghost"
+              className="home-dashboard__focus home-dashboard__focus--action h-auto"
               onClick={primaryEnvironment ? () => onOpenEnvironments(primaryEnvironment.id) : onOpenWizard}
               aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
             >
@@ -570,7 +571,7 @@ function HomeDashboard({
                   Update available
                 </SimmBadge>
               )}
-            </button>
+            </SimmButton>
           )}
           <div className="home-dashboard__quick-grid">
             <SimmButton type="button" variant="ghost" onClick={onOpenModUpdates}>
@@ -1078,30 +1079,30 @@ function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUti
       </div>
 
       <div className="window-controls" aria-label="Window controls">
-        <button
+        <SimmIconButton
           onClick={handleMinimize}
           className="window-control-btn"
           title="Minimize"
           aria-label="Minimize"
         >
           <Icon name="minus" />
-        </button>
-        <button
+        </SimmIconButton>
+        <SimmIconButton
           onClick={handleToggleMaximize}
           className="window-control-btn"
           title={isMaximized ? 'Restore Down' : 'Maximize'}
           aria-label={isMaximized ? 'Restore Down' : 'Maximize'}
         >
           <Icon name={isMaximized ? 'windowRestore' : 'square'} />
-        </button>
-        <button
+        </SimmIconButton>
+        <SimmIconButton
           onClick={handleCloseWindow}
           className="window-control-btn window-control-btn-close"
           title="Close"
           aria-label="Close"
         >
           <Icon name="times" />
-        </button>
+        </SimmIconButton>
       </div>
     </header>
   );
@@ -2308,14 +2309,13 @@ function AppContent() {
         <div className="app-notice app-notice--danger" role="alert" aria-live="assertive">
           <div className="app-notice__header">
             <strong>Nexus Download Blocked</strong>
-            <button
-              type="button"
+            <SimmIconButton
               className="window-control-btn app-notice__dismiss"
               onClick={() => setAppNotice(null)}
               aria-label="Dismiss notice"
             >
               <Icon name="times" />
-            </button>
+            </SimmIconButton>
           </div>
           <span className="app-notice__body">{appNotice}</span>
         </div>

@@ -8995,7 +8995,7 @@ body {
 }
 
 .workspace-collection__table-head--discover {
-  grid-template-columns: 50px minmax(300px, 1fr) minmax(110px, 0.32fr) minmax(100px, 0.24fr) minmax(92px, 0.22fr);
+  grid-template-columns: 50px minmax(360px, 1fr) minmax(120px, 0.18fr) minmax(108px, 0.16fr) 78px;
 }
 
 .workspace-collection__table-head--downloaded {
@@ -9005,6 +9005,11 @@ body {
 .workspace-collection__table-head--discover span:first-child,
 .workspace-collection__table-head--downloaded span:first-child {
   grid-column: 2;
+}
+
+.workspace-collection__table-head--discover span:last-child {
+  justify-self: center;
+  text-align: center;
 }
 
 .mods-overlay--environment .workspace-collection__list {
@@ -9037,7 +9042,7 @@ body {
 }
 
 .workspace-collection__row--discover {
-  grid-template-columns: 50px minmax(300px, 1fr) minmax(110px, 0.32fr) minmax(100px, 0.24fr) minmax(92px, 0.22fr);
+  grid-template-columns: 50px minmax(360px, 1fr) minmax(120px, 0.18fr) minmax(108px, 0.16fr) 78px;
   gap: 0.78rem;
   align-items: center;
   min-height: 88px;
@@ -9115,7 +9120,8 @@ body {
 }
 
 .workspace-collection__row-cell--status {
-  justify-items: start;
+  justify-items: center;
+  text-align: center;
 }
 
 .workspace-collection__row-title {
@@ -9149,28 +9155,29 @@ body {
 .workspace-collection__status {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   width: fit-content;
   min-width: 0;
-  padding: 0.14rem 0.42rem;
-  border-radius: 999px;
-  border: 1px solid var(--workspace-stroke-soft);
-  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 82%, transparent);
+  padding: 0;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
   color: var(--workspace-title-color);
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   line-height: 1.2;
-  white-space: normal;
+  white-space: nowrap;
 }
 
 .workspace-collection__status--success {
-  border-color: rgba(74, 222, 128, 0.28);
-  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 74%, #238a55 26%);
   color: #8ee4ab;
 }
 
 .workspace-collection__status--warning {
-  border-color: rgba(255, 187, 84, 0.32);
-  background: color-mix(in srgb, var(--workspace-surface-muted-soft, #1d2b3f) 72%, #a86d22 28%);
   color: #ffca76;
+}
+
+.workspace-collection__status--muted {
+  color: var(--workspace-copy-color);
 }
 
 .workspace-collection__row-summary {
