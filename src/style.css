@@ -70,22 +70,10 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
-/* Responsive base font size scaling */
+/* Keep desktop rem sizing stable across 1080p, 1440p, and 4k; scale only for compact/mobile layouts. */
 @media (max-width: 768px) {
   :root {
     font-size: 14px;
-  }
-}
-
-@media (min-width: 1920px) {
-  :root {
-    font-size: 18px;
-  }
-}
-
-@media (min-width: 2560px) {
-  :root {
-    font-size: 20px;
   }
 }
 
@@ -4538,7 +4526,10 @@ body::before {
 .logs-panel__mod-button {
   padding: 0.48rem 0.54rem;
   display: grid;
+  align-items: stretch;
   gap: 0.18rem;
+  justify-content: stretch;
+  justify-items: stretch;
   text-align: left;
   min-width: 0;
 }
@@ -8900,6 +8891,9 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   gap: 0.8rem;
+  width: 100%;
+  height: auto;
+  min-height: 4.95rem;
   padding: 0.8rem 0.9rem;
   border-radius: 0.78rem;
   border: 1px solid var(--workspace-stroke);
@@ -8907,6 +8901,11 @@ body {
   color: var(--workspace-title-color);
   text-align: left;
   cursor: pointer;
+  white-space: normal;
+}
+
+.workspace-feature-card > div {
+  min-width: 0;
 }
 
 .workspace-feature-card p {
@@ -8916,6 +8915,7 @@ body {
 }
 
 .workspace-feature-card span {
+  flex: 0 0 auto;
   white-space: nowrap;
   color: var(--primary-btn-color);
   font-size: 0.78rem;

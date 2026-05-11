@@ -35,6 +35,7 @@ Use dialogs for destructive confirmation, credential entry, runtime choice, file
 - `bun run test` and `bun run build` are not enough by themselves.
 - Plain Vite smoke tests do not prove Tauri-hosted behavior for code that depends on Tauri APIs.
 - When possible, review actual Tauri-hosted UI for window, protocol, filesystem, and IPC-dependent behavior.
+- Layout and visual reviews must consider 1080p, 1440p, and 4k desktop viewports. Keep desktop root font sizing stable; use explicit component dimensions, wrapping, and container constraints so the app does not depend on one developer's monitor resolution.
 
 ## Anti-Patterns
 

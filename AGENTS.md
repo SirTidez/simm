@@ -19,6 +19,7 @@ Important:
 - `bun run lint` currently starts as an advisory check: warnings do not block the command and are not a mandate for broad React churn.
 - Treat `react-hooks/rules-of-hooks` as correctness work. Treat `react-hooks/exhaustive-deps`, Fast Refresh, and IPC/event-boundary warnings as review prompts unless the fix is small, local, and behavior-preserving.
 - If `tsc` fails, do not rely on Vitest or Vite build success as evidence that the frontend is CI-safe.
+- For layout or visual changes, account for desktop viewport differences before considering the work done. SIMM should remain consistent at common 1080p, 1440p, and 4k desktop sizes; do not use desktop breakpoint root-font scaling to make rem-based controls larger on high-resolution screens. Prefer component/container sizing that remains stable across those viewports.
 
 ## Full Repo Validation
 
