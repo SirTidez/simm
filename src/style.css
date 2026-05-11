@@ -4832,6 +4832,18 @@ body::before {
   pointer-events: none;
 }
 
+.logs-panel__load-older {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 2.25rem;
+  border-bottom: 1px solid rgba(112, 157, 221, 0.12);
+  color: #b9c7d8;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+}
+
 .logs-panel__jump-live-overlay {
   position: absolute;
   left: 50%;

@@ -808,6 +808,71 @@ describe('LogsOverlay', () => {
     expect(container.querySelector('.logs-panel__virtual-spacer')).toBeTruthy();
   });
 
+  it('loads an older log chunk when scrolling near the top of a tailed file', async () => {
+    const olderLoad = createDeferred<Array<ReturnType<typeof makeLogLine>>>();
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce(
+        Array.from({ length: 4000 }, (_, index) => makeLogLine({
+          lineNumber: index + 101,
+          content: `Tailed log line ${index + 101}`,
+          category: 'general',
+        })),
+      )
+      .mockImplementationOnce(() => olderLoad.promise);
+
+    const { container } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Tailed log line 101')).toBeTruthy();
+
+    const stream = container.querySelector('.logs-panel__stream') as HTMLDivElement | null;
+    expect(stream).toBeTruthy();
+
+    if (stream) {
+      Object.defineProperty(stream, 'scrollHeight', {
+        configurable: true,
+        value: 240000,
+      });
+      Object.defineProperty(stream, 'clientHeight', {
+        configurable: true,
+        value: 720,
+      });
+      Object.defineProperty(stream, 'scrollTop', {
+        configurable: true,
+        value: 100,
+        writable: true,
+      });
+      fireEvent.scroll(stream);
+    }
+
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I/Logs/Session-latest.log', 8000);
+    });
+
+    olderLoad.resolve(
+      Array.from({ length: 4100 }, (_, index) => makeLogLine({
+        lineNumber: index + 1,
+        content: `Expanded log line ${index + 1}`,
+        category: 'general',
+      })),
+    );
+
+    expect(await screen.findByText('Expanded log line 1')).toBeTruthy();
+  });
+
   it('keeps edge-case metadata visible for missing timestamps and long mod tags', async () => {
     apiMocks.getLogFiles.mockResolvedValue([
       makeLogFile({

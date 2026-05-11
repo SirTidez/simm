@@ -20,9 +20,11 @@ import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
 const INITIAL_LOG_LINE_LIMIT = 4000;
+const LOG_LINE_CHUNK_SIZE = 4000;
 const LOG_FILE_CACHE_LIMIT = 10;
 const LOG_ROW_ESTIMATED_HEIGHT = 58;
 const LOG_ROW_OVERSCAN = 14;
+const LOG_LOAD_OLDER_THRESHOLD = LOG_ROW_ESTIMATED_HEIGHT * 8;
 
 interface LogFile {
   name: string;
@@ -44,6 +46,7 @@ interface LogLine {
 interface CachedLogFile {
   size: number;
   modified: string | null;
+  loadedLimit: number;
   lines: LogLine[];
 }
 
@@ -409,8 +412,10 @@ const LogStream = memo(function LogStream({
   error,
   isLiveFile,
   loading,
+  loadingOlder,
   logLineCount,
   onKeyDown,
+  onLoadOlder,
   onModFilter,
   onScrollStateChange,
   onSelectLine,
@@ -424,8 +429,10 @@ const LogStream = memo(function LogStream({
   error: string | null;
   isLiveFile: boolean;
   loading: boolean;
+  loadingOlder: boolean;
   logLineCount: number;
   onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
+  onLoadOlder: () => void;
   onModFilter: (line: LogLine, key: string) => void;
   onScrollStateChange: (atBottom: boolean) => void;
   onSelectLine: (key: string) => void;
@@ -454,6 +461,9 @@ const LogStream = memo(function LogStream({
 
     const { scrollTop, scrollHeight, clientHeight } = container;
     onScrollStateChange(Math.abs(scrollHeight - clientHeight - scrollTop) < 12);
+    if (scrollTop <= LOG_LOAD_OLDER_THRESHOLD) {
+      onLoadOlder();
+    }
 
     if (scrollFrameRef.current !== null) {
       return;
@@ -463,7 +473,7 @@ const LogStream = memo(function LogStream({
       scrollFrameRef.current = null;
       updateScrollMetrics(container);
     });
-  }, [containerRef, onScrollStateChange, updateScrollMetrics]);
+  }, [containerRef, onLoadOlder, onScrollStateChange, updateScrollMetrics]);
 
   const setRowRef = useCallback((key: string, element: HTMLDivElement | null) => {
     rowRefs.current[key] = element;
@@ -543,6 +553,12 @@ const LogStream = memo(function LogStream({
         </div>
       ) : (
         <>
+          {loadingOlder ? (
+            <div className="logs-panel__load-older" role="status">
+              <Icon name="fas fa-spinner fa-spin" />
+              Loading earlier entries
+            </div>
+          ) : null}
           {virtualTopPadding > 0 ? (
             <div
               aria-hidden="true"
@@ -583,6 +599,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [selectedLineKey, setSelectedLineKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filterLevel, setFilterLevel] = useState<LogLevelFilter>('ALL');
   const [filterCategory, setFilterCategory] = useState<LogCategoryFilter>('ALL');
@@ -606,11 +623,18 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const toastTimeoutRef = useRef<number | null>(null);
   const logFileCacheRef = useRef<Map<string, CachedLogFile>>(new Map());
   const displayedLogPathRef = useRef<string | null>(null);
+  const selectedLogPathRef = useRef<string | null>(null);
+  const loadedLogLineLimitRef = useRef(INITIAL_LOG_LINE_LIMIT);
+  const loadingOlderRef = useRef(false);
 
   const selectedLogFile = useMemo(
     () => logFiles.find((file) => file.path === selectedLogPath) ?? null,
     [logFiles, selectedLogPath],
   );
+
+  useEffect(() => {
+    selectedLogPathRef.current = selectedLogPath;
+  }, [selectedLogPath]);
 
   const isSharedPlayerLogFile = (file: LogFile | null): boolean => {
     if (!file) return false;
@@ -624,7 +648,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     return file.isLatest || normalizedPath.endsWith('/player.log');
   }, []);
 
-  const getCachedLogLines = useCallback((file: LogFile): LogLine[] | null => {
+  const getCachedLogFile = useCallback((file: LogFile): CachedLogFile | null => {
     const cached = logFileCacheRef.current.get(file.path);
     if (!cached) return null;
 
@@ -635,16 +659,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     logFileCacheRef.current.delete(file.path);
     logFileCacheRef.current.set(file.path, cached);
-    return cached.lines;
+    return cached;
   }, []);
 
-  const cacheLogLines = useCallback((file: LogFile, lines: LogLine[]): LogLine[] => {
+  const cacheLogLines = useCallback((file: LogFile, lines: LogLine[], loadedLimit = loadedLogLineLimitRef.current): LogLine[] => {
     const existing = logFileCacheRef.current.get(file.path);
     const stableLines = existing && areLogLinesEqual(existing.lines, lines) ? existing.lines : lines;
 
     logFileCacheRef.current.set(file.path, {
       size: file.size,
       modified: file.modified,
+      loadedLimit,
       lines: stableLines,
     });
 
@@ -841,6 +866,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     setLogFiles([]);
     setSelectedLogPath(null);
     setLogLines([]);
+    setLoadingOlder(false);
+    loadingOlderRef.current = false;
+    loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
     setSelectedLineKey(null);
     setLoading(false);
     setError(null);
@@ -874,9 +902,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       setLoading(true);
       setError(null);
       resetLogViewport();
+      loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
       setLogLines([]);
       const lines = await ApiService.readLogFile(logPath, INITIAL_LOG_LINE_LIMIT);
-      const stableLines = file ? cacheLogLines(file, lines) : lines;
+      const stableLines = file ? cacheLogLines(file, lines, INITIAL_LOG_LINE_LIMIT) : lines;
       showLogLines(stableLines, logPath);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load log file');
@@ -962,8 +991,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       resetLogViewport();
       setError(null);
 
-      const cachedLines = getCachedLogLines(selectedLogFile);
+      const cachedFile = getCachedLogFile(selectedLogFile);
+      const cachedLines = cachedFile?.lines ?? null;
       if (cachedLines) {
+        loadedLogLineLimitRef.current = cachedFile?.loadedLimit ?? INITIAL_LOG_LINE_LIMIT;
         setLoading(false);
         showLogLines(cachedLines, selectedLogFile.path);
         if (!isLiveLogFile(selectedLogFile)) {
@@ -978,9 +1009,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         if (!cachedLines && displayedLogPathRef.current !== selectedLogFile.path) {
           setLogLines([]);
         }
+        loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
         const lines = await ApiService.readLogFile(selectedLogFile.path, INITIAL_LOG_LINE_LIMIT);
         if (cancelled) return;
-        const stableLines = cacheLogLines(selectedLogFile, lines);
+        const stableLines = cacheLogLines(selectedLogFile, lines, INITIAL_LOG_LINE_LIMIT);
         showLogLines(stableLines, selectedLogFile.path);
       } catch (err) {
         if (!cancelled) {
@@ -1000,21 +1032,24 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     return () => {
       cancelled = true;
     };
-  }, [cacheLogLines, getCachedLogLines, isLiveLogFile, resetLogViewport, selectedLogFile, showLogLines]);
+  }, [cacheLogLines, getCachedLogFile, isLiveLogFile, resetLogViewport, selectedLogFile, showLogLines]);
 
   const selectLogFile = (logPath: string) => {
     if (logPath === selectedLogPath) {
       return;
     }
     const nextFile = logFiles.find((file) => file.path === logPath) ?? null;
-    const cachedLines = nextFile ? getCachedLogLines(nextFile) : null;
+    const cachedFile = nextFile ? getCachedLogFile(nextFile) : null;
+    const cachedLines = cachedFile?.lines ?? null;
 
     resetLogViewport();
     setError(null);
     if (cachedLines) {
+      loadedLogLineLimitRef.current = cachedFile?.loadedLimit ?? INITIAL_LOG_LINE_LIMIT;
       setLoading(false);
       showLogLines(cachedLines, logPath);
     } else {
+      loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
       displayedLogPathRef.current = null;
       setLogLines([]);
     }
@@ -1056,9 +1091,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     const bindListener = async () => {
       unlisten = await listen<{ lines: LogLine[] }>('log-update', (event) => {
         setLogLines((current) => {
-          const nextLines = [...current, ...event.payload.lines].slice(-INITIAL_LOG_LINE_LIMIT);
+          const nextLines = [...current, ...event.payload.lines].slice(-loadedLogLineLimitRef.current);
           if (selectedLogFile) {
-            cacheLogLines(selectedLogFile, nextLines);
+            cacheLogLines(selectedLogFile, nextLines, loadedLogLineLimitRef.current);
           }
           return nextLines;
         });
@@ -1110,6 +1145,45 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       }
     };
   }, [isOpen, isWatching]);
+
+  const loadOlderLogEntries = useCallback(() => {
+    if (!selectedLogFile || loadingOlderRef.current) return;
+    const firstLoadedLineNumber = logLines[0]?.lineNumber ?? 1;
+    if (firstLoadedLineNumber <= 1) return;
+
+    const container = logContainerRef.current;
+    const previousScrollHeight = container?.scrollHeight ?? 0;
+    const previousScrollTop = container?.scrollTop ?? 0;
+    const nextLimit = loadedLogLineLimitRef.current + LOG_LINE_CHUNK_SIZE;
+
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+
+    void ApiService.readLogFile(selectedLogFile.path, nextLimit)
+      .then((lines) => {
+        const currentPath = selectedLogFile.path;
+        if (selectedLogPathRef.current !== currentPath) return;
+        loadedLogLineLimitRef.current = nextLimit;
+        const stableLines = cacheLogLines(selectedLogFile, lines, nextLimit);
+        displayedLogPathRef.current = currentPath;
+        setLogLines((current) => (areLogLinesEqual(current, stableLines) ? current : stableLines));
+        setAutoScroll(false);
+        setIsAtBottom(false);
+        requestAnimationFrame(() => {
+          const latestContainer = logContainerRef.current;
+          if (!latestContainer || displayedLogPathRef.current !== currentPath) return;
+          const heightDelta = latestContainer.scrollHeight - previousScrollHeight;
+          latestContainer.scrollTop = Math.max(0, previousScrollTop + heightDelta);
+        });
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to load earlier log entries');
+      })
+      .finally(() => {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
+      });
+  }, [cacheLogLines, logLines, selectedLogFile]);
 
   const handleStreamScrollStateChange = useCallback((atBottom: boolean) => {
     setIsAtBottom(atBottom);
@@ -1519,8 +1593,10 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
               error={error}
               isLiveFile={isLiveFile}
               loading={loading}
+              loadingOlder={loadingOlder}
               logLineCount={logLines.length}
               onKeyDown={handleViewerKeyDown}
+              onLoadOlder={loadOlderLogEntries}
               onModFilter={handleStreamModFilter}
               onScrollStateChange={handleStreamScrollStateChange}
               onSelectLine={handleStreamLineSelect}
