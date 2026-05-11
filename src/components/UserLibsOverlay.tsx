@@ -7,6 +7,7 @@ import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { Icon } from './Icon';
+import { SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface UserLibInfo {
@@ -254,12 +255,12 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
                 />
               </div>
               <div className="workspace-collection__toolbar-group">
-                <button type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
+                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
                   Open Folder
-                </button>
-                <button type="button" className="btn btn-secondary btn-small" onClick={() => void loadUserLibs()} disabled={loading}>
+                </SimmButton>
+                <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void loadUserLibs()} disabled={loading}>
                   Reload
-                </button>
+                </SimmButton>
               </div>
             </div>
 
@@ -361,19 +362,19 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
               </div>
 
               <div className="workspace-inspector-card__actions">
-                <button
+                <SimmButton
                   className={selectedUserLib.disabled ? 'btn btn-primary' : 'btn btn-secondary'}
                   onClick={() => void handleToggleUserLib(selectedUserLib)}
                   disabled={togglingUserLibKey === getUserLibKey(selectedUserLib)}
                 >
                   {selectedUserLib.disabled ? 'Enable' : 'Disable'}
-                </button>
-                <button className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
+                </SimmButton>
+                <SimmButton className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
                   Open Folder
-                </button>
-                <button className="btn btn-secondary" onClick={() => void loadUserLibs()} disabled={loading}>
+                </SimmButton>
+                <SimmButton className="btn btn-secondary" onClick={() => void loadUserLibs()} disabled={loading}>
                   Reload
-                </button>
+                </SimmButton>
               </div>
             </div>
           )}

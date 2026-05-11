@@ -4,6 +4,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
 import type { Environment, ModLibraryEntry } from '../types';
 import { SimmButton, SimmDialogContent } from './primitives';
 
@@ -140,11 +141,10 @@ export function InstallTargetsDialog({
                 className="workspace-install-dialog__row"
                 style={isLocked ? { opacity: 0.72, cursor: 'default' } : undefined}
               >
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selectedEnvironmentIds.has(environment.id)}
                   disabled={isLocked}
-                  onChange={() => onToggleEnvironment(environment.id)}
+                  onCheckedChange={() => onToggleEnvironment(environment.id)}
                 />
                 <span className="workspace-install-dialog__row-main">
                   <strong>{environment.name}</strong>

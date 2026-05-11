@@ -8,7 +8,7 @@
 
 **Tech Stack:** Bun, Vite, React 18, Tauri 2, Tailwind CSS v4, `@tailwindcss/vite`, shadcn/ui `base-nova`, lucide icons, Vitest, TypeScript.
 
-**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-6 are complete, and the first broad atom pass has reached `DownloadsPanel`, the shared security report view, `ConfigurationOverlay`, `LogsOverlay`, `Settings`, the App shell, `ModsOverlay`, and `ModLibraryOverlay`. A `vendor-ui` manual chunk now isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload. Task 9 is the current conversion backlog. The dead `legacyLayout` scaffolding has been removed from `ModsOverlay` and `ModLibraryOverlay`; `ModsOverlay` no longer appears in the raw-control inventory, and `ModLibraryOverlay` has one remaining active raw button.
+**Current checkpoint:** Tailwind v4, shadcn `base-nova`, foundation components, and SIMM primitives are merged into `0.8.5`. Setup Tasks 1-7 and the remaining Task 9 conversion inventory are complete; Task 8 remains the optional CSS-debt cleanup track after active conversions. A `vendor-ui` manual chunk isolates Base UI/shadcn runtime cost so small lazy surfaces do not absorb the full dependency payload. The raw-control inventory outside generated `src/components/ui` implementations is empty, dead `legacyLayout` scaffolding has been removed from `ModsOverlay` and `ModLibraryOverlay`, remaining nested manual modal shells have been collapsed into SIMM dialog primitives, and the full frontend validation gate passes with lint warnings only.
 
 **Current docs refresh:** Context7 checked shadcn/ui and Tailwind CSS docs on 2026-05-09. Current shadcn guidance still treats generated components as source-owned project code configured by `components.json` and added with `shadcn@latest add <component>`. Current Tailwind v4 guidance for Vite still uses `@tailwindcss/vite` in `vite.config.ts` and `@import "tailwindcss";` in the app CSS. The active repo matches this shape: `bunx --bun shadcn@latest info --json` reports Vite, TypeScript, Tailwind v4, `base-nova`, `base`, lucide, `src/style.css`, and generated UI components including `alert-dialog`, `alert`, `button`, `checkbox`, `context-menu`, `dialog`, `dropdown-menu`, `empty`, `field`, `input`, `label`, `popover`, `progress`, `radio-group`, `scroll-area`, `select`, `separator`, `skeleton`, `switch`, `tabs`, `textarea`, and `tooltip`.
 
@@ -591,7 +591,7 @@ Status: pending. Do not run broad CSS cleanup before Task 9 removes dead legacy 
 - Modify: `src/style.css`
 - Modify: affected component files only when a selector is removed
 
-- [ ] **Step 1: Build a selector inventory**
+- [x] **Step 1: Build a selector inventory**
 
 ```powershell
 rg -n "^\\.[A-Za-z0-9_-]+" src/style.css
@@ -600,7 +600,7 @@ rg -n "className=" src/components
 
 Expected: know which selectors are still referenced.
 
-- [ ] **Step 2: Remove dead selectors in batches**
+- [x] **Step 2: Remove dead selectors in batches**
 
 Each batch should remove selectors from one migrated surface only.
 
@@ -608,8 +608,10 @@ Current Task 8 checkpoint:
 
 - Removed the old native `workspace-collection__toolbar-select-wrap` selector batch after confirming there were no remaining JSX references. Live Mod Library sorting now uses the shadcn `Select` wrapper through `DiscoverSortSelect`.
 - Validation passed with `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
+- Built a current CSS/className inventory after Task 9 completed. Removed the stale settings hidden-input switch selectors left behind by the `Switch` conversion, and pruned the now-unused Configuration editor selectors for the pre-migration header/badge/raw-toolbar shape.
+- Verified those selector names no longer appear outside the plan text and `bunx tsc --noEmit` passes.
 
-- [ ] **Step 3: Validate after each CSS batch**
+- [x] **Step 3: Validate after each CSS batch**
 
 ```powershell
 bunx tsc --noEmit
@@ -619,6 +621,11 @@ bun run build
 ```
 
 Expected: no deleted selector affects an unconverted page.
+
+Current Task 8 validation checkpoint:
+
+- Validation passed with `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
+- Lint remains warning-only with the existing advisory hook/dependency, Fast Refresh, and IPC/event-boundary warning baseline.
 
 - [ ] **Step 4: Commit CSS cleanup batches**
 
@@ -685,7 +692,7 @@ InstallTargetsDialog.tsx: inputs=1, checkbox=1
 ErrorBoundary.tsx: buttons=1
 ```
 
-- [ ] **Step 1: Re-run the inventory before each conversion batch**
+- [x] **Step 1: Re-run the inventory before each conversion batch**
 
 ```powershell
 bunx --bun shadcn@latest info --json
@@ -759,7 +766,7 @@ Current Task 9 Step 3 checkpoint:
 - Fresh raw-control inventory reports no remaining raw controls in `App.tsx`, `AppUpdateToast.tsx`, `ErrorBoundary.tsx`, or `Footer.tsx`.
 - Validation passed with `bunx tsc --noEmit`, `bun run test src/components/App.test.tsx`, `bun run test src/components/primitives/SimmButton.test.tsx`, `bun run lint`, `bun run test`, `bun run build`, and `bun install`. Lint remains warning-only with the existing hook/dependency and Fast Refresh warning baseline.
 
-- [ ] **Step 4: Finish environment workflow controls**
+- [x] **Step 4: Finish environment workflow controls**
 
 Targets:
 
@@ -781,7 +788,14 @@ import { SimmButton } from '@/components/primitives';
 
 Expected: tests should use user-like interactions and roles (`button`, `checkbox`, `radio`, `textbox`) rather than implementation details.
 
-- [ ] **Step 5: Finish account/setup/app-update surfaces**
+Current Task 9 Step 4 checkpoint:
+
+- Converted environment workflow controls to SIMM/shadcn primitives across `EnvironmentCreationWizard.tsx`, `EnvironmentList.tsx`, and `InstallTargetsDialog.tsx`.
+- Replaced raw environment inputs, textareas, checkboxes, radio selection, and wizard/list action buttons while preserving existing class anchors and behavior.
+- Fresh raw-control inventory reports no remaining raw controls in those three files.
+- Validation passed with `bunx tsc --noEmit` and `bun run test src/components/EnvironmentList.test.tsx`.
+
+- [x] **Step 5: Finish account/setup/app-update surfaces**
 
 Targets:
 
@@ -794,7 +808,14 @@ src/components/AppUpdateToast.tsx: snooze number input and action buttons
 
 Expected: these are smaller than workspace overlays and should be converted before another large Mod Library pass. Keep setup-guide page structure and onboarding copy unchanged.
 
-- [ ] **Step 6: Finish package-management side panels**
+Current Task 9 Step 5 checkpoint:
+
+- Converted Welcome setup actions, account-service actions, and the auth credential preference to `SimmButton`/`Switch` primitives while preserving onboarding copy and account behavior.
+- `AppUpdateToast.tsx` was already converted during the chrome batch.
+- Fresh raw-control inventory reports no remaining raw controls in `WelcomeOverlay.tsx`, `SteamAccountOverlay.tsx`, `AuthenticationModal.tsx`, or `AppUpdateToast.tsx`.
+- Validation passed with `bunx tsc --noEmit`.
+
+- [x] **Step 6: Finish package-management side panels**
 
 Targets:
 
@@ -807,7 +828,14 @@ src/components/ModLibraryOverlay.tsx: active search/source/install/delete/inspec
 
 Expected: convert simple buttons to `SimmButton` first. For list rows, listbox controls, inspector candidates, and multi-select checkboxes, prefer generated `Checkbox`, `DropdownMenu`, `ContextMenu`, or `RadioGroup` only when tests can preserve keyboard and selection behavior.
 
-- [ ] **Step 7: Convert deferred behavior-heavy controls last**
+Current Task 9 Step 6 checkpoint:
+
+- Converted plugin, UserLibs, and Mod Library runtime-prompt buttons to `SimmButton` while preserving row keyboard/context-menu behavior.
+- `ModsOverlay.tsx` remained raw-control clean after the dead legacy layout removal.
+- Fresh raw-control inventory reports no remaining raw controls in `PluginsOverlay.tsx`, `UserLibsOverlay.tsx`, `ModsOverlay.tsx`, or `ModLibraryOverlay.tsx`.
+- Validation passed with `bunx tsc --noEmit` and `bun run test src/components/ModLibraryOverlay.test.tsx`.
+
+- [x] **Step 7: Convert deferred behavior-heavy controls last**
 
 Targets:
 
@@ -819,7 +847,14 @@ src/components/LogsOverlay.tsx: no raw `<button>` remained in the 2026-05-09 sca
 
 Expected: use `Tabs` for tab-like section/mode controls only if the keyboard model is acceptable. Use `Switch` or `Checkbox` for boolean controls only when existing labels and test expectations can map to accessible roles without layout churn.
 
-- [ ] **Step 8: Collapse remaining manual modal shells into SIMM dialog primitives**
+Current Task 9 Step 7 checkpoint:
+
+- Converted configuration explorer, mode switch, section tabs, entry delete, boolean value toggles, security-report selector/filter/finding controls, and remaining Settings directory/tooling buttons to `SimmButton`.
+- `LogsOverlay.tsx` still has no raw active controls in the current audit.
+- Fresh raw-control inventory reports no remaining raw controls outside generated `src/components/ui` implementations.
+- Validation passed with `bunx tsc --noEmit`.
+
+- [x] **Step 8: Collapse remaining manual modal shells into SIMM dialog primitives**
 
 Targets:
 
@@ -831,7 +866,13 @@ Any remaining close buttons that are raw `<button className="modal-close">`
 
 Expected: prefer `SimmDialogContent` or `SimmAlertDialogContent` wrappers so SIMM keeps its existing modal look while shadcn/Base UI owns focus management and escape behavior. Do not replace Tauri native plugin dialogs.
 
-- [ ] **Step 9: Validate each batch with frontend CI**
+Current Task 9 Step 8 checkpoint:
+
+- Converted the nested security report overlay and Mod Library runtime prompt from hand-authored `modal-overlay` shells to `Dialog` + `SimmDialogContent`.
+- The manual-shell audit now reports no raw `<button>` controls, no dead `legacyLayout`, and no direct nested `modal-overlay` shells outside the generated UI primitives and plan text.
+- Validation passed with `bunx tsc --noEmit` and `bun run test src/components/ModLibraryOverlay.test.tsx`.
+
+- [x] **Step 9: Validate each batch with frontend CI**
 
 Run the focused test first, then the full frontend gate:
 
@@ -844,6 +885,13 @@ bun run build
 ```
 
 Expected: focused tests identify surface regressions, and the full gate matches GitHub Actions. Lint warnings are review prompts unless they are correctness issues in touched code.
+
+Current Task 9 Step 9 checkpoint:
+
+- `bunx --bun shadcn@latest info --json` reports Vite, TypeScript, Tailwind v4, `base-nova`, `base`, lucide, `src/style.css`, and the expected generated component set.
+- Raw-control inventory outside `src/components/ui` is empty.
+- `git diff --check` passed; Git reported only normal LF-to-CRLF working-copy warnings on Windows.
+- Full frontend gate passed: `bun install`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`. Lint completed with the existing advisory warning baseline and no errors.
 
 ---
 

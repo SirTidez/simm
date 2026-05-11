@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Icon } from './Icon';
 import { SimmButton, SimmDialogContent } from './primitives';
 
@@ -241,18 +242,24 @@ export function AuthenticationModal({
                 </div>
 
                 <div className="settings-field auth-modal__preference">
-                  <label className="settings-toggle">
-                    <input
-                      type="checkbox"
+                  <div
+                    className="settings-toggle settings-toggle-button"
+                    onClick={(event) => {
+                      if ((event.target as HTMLElement).closest('[data-slot="switch"]')) return;
+                      setSaveCredentials((checked) => !checked);
+                    }}
+                  >
+                    <Switch
                       checked={saveCredentials}
-                      onChange={(event) => setSaveCredentials(event.target.checked)}
+                      onCheckedChange={setSaveCredentials}
+                      aria-label="Remember credentials securely"
+                      className="settings-toggle__switch"
                     />
-                    <span className="settings-toggle__control"></span>
-                    <span>
+                    <span className="settings-toggle__copy">
                       <strong>Remember credentials securely</strong>
                       <small>Store this Steam login locally in encrypted form for future Steam authorization.</small>
                     </span>
-                  </label>
+                  </div>
                 </div>
               </div>
 

@@ -3171,18 +3171,6 @@ body::before {
   height: 100%;
 }
 
-.config-editor__subtitle {
-  margin: 0.35rem 0 0;
-  color: #95acc9;
-  font-size: 0.84rem;
-}
-
-.config-editor__header-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-}
-
 .config-editor__shell {
   flex: 1;
   min-height: 0;
@@ -3247,7 +3235,6 @@ body::before {
 
 .config-explorer__search input,
 .config-editor__search input,
-.config-section-card__title-input,
 .config-entry-row input,
 .config-entry-row textarea {
   width: 100%;
@@ -3334,6 +3321,9 @@ body::before {
   width: 100%;
   min-width: 0;
   text-align: left;
+  justify-content: stretch;
+  justify-items: stretch;
+  align-items: stretch;
   padding: 0.54rem 0.58rem;
   border-radius: 0.38rem;
   border: 1px solid rgba(91, 121, 160, 0.18);
@@ -3357,8 +3347,7 @@ body::before {
 }
 
 .config-explorer__file-head,
-.config-explorer__file-meta,
-.config-explorer__file-badges {
+.config-explorer__file-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3381,14 +3370,8 @@ body::before {
   justify-content: flex-start;
 }
 
-.config-explorer__file-meta span,
-.config-explorer__file-badges .settings-chip {
+.config-explorer__file-meta span {
   min-width: 0;
-}
-
-.config-explorer__file-badges {
-  justify-content: flex-start;
-  flex-wrap: wrap;
 }
 
 .config-explorer__file-path {
@@ -3425,6 +3408,8 @@ body::before {
 .config-explorer__match-more {
   width: 100%;
   min-width: 0;
+  justify-content: flex-start;
+  align-items: center;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3570,16 +3555,14 @@ body::before {
 
 .config-workspace__header,
 .config-workspace__toolbar,
-.config-section-card__header,
-.config-section-card__footer {
+.config-section-card__header {
   display: flex;
   justify-content: space-between;
   gap: 0.65rem;
   align-items: center;
 }
 
-.config-workspace__identity,
-.config-raw__header {
+.config-workspace__identity {
   display: flex;
   align-items: center;
   min-width: 0;
@@ -3591,13 +3574,11 @@ body::before {
 
 .config-workspace__identity h3,
 .config-structured__header h4,
-.config-section-card__header h4,
-.config-raw__header h4 {
+.config-section-card__header h4 {
   margin: 0;
   color: #eef5ff;
 }
 
-.config-workspace__badges,
 .config-workspace__actions {
   display: flex;
   flex-wrap: wrap;
@@ -3669,9 +3650,6 @@ body::before {
   }
 }
 
-.config-workspace__meta-row,
-.config-workspace__path,
-.config-raw__header p,
 .config-editor__warning p,
 .config-section-card__header p {
   margin: 0;
@@ -3698,18 +3676,6 @@ body::before {
   overflow-wrap: normal;
 }
 
-.config-workspace__meta-row {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem 0.6rem;
-  flex-wrap: wrap;
-}
-
-.config-workspace__path {
-  overflow-wrap: anywhere;
-  color: #b0c4de;
-}
-
 .config-workspace__toolbar {
   padding: 0.5rem 0.58rem;
   align-items: center;
@@ -3718,10 +3684,6 @@ body::before {
   gap: 0.75rem;
   border-bottom: 1px solid rgba(88, 116, 154, 0.18);
   background: rgba(11, 19, 30, 0.42);
-}
-
-.config-workspace__toolbar--raw {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .config-workspace__toolbar-main {
@@ -3742,12 +3704,6 @@ body::before {
   justify-content: flex-end;
   gap: 0.62rem;
   min-width: min(38vw, 520px);
-}
-
-.config-editor__mode-note {
-  color: #90a7c4;
-  font-size: 0.72rem;
-  line-height: 1.35;
 }
 
 .config-workspace__section-tabs-shell {
@@ -5436,21 +5392,6 @@ body::before {
   opacity: 0.7;
 }
 
-.settings-toggle input {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 1px;
-  height: 1px;
-  margin: 0;
-  opacity: 0;
-  pointer-events: none;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
 .settings-toggle__copy {
   display: grid;
   gap: 0.18rem;
@@ -5459,62 +5400,6 @@ body::before {
 .settings-toggle strong {
   color: var(--workspace-title-color);
   font-size: 0.86rem;
-}
-
-.settings-toggle__control {
-  position: relative;
-  display: inline-flex;
-  width: 2.45rem;
-  min-width: 2.45rem;
-  height: 1.45rem;
-  border-radius: 999px;
-  border: 1px solid var(--workspace-stroke);
-  background: var(--workspace-surface-card-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(197, 219, 245, 0.06),
-    0 2px 6px rgba(0, 0, 0, 0.18);
-  transition: background 0.2s ease, border-color 0.2s ease;
-}
-
-.settings-toggle__control::after {
-  content: '';
-  position: absolute;
-  top: 0.12rem;
-  left: 0.12rem;
-  width: 1.02rem;
-  height: 1.02rem;
-  border-radius: 50%;
-  background: linear-gradient(180deg, #f5fbff, #cad8e9);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
-  transition: transform 0.2s ease;
-}
-
-.settings-toggle input:checked + .settings-toggle__control {
-  border-color: rgba(122, 174, 236, 0.82);
-  background: linear-gradient(180deg, #4f92de, #3b6faf);
-}
-
-.settings-toggle input:checked + .settings-toggle__control::after {
-  transform: translateX(0.98rem);
-}
-
-.settings-toggle input:focus-visible + .settings-toggle__control {
-  outline: 2px solid rgba(144, 193, 255, 0.85);
-  outline-offset: 2px;
-}
-
-.settings-toggle-button[aria-checked="true"] .settings-toggle__control {
-  border-color: rgba(122, 174, 236, 0.82);
-  background: linear-gradient(180deg, #4f92de, #3b6faf);
-}
-
-.settings-toggle-button[aria-checked="true"] .settings-toggle__control::after {
-  transform: translateX(0.98rem);
-}
-
-.settings-toggle-button:focus-visible .settings-toggle__control {
-  outline: 2px solid rgba(144, 193, 255, 0.85);
-  outline-offset: 2px;
 }
 
 .settings-callout {

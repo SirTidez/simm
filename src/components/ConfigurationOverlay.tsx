@@ -359,20 +359,22 @@ const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId,
           <span className="config-entry-row__value-kind">{formatValueKind(valueKind)}</span>
         </div>
         <div className="config-entry-row__boolean-group" role="group" aria-label={`Value for ${entry.key || 'new entry'}`}>
-          <button
+          <SimmButton
             type="button"
-            className={`config-entry-row__boolean-option ${booleanValue === true ? 'config-entry-row__boolean-option--active' : ''}`}
+            variant="ghost"
+            className={`config-entry-row__boolean-option h-auto ${booleanValue === true ? 'config-entry-row__boolean-option--active' : ''}`}
             onClick={() => onChange(sectionId, entry.id, 'value', 'true')}
           >
             True
-          </button>
-          <button
+          </SimmButton>
+          <SimmButton
             type="button"
-            className={`config-entry-row__boolean-option ${booleanValue === false ? 'config-entry-row__boolean-option--active' : ''}`}
+            variant="ghost"
+            className={`config-entry-row__boolean-option h-auto ${booleanValue === false ? 'config-entry-row__boolean-option--active' : ''}`}
             onClick={() => onChange(sectionId, entry.id, 'value', 'false')}
           >
             False
-          </button>
+          </SimmButton>
         </div>
       </div>
     );
@@ -447,14 +449,16 @@ const ConfigEntryRow = memo(function ConfigEntryRow({ sectionId, entry, onChange
           )}
         </div>
 
-        <button
+        <SimmButton
           type="button"
+          variant="ghost"
+          size="icon-sm"
           className="config-entry-row__delete"
           aria-label={`Delete ${entryLabel}`}
           onClick={handleDeleteClick}
         >
           <ConfigTrashIcon />
-        </button>
+        </SimmButton>
       </div>
 
       <div className="config-entry-row__value">
@@ -1108,9 +1112,10 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
 
     return (
       <div key={file.path} className={`config-explorer__file-stack ${showMatchTree ? 'config-explorer__file-stack--tree' : ''}`}>
-        <button
+        <SimmButton
           type="button"
-          className={`config-explorer__file ${selected ? 'config-explorer__file--active' : ''}`}
+          variant="ghost"
+          className={`config-explorer__file h-auto ${selected ? 'config-explorer__file--active' : ''}`}
           onClick={() => handleSelectFile(file)}
         >
           <div className="config-explorer__file-head">
@@ -1124,42 +1129,45 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
           <div className="config-explorer__file-path" title={file.relativePath}>
             {file.relativePath}
           </div>
-        </button>
+        </SimmButton>
 
         {showMatchTree && (
           <div className="config-explorer__match-tree" aria-label={`Matches in ${file.name}`}>
             {matches.map((section) => (
               <div key={section.id} className="config-explorer__match-section">
-                <button
+                <SimmButton
                   type="button"
-                  className="config-explorer__match-section-button"
+                  variant="ghost"
+                  className="config-explorer__match-section-button h-auto"
                   onClick={() => handleSelectExplorerMatch(file, section.id)}
                 >
                   <Icon name="fas fa-folder-tree" />
                   <span>{section.name}</span>
-                </button>
+                </SimmButton>
                 {section.entries.length > 0 && (
                   <div className="config-explorer__match-entries">
                     {section.entries.slice(0, 8).map((entry) => (
-                      <button
+                      <SimmButton
                         key={entry.id}
                         type="button"
-                        className="config-explorer__match-entry"
+                        variant="ghost"
+                        className="config-explorer__match-entry h-auto"
                         onClick={() => handleSelectExplorerMatch(file, section.id)}
                         title={`${entry.key} = ${entry.value}`}
                       >
                         <span className="config-explorer__match-entry-key">{entry.key}</span>
                         <span className="config-explorer__match-entry-value">{entry.value}</span>
-                      </button>
+                      </SimmButton>
                     ))}
                     {section.entries.length > 8 && (
-                      <button
+                      <SimmButton
                         type="button"
-                        className="config-explorer__match-more"
+                        variant="ghost"
+                        className="config-explorer__match-more h-auto"
                         onClick={() => handleSelectExplorerMatch(file, section.id)}
                       >
                         {section.entries.length - 8} more
-                      </button>
+                      </SimmButton>
                     )}
                   </div>
                 )}
@@ -1282,21 +1290,23 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                   <div className="config-workspace__title-row">
                     <h3 title={activeDocument.summary.path}>{activeDocument.summary.name}</h3>
                     <div className="config-workspace__mode-switch" role="group" aria-label="Editor mode">
-                      <button
+                      <SimmButton
                         type="button"
-                        className={`config-workspace__mode-button ${editorMode === 'structured' ? 'config-workspace__mode-button--active' : ''}`}
+                        variant="ghost"
+                        className={`config-workspace__mode-button h-auto ${editorMode === 'structured' ? 'config-workspace__mode-button--active' : ''}`}
                         onClick={() => handleModeChange('structured')}
                         disabled={!structuredAvailable}
                       >
                         Structured
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
-                        className={`config-workspace__mode-button ${editorMode === 'raw' ? 'config-workspace__mode-button--active' : ''}`}
+                        variant="ghost"
+                        className={`config-workspace__mode-button h-auto ${editorMode === 'raw' ? 'config-workspace__mode-button--active' : ''}`}
                         onClick={() => handleModeChange('raw')}
                       >
                         Raw
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 </div>
@@ -1327,14 +1337,16 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                   <div className="config-workspace__toolbar-main">
                     <div className={`config-workspace__section-tabs-shell ${sectionTabOverflow.left ? 'config-workspace__section-tabs-shell--left' : ''} ${sectionTabOverflow.right ? 'config-workspace__section-tabs-shell--right' : ''}`}>
                       {sectionTabOverflow.left && (
-                        <button
+                        <SimmButton
                           type="button"
+                          variant="ghost"
+                          size="icon-sm"
                           className="config-workspace__section-tabs-shift config-workspace__section-tabs-shift--left"
                           aria-label="Show earlier sections"
                           onClick={() => scrollSectionTabs(-240)}
                         >
                           <Icon name="fas fa-chevron-left" />
-                        </button>
+                        </SimmButton>
                       )}
                       <div
                         ref={sectionTabsRef}
@@ -1342,34 +1354,38 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
                         onWheel={handleSectionTabsWheel}
                       >
                         {sectionTabs.length > 1 && (
-                          <button
+                          <SimmButton
                             type="button"
-                            className={`config-workspace__section-tab ${activeSectionId === ALL_SECTIONS_TAB ? 'config-workspace__section-tab--active' : ''}`}
+                            variant="ghost"
+                            className={`config-workspace__section-tab h-auto ${activeSectionId === ALL_SECTIONS_TAB ? 'config-workspace__section-tab--active' : ''}`}
                             onClick={() => setActiveSectionId(ALL_SECTIONS_TAB)}
                           >
                             All Sections
-                          </button>
+                          </SimmButton>
                         )}
                         {sectionTabs.map((section) => (
-                          <button
+                          <SimmButton
                             key={section.id}
                             type="button"
-                            className={`config-workspace__section-tab ${activeSectionId === section.id ? 'config-workspace__section-tab--active' : ''}`}
+                            variant="ghost"
+                            className={`config-workspace__section-tab h-auto ${activeSectionId === section.id ? 'config-workspace__section-tab--active' : ''}`}
                             onClick={() => setActiveSectionId(section.id)}
                           >
                             {section.name}
-                          </button>
+                          </SimmButton>
                         ))}
                       </div>
                       {sectionTabOverflow.right && (
-                        <button
+                        <SimmButton
                           type="button"
+                          variant="ghost"
+                          size="icon-sm"
                           className="config-workspace__section-tabs-shift config-workspace__section-tabs-shift--right"
                           aria-label="Show later sections"
                           onClick={() => scrollSectionTabs(240)}
                         >
                           <Icon name="fas fa-chevron-right" />
-                        </button>
+                        </SimmButton>
                       )}
                     </div>
                   </div>

@@ -6,9 +6,10 @@ import type {
   Severity,
   ThreatFamily,
 } from '../types';
+import { Dialog } from '@/components/ui/dialog';
 import { getSecurityDispositionBadgeConfig } from './securityScanHelpers';
 import { Icon } from './Icon';
-import { SimmBadge, SimmButton } from './primitives';
+import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
 
 interface SecurityScanReportOverlayProps {
   isOpen: boolean;
@@ -279,12 +280,8 @@ export function SecurityScanReportView({
         boxShadow: 'none',
       };
 
-  const shell = (
-    <div
-      className={presentation === 'overlay' ? 'modal-content modal-content-nested' : 'security-report-view security-report-view--page'}
-      onClick={presentation === 'overlay' ? (event) => event.stopPropagation() : undefined}
-      style={shellStyle}
-    >
+  const shellContent = (
+    <>
         <div className="modal-header security-report-view__header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
             <span>{title}</span>
@@ -339,10 +336,11 @@ export function SecurityScanReportView({
           {files.length > 1 && (
             <div style={{ display: 'grid', gap: '0.55rem' }}>
               {files.map((file, index) => (
-                <button
+                <SimmButton
                   key={`${file.fileName}-${index}`}
                   type="button"
-                  className={`security-report-selector ${index === activeFileIndex ? 'security-report-selector--active' : ''}`}
+                  variant="ghost"
+                  className={`security-report-selector h-auto ${index === activeFileIndex ? 'security-report-selector--active' : ''}`}
                   aria-pressed={index === activeFileIndex}
                   onClick={() => setActiveFileIndex(index)}
                   style={{
@@ -363,7 +361,7 @@ export function SecurityScanReportView({
                     <strong style={{ color: '#eef5ff', fontSize: '0.9rem' }}>{file.fileName}</strong>
                     <span style={{ color: '#8ea7c6', fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.displayPath}</span>
                   </span>
-                </button>
+                </SimmButton>
               ))}
             </div>
           )}
@@ -388,10 +386,11 @@ export function SecurityScanReportView({
                   const optionStyle = getSummaryStyle(option.report.summary, option.report.policy.blocked);
                   const isActive = index === activeReportIndex;
                   return (
-                    <button
+                    <SimmButton
                       key={option.key}
                       type="button"
-                      className={`security-report-selector ${isActive ? 'security-report-selector--active' : ''}`}
+                      variant="ghost"
+                      className={`security-report-selector h-auto ${isActive ? 'security-report-selector--active' : ''}`}
                       aria-pressed={isActive}
                       onClick={() => setActiveReportIndex(index)}
                       style={{
@@ -433,7 +432,7 @@ export function SecurityScanReportView({
                           {option.description}
                         </span>
                       )}
-                    </button>
+                    </SimmButton>
                   );
                 })}
               </div>
@@ -591,10 +590,11 @@ export function SecurityScanReportView({
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>Findings</h3>
                 <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
                   {filterOptions.map((option) => (
-                    <button
+                    <SimmButton
                       key={option}
                       type="button"
-                      className={`security-report-filter ${activeSeverity === option ? 'security-report-filter--active' : ''}`}
+                      variant="ghost"
+                      className={`security-report-filter h-auto ${activeSeverity === option ? 'security-report-filter--active' : ''}`}
                       aria-pressed={activeSeverity === option}
                       onClick={() => setActiveSeverity(option)}
                       style={{
@@ -607,7 +607,7 @@ export function SecurityScanReportView({
                       }}
                     >
                       {option}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               </div>
@@ -623,10 +623,11 @@ export function SecurityScanReportView({
                     const isActive = selectedFinding ? getFindingKey(selectedFinding, filteredFindings.indexOf(selectedFinding)) === key : index === 0;
                     const badge = severityBadgeStyles[finding.severity];
                     return (
-                      <button
+                      <SimmButton
                         key={key}
                         type="button"
-                        className={`security-report-finding ${isActive ? 'security-report-finding--active' : ''}`}
+                        variant="ghost"
+                        className={`security-report-finding h-auto ${isActive ? 'security-report-finding--active' : ''}`}
                         aria-pressed={isActive}
                         onClick={() => setSelectedFindingKey(key)}
                         style={{
@@ -644,7 +645,7 @@ export function SecurityScanReportView({
                         </SimmBadge>
                         <strong style={{ color: '#edf5ff', lineHeight: 1.45 }}>{finding.description}</strong>
                         <span style={{ color: '#8fa7c5', fontSize: '0.82rem' }}>{finding.location || activeFile?.displayPath}</span>
-                      </button>
+                      </SimmButton>
                     );
                   })
                 )}
@@ -718,18 +719,36 @@ export function SecurityScanReportView({
             )}
           </div>
         )}
-      </div>
+    </>
   );
 
   if (presentation === 'overlay') {
     return (
-      <div className="modal-overlay modal-overlay-nested" onClick={onClose}>
-        {shell}
-      </div>
+      <Dialog open onOpenChange={(open) => {
+        if (!open) {
+          onClose?.();
+        }
+      }}>
+        <SimmDialogContent
+          nested
+          showCloseButton={false}
+          className="security-report-view__dialog"
+          style={shellStyle}
+        >
+          {shellContent}
+        </SimmDialogContent>
+      </Dialog>
     );
   }
 
-  return shell;
+  return (
+    <div
+      className="security-report-view security-report-view--page"
+      style={shellStyle}
+    >
+      {shellContent}
+    </div>
+  );
 }
 
 export function SecurityScanReportOverlay({

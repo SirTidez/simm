@@ -9,6 +9,7 @@ import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
+import { SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface PluginInfo {
@@ -384,15 +385,15 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
                   />
                 </div>
                 <div className="workspace-collection__toolbar-group">
-                  <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
+                  <SimmButton onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
                     {uploading ? 'Uploading...' : 'Add Plugin'}
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
+                  </SimmButton>
+                  <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
                     Open Folder
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-small" onClick={() => void loadPlugins()} disabled={loading}>
+                  </SimmButton>
+                  <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void loadPlugins()} disabled={loading}>
                     Reload
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
@@ -502,22 +503,22 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
                 </div>
 
                 <div className="workspace-inspector-card__actions">
-                  <button
+                  <SimmButton
                     className={selectedPlugin.disabled ? 'btn btn-primary' : 'btn btn-secondary'}
                     onClick={() => void handleTogglePlugin(selectedPlugin)}
                     disabled={togglingPluginKey === getPluginKey(selectedPlugin)}
                   >
                     {selectedPlugin.disabled ? 'Enable' : 'Disable'}
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => setPendingDelete(selectedPlugin)} disabled={deletingPluginKey === getPluginKey(selectedPlugin)}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => setPendingDelete(selectedPlugin)} disabled={deletingPluginKey === getPluginKey(selectedPlugin)}>
                     Delete
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
                     Open Folder
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => void loadPlugins()} disabled={loading}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => void loadPlugins()} disabled={loading}>
                     Reload
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             )}

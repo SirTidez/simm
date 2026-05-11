@@ -4,6 +4,7 @@ import { ApiService } from '../services/api';
 import type { ExperienceMode, SecurityScannerStatus } from '../types';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
+import { SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 type WelcomeMode = 'setup' | 'upgradePrompt';
@@ -332,14 +333,14 @@ export function WelcomeOverlay({
               mode keeps separate branch installs visible when you need them.
             </p>
             <div className="welcome-panel__actions">
-              <button type="button" className="btn btn-primary" onClick={() => setSetupStarted(true)}>
+              <SimmButton type="button" className="btn btn-primary" onClick={() => setSetupStarted(true)}>
                 <Icon name="sliders" />
                 Try Setup Guide
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={() => void handleSkip()} disabled={saving}>
+              </SimmButton>
+              <SimmButton type="button" className="btn btn-secondary" onClick={() => void handleSkip()} disabled={saving}>
                 <Icon name={saving ? 'spinner' : 'checkCircle'} />
                 {saving ? 'Saving...' : 'Keep Current Layout'}
-              </button>
+              </SimmButton>
             </div>
           </section>
         </div>
@@ -394,9 +395,10 @@ export function WelcomeOverlay({
 
         {step === 'mode' && (
           <div className="wizard-entry-grid" aria-label="App mode choices">
-            <button
+            <SimmButton
               type="button"
-              className={`wizard-entry-card ${experienceMode === 'player' ? 'wizard-entry-card--selected' : ''}`}
+              variant="ghost"
+              className={`wizard-entry-card h-auto ${experienceMode === 'player' ? 'wizard-entry-card--selected' : ''}`}
               onClick={() => chooseExperienceMode('player')}
               aria-pressed={experienceMode === 'player'}
             >
@@ -409,11 +411,12 @@ export function WelcomeOverlay({
                 <p>Use the mod library, updates, accounts, and existing game installs without advanced install noise.</p>
               </div>
               <span className="wizard-inline-action">Recommended</span>
-            </button>
+            </SimmButton>
 
-            <button
+            <SimmButton
               type="button"
-              className={`wizard-entry-card ${experienceMode === 'powerUser' ? 'wizard-entry-card--selected' : ''}`}
+              variant="ghost"
+              className={`wizard-entry-card h-auto ${experienceMode === 'powerUser' ? 'wizard-entry-card--selected' : ''}`}
               onClick={() => chooseExperienceMode('powerUser')}
               aria-pressed={experienceMode === 'powerUser'}
             >
@@ -426,7 +429,7 @@ export function WelcomeOverlay({
                 <p>Keep separate Steam branch installs and lower-level setup tools visible inside Add Game.</p>
               </div>
               <span className="wizard-inline-action">Full controls</span>
-            </button>
+            </SimmButton>
           </div>
         )}
 
@@ -449,31 +452,31 @@ export function WelcomeOverlay({
                   : 'If automatic detection does not find Steam, Add Game can still import the existing folder.'}
               </p>
               <div className="welcome-panel__actions">
-                <button
+                <SimmButton
                   type="button"
                   className={finishAction === 'addGame' ? 'btn btn-primary' : 'btn btn-secondary'}
                   onClick={() => setFinishAction('addGame')}
                 >
                   <Icon name="folderPlus" />
                   Open Add Game After Setup
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
                   type="button"
                   className={finishAction === 'none' ? 'btn btn-primary' : 'btn btn-secondary'}
                   onClick={() => setFinishAction('none')}
                 >
                   <Icon name="house" />
                   Go to Home First
-                </button>
+                </SimmButton>
                 {experienceMode === 'powerUser' && (
-                  <button
+                  <SimmButton
                     type="button"
                     className={finishAction === 'accounts' ? 'btn btn-primary' : 'btn btn-secondary'}
                     onClick={() => setFinishAction('accounts')}
                   >
                     <Icon name="userCircle" />
                     Open Accounts After Setup
-                  </button>
+                  </SimmButton>
                 )}
               </div>
             </section>
@@ -489,10 +492,10 @@ export function WelcomeOverlay({
                   <p>Downloads, backups, logs, and app support files live here.</p>
                 </div>
                 <div className="welcome-panel__inline-actions">
-                  <button type="button" className="btn btn-secondary" onClick={() => void handleOpenSimmFolder()} disabled={!canOpenSimmFolder}>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void handleOpenSimmFolder()} disabled={!canOpenSimmFolder}>
                     <Icon name="folderOpen" />
                     Open SIMM Folder
-                  </button>
+                  </SimmButton>
                   {homePathLookupFailed && (
                     <span className="welcome-panel__inline-note">
                       Folder lookup is unavailable right now, but SIMM still created the workspace.
@@ -541,7 +544,7 @@ export function WelcomeOverlay({
                     {securityScannerStatus?.lastError && <div className="settings-error-banner">{securityScannerStatus.lastError}</div>}
                     {(securityScannerError || securityScannerStatus?.installed !== true) && (
                       <div className="welcome-panel__inline-actions">
-                        <button
+                        <SimmButton
                           type="button"
                           className="btn btn-secondary"
                           onClick={() => void handleInstallSecurityScanner()}
@@ -555,7 +558,7 @@ export function WelcomeOverlay({
                               : securityScannerError
                                 ? 'Retry MLVScan Install'
                                 : 'Install MLVScan Now'}
-                        </button>
+                        </SimmButton>
                       </div>
                     )}
                   </div>
@@ -578,14 +581,14 @@ export function WelcomeOverlay({
                       <h5>Authenticate with Steam for advanced installs</h5>
                       <p>Only separate SIMM-managed branch installs may ask you to authorize SIMM. Your regular Steam install stays updated by Steam.</p>
                       <div className="welcome-panel__inline-actions">
-                        <button
+                        <SimmButton
                           type="button"
                           className={finishAction === 'accounts' ? 'btn btn-primary' : 'btn btn-secondary'}
                           onClick={() => setFinishAction('accounts')}
                         >
                           <Icon name="userCircle" />
                           Open Accounts After Setup
-                        </button>
+                        </SimmButton>
                       </div>
                     </div>
                   </article>
@@ -620,16 +623,16 @@ export function WelcomeOverlay({
 
       <div className="welcome-panel__footer">
         {currentStepIndex > 0 && (
-          <button type="button" className="btn btn-secondary" onClick={goBack} disabled={saving}>
+          <SimmButton type="button" className="btn btn-secondary" onClick={goBack} disabled={saving}>
             Back
-          </button>
+          </SimmButton>
         )}
         {step !== 'safety' ? (
-          <button type="button" className="btn btn-primary" onClick={goNext}>
+          <SimmButton type="button" className="btn btn-primary" onClick={goNext}>
             Continue
-          </button>
+          </SimmButton>
         ) : (
-          <button
+          <SimmButton
             type="button"
             className="btn btn-primary"
             onClick={() => void handleFinish()}
@@ -643,12 +646,12 @@ export function WelcomeOverlay({
                 : loadingSecurityScannerStatus
                   ? 'Checking MLVScan...'
                   : 'Finish Setup'}
-          </button>
+          </SimmButton>
         )}
-        <button type="button" className="btn btn-secondary" onClick={onOpenSettings}>
+        <SimmButton type="button" className="btn btn-secondary" onClick={onOpenSettings}>
           <Icon name="sliders" />
           Settings
-        </button>
+        </SimmButton>
       </div>
     </section>
   );

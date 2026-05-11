@@ -1154,12 +1154,12 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     )}
                     <div className="settings-inline-status settings-inline-status--action">
                       <span>Tooling Check</span>
-                      <button
+                      <SimmButton
                         onClick={refreshDepotDownloader}
                         className="btn btn-secondary btn-small"
                       >
                         Refresh
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 </div>
@@ -1708,16 +1708,17 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                 ) : (
                   <>
                     {getParentPath(directoryPath) && (
-                      <button
+                      <SimmButton
                         type="button"
-                        className="wizard-directory-row wizard-directory-row--parent"
+                        variant="ghost"
+                        className="wizard-directory-row wizard-directory-row--parent h-auto"
                         onClick={() =>
                           void loadDirectory(getParentPath(directoryPath) || "")
                         }
                       >
                         <Icon name="fas fa-arrow-up" />
                         <span>Parent Directory</span>
-                      </button>
+                      </SimmButton>
                     )}
                     {directoryList.length === 0 ? (
                       <div className="wizard-empty-card">
@@ -1730,15 +1731,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </div>
                     ) : (
                       directoryList.map((dir) => (
-                        <button
+                        <SimmButton
                           key={dir.path}
                           type="button"
-                          className="wizard-directory-row"
+                          variant="ghost"
+                          className="wizard-directory-row h-auto"
                           onClick={() => void loadDirectory(dir.path)}
                         >
                           <Icon name="fas fa-folder" />
                           <span>{dir.name}</span>
-                        </button>
+                        </SimmButton>
                       ))
                     )}
                   </>

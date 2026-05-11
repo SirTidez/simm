@@ -18,6 +18,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
 import {
   onAuthWaiting,
@@ -1692,7 +1696,7 @@ export function EnvironmentList({
         <div className="environment-card__header">
           {editingName === env.id ? (
             <div className="name-editor environment-card__name-editor">
-              <input
+              <Input
                 type="text"
                 value={nameValue}
                 onChange={(e) => setNameValue(e.target.value)}
@@ -1707,12 +1711,12 @@ export function EnvironmentList({
                 autoFocus
               />
               <div className="name-actions">
-                <button onClick={() => handleSaveName(env.id)} className="btn btn-primary btn-small" title="Save name">
+                <SimmButton onClick={() => handleSaveName(env.id)} className="btn btn-primary btn-small" title="Save name">
                   <Icon name="fas fa-check" />
-                </button>
-                <button onClick={handleCancelEditName} className="btn btn-secondary btn-small" title="Cancel">
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={handleCancelEditName} className="btn btn-secondary btn-small" title="Cancel">
                   <Icon name="fas fa-times" />
-                </button>
+                </SimmButton>
               </div>
             </div>
           ) : (
@@ -1720,17 +1724,18 @@ export function EnvironmentList({
               <div className="environment-card__title-row">
                 <div className="name-display environment-card__title-group">
                   <h3>{env.name}</h3>
-                  <button onClick={() => handleStartEditName(env)} className="btn-edit-name" title="Rename environment">
+                  <SimmButton variant="ghost" size="icon-sm" onClick={() => handleStartEditName(env)} className="btn-edit-name" title="Rename environment">
                     <Icon name="fas fa-edit" />
-                  </button>
+                  </SimmButton>
                 </div>
                 <div className="environment-card__header-actions">
                   <span className={`environment-state-pill environment-state-pill--${status.tone}`}>
                     <Icon name={status.icon} />
                     {status.label}
                   </span>
-                  <button
+                  <SimmButton
                     type="button"
+                    variant="secondary"
                     className="btn btn-secondary btn-small environment-card__overflow-button"
                     onClick={(event) => {
                       const rect = event.currentTarget.getBoundingClientRect();
@@ -1739,7 +1744,7 @@ export function EnvironmentList({
                     aria-label={`More actions for ${env.name}`}
                   >
                     <Icon name="fas fa-ellipsis-h" />
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
               <div className="environment-card__identity-badges">
@@ -1756,7 +1761,7 @@ export function EnvironmentList({
         <div className="environment-description environment-card__description">
           {editingDescription === env.id ? (
             <div className="description-editor">
-              <textarea
+              <Textarea
                 value={descriptionValue}
                 onChange={(e) => setDescriptionValue(e.target.value)}
                 placeholder="Describe what this version means..."
@@ -1765,12 +1770,12 @@ export function EnvironmentList({
                 autoFocus
               />
               <div className="description-actions">
-                <button onClick={() => handleSaveDescription(env.id)} className="btn btn-primary btn-small" title="Save description">
+                <SimmButton onClick={() => handleSaveDescription(env.id)} className="btn btn-primary btn-small" title="Save description">
                   <Icon name="fas fa-check" />
-                </button>
-                <button onClick={handleCancelEditDescription} className="btn btn-secondary btn-small" title="Cancel">
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={handleCancelEditDescription} className="btn btn-secondary btn-small" title="Cancel">
                   <Icon name="fas fa-times" />
-                </button>
+                </SimmButton>
               </div>
             </div>
           ) : (
@@ -1778,9 +1783,9 @@ export function EnvironmentList({
               <span className="description-text">
                 {env.description || <span className="description-placeholder">No description</span>}
               </span>
-              <button onClick={() => handleStartEditDescription(env)} className="btn-edit-description" title="Edit description">
+              <SimmButton variant="ghost" size="icon-sm" onClick={() => handleStartEditDescription(env)} className="btn-edit-description" title="Edit description">
                 <Icon name="fas fa-edit" />
-              </button>
+              </SimmButton>
             </div>
           )}
         </div>
@@ -1820,65 +1825,67 @@ export function EnvironmentList({
         <div className="environment-card__action-group">
           {!isDownloading && !isCompleted && (
             <div className="environment-card__action-row environment-card__action-row--single">
-              <button onClick={() => handleStartDownload(env)} className="btn btn-primary">
+              <SimmButton onClick={() => handleStartDownload(env)} className="btn btn-primary">
                 <Icon name="fas fa-download" />
                 <span>Download</span>
-              </button>
+              </SimmButton>
             </div>
           )}
 
           {isDownloading && (
             <div className="environment-card__action-row environment-card__action-row--single">
-              <button onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
+              <SimmButton variant="secondary" onClick={() => handleCancelDownload(env)} className="btn btn-secondary">
                 <Icon name="fas fa-ban" />
                 <span>Cancel Download</span>
-              </button>
+              </SimmButton>
             </div>
           )}
 
           {isCompleted && (
             <>
               <div className="environment-card__action-row environment-card__action-row--primary">
-                <button
+                <SimmButton
                   onClick={() => handleLaunchGame(env, launchMethod)}
                   className="btn btn-primary environment-card__hero-action"
                   title={`Launch the game via ${launchMethod === 'direct' ? 'Local Install' : 'Steam'}`}
                 >
                   <Icon name="fas fa-play" />
                   <span>Launch</span>
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  variant="secondary"
                   onClick={() => handleOpenModsOverlay(env.id)}
                   className="btn btn-secondary environment-card__hero-action environment-card__hero-action--mods"
                   title="Open installed mods"
                 >
                   <Icon name="fas fa-puzzle-piece" />
                   <span>Mods</span>
-                </button>
+                </SimmButton>
               </div>
 
               <div className="environment-card__action-row environment-card__action-row--secondary">
-                <button onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="Edit mod configuration">
+                <SimmButton variant="secondary" onClick={() => handleOpenConfigOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="Edit mod configuration">
                   <Icon name="fas fa-cog" />
                   <span>Config</span>
-                </button>
-                <button onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View MelonLoader logs">
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={() => handleOpenLogsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View MelonLoader logs">
                   <Icon name="fas fa-file-alt" />
                   <span>Logs</span>
-                </button>
-                <button onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View installed plugins">
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={() => handleOpenPluginsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View installed plugins">
                   <Icon name="fas fa-plug" />
                   <span>Plugins</span>
-                </button>
-                <button onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View UserLibs">
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View UserLibs">
                   <Icon name="fas fa-book" />
                   <span>UserLibs</span>
-                </button>
-                <button onClick={() => handleOpenFolder(env)} className="btn btn-secondary environment-card__command-btn" title="Open folder in file explorer">
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={() => handleOpenFolder(env)} className="btn btn-secondary environment-card__command-btn" title="Open folder in file explorer">
                   <Icon name="fas fa-folder-open" />
                   <span>Folder</span>
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  variant="secondary"
                   onClick={() => handleUpdateAction(env)}
                   className={`btn btn-secondary environment-card__command-btn ${env.updateAvailable && !isSteam ? 'environment-card__command-btn--warning' : ''}`}
                   disabled={isCheckingUpdate}
@@ -1886,7 +1893,7 @@ export function EnvironmentList({
                 >
                   <Icon name={isCheckingUpdate ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-rotate'} />
                   <span>{isCheckingUpdate ? 'Checking…' : 'Update'}</span>
-                </button>
+                </SimmButton>
               </div>
             </>
           )}
@@ -1915,7 +1922,7 @@ export function EnvironmentList({
                   <Icon name={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'} />
                   {launchMethod === 'direct' ? 'Local launch' : 'Steam launch'}
                 </span>
-                <button
+                <SimmButton
                   type="button"
                   className="btn btn-secondary btn-small"
                   onClick={() => handleInstallMelonLoader(env)}
@@ -1924,7 +1931,7 @@ export function EnvironmentList({
                 >
                   <Icon name={installingMelonLoader.has(env.id) ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
                   <span>{mlStatus?.installed ? 'MelonLoader' : 'Install ML'}</span>
-                </button>
+                </SimmButton>
               </div>
             )}
           </div>
@@ -1946,14 +1953,14 @@ export function EnvironmentList({
       <div className="empty-state">
         <p>No game installs yet. Create one to get started!</p>
         {onOpenWorkspace && (
-          <button
+          <SimmButton
             type="button"
             className="btn btn-primary"
             onClick={() => onOpenWorkspace({ view: 'wizard' })}
           >
             <Icon name="plus" />
             Add Environment
-          </button>
+          </SimmButton>
         )}
       </div>
     );
@@ -1977,17 +1984,19 @@ export function EnvironmentList({
               key={env.id}
               className="workspace-environment-sidebar__item"
             >
-              <button
+              <SimmButton
+                type="button"
+                variant="ghost"
                 onClick={() => {
                   rememberEnvironment(env.id);
                   onSelectEnvironment?.(env.id);
                 }}
-                className={`workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
+                className={`workspace-environment-sidebar__button h-auto ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
                 title={env.name}
                 aria-current={selectedEnvironmentId === env.id ? 'page' : undefined}
               >
                 <span className="workspace-environment-sidebar__button-label">{env.name}</span>
-              </button>
+              </SimmButton>
             </div>
           ))}
         </div>
@@ -2105,10 +2114,9 @@ export function EnvironmentList({
           </div>
         ) : (
           <label className="app-dialog__option">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={deleteConfirm.deleteFiles}
-              onChange={(event) => setDeleteConfirm((previous) => ({ ...previous, deleteFiles: event.target.checked }))}
+              onCheckedChange={(checked) => setDeleteConfirm((previous) => ({ ...previous, deleteFiles: !!checked }))}
             />
             <span className="app-dialog__option-copy">
               <strong>Also delete game files from disk</strong>
@@ -2180,7 +2188,15 @@ export function EnvironmentList({
               ) : (
                 <>
                   <div className="melonloader-dialog__list">
-                    <div className="melonloader-dialog__release-grid">
+                    <RadioGroup
+                      className="melonloader-dialog__release-grid"
+                      value={selectedMelonLoaderTag}
+                      onValueChange={(value) => setSelectedMelonLoaderVersion(prev => {
+                        const next = new Map(prev);
+                        next.set(showMelonLoaderVersionSelector, value);
+                        return next;
+                      })}
+                    >
                       {melonLoaderSelectorReleases.map((release) => (
                         <label
                           key={release.tag_name}
@@ -2188,16 +2204,8 @@ export function EnvironmentList({
                             selectedMelonLoaderTag === release.tag_name ? 'melonloader-dialog__release-row--selected' : ''
                           }`}
                         >
-                          <input
-                            type="radio"
-                            name="melonLoaderVersion"
+                          <RadioGroupItem
                             value={release.tag_name}
-                            checked={selectedMelonLoaderTag === release.tag_name}
-                            onChange={(e) => setSelectedMelonLoaderVersion(prev => {
-                              const next = new Map(prev);
-                              next.set(showMelonLoaderVersionSelector, e.target.value);
-                              return next;
-                            })}
                             className="melonloader-dialog__radio"
                           />
                           <div className="melonloader-dialog__release-content">
@@ -2247,7 +2255,7 @@ export function EnvironmentList({
                           </div>
                         </label>
                       ))}
-                    </div>
+                    </RadioGroup>
                   </div>
 
                   <div className="melonloader-dialog__footer">

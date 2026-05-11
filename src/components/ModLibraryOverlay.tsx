@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Dialog } from "@/components/ui/dialog";
 import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import {
@@ -44,7 +45,7 @@ import {
   InstallTargetsDialog,
   getNormalizedRuntime,
 } from "./InstallTargetsDialog";
-import { SimmBadge, SimmButton } from "./primitives";
+import { SimmBadge, SimmButton, SimmDialogContent } from "./primitives";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
@@ -6493,21 +6494,23 @@ export function ModLibraryOverlay({
         busy={securityActionBusy}
       />
       {runtimePrompt && (
-        <div
-          className="modal-overlay modal-overlay-nested"
-          onClick={() => {
+        <Dialog open onOpenChange={(open) => {
+          if (!open) {
             runtimePrompt.onDismiss?.();
             setRuntimePrompt(null);
-          }}
-        >
-          <div
-            className="modal-content modal-content-nested"
-            onClick={(e) => e.stopPropagation()}
+          }
+        }}>
+          <SimmDialogContent
+            nested
+            showCloseButton={false}
             style={{ maxWidth: "420px" }}
           >
             <div className="modal-header">
               <h2>{runtimePrompt.title}</h2>
-              <button
+              <SimmButton
+                type="button"
+                variant="ghost"
+                size="icon-sm"
                 className="modal-close"
                 onClick={() => {
                   runtimePrompt.onDismiss?.();
@@ -6515,7 +6518,7 @@ export function ModLibraryOverlay({
                 }}
               >
                 ×
-              </button>
+              </SimmButton>
             </div>
             <div style={{ padding: "1rem 1.25rem 1.25rem" }}>
               <p style={{ marginTop: 0, color: "#ccc" }}>
@@ -6565,8 +6568,8 @@ export function ModLibraryOverlay({
                 </SimmButton>
               </div>
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
 
       <div className="mods-overlay mods-overlay--library workspace-collection-shell">
