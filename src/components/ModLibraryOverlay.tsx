@@ -584,6 +584,58 @@ const formatVersionTag = (value?: string): string => {
 const stripFileExtension = (fileName: string): string =>
   fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, "");
 
+const normalizeNexusVersionRowLabel = (value?: string): string =>
+  stripFileExtension(value || "")
+    .toLowerCase()
+    .replace(/\bv(?=\d)/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+
+const getNexusVersionRowDetail = (
+  file: Pick<NexusModFile, "file_name" | "name">,
+  modName: string,
+  versionLabel: string,
+): string | null => {
+  const candidate = stripFileExtension(file.file_name || file.name || "").trim();
+  if (!candidate) {
+    return null;
+  }
+
+  const normalizedCandidate = normalizeNexusVersionRowLabel(candidate);
+  const normalizedModName = normalizeNexusVersionRowLabel(modName);
+  const normalizedVersion = normalizeNexusVersionRowLabel(versionLabel);
+  const candidateWithoutVersion = normalizedVersion
+    ? normalizedCandidate.replace(normalizedVersion, "")
+    : normalizedCandidate;
+
+  if (
+    normalizedCandidate === normalizedModName ||
+    candidateWithoutVersion === normalizedModName ||
+    normalizedCandidate === `${normalizedModName}${normalizedVersion}` ||
+    normalizedCandidate === `${normalizedVersion}${normalizedModName}`
+  ) {
+    return null;
+  }
+
+  return candidate;
+};
+
+const getNexusVersionRowSummary = (
+  file: Pick<NexusModFile, "file_name" | "name">,
+  modName: string,
+  versionLabel: string,
+): string | null => {
+  const summary = stripFileExtension(file.name || "").trim();
+  if (!summary || summary === stripFileExtension(file.file_name || "").trim()) {
+    return null;
+  }
+
+  return getNexusVersionRowDetail(
+    { file_name: summary, name: summary },
+    modName,
+    versionLabel,
+  );
+};
+
 const detectRuntimeFromFileName = (
   fileName: string,
 ): "IL2CPP" | "Mono" | null => {
@@ -4981,13 +5033,35 @@ export function ModLibraryOverlay({
     storeLocalArchiveWithSecurity,
   ]);
 
-  const handleDeleteDownloadedGroup = async (group: DownloadedModGroup) => {
+  const handleDeleteDownloadedGroup = useCallback(async (group: DownloadedModGroup) => {
+    const installedEnvironmentIds = Array.from(new Set(group.installedIn));
+    const installedEnvironmentNames = installedEnvironmentIds.map((envId) => {
+      return (
+        environments.find((environment) => environment.id === envId)?.name ||
+        envId
+      );
+    });
+    const installedSummary =
+      installedEnvironmentNames.length > 0
+        ? installedEnvironmentNames.length <= 3
+          ? installedEnvironmentNames.join(", ")
+          : `${installedEnvironmentNames.slice(0, 3).join(", ")} and ${installedEnvironmentNames.length - 3} more`
+        : "";
+
     setConfirmOverlay({
       isOpen: true,
-      title: "Delete Downloaded Files",
-      message: group.entries.some((entry) => entry.installedIn.length > 0)
-        ? "This will remove the mod from all environments and delete the downloaded files. Continue?"
+      title:
+        installedEnvironmentIds.length > 0
+          ? "Uninstall and Delete?"
+          : "Delete Downloaded Files",
+      message:
+        installedEnvironmentIds.length > 0
+          ? `This library copy is installed in ${installedEnvironmentIds.length} environment${installedEnvironmentIds.length === 1 ? "" : "s"}${installedSummary ? `: ${installedSummary}` : ""}. Delete will uninstall it from those environments and remove the downloaded files from the library. Continue?`
         : "Delete the downloaded files from the library? This cannot be undone.",
+      confirmText:
+        installedEnvironmentIds.length > 0
+          ? "Uninstall and Delete"
+          : "Delete Files",
       onConfirm: async () => {
         setConfirmOverlay({
           isOpen: false,
@@ -5011,24 +5085,54 @@ export function ModLibraryOverlay({
           });
         } catch (err) {
           console.error("Failed to delete downloaded mod files:", err);
+          showLibraryNotice(
+            "Delete Failed",
+            err instanceof Error
+              ? err.message
+              : "Failed to delete downloaded mod files.",
+          );
         } finally {
           setDeleting(null);
         }
       },
     });
-  };
+  }, [environments, getEntryStorageIds, refreshLibrary, showLibraryNotice]);
 
   const handleBulkDelete = async () => {
     if (!library || selectedModIds.size === 0) return;
     const selectedEntries = library.downloaded.filter((entry) =>
       selectedModIds.has(entry.storageId),
     );
+    const installedEnvironmentIds = Array.from(
+      new Set(selectedEntries.flatMap((entry) => entry.installedIn)),
+    );
+    const installedEnvironmentNames = installedEnvironmentIds.map((envId) => {
+      return (
+        environments.find((environment) => environment.id === envId)?.name ||
+        envId
+      );
+    });
+    const installedSummary =
+      installedEnvironmentNames.length > 0
+        ? installedEnvironmentNames.length <= 3
+          ? installedEnvironmentNames.join(", ")
+          : `${installedEnvironmentNames.slice(0, 3).join(", ")} and ${installedEnvironmentNames.length - 3} more`
+        : "";
+
     setConfirmOverlay({
       isOpen: true,
-      title: "Delete Downloaded Files",
-      message: selectedEntries.some((entry) => entry.installedIn.length > 0)
-        ? "Some selected mods are installed in environments. This will remove them from those environments and delete the downloaded files. Continue?"
+      title:
+        installedEnvironmentIds.length > 0
+          ? "Uninstall and Delete?"
+          : "Delete Downloaded Files",
+      message:
+        installedEnvironmentIds.length > 0
+          ? `Some selected library copies are installed in ${installedEnvironmentIds.length} environment${installedEnvironmentIds.length === 1 ? "" : "s"}${installedSummary ? `: ${installedSummary}` : ""}. Delete will uninstall them from those environments and remove the downloaded files from the library. Continue?`
         : "Delete selected downloaded files from the library? This cannot be undone.",
+      confirmText:
+        installedEnvironmentIds.length > 0
+          ? "Uninstall and Delete"
+          : "Delete Files",
       onConfirm: async () => {
         setConfirmOverlay({
           isOpen: false,
@@ -5048,6 +5152,12 @@ export function ModLibraryOverlay({
           setSelectedModIds(new Set());
         } catch (err) {
           console.error("Failed to bulk delete downloaded mods:", err);
+          showLibraryNotice(
+            "Delete Failed",
+            err instanceof Error
+              ? err.message
+              : "Failed to delete selected downloaded mods.",
+          );
         } finally {
           setDeleting(null);
         }
@@ -9034,7 +9144,12 @@ export function ModLibraryOverlay({
                           ? "Available Updates"
                           : "Downloaded Library"}
                       </strong>
-                      <span>{displayedDownloadedGroups.length} entries</span>
+                      <span>
+                        {displayedDownloadedGroups.length}{" "}
+                        {displayedDownloadedGroups.length === 1
+                          ? "group"
+                          : "groups"}
+                      </span>
                     </div>
                     <div className="workspace-collection__toolbar-search">
                       <Input
@@ -9172,21 +9287,8 @@ export function ModLibraryOverlay({
 
               {libraryTab === "discover" &&
                 (showSearchResults || showNexusModsResults) && (
-                  <section className="workspace-collection__section">
-                    <div className="workspace-collection__section-header">
-                      <h3>
-                        {showSearchResults
-                          ? "Discover Results"
-                          : "Nexus Results"}
-                      </h3>
-                      <span>
-                        {showSearchResults
-                          ? searchResults.length
-                          : nexusModsSearchResults.length}{" "}
-                        result(s)
-                      </span>
-                    </div>
-                    <div className="workspace-collection__list">
+                  <section className="workspace-collection__section workspace-collection__section--inventory">
+                    <div className="workspace-collection__list workspace-collection__list--inventory">
                       <div className="workspace-collection__table-head workspace-collection__table-head--discover" aria-hidden="true">
                         <span>Name</span>
                         <span>Author</span>
@@ -9210,7 +9312,7 @@ export function ModLibraryOverlay({
                           return (
                             <div
                               key={pkg.key}
-                              className={`workspace-collection__row ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                              className={`workspace-collection__row workspace-collection__row--discover ${isSelected ? "workspace-collection__row--selected" : ""}`}
                               role="button"
                               tabIndex={0}
                               onClick={() => openThunderstoreModView(pkg)}
@@ -9233,31 +9335,34 @@ export function ModLibraryOverlay({
                                   {pkg.name}
                                 </div>
                                 <div className="workspace-collection__row-meta">
-                                  <span>{pkg.owner}</span>
-                                  <WorkspaceBadge tone="source">
-                                    Thunderstore
-                                  </WorkspaceBadge>
                                   {updatedLabel !== "unknown" && (
-                                    <WorkspaceBadge>
-                                      Updated {updatedLabel}
-                                    </WorkspaceBadge>
+                                    <span>Updated {updatedLabel}</span>
                                   )}
-                                  {downloadedGroup && (
-                                    <WorkspaceBadge tone="success">
-                                      Downloaded
-                                    </WorkspaceBadge>
-                                  )}
-                                  {downloadedGroup &&
-                                    isGroupUpdateAvailable(downloadedGroup) && (
-                                      <WorkspaceBadge tone="warning">
-                                        Update available
-                                      </WorkspaceBadge>
-                                    )}
                                 </div>
                                 <p className="workspace-collection__row-summary">
                                   {latestVersion?.description ||
                                     "No summary provided."}
                                 </p>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>{pkg.owner}</span>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>Thunderstore</span>
+                              </div>
+                              <div className="workspace-collection__row-cell workspace-collection__row-cell--status">
+                                {downloadedGroup &&
+                                isGroupUpdateAvailable(downloadedGroup) ? (
+                                  <span className="workspace-collection__status workspace-collection__status--warning">
+                                    Update available
+                                  </span>
+                                ) : downloadedGroup ? (
+                                  <span className="workspace-collection__status workspace-collection__status--success">
+                                    Downloaded
+                                  </span>
+                                ) : (
+                                  <span>Available</span>
+                                )}
                               </div>
                             </div>
                           );
@@ -9276,7 +9381,7 @@ export function ModLibraryOverlay({
                           return (
                             <div
                               key={mod.mod_id}
-                              className={`workspace-collection__row ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                              className={`workspace-collection__row workspace-collection__row--discover ${isSelected ? "workspace-collection__row--selected" : ""}`}
                               role="button"
                               tabIndex={0}
                               onClick={() => openNexusModView(mod)}
@@ -9297,30 +9402,33 @@ export function ModLibraryOverlay({
                                   {mod.name}
                                 </div>
                                 <div className="workspace-collection__row-meta">
-                                  <span>{getNexusModAttribution(mod)}</span>
-                                  <WorkspaceBadge tone="source">
-                                    Nexus Mods
-                                  </WorkspaceBadge>
                                   {updatedLabel !== "unknown" && (
-                                    <WorkspaceBadge>
-                                      Updated {updatedLabel}
-                                    </WorkspaceBadge>
+                                    <span>Updated {updatedLabel}</span>
                                   )}
-                                  {downloadedGroup && (
-                                    <WorkspaceBadge tone="success">
-                                      Downloaded
-                                    </WorkspaceBadge>
-                                  )}
-                                  {downloadedGroup &&
-                                    isGroupUpdateAvailable(downloadedGroup) && (
-                                      <WorkspaceBadge tone="warning">
-                                        Update available
-                                      </WorkspaceBadge>
-                                    )}
                                 </div>
                                 <p className="workspace-collection__row-summary">
                                   {mod.summary || "No summary provided."}
                                 </p>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>{getNexusModAttribution(mod)}</span>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>Nexus Mods</span>
+                              </div>
+                              <div className="workspace-collection__row-cell workspace-collection__row-cell--status">
+                                {downloadedGroup &&
+                                isGroupUpdateAvailable(downloadedGroup) ? (
+                                  <span className="workspace-collection__status workspace-collection__status--warning">
+                                    Update available
+                                  </span>
+                                ) : downloadedGroup ? (
+                                  <span className="workspace-collection__status workspace-collection__status--success">
+                                    Downloaded
+                                  </span>
+                                ) : (
+                                  <span>Available</span>
+                                )}
                               </div>
                             </div>
                           );
@@ -9334,18 +9442,10 @@ export function ModLibraryOverlay({
                         )}
                     </div>
                   </section>
-                )}
+              )}
 
               {(libraryTab === "library" || libraryTab === "updates") && (
-                <section className="workspace-collection__section">
-                  <div className="workspace-collection__section-header">
-                    <h3>
-                      {libraryTab === "updates"
-                        ? "Available Updates"
-                        : "Downloaded Library"}
-                    </h3>
-                    <span>{displayedDownloadedGroups.length} group(s)</span>
-                  </div>
+                <section className="workspace-collection__section workspace-collection__section--inventory">
                   {loadingLibrary && (
                     <CollectionEmpty>Loading mod library...</CollectionEmpty>
                   )}
@@ -9358,7 +9458,7 @@ export function ModLibraryOverlay({
                       </CollectionEmpty>
                   )}
                   {!loadingLibrary && displayedDownloadedGroups.length > 0 && (
-                    <div className="workspace-collection__list">
+                    <div className="workspace-collection__list workspace-collection__list--inventory">
                       <div className="workspace-collection__table-head workspace-collection__table-head--downloaded" aria-hidden="true">
                         <span>Name</span>
                         <span>Source</span>
@@ -9378,7 +9478,7 @@ export function ModLibraryOverlay({
                         return (
                           <div
                             key={group.key}
-                            className={`workspace-collection__row ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                            className={`workspace-collection__row workspace-collection__row--downloaded ${isSelected ? "workspace-collection__row--selected" : ""}`}
                             role="button"
                             tabIndex={0}
                             onClick={() => openDownloadedModView(group)}
@@ -9405,15 +9505,6 @@ export function ModLibraryOverlay({
                                 {group.displayName}
                               </div>
                               <div className="workspace-collection__row-meta">
-                                <WorkspaceBadge tone="source">
-                                  {getSourceBadgeLabel(activeEntry?.source)}
-                                </WorkspaceBadge>
-                                <WorkspaceBadge>
-                                  {formatVersionTag(
-                                    getEntryVersionLabel(activeEntry!),
-                                  )}
-                                </WorkspaceBadge>
-                                <WorkspaceBadge>{`${group.installedIn.length} env${group.installedIn.length === 1 ? "" : "s"}`}</WorkspaceBadge>
                                 {group.availableRuntimes.map((runtime) => (
                                   <WorkspaceBadge
                                     key={`${group.key}-${runtime}`}
@@ -9442,6 +9533,34 @@ export function ModLibraryOverlay({
                               <p className="workspace-collection__row-summary">
                                 {activeEntry?.summary || "No summary provided."}
                               </p>
+                            </div>
+                            <div className="workspace-collection__row-cell workspace-collection__row-cell--source">
+                              <span>
+                                {getSourceBadgeLabel(activeEntry?.source)}
+                              </span>
+                              {group.author ? <small>{group.author}</small> : null}
+                            </div>
+                            <div className="workspace-collection__row-cell">
+                              <span>
+                                {formatVersionTag(
+                                  getEntryVersionLabel(activeEntry!),
+                                )}
+                              </span>
+                              {group.remoteVersion &&
+                              group.remoteVersion !==
+                                getEntryVersionLabel(activeEntry!) ? (
+                                <small>
+                                  Latest {formatVersionTag(group.remoteVersion)}
+                                </small>
+                              ) : null}
+                            </div>
+                            <div className="workspace-collection__row-cell">
+                              <span>{group.installedIn.length}</span>
+                              <small>
+                                {group.installedIn.length === 1
+                                  ? "environment"
+                                  : "environments"}
+                              </small>
                             </div>
                           </div>
                         );
@@ -10119,6 +10238,16 @@ export function ModLibraryOverlay({
                           file.version || file.mod_version || "unknown";
                         const isActive =
                           selectedNexusFile?.file_id === file.file_id;
+                        const detailLabel = getNexusVersionRowDetail(
+                          file,
+                          selectedNexusResult.name,
+                          versionLabel,
+                        );
+                        const summaryLabel = getNexusVersionRowSummary(
+                          file,
+                          selectedNexusResult.name,
+                          versionLabel,
+                        );
                         return (
                           <SimmButton
                             key={file.file_id}
@@ -10162,11 +10291,11 @@ export function ModLibraryOverlay({
                                     getNexusModUpdatedAt(selectedNexusResult),
                                 )}
                               </span>
-                              <span>{file.file_name || file.name}</span>
+                              {detailLabel && <span>{detailLabel}</span>}
                             </div>
-                            {file.name && file.file_name !== file.name && (
+                            {summaryLabel && (
                               <p className="workspace-version-row__summary">
-                                {file.name}
+                                {summaryLabel}
                               </p>
                             )}
                           </SimmButton>
