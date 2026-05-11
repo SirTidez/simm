@@ -56,8 +56,33 @@ import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const LAST_ENV_KEY = 'simm:lastEnvId';
 const SHELL_NAV_COLLAPSED_KEY = 'simm:shellNavCollapsed';
+const CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY = 'simm:consumedNexusOAuthCallbacks';
 const SIMM_RELEASES_URL = 'https://api.github.com/repos/SirTidez/simm/releases?per_page=4';
 const SIMM_CHANGELOG_URL = 'https://raw.githubusercontent.com/SirTidez/simm/master/CHANGELOG.md';
+
+const readConsumedNexusOAuthCallbacks = () => {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY) || '[]');
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((value): value is string => typeof value === 'string'))
+      : new Set<string>();
+  } catch {
+    return new Set<string>();
+  }
+};
+
+const rememberConsumedNexusOAuthCallback = (callbackUrl: string) => {
+  try {
+    const callbacks = readConsumedNexusOAuthCallbacks();
+    callbacks.add(callbackUrl);
+    sessionStorage.setItem(
+      CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY,
+      JSON.stringify(Array.from(callbacks).slice(-12)),
+    );
+  } catch {
+    // Ignore storage failures; the in-memory replay guard still works for this session.
+  }
+};
 
 const readStoredShellNavCollapsed = () => {
   try {
@@ -629,8 +654,17 @@ function AppShellDownloadsDock({
   label: string;
   shellNavCollapsed: boolean;
 }) {
-  const [downloadsPanelOpen, setDownloadsPanelOpen] = useState(false);
+  const [downloadsPanelMounted, setDownloadsPanelMounted] = useState(false);
+  const [downloadsPanelVisible, setDownloadsPanelVisible] = useState(false);
   const downloadsPanelDismissTimerRef = useRef<number | null>(null);
+  const downloadsPanelAnimationFrameRef = useRef<number | null>(null);
+
+  const clearDownloadsPanelAnimationFrame = useCallback(() => {
+    if (downloadsPanelAnimationFrameRef.current !== null) {
+      cancelShellAnimationFrame(downloadsPanelAnimationFrameRef.current);
+      downloadsPanelAnimationFrameRef.current = null;
+    }
+  }, []);
 
   const clearDownloadsPanelDismissTimer = useCallback(() => {
     if (downloadsPanelDismissTimerRef.current !== null) {
@@ -639,25 +673,64 @@ function AppShellDownloadsDock({
     }
   }, []);
 
+  const openDownloadsPanel = useCallback(() => {
+    clearDownloadsPanelAnimationFrame();
+    setDownloadsPanelMounted(true);
+
+    if (prefersReducedShellMotion()) {
+      setDownloadsPanelVisible(true);
+      return;
+    }
+
+    downloadsPanelAnimationFrameRef.current = requestShellAnimationFrame(() => {
+      downloadsPanelAnimationFrameRef.current = null;
+      setDownloadsPanelVisible(true);
+    });
+  }, [clearDownloadsPanelAnimationFrame]);
+
   const closeDownloadsPanel = useCallback(() => {
     clearDownloadsPanelDismissTimer();
-    setDownloadsPanelOpen(false);
-  }, [clearDownloadsPanelDismissTimer]);
+    clearDownloadsPanelAnimationFrame();
+
+    if (prefersReducedShellMotion()) {
+      setDownloadsPanelVisible(false);
+      setDownloadsPanelMounted(false);
+      return;
+    }
+
+    setDownloadsPanelVisible(false);
+  }, [clearDownloadsPanelAnimationFrame, clearDownloadsPanelDismissTimer]);
 
   const scheduleDownloadsPanelDismiss = useCallback(() => {
     clearDownloadsPanelDismissTimer();
     downloadsPanelDismissTimerRef.current = window.setTimeout(() => {
       downloadsPanelDismissTimerRef.current = null;
-      setDownloadsPanelOpen(false);
+      closeDownloadsPanel();
     }, 850);
-  }, [clearDownloadsPanelDismissTimer]);
+  }, [clearDownloadsPanelDismissTimer, closeDownloadsPanel]);
 
   const toggleDownloadsPanel = useCallback(() => {
     clearDownloadsPanelDismissTimer();
-    setDownloadsPanelOpen((open) => !open);
-  }, [clearDownloadsPanelDismissTimer]);
+    if (downloadsPanelVisible) {
+      closeDownloadsPanel();
+      return;
+    }
 
-  useEffect(() => clearDownloadsPanelDismissTimer, [clearDownloadsPanelDismissTimer]);
+    openDownloadsPanel();
+  }, [clearDownloadsPanelDismissTimer, closeDownloadsPanel, downloadsPanelVisible, openDownloadsPanel]);
+
+  const handleDownloadsPanelTransitionEnd = useCallback((event: TransitionEvent<HTMLDivElement>) => {
+    if (event.currentTarget !== event.target || event.propertyName !== 'opacity' || downloadsPanelVisible) {
+      return;
+    }
+
+    setDownloadsPanelMounted(false);
+  }, [downloadsPanelVisible]);
+
+  useEffect(() => () => {
+    clearDownloadsPanelDismissTimer();
+    clearDownloadsPanelAnimationFrame();
+  }, [clearDownloadsPanelAnimationFrame, clearDownloadsPanelDismissTimer]);
 
   return (
     <>
@@ -671,7 +744,7 @@ function AppShellDownloadsDock({
           variant="ghost"
           className="app-shell-sidebar__tool-item app-shell-sidebar__download-item"
           onClick={toggleDownloadsPanel}
-          aria-expanded={downloadsPanelOpen}
+          aria-expanded={downloadsPanelVisible}
           aria-controls="downloads-popover"
           title={label}
         >
@@ -680,14 +753,19 @@ function AppShellDownloadsDock({
           <SimmBadge variant="secondary" className="app-shell-sidebar__tool-badge">{badge}</SimmBadge>
         </SimmButton>
       </div>
-      {downloadsPanelOpen && (
+      {downloadsPanelMounted && (
         <div
-          className={`downloads-popover${shellNavCollapsed ? ' downloads-popover--nav-collapsed' : ''}`}
+          className={[
+            'downloads-popover',
+            downloadsPanelVisible ? 'downloads-popover--open' : 'downloads-popover--closing',
+            shellNavCollapsed ? 'downloads-popover--nav-collapsed' : '',
+          ].filter(Boolean).join(' ')}
           id="downloads-popover"
           role="dialog"
           aria-label="Downloads"
           onPointerEnter={clearDownloadsPanelDismissTimer}
           onPointerLeave={scheduleDownloadsPanelDismiss}
+          onTransitionEnd={handleDownloadsPanelTransitionEnd}
         >
           <Suspense fallback={<WorkspacePanelFallback />}>
             <DownloadsPanel presentation="popup" onClose={closeDownloadsPanel} />
@@ -1590,7 +1668,9 @@ function AppContent() {
       return;
     }
 
+    const consumedCallbacks = readConsumedNexusOAuthCallbacks();
     if (
+      consumedCallbacks.has(callbackUrl) ||
       completedNexusCallbackRef.current === callbackUrl ||
       inFlightNexusCallbackRef.current === callbackUrl
     ) {
@@ -1610,11 +1690,27 @@ function AppContent() {
         return;
       }
       completedNexusCallbackRef.current = callbackUrl;
+      rememberConsumedNexusOAuthCallback(callbackUrl);
       dispatchNexusOAuthResult({ success: true });
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login';
+      if (message.includes('No pending Nexus OAuth login flow')) {
+        try {
+          const status = await ApiService.getNexusOAuthStatus();
+          if (status.connected) {
+            completedNexusCallbackRef.current = callbackUrl;
+            rememberConsumedNexusOAuthCallback(callbackUrl);
+            dispatchNexusOAuthResult({ success: true });
+            return;
+          }
+        } catch {
+          // Fall through to the original callback failure below.
+        }
+      }
+
       dispatchNexusOAuthResult({
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login',
+        error: message,
       });
       return;
     } finally {

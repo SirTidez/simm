@@ -336,6 +336,7 @@ describe('App', () => {
     });
     processMocks.relaunch.mockResolvedValue(undefined);
     localStorage.clear();
+    sessionStorage.clear();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url.includes('/releases')) {
         return {
@@ -692,11 +693,17 @@ describe('App', () => {
     const popup = await screen.findByRole('dialog', { name: 'Downloads' });
     const downloadsButton = screen.getByRole('button', { name: /Downloads/ });
     expect(popup.classList.contains('downloads-popover')).toBe(true);
+    await waitFor(() => expect(popup.classList.contains('downloads-popover--open')).toBe(true));
     expect(downloadsButton.classList.contains('app-shell-sidebar__tool-item--active')).toBe(false);
     expect(await within(popup).findByText('Downloads Panel')).toBeTruthy();
     expect(within(popup).getByText('popup')).toBeTruthy();
 
     fireEvent.click(downloadsButton);
+    expect(downloadsButton).toHaveAttribute('aria-expanded', 'false');
+    expect(popup.classList.contains('downloads-popover--closing')).toBe(true);
+    expect(screen.getByRole('dialog', { name: 'Downloads' })).toBeTruthy();
+
+    fireEvent.transitionEnd(popup, { propertyName: 'opacity' });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Downloads' })).toBeNull());
   });
 
@@ -1100,5 +1107,48 @@ describe('App', () => {
         ([command]) => command === 'complete_nexus_manual_download_session',
       ),
     ).toHaveLength(2);
+  });
+
+  it('consumes a replayed successful Nexus OAuth callback when no pending flow remains', async () => {
+    const callbackUrl = 'simm://oauth/nexus/callback?code=abc&state=done';
+    const oauthResults: Array<{ success: boolean; error?: string }> = [];
+    const handleOAuthResult = ((event: Event) => {
+      oauthResults.push((event as CustomEvent<{ success: boolean; error?: string }>).detail);
+    }) as EventListener;
+    window.addEventListener('nexus-oauth-result', handleOAuthResult);
+    deepLinkMocks.getCurrent.mockResolvedValue([callbackUrl]);
+    invokeMock.mockImplementation((command: string) => {
+      switch (command) {
+        case 'complete_nexus_oauth_callback':
+          return Promise.reject(new Error('No pending Nexus OAuth login flow'));
+        case 'get_nexus_oauth_status':
+          return Promise.resolve({ connected: true, account: { name: 'Tester' } });
+        default:
+          return Promise.resolve(false);
+      }
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith('complete_nexus_oauth_callback', {
+          callbackUrl,
+        });
+        expect(invokeMock).toHaveBeenCalledWith('get_nexus_oauth_status');
+      });
+
+      expect(oauthResults).toContainEqual({ success: true });
+      expect(oauthResults.some((result) => result.success === false)).toBe(false);
+
+      window.dispatchEvent(new Event('focus'));
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === 'complete_nexus_oauth_callback'),
+      ).toHaveLength(1);
+    } finally {
+      window.removeEventListener('nexus-oauth-result', handleOAuthResult);
+    }
   });
 });
