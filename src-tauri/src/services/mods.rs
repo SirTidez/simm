@@ -71,6 +71,32 @@ enum LinkedSourceProvider {
 }
 
 fn archive_format_for_path(path: &Path) -> &'static str {
+    if let Ok(mut file) = File::open(path) {
+        let mut signature = [0u8; 8];
+        if let Ok(count) = file.read(&mut signature) {
+            if count >= 4
+                && signature[0] == 0x50
+                && signature[1] == 0x4b
+                && matches!(signature[2], 0x03 | 0x05 | 0x07)
+                && matches!(signature[3], 0x04 | 0x06 | 0x08)
+            {
+                return "zip";
+            }
+            if count >= 6 && signature[..6] == [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c] {
+                return "7z";
+            }
+            if count >= 7 && signature[..7] == [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00] {
+                return "rar";
+            }
+            if count >= 8 && signature[..8] == [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00] {
+                return "rar";
+            }
+            if count >= 2 && signature[..2] == [0x4d, 0x5a] {
+                return "dll";
+            }
+        }
+    }
+
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -13282,6 +13308,59 @@ mod tests {
                 )
                 .await
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn store_mod_archive_extracts_zip_even_when_download_name_ends_with_dll() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let misleading_zip_path = temp.path().join("Empire-S1API.dll");
+        write_zip_fixture(
+            &misleading_zip_path,
+            &[("Empire-S1API.dll", b"managed dll")],
+        )?;
+
+        let stored = service
+            .store_mod_archive(
+                misleading_zip_path.to_string_lossy().as_ref(),
+                "Empire-S1API.dll",
+                Some(Runtime::Il2cpp),
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "1437",
+                    "sourceVersion": "2.3.0",
+                    "modName": "Empire 2.0 - Resurrected"
+                })),
+                None,
+            )
+            .await?;
+
+        let storage_id = stored
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("storage id");
+        let storage_base = service.get_mods_storage_dir().await?.join(storage_id);
+        let staged_dll = storage_base.join("Mods").join("Empire-S1API.dll");
+
+        assert_eq!(fs::read(&staged_dll).await?, b"managed dll");
 
         Ok(())
     }

@@ -1876,7 +1876,7 @@ mod tests {
     use crate::services::nexus_mods::NexusModsService;
     use crate::services::thunderstore::ThunderStoreService;
     use crate::types::{
-        ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource, schedule_i_config,
+        schedule_i_config, ModLibraryEntry, ModLibraryResult, ModMetadata, ModSource,
     };
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};

@@ -113,16 +113,18 @@ pub async fn download_thunderstore_package(
                 .as_deref()
                 .and_then(|selected_uuid| {
                     versions.iter().find(|version| {
-                        version
-                            .get("uuid4")
-                            .and_then(|value| value.as_str())
-                            == Some(selected_uuid)
+                        version.get("uuid4").and_then(|value| value.as_str()) == Some(selected_uuid)
                     })
                 })
                 .or_else(|| versions.first())
         })
         .and_then(|version| version.get("icon").and_then(|value| value.as_str()))
-        .or_else(|| package.get("latest").and_then(|latest| latest.get("icon")).and_then(|value| value.as_str()))
+        .or_else(|| {
+            package
+                .get("latest")
+                .and_then(|latest| latest.get("icon"))
+                .and_then(|value| value.as_str())
+        })
         .or_else(|| package.get("icon").and_then(|value| value.as_str()))
         .or_else(|| package.get("icon_url").and_then(|value| value.as_str()))
         .map(|value| value.to_string());
