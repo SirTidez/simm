@@ -610,6 +610,8 @@ Current Task 8 checkpoint:
 - Validation passed with `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 - Built a current CSS/className inventory after Task 9 completed. Removed the stale settings hidden-input switch selectors left behind by the `Switch` conversion, and pruned the now-unused Configuration editor selectors for the pre-migration header/badge/raw-toolbar shape.
 - Verified those selector names no longer appear outside the plan text and `bunx tsc --noEmit` passes.
+- Continued the post-conversion cleanup by pruning orphaned legacy shell/sidebar, account metadata, environment info, workspace toolbar, preset preview, and unused modifier selectors from `src/style.css` after confirming they had no JSX references and were not backed by dynamic class-name patterns.
+- Verified the pruned selector names no longer appear in source and `bunx tsc --noEmit` passes.
 
 - [x] **Step 3: Validate after each CSS batch**
 
@@ -626,6 +628,7 @@ Current Task 8 validation checkpoint:
 
 - Validation passed with `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`.
 - Lint remains warning-only with the existing advisory hook/dependency, Fast Refresh, and IPC/event-boundary warning baseline.
+- The continued CSS-only cleanup batch passed the full frontend gate: `bun install`, `bunx tsc --noEmit`, `bun run lint`, `bun run test`, and `bun run build`. Lint still reports only the existing warning baseline.
 
 - [ ] **Step 4: Commit CSS cleanup batches**
 
