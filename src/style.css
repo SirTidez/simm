@@ -8524,15 +8524,25 @@ body {
 
 .workspace-collection__content,
 .workspace-collection__inspector {
+  min-width: 0;
   min-height: 0;
 }
 
 .workspace-collection__content {
+  flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 0;
   display: grid;
+  align-content: start;
   gap: 0;
+  scrollbar-gutter: stable;
+}
+
+.mods-overlay--environment .workspace-collection__content {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .workspace-collection__section {
@@ -8685,7 +8695,36 @@ body {
 }
 
 .mods-overlay--environment .workspace-collection__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   border-radius: 0.42rem;
+}
+
+.mods-overlay--environment .workspace-collection__list-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-color: color-mix(in srgb, var(--scrollbar-thumb-hover) 90%, rgba(255, 255, 255, 0.18)) var(--scrollbar-track-hover);
+}
+
+.mods-overlay--environment .workspace-collection__list-body::-webkit-scrollbar-track {
+  background: var(--scrollbar-track-hover);
+}
+
+.mods-overlay--environment .workspace-collection__list-body::-webkit-scrollbar-thumb {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--scrollbar-thumb-hover) 72%, rgba(255, 255, 255, 0.14)),
+      color-mix(in srgb, var(--scrollbar-thumb-hover) 92%, rgba(255, 255, 255, 0.05))
+    );
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }
 
 .mods-overlay--environment .workspace-collection__row {

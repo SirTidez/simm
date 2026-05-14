@@ -2463,86 +2463,88 @@ export function ModsOverlay({
                     <span>Version</span>
                     <span>Status</span>
                   </div>
-                  {filteredMods.map((mod) => {
-                    const updateInfo = modUpdates.get(mod.fileName);
-                    const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
-                    const updateDisabledReason = getUpdateDisabledReason(mod, updateInfo?.updateAvailable);
-                    const securityBadge = getSecurityBadgeConfig(mod.securityScan);
-                    return (
-                      <div
-                        key={`${mod.fileName}-${mod.path}`}
-                        className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
-                        role="button"
-                        aria-label={`Open details for ${mod.name}`}
-                        tabIndex={0}
-                        onClick={() => openInstalledModView(mod)}
-                        onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
-                        onContextMenu={(event) => openContextMenu(event, [
-                          {
-                            key: mod.disabled ? 'enable' : 'disable',
-                            label: mod.disabled ? 'Enable' : 'Disable',
-                            icon: mod.disabled ? 'fas fa-check' : 'fas fa-ban',
-                            onSelect: () => void (mod.disabled ? handleEnableMod(mod) : handleDisableMod(mod)),
-                          },
-                          {
-                            key: 'update',
-                            label: 'Update',
-                            icon: 'fas fa-arrow-up',
-                            disabled: !!updateDisabledReason,
-                            onSelect: () => void handleUpdateMod(mod),
-                          },
-                          {
-                            key: 'config',
-                            label: 'Open Config',
-                            icon: 'fas fa-sliders-h',
-                            disabled: !onOpenConfig,
-                            onSelect: () => onOpenConfig?.(),
-                          },
-                          {
-                            key: 'security',
-                            label: mod.securityScan ? 'Rescan Security' : 'Scan Security',
-                            icon: 'fas fa-shield-halved',
-                            disabled: scanningInstalledMod === `${mod.fileName}-${mod.path}`,
-                            onSelect: () => void handleScanInstalledMod(mod),
-                          },
-                          {
-                            key: 'library',
-                            label: 'Open in Mod Library',
-                            icon: 'fas fa-book-open',
-                            disabled: !onOpenModLibrary,
-                            onSelect: () => onOpenModLibrary?.(),
-                          },
-                          {
-                            key: 'source',
-                            label: 'Open Source Page',
-                            icon: 'fas fa-arrow-up-right-from-square',
-                            disabled: !safeExternalUrl(mod.sourceUrl),
-                            onSelect: () => openExternalSourceUrl(mod.sourceUrl),
-                          },
-                          {
-                            key: 'delete',
-                            label: 'Uninstall from Environment',
-                            icon: 'fas fa-trash',
-                            danger: true,
-                            onSelect: () => requestDeleteMod(mod),
-                          },
-                        ])}
-                      >
-                        {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'inline')}
-                        <div className="workspace-collection__row-body">
-                          <div className="workspace-collection__row-title">{mod.name}</div>
-                          <div className="workspace-collection__row-meta">
-                            {mod.disabled && <WorkspaceBadge tone="danger">Disabled</WorkspaceBadge>}
-                            {updateInfo?.updateAvailable && <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>}
-                            {mod.source && <WorkspaceBadge tone="source">{getSourceLabel(mod.source)}</WorkspaceBadge>}
-                            {mod.version && <WorkspaceBadge>{mod.version}</WorkspaceBadge>}
-                            <SecurityScanBadge config={securityBadge} />
+                  <div className="workspace-collection__list-body">
+                    {filteredMods.map((mod) => {
+                      const updateInfo = modUpdates.get(mod.fileName);
+                      const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
+                      const updateDisabledReason = getUpdateDisabledReason(mod, updateInfo?.updateAvailable);
+                      const securityBadge = getSecurityBadgeConfig(mod.securityScan);
+                      return (
+                        <div
+                          key={`${mod.fileName}-${mod.path}`}
+                          className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                          role="button"
+                          aria-label={`Open details for ${mod.name}`}
+                          tabIndex={0}
+                          onClick={() => openInstalledModView(mod)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
+                          onContextMenu={(event) => openContextMenu(event, [
+                            {
+                              key: mod.disabled ? 'enable' : 'disable',
+                              label: mod.disabled ? 'Enable' : 'Disable',
+                              icon: mod.disabled ? 'fas fa-check' : 'fas fa-ban',
+                              onSelect: () => void (mod.disabled ? handleEnableMod(mod) : handleDisableMod(mod)),
+                            },
+                            {
+                              key: 'update',
+                              label: 'Update',
+                              icon: 'fas fa-arrow-up',
+                              disabled: !!updateDisabledReason,
+                              onSelect: () => void handleUpdateMod(mod),
+                            },
+                            {
+                              key: 'config',
+                              label: 'Open Config',
+                              icon: 'fas fa-sliders-h',
+                              disabled: !onOpenConfig,
+                              onSelect: () => onOpenConfig?.(),
+                            },
+                            {
+                              key: 'security',
+                              label: mod.securityScan ? 'Rescan Security' : 'Scan Security',
+                              icon: 'fas fa-shield-halved',
+                              disabled: scanningInstalledMod === `${mod.fileName}-${mod.path}`,
+                              onSelect: () => void handleScanInstalledMod(mod),
+                            },
+                            {
+                              key: 'library',
+                              label: 'Open in Mod Library',
+                              icon: 'fas fa-book-open',
+                              disabled: !onOpenModLibrary,
+                              onSelect: () => onOpenModLibrary?.(),
+                            },
+                            {
+                              key: 'source',
+                              label: 'Open Source Page',
+                              icon: 'fas fa-arrow-up-right-from-square',
+                              disabled: !safeExternalUrl(mod.sourceUrl),
+                              onSelect: () => openExternalSourceUrl(mod.sourceUrl),
+                            },
+                            {
+                              key: 'delete',
+                              label: 'Uninstall from Environment',
+                              icon: 'fas fa-trash',
+                              danger: true,
+                              onSelect: () => requestDeleteMod(mod),
+                            },
+                          ])}
+                        >
+                          {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'inline')}
+                          <div className="workspace-collection__row-body">
+                            <div className="workspace-collection__row-title">{mod.name}</div>
+                            <div className="workspace-collection__row-meta">
+                              {mod.disabled && <WorkspaceBadge tone="danger">Disabled</WorkspaceBadge>}
+                              {updateInfo?.updateAvailable && <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>}
+                              {mod.source && <WorkspaceBadge tone="source">{getSourceLabel(mod.source)}</WorkspaceBadge>}
+                              {mod.version && <WorkspaceBadge>{mod.version}</WorkspaceBadge>}
+                              <SecurityScanBadge config={securityBadge} />
+                            </div>
+                            <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
                           </div>
-                          <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
