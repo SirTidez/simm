@@ -79,6 +79,7 @@ React component -> `ApiService` -> `invoke()` -> Rust command -> service -> resu
 
 - **Rust (stable)**: https://rustup.rs/
 - **Node.js v22.12+**: https://nodejs.org/
+- **Bun 1.3.x**: https://bun.sh/
 
 ## Node.js Version
 
@@ -103,6 +104,7 @@ The installed Windows app is also marked `requireAdministrator`, so every launch
 ### Run Full App (Tauri + Vite)
 
 ```bash
+bun install
 bun run tauri dev
 ```
 
@@ -115,6 +117,10 @@ bun run dev
 ### Build
 
 ```bash
+bun install
+bunx tsc --noEmit
+bun run lint
+bun run test
 bun run build
 bun run tauri build
 ```

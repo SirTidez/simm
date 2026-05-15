@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,11 +26,11 @@ def find_repo_root(start: Path) -> Path:
 
 
 def quick_validate_path() -> Path:
-    user_profile = os.environ.get("USERPROFILE")
-    if not user_profile:
-        raise SystemExit("USERPROFILE is not set; cannot locate skill-creator validator.")
+    home = Path.home()
+    if not str(home):
+        raise SystemExit("Could not locate the user home directory for skill-creator validator.")
     path = (
-        Path(user_profile)
+        home
         / ".codex"
         / "skills"
         / ".system"
