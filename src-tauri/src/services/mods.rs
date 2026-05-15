@@ -122,7 +122,15 @@ fn archive_format_for_path(path: &Path) -> &'static str {
 }
 
 fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, String> {
-    let path = Path::new(entry_name);
+    let normalized_entry_name = entry_name.replace('\\', "/");
+    if normalized_entry_name.contains(':') {
+        return Err(format!(
+            "Archive entry contains an unsafe path: {}",
+            entry_name
+        ));
+    }
+
+    let path = Path::new(&normalized_entry_name);
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(format!(
             "Archive entry contains an unsafe path: {}",
@@ -7147,7 +7155,9 @@ exit 1
                 .context("Failed to read file from archive")?;
 
             let file_name = file.name().to_string();
-            let is_dir = file_name.ends_with('/');
+            let relative_path =
+                safe_archive_relative_path(&file_name).map_err(|error| anyhow::anyhow!(error))?;
+            let is_dir = file_name.ends_with('/') || file.is_dir();
 
             let mut buffer = Vec::new();
             if !is_dir {
@@ -7155,12 +7165,12 @@ exit 1
                     .context("Failed to read file data from archive")?;
             }
 
-            file_data.push((file_name, is_dir, buffer));
+            file_data.push((relative_path, is_dir, buffer));
         }
 
         // Now do async operations with the collected data
-        for (file_name, is_dir, buffer) in file_data {
-            let outpath = temp_dir.join(&file_name);
+        for (relative_path, is_dir, buffer) in file_data {
+            let outpath = temp_dir.join(relative_path);
 
             if is_dir {
                 fs::create_dir_all(&outpath).await?;
@@ -10478,6 +10488,78 @@ mod tests {
             .extract_thunderstore_manifest(&zip_path)
             .expect("manifest parsed");
         assert_eq!(parsed.get("name").and_then(|v| v.as_str()), Some("Example"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_and_install_zip_rejects_traversal_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let zip_path = temp.path().join("malicious.zip");
+        write_zip_fixture(&zip_path, &[("../escape.txt", b"owned")])?;
+
+        let extract_dir = temp.path().join("extract");
+        let mods_dir = temp.path().join("mods");
+        let plugins_dir = temp.path().join("plugins");
+        let userlibs_dir = temp.path().join("userlibs");
+        let userdata_dir = temp.path().join("userdata");
+        fs::create_dir_all(&extract_dir).await?;
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::create_dir_all(&userdata_dir).await?;
+
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+        let result = service
+            .extract_and_install_zip(
+                &zip_path,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                &extract_dir,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!temp.path().join("escape.txt").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_and_install_zip_preserves_safe_nested_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let zip_path = temp.path().join("mod.zip");
+        write_zip_fixture(&zip_path, &[("Mods/Example.dll", b"dll")])?;
+
+        let extract_dir = temp.path().join("extract");
+        let mods_dir = temp.path().join("mods");
+        let plugins_dir = temp.path().join("plugins");
+        let userlibs_dir = temp.path().join("userlibs");
+        let userdata_dir = temp.path().join("userdata");
+        fs::create_dir_all(&extract_dir).await?;
+        fs::create_dir_all(&mods_dir).await?;
+        fs::create_dir_all(&plugins_dir).await?;
+        fs::create_dir_all(&userlibs_dir).await?;
+        fs::create_dir_all(&userdata_dir).await?;
+
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+        let installed = service
+            .extract_and_install_zip(
+                &zip_path,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                &extract_dir,
+                None,
+            )
+            .await?;
+
+        assert!(mods_dir.join("Example.dll").exists());
+        assert!(installed.iter().any(|file| file == "Example.dll"));
 
         Ok(())
     }
