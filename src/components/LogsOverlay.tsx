@@ -476,7 +476,11 @@ const LogStream = memo(function LogStream({
   }, [containerRef, onLoadOlder, onScrollStateChange, updateScrollMetrics]);
 
   const setRowRef = useCallback((key: string, element: HTMLDivElement | null) => {
-    rowRefs.current[key] = element;
+    if (element) {
+      rowRefs.current[key] = element;
+    } else {
+      delete rowRefs.current[key];
+    }
   }, [rowRefs]);
 
   useEffect(() => {
@@ -905,14 +909,18 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
       setLogLines([]);
       const lines = await ApiService.readLogFile(logPath, INITIAL_LOG_LINE_LIMIT);
+      if (selectedLogPathRef.current !== logPath) return;
       const stableLines = file ? cacheLogLines(file, lines, INITIAL_LOG_LINE_LIMIT) : lines;
       showLogLines(stableLines, logPath);
     } catch (err) {
+      if (selectedLogPathRef.current !== logPath) return;
       setError(err instanceof Error ? err.message : 'Failed to load log file');
       displayedLogPathRef.current = null;
       setLogLines([]);
     } finally {
-      setLoading(false);
+      if (selectedLogPathRef.current === logPath) {
+        setLoading(false);
+      }
     }
   };
 
@@ -1177,10 +1185,12 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         });
       })
       .catch((err) => {
+        if (selectedLogPathRef.current !== selectedLogFile.path) return;
         setError(err instanceof Error ? err.message : 'Failed to load earlier log entries');
       })
       .finally(() => {
         loadingOlderRef.current = false;
+        if (selectedLogPathRef.current !== selectedLogFile.path) return;
         setLoadingOlder(false);
       });
   }, [cacheLogLines, logLines, selectedLogFile]);

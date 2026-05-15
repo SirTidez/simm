@@ -363,6 +363,7 @@ const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId,
             type="button"
             variant="ghost"
             className={`config-entry-row__boolean-option h-auto ${booleanValue === true ? 'config-entry-row__boolean-option--active' : ''}`}
+            aria-pressed={booleanValue === true}
             onClick={() => onChange(sectionId, entry.id, 'value', 'true')}
           >
             True
@@ -371,6 +372,7 @@ const ConfigEntryValueEditor = memo(function ConfigEntryValueEditor({ sectionId,
             type="button"
             variant="ghost"
             className={`config-entry-row__boolean-option h-auto ${booleanValue === false ? 'config-entry-row__boolean-option--active' : ''}`}
+            aria-pressed={booleanValue === false}
             onClick={() => onChange(sectionId, entry.id, 'value', 'false')}
           >
             False
@@ -641,10 +643,13 @@ export function ConfigurationOverlay({ isOpen, environmentId, environment }: Pro
       setLoadingFileSearchContents(false);
     };
 
-    void loadSearchContents();
+    const timeoutId = window.setTimeout(() => {
+      void loadSearchContents();
+    }, 250);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeoutId);
     };
   }, [catalog, documentCache, environmentId, fileFilter, isOpen, loadingCatalog]);
 

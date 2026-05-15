@@ -38,6 +38,7 @@ export interface SecurityScanReportViewProps {
   confirmLabel?: string;
   busy?: boolean;
   presentation?: 'overlay' | 'page';
+  open?: boolean;
 }
 
 const severityOrder: Record<Severity, number> = {
@@ -169,6 +170,7 @@ export function SecurityScanReportView({
   confirmLabel = 'Continue Anyway',
   busy = false,
   presentation = 'overlay',
+  open = true,
 }: SecurityScanReportViewProps) {
   const normalizedReportOptions = useMemo<SecurityScanReportOption[]>(() => {
     if (Array.isArray(reportOptions) && reportOptions.length > 0) {
@@ -724,8 +726,8 @@ export function SecurityScanReportView({
 
   if (presentation === 'overlay') {
     return (
-      <Dialog open onOpenChange={(open) => {
-        if (!open) {
+      <Dialog open={open} onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
           onClose?.();
         }
       }}>
@@ -761,10 +763,6 @@ export function SecurityScanReportOverlay({
   confirmLabel = 'Continue Anyway',
   busy = false,
 }: SecurityScanReportOverlayProps) {
-  if (!isOpen) {
-    return null;
-  }
-
   return (
     <SecurityScanReportView
       title={title}
@@ -775,6 +773,7 @@ export function SecurityScanReportOverlay({
       confirmLabel={confirmLabel}
       busy={busy}
       presentation="overlay"
+      open={isOpen}
     />
   );
 }

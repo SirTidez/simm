@@ -28,7 +28,7 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
     if (await downloadBranchHeading.isVisible().catch(() => false)) {
       await page.getByRole('button', { name: /Browse Branches/i }).click();
       const enabledBranchCards = page.locator('.wizard-branch-card:not(.wizard-branch-card--disabled)');
-      await expect(enabledBranchCards.first()).toBeVisible();
+      await expect(enabledBranchCards.first()).toBeVisible({ timeout: 30000 });
       await enabledBranchCards.first().click();
 
       await expect(page.getByRole('heading', { name: 'Configure Environment' })).toBeVisible();

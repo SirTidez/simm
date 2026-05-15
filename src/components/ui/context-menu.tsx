@@ -194,6 +194,7 @@ function ContextMenuCheckboxItem({
       <span className="pointer-events-none absolute right-2">
         <ContextMenuPrimitive.CheckboxItemIndicator>
           <CheckIcon
+            aria-hidden="true"
           />
         </ContextMenuPrimitive.CheckboxItemIndicator>
       </span>
@@ -234,6 +235,7 @@ function ContextMenuRadioItem({
       <span className="pointer-events-none absolute right-2">
         <ContextMenuPrimitive.RadioItemIndicator>
           <CheckIcon
+            aria-hidden="true"
           />
         </ContextMenuPrimitive.RadioItemIndicator>
       </span>

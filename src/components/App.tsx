@@ -342,14 +342,14 @@ function parseChangelogFeed(markdown: string): HomeFeedItem[] {
   }).filter((item) => item.bullets.length > 0);
 }
 
-async function loadHomeFeed(): Promise<HomeFeedItem[]> {
+async function loadHomeFeed(signal?: AbortSignal): Promise<HomeFeedItem[]> {
   if (typeof fetch !== 'function') {
     return [];
   }
 
   const [releaseResult, changelogResult] = await Promise.allSettled([
-    fetch(SIMM_RELEASES_URL, { headers: { Accept: 'application/vnd.github+json' } }),
-    fetch(SIMM_CHANGELOG_URL),
+    fetch(SIMM_RELEASES_URL, { headers: { Accept: 'application/vnd.github+json' }, signal }),
+    fetch(SIMM_CHANGELOG_URL, { signal }),
   ]);
 
   const feed: HomeFeedItem[] = [];
@@ -432,20 +432,21 @@ function HomeDashboard({
   const [feedStatus, setFeedStatus] = useState<'loading' | 'ready' | 'empty'>('loading');
 
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
+    const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
 
     const loadFeed = async () => {
       setFeedStatus('loading');
       try {
-        const items = await loadHomeFeed();
+        const items = await loadHomeFeed(controller.signal);
         if (cancelled) return;
         setFeedItems(items);
         setFeedStatus(items.length > 0 ? 'ready' : 'empty');
       } catch (error) {
+        if (cancelled) return;
         logger.warn('Failed to load home news feed', { error });
-        if (!cancelled) {
-          setFeedStatus('empty');
-        }
+        setFeedStatus('empty');
       }
     };
 
@@ -453,6 +454,8 @@ function HomeDashboard({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timeoutId);
+      controller.abort();
     };
   }, []);
 
@@ -1694,8 +1697,8 @@ function AppContent() {
       rememberConsumedNexusOAuthCallback(callbackUrl);
       dispatchNexusOAuthResult({ success: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login';
-      if (message.includes('No pending Nexus OAuth login flow')) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login';
+      if (errorMessage.includes('No pending Nexus OAuth login flow')) {
         try {
           const status = await ApiService.getNexusOAuthStatus();
           if (status.connected) {
@@ -1711,7 +1714,7 @@ function AppContent() {
 
       dispatchNexusOAuthResult({
         success: false,
-        error: message,
+        error: errorMessage,
       });
       return;
     } finally {
@@ -1766,14 +1769,14 @@ function AppContent() {
       });
     } catch (error) {
       console.error('Failed to complete Nexus manual download callback:', nxmUrl, error);
-      const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      const errorMessage = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
       completedNxmCallbackRef.current.add(nxmUrl);
-      if (message.includes('Close SIMM to download Nexus mods for other games')) {
-        setAppNotice(message);
+      if (errorMessage.includes('Close SIMM to download Nexus mods for other games')) {
+        setAppNotice(errorMessage);
       }
       dispatchNexusManualDownloadResult({
         success: false,
-        error: message,
+        error: errorMessage,
         nxmUrl,
       });
       return;
@@ -1812,14 +1815,14 @@ function AppContent() {
       });
     } catch (error) {
       console.error('Failed to complete Nexus manual download after runtime selection:', pending.nxmUrl, error);
-      const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      const errorMessage = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
       completedNxmCallbackRef.current.add(pending.nxmUrl);
-      if (message.includes('Close SIMM to download Nexus mods for other games')) {
-        setAppNotice(message);
+      if (errorMessage.includes('Close SIMM to download Nexus mods for other games')) {
+        setAppNotice(errorMessage);
       }
       dispatchNexusManualDownloadResult({
         success: false,
-        error: message,
+        error: errorMessage,
         nxmUrl: pending.nxmUrl,
       });
     } finally {

@@ -102,7 +102,7 @@ function renderDownloadRow(download: TrackedDownload) {
               className="downloads-panel__icon-image"
               aria-hidden="true"
               onError={(event) => {
-                if (remoteIcon && event.currentTarget.src !== remoteIcon) {
+                if (remoteIcon && iconSource !== remoteIcon && event.currentTarget.getAttribute('src') !== remoteIcon) {
                   event.currentTarget.src = remoteIcon;
                   return;
                 }

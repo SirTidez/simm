@@ -322,7 +322,7 @@ describe('ConfigurationOverlay', () => {
     });
   });
 
-  it('lets CodeMirror handle wheel scrolling in raw mode', async () => {
+  it('does not block wheel scrolling on the raw editor wrapper', async () => {
     apiMocks.getConfigCatalog.mockResolvedValue([
       makeSummary({ name: 'Loader.cfg', path: 'C:/Games/Schedule I/MelonLoader/Loader.cfg' }),
     ]);

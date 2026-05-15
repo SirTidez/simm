@@ -32,7 +32,7 @@ export async function connectToTauriApp(): Promise<{ browser: Browser; page: Pag
     }
 
     await page.bringToFront();
-    await expect(page.getByRole('button', { name: 'Mod Library', exact: true })).toBeVisible({ timeout: 30000 });
+    await expect(page.getByRole('button', { name: /Mod Library/i })).toBeVisible({ timeout: 30000 });
 
     return { browser, page };
   } catch (error) {

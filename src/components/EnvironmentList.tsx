@@ -1683,7 +1683,19 @@ export function EnvironmentList({
           }
         }}
         className={`environment-card environment-card--workspace${focusedEnvironmentId === env.id ? ' environment-card--focused' : ''}`}
-        tabIndex={-1}
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key !== 'ContextMenu' && event.key !== 'Enter' && event.key !== ' ') {
+            return;
+          }
+          const target = event.target as HTMLElement;
+          if (target.closest('input, textarea, button, a, [contenteditable="true"]')) {
+            return;
+          }
+          event.preventDefault();
+          const rect = event.currentTarget.getBoundingClientRect();
+          openEnvironmentMenu(env.id, rect.right - 8, rect.bottom + 6);
+        }}
         onContextMenu={(event) => {
           const target = event.target as HTMLElement;
           if (target.closest('input, textarea, button, a, [contenteditable="true"]')) {
