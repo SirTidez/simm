@@ -638,29 +638,80 @@ pub async fn check_all_updates(
                 .cache_icon_for_metadata(icon_url.as_deref())
                 .await;
 
-            let metadata_update = ModMetadata {
-                source: Some(ModSource::Thunderstore),
-                source_id: Some(source_id.clone()),
-                source_version,
-                author: package
-                    .get("owner")
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
-                mod_name: package
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
-                source_url: package
-                    .get("package_url")
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
-                summary: select_latest_thunderstore_version(&package, Some(&source_id))
-                    .and_then(|v| v.get("description"))
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
-                icon_url,
-                icon_cache_path,
-                downloads: package
+            let mut metadata_update = mods_service
+                .load_storage_metadata_by_id(&storage_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(ModMetadata {
+                    source: None,
+                    source_id: None,
+                    source_version: None,
+                    author: None,
+                    mod_name: None,
+                    source_url: None,
+                    summary: None,
+                    icon_url: None,
+                    icon_cache_path: None,
+                    downloads: None,
+                    likes_or_endorsements: None,
+                    updated_at: None,
+                    tags: None,
+                    installed_version: None,
+                    library_added_at: None,
+                    installed_at: None,
+                    last_update_check: None,
+                    metadata_last_refreshed: None,
+                    update_available: None,
+                    remote_version: None,
+                    detected_runtime: None,
+                    runtime_match: None,
+                    mod_storage_id: None,
+                    symlink_paths: None,
+                    security_scan: None,
+                });
+
+            metadata_update.source = Some(ModSource::Thunderstore);
+            metadata_update.source_id = Some(source_id.clone());
+            if source_version.is_some() {
+                metadata_update.source_version = source_version;
+            }
+            if let Some(author) = package
+                .get("owner")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+            {
+                metadata_update.author = Some(author);
+            }
+            if let Some(mod_name) = package
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+            {
+                metadata_update.mod_name = Some(mod_name);
+            }
+            if let Some(source_url) = package
+                .get("package_url")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+            {
+                metadata_update.source_url = Some(source_url);
+            }
+            if let Some(summary) = select_latest_thunderstore_version(&package, Some(&source_id))
+                .and_then(|v| v.get("description"))
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+            {
+                metadata_update.summary = Some(summary);
+            }
+            if icon_url.is_some() {
+                metadata_update.icon_url = icon_url;
+            }
+            if icon_cache_path.is_some() {
+                metadata_update.icon_cache_path = icon_cache_path;
+            }
+            if let Some(downloads) =
+                package
                     .get("versions")
                     .and_then(|v| v.as_array())
                     .map(|versions| {
@@ -668,34 +719,36 @@ pub async fn check_all_updates(
                             .iter()
                             .map(|ver| ver.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0))
                             .sum::<u64>()
-                    }),
-                likes_or_endorsements: package.get("rating_score").and_then(|v| v.as_i64()),
-                updated_at: package
-                    .get("date_updated")
-                    .and_then(|v| v.as_str())
-                    .map(|v| v.to_string()),
-                tags: package
-                    .get("categories")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect::<Vec<String>>()
                     })
-                    .filter(|tags| !tags.is_empty()),
-                installed_version: None,
-                library_added_at: None,
-                installed_at: None,
-                last_update_check: Some(now),
-                metadata_last_refreshed: Some(now),
-                update_available: None,
-                remote_version: None,
-                detected_runtime: None,
-                runtime_match: None,
-                mod_storage_id: Some(storage_id.clone()),
-                symlink_paths: None,
-                security_scan: None,
-            };
+            {
+                metadata_update.downloads = Some(downloads);
+            }
+            if let Some(likes_or_endorsements) =
+                package.get("rating_score").and_then(|v| v.as_i64())
+            {
+                metadata_update.likes_or_endorsements = Some(likes_or_endorsements);
+            }
+            if let Some(updated_at) = package
+                .get("date_updated")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+            {
+                metadata_update.updated_at = Some(updated_at);
+            }
+            if let Some(tags) = package
+                .get("categories")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                })
+                .filter(|tags| !tags.is_empty())
+            {
+                metadata_update.tags = Some(tags);
+            }
+            metadata_update.metadata_last_refreshed = Some(now);
+            metadata_update.mod_storage_id = Some(storage_id.clone());
 
             if let Err(error) = mods_service
                 .upsert_storage_metadata_by_id(&storage_id, metadata_update)

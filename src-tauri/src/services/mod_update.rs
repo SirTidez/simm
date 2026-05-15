@@ -192,7 +192,8 @@ impl ModUpdateService {
 
         let library = mods_service.get_mod_library().await?;
         let mut updates_by_env: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-        let mut processed_storage_ids = HashSet::new();
+        let mut update_results_by_storage_id: HashMap<String, Option<serde_json::Value>> =
+            HashMap::new();
         let now = Utc::now();
 
         for entry in &library.downloaded {
@@ -217,35 +218,120 @@ impl ModUpdateService {
             }
 
             for (runtime_label, storage_id) in runtime_storage_pairs {
-                if storage_id.trim().is_empty() || !processed_storage_ids.insert(storage_id.clone())
-                {
+                if storage_id.trim().is_empty() {
                     continue;
                 }
 
-                let storage_metadata = mods_service
-                    .load_storage_metadata_by_id(&storage_id)
-                    .await?
-                    .unwrap_or_else(|| ModMetadata {
-                        source: entry.source.clone(),
-                        source_id: entry.source_id.clone(),
-                        source_version: entry.source_version.clone(),
-                        author: entry.author.clone(),
-                        mod_name: Some(entry.display_name.clone()),
-                        source_url: entry.source_url.clone(),
-                        summary: entry.summary.clone(),
-                        icon_url: entry.icon_url.clone(),
-                        icon_cache_path: entry.icon_cache_path.clone(),
-                        downloads: entry.downloads,
-                        likes_or_endorsements: entry.likes_or_endorsements,
-                        updated_at: entry.updated_at.clone(),
-                        tags: entry.tags.clone(),
-                        installed_version: entry.installed_version.clone(),
-                        library_added_at: entry.library_added_at,
-                        installed_at: entry.installed_at,
-                        last_update_check: None,
-                        metadata_last_refreshed: None,
-                        update_available: entry.update_available,
-                        remote_version: entry.remote_version.clone(),
+                let maybe_result = if let Some(cached_result) =
+                    update_results_by_storage_id.get(&storage_id)
+                {
+                    cached_result.clone()
+                } else {
+                    let storage_metadata = mods_service
+                        .load_storage_metadata_by_id(&storage_id)
+                        .await?
+                        .unwrap_or_else(|| ModMetadata {
+                            source: entry.source.clone(),
+                            source_id: entry.source_id.clone(),
+                            source_version: entry.source_version.clone(),
+                            author: entry.author.clone(),
+                            mod_name: Some(entry.display_name.clone()),
+                            source_url: entry.source_url.clone(),
+                            summary: entry.summary.clone(),
+                            icon_url: entry.icon_url.clone(),
+                            icon_cache_path: entry.icon_cache_path.clone(),
+                            downloads: entry.downloads,
+                            likes_or_endorsements: entry.likes_or_endorsements,
+                            updated_at: entry.updated_at.clone(),
+                            tags: entry.tags.clone(),
+                            installed_version: entry.installed_version.clone(),
+                            library_added_at: entry.library_added_at,
+                            installed_at: entry.installed_at,
+                            last_update_check: None,
+                            metadata_last_refreshed: None,
+                            update_available: entry.update_available,
+                            remote_version: entry.remote_version.clone(),
+                            detected_runtime: match runtime_label.as_str() {
+                                "IL2CPP" => Some(Runtime::Il2cpp),
+                                "Mono" => Some(Runtime::Mono),
+                                _ => None,
+                            },
+                            runtime_match: None,
+                            mod_storage_id: Some(storage_id.clone()),
+                            symlink_paths: None,
+                            security_scan: entry.security_scan.clone(),
+                        });
+                    let Some(source) = storage_metadata.source.clone() else {
+                        update_results_by_storage_id.insert(storage_id.clone(), None);
+                        continue;
+                    };
+                    if matches!(source, ModSource::Local | ModSource::Unknown) {
+                        update_results_by_storage_id.insert(storage_id.clone(), None);
+                        continue;
+                    }
+                    let Some(source_id) = storage_metadata
+                        .source_id
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                    else {
+                        update_results_by_storage_id.insert(storage_id.clone(), None);
+                        continue;
+                    };
+
+                    let metadata = ModMetadata {
+                        source: Some(source.clone()),
+                        source_id: Some(source_id.clone()),
+                        source_version: storage_metadata.source_version.clone(),
+                        author: storage_metadata
+                            .author
+                            .clone()
+                            .or_else(|| entry.author.clone()),
+                        mod_name: storage_metadata
+                            .mod_name
+                            .clone()
+                            .or_else(|| Some(entry.display_name.clone())),
+                        source_url: storage_metadata
+                            .source_url
+                            .clone()
+                            .or_else(|| entry.source_url.clone()),
+                        summary: storage_metadata
+                            .summary
+                            .clone()
+                            .or_else(|| entry.summary.clone()),
+                        icon_url: storage_metadata
+                            .icon_url
+                            .clone()
+                            .or_else(|| entry.icon_url.clone()),
+                        icon_cache_path: storage_metadata
+                            .icon_cache_path
+                            .clone()
+                            .or_else(|| entry.icon_cache_path.clone()),
+                        downloads: storage_metadata.downloads.or(entry.downloads),
+                        likes_or_endorsements: storage_metadata
+                            .likes_or_endorsements
+                            .or(entry.likes_or_endorsements),
+                        updated_at: storage_metadata
+                            .updated_at
+                            .clone()
+                            .or_else(|| entry.updated_at.clone()),
+                        tags: storage_metadata.tags.clone().or_else(|| entry.tags.clone()),
+                        installed_version: storage_metadata
+                            .installed_version
+                            .clone()
+                            .or_else(|| entry.installed_version.clone()),
+                        library_added_at: storage_metadata
+                            .library_added_at
+                            .or(entry.library_added_at),
+                        installed_at: storage_metadata.installed_at.or(entry.installed_at),
+                        last_update_check: storage_metadata.last_update_check,
+                        metadata_last_refreshed: storage_metadata.metadata_last_refreshed,
+                        update_available: storage_metadata
+                            .update_available
+                            .or(entry.update_available),
+                        remote_version: storage_metadata
+                            .remote_version
+                            .clone()
+                            .or_else(|| entry.remote_version.clone()),
                         detected_runtime: match runtime_label.as_str() {
                             "IL2CPP" => Some(Runtime::Il2cpp),
                             "Mono" => Some(Runtime::Mono),
@@ -253,111 +339,41 @@ impl ModUpdateService {
                         },
                         runtime_match: None,
                         mod_storage_id: Some(storage_id.clone()),
-                        symlink_paths: None,
-                        security_scan: entry.security_scan.clone(),
-                    });
-                let Some(source) = storage_metadata.source.clone() else {
-                    continue;
-                };
-                if matches!(source, ModSource::Local | ModSource::Unknown) {
-                    continue;
-                }
-                let Some(source_id) = storage_metadata
-                    .source_id
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                else {
-                    continue;
-                };
+                        symlink_paths: storage_metadata.symlink_paths.clone(),
+                        security_scan: storage_metadata
+                            .security_scan
+                            .clone()
+                            .or_else(|| entry.security_scan.clone()),
+                    };
 
-                let metadata = ModMetadata {
-                    source: Some(source.clone()),
-                    source_id: Some(source_id.clone()),
-                    source_version: storage_metadata.source_version.clone(),
-                    author: storage_metadata
-                        .author
-                        .clone()
-                        .or_else(|| entry.author.clone()),
-                    mod_name: storage_metadata
-                        .mod_name
-                        .clone()
-                        .or_else(|| Some(entry.display_name.clone())),
-                    source_url: storage_metadata
-                        .source_url
-                        .clone()
-                        .or_else(|| entry.source_url.clone()),
-                    summary: storage_metadata
-                        .summary
-                        .clone()
-                        .or_else(|| entry.summary.clone()),
-                    icon_url: storage_metadata
-                        .icon_url
-                        .clone()
-                        .or_else(|| entry.icon_url.clone()),
-                    icon_cache_path: storage_metadata
-                        .icon_cache_path
-                        .clone()
-                        .or_else(|| entry.icon_cache_path.clone()),
-                    downloads: storage_metadata.downloads.or(entry.downloads),
-                    likes_or_endorsements: storage_metadata
-                        .likes_or_endorsements
-                        .or(entry.likes_or_endorsements),
-                    updated_at: storage_metadata
-                        .updated_at
-                        .clone()
-                        .or_else(|| entry.updated_at.clone()),
-                    tags: storage_metadata.tags.clone().or_else(|| entry.tags.clone()),
-                    installed_version: storage_metadata
-                        .installed_version
-                        .clone()
-                        .or_else(|| entry.installed_version.clone()),
-                    library_added_at: storage_metadata.library_added_at.or(entry.library_added_at),
-                    installed_at: storage_metadata.installed_at.or(entry.installed_at),
-                    last_update_check: storage_metadata.last_update_check,
-                    metadata_last_refreshed: storage_metadata.metadata_last_refreshed,
-                    update_available: storage_metadata.update_available.or(entry.update_available),
-                    remote_version: storage_metadata
-                        .remote_version
-                        .clone()
-                        .or_else(|| entry.remote_version.clone()),
-                    detected_runtime: match runtime_label.as_str() {
-                        "IL2CPP" => Some(Runtime::Il2cpp),
-                        "Mono" => Some(Runtime::Mono),
-                        _ => None,
-                    },
-                    runtime_match: None,
-                    mod_storage_id: Some(storage_id.clone()),
-                    symlink_paths: storage_metadata.symlink_paths.clone(),
-                    security_scan: storage_metadata
-                        .security_scan
-                        .clone()
-                        .or_else(|| entry.security_scan.clone()),
+                    let (updated_metadata, maybe_result) = self
+                        .refresh_update_metadata(
+                            &Self::representative_library_entry_path(entry, &runtime_label),
+                            metadata,
+                            &runtime_label,
+                            now,
+                            mods_service,
+                            thunderstore_service,
+                            nexus_mods_service,
+                            nexus_game_id,
+                            github_service,
+                        )
+                        .await?;
+
+                    if let Err(error) = mods_service
+                        .upsert_storage_metadata_by_id(&storage_id, updated_metadata)
+                        .await
+                    {
+                        log::warn!(
+                            "Failed to sync library update metadata to storage {}: {}",
+                            storage_id,
+                            error
+                        );
+                    }
+
+                    update_results_by_storage_id.insert(storage_id.clone(), maybe_result.clone());
+                    maybe_result
                 };
-
-                let (updated_metadata, maybe_result) = self
-                    .refresh_update_metadata(
-                        &Self::representative_library_entry_path(entry, &runtime_label),
-                        metadata,
-                        &runtime_label,
-                        now,
-                        mods_service,
-                        thunderstore_service,
-                        nexus_mods_service,
-                        nexus_game_id,
-                        github_service,
-                    )
-                    .await?;
-
-                if let Err(error) = mods_service
-                    .upsert_storage_metadata_by_id(&storage_id, updated_metadata)
-                    .await
-                {
-                    log::warn!(
-                        "Failed to sync library update metadata to storage {}: {}",
-                        storage_id,
-                        error
-                    );
-                }
 
                 let Some(result) = maybe_result else {
                     continue;

@@ -1,6 +1,6 @@
 [package]
 name = "simmrust"
-version = "0.8.4"
+version = "0.8.5"
 description = "Schedule I Developer Environment Manager"
 authors = ["LockWire Labs"]
 license = "AGPL-3.0"

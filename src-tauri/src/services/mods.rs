@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{copy, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,7 @@ macro_rules! eprintln {
 
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
 const STORAGE_SECURITY_SCAN_FILE: &str = ".security-scan.json";
+const COPY_FALLBACK_MARKER_FILE: &str = ".simm-copy-fallback.json";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
@@ -2261,21 +2262,21 @@ impl ModsService {
         file_name: &str,
         summary: SecurityScanSummary,
     ) -> Result<()> {
-        self.resolve_installed_mod_path(game_dir, file_name).await?;
-
         let mods_directory = self.get_mods_directory(game_dir);
+        let resolved_path = self.resolve_installed_mod_path(game_dir, file_name).await?;
+        let metadata_key = Self::metadata_key_for_resolved_mod(&mods_directory, &resolved_path)?;
         let mut metadata = self
             .load_mod_metadata(&mods_directory)
             .await
             .unwrap_or_else(|_| HashMap::new());
         let entry = metadata
-            .entry(file_name.to_string())
+            .entry(metadata_key.clone())
             .or_insert_with(|| ModMetadata {
                 source: Some(ModSource::Local),
                 source_id: None,
                 source_version: None,
                 author: None,
-                mod_name: Path::new(file_name)
+                mod_name: Path::new(&metadata_key)
                     .file_name()
                     .and_then(|value| value.to_str())
                     .map(|value| value.replace(".dll", "").replace(".DLL", "")),
@@ -2303,6 +2304,20 @@ impl ModsService {
 
         entry.security_scan = Some(summary);
         self.save_mod_metadata(&mods_directory, &metadata).await
+    }
+
+    fn metadata_key_for_resolved_mod(
+        mods_directory: &Path,
+        resolved_path: &Path,
+    ) -> Result<String> {
+        let relative = resolved_path
+            .strip_prefix(mods_directory)
+            .context("Resolved mod path is outside the Mods directory")?;
+        let mut key = relative.to_string_lossy().replace('\\', "/");
+        if let Some(active_key) = key.strip_suffix(".disabled") {
+            key = active_key.to_string();
+        }
+        Ok(key)
     }
 
     pub async fn upsert_storage_metadata_by_id(
@@ -3239,7 +3254,9 @@ impl ModsService {
                         "Symlink privilege unavailable for {}. Used directory copy fallback.",
                         dst.display()
                     );
-                    return self.copy_directory_recursive(src, dst).await;
+                    self.copy_directory_recursive(src, dst).await?;
+                    self.write_copy_fallback_marker(src, dst).await?;
+                    return Ok(());
                 }
                 Err(error) => {
                     return Err(error).context(format!(
@@ -3458,13 +3475,20 @@ impl ModsService {
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn metadata_is_same_file(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
-        false
+    fn metadata_is_same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        left.ino() == right.ino() && left.dev() == right.dev()
     }
 
     #[cfg(not(target_os = "windows"))]
-    fn paths_are_same_hard_link(_left: &Path, _right: &Path) -> bool {
-        false
+    fn paths_are_same_hard_link(left: &Path, right: &Path) -> bool {
+        match (std::fs::metadata(left), std::fs::metadata(right)) {
+            (Ok(left), Ok(right)) if left.is_file() && right.is_file() => {
+                Self::metadata_is_same_file(&left, &right)
+            }
+            _ => false,
+        }
     }
 
     async fn path_is_hard_link_to_storage_source(&self, path: &Path, source_path: &Path) -> bool {
@@ -3531,6 +3555,13 @@ impl ModsService {
             if let Some(source_path) =
                 self.storage_source_path_for_env_path(&storage_base, output_dir, &path)
             {
+                if self
+                    .path_has_copy_fallback_marker(&path, &source_path, storage_id)
+                    .await
+                {
+                    return true;
+                }
+
                 if self
                     .path_is_hard_link_to_storage_source(&path, &source_path)
                     .await
@@ -7146,40 +7177,29 @@ exit 1
 
         let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
 
-        // Extract all files to temp directory
-        // First, collect all file data synchronously (before any await)
-        let mut file_data = Vec::new();
+        // Extract directly to disk so large archives are not buffered in memory.
         for i in 0..archive.len() {
             let mut file = archive
                 .by_index(i)
                 .context("Failed to read file from archive")?;
 
             let file_name = file.name().to_string();
-            let relative_path =
-                safe_archive_relative_path(&file_name).map_err(|error| anyhow::anyhow!(error))?;
-            let is_dir = file_name.ends_with('/') || file.is_dir();
-
-            let mut buffer = Vec::new();
-            if !is_dir {
-                file.read_to_end(&mut buffer)
-                    .context("Failed to read file data from archive")?;
-            }
-
-            file_data.push((relative_path, is_dir, buffer));
-        }
-
-        // Now do async operations with the collected data
-        for (relative_path, is_dir, buffer) in file_data {
+            let relative_path = safe_archive_relative_path(&file_name)
+                .map_err(anyhow::Error::msg)
+                .context("Unsafe path in zip archive")?;
             let outpath = temp_dir.join(relative_path);
+            let is_dir = file.is_dir() || file_name.ends_with('/');
 
             if is_dir {
-                fs::create_dir_all(&outpath).await?;
+                std::fs::create_dir_all(&outpath).context("Failed to create archive directory")?;
             } else {
                 if let Some(p) = outpath.parent() {
-                    fs::create_dir_all(p).await?;
+                    std::fs::create_dir_all(p)
+                        .context("Failed to create archive parent directory")?;
                 }
-                let mut outfile = fs::File::create(&outpath).await?;
-                tokio::io::AsyncWriteExt::write_all(&mut outfile, &buffer).await?;
+                let mut outfile =
+                    File::create(&outpath).context("Failed to create extracted archive file")?;
+                copy(&mut file, &mut outfile).context("Failed to extract archive file")?;
             }
         }
 
@@ -8569,6 +8589,58 @@ exit 1
         }
 
         Ok(())
+    }
+
+    async fn write_copy_fallback_marker(&self, source: &Path, dest: &Path) -> Result<()> {
+        let marker = serde_json::json!({
+            "sourcePath": source.to_string_lossy(),
+        });
+        fs::write(dest.join(COPY_FALLBACK_MARKER_FILE), marker.to_string())
+            .await
+            .context("Failed to write copy fallback marker")
+    }
+
+    async fn path_has_copy_fallback_marker(
+        &self,
+        path: &Path,
+        expected_source_path: &Path,
+        storage_id: &str,
+    ) -> bool {
+        let metadata = match fs::metadata(path).await {
+            Ok(value) if value.is_dir() => value,
+            _ => return false,
+        };
+        if !metadata.is_dir() {
+            return false;
+        }
+
+        let marker = match fs::read_to_string(path.join(COPY_FALLBACK_MARKER_FILE)).await {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        let Some(source_path) = serde_json::from_str::<serde_json::Value>(&marker)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("sourcePath")
+                    .and_then(|path| path.as_str())
+                    .map(str::to_string)
+            })
+        else {
+            return false;
+        };
+
+        if !source_path.contains(storage_id) {
+            return false;
+        }
+
+        match (
+            std::fs::canonicalize(PathBuf::from(source_path)),
+            std::fs::canonicalize(expected_source_path),
+        ) {
+            (Ok(actual), Ok(expected)) => actual == expected,
+            _ => false,
+        }
     }
 
     pub async fn install_dll_mod(

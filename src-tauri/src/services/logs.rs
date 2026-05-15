@@ -992,7 +992,7 @@ impl LogsService {
 
         let mut watched_file = fs::File::open(&path).await?;
         let metadata = watched_file.metadata().await?;
-        let (encoding, data_start) = Self::detect_log_encoding(&mut watched_file).await?;
+        let (mut encoding, mut data_start) = Self::detect_log_encoding(&mut watched_file).await?;
         *self.last_position.write().await = metadata.len();
         *self.last_line_count.write().await =
             Self::count_lines(&mut watched_file, metadata.len(), data_start, encoding).await?;
@@ -1072,9 +1072,35 @@ impl LogsService {
 
                 *last_position.write().await = current_size;
             } else if current_size < last_pos {
-                // File was truncated or replaced, reset position and line counter
-                *last_position.write().await = 0;
-                *last_line_count.write().await = 0;
+                // File was truncated or replaced; re-detect BOM/encoding before reading new bytes.
+                if let Ok(mut refreshed_file) = fs::File::open(&path).await {
+                    if let Ok((next_encoding, next_data_start)) =
+                        Self::detect_log_encoding(&mut refreshed_file).await
+                    {
+                        encoding = next_encoding;
+                        data_start = next_data_start;
+                        let refreshed_size = refreshed_file
+                            .metadata()
+                            .await
+                            .map(|value| value.len())
+                            .unwrap_or(current_size);
+                        *last_position.write().await = refreshed_size;
+                        *last_line_count.write().await = Self::count_lines(
+                            &mut refreshed_file,
+                            refreshed_size,
+                            data_start,
+                            encoding,
+                        )
+                        .await
+                        .unwrap_or(0);
+                    } else {
+                        *last_position.write().await = 0;
+                        *last_line_count.write().await = 0;
+                    }
+                } else {
+                    *last_position.write().await = 0;
+                    *last_line_count.write().await = 0;
+                }
             }
         }
 
