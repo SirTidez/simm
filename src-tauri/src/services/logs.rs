@@ -1111,10 +1111,9 @@ impl LogsService {
                         }
 
                         *last_line_count.write().await = previous_line_count + lines.len();
+                        *last_position.write().await = current_size;
                     }
                 }
-
-                *last_position.write().await = current_size;
             } else if current_size < last_pos {
                 // File was truncated or replaced; re-detect BOM/encoding before reading new bytes.
                 pending_bytes.clear();
