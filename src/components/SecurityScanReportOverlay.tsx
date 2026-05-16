@@ -193,6 +193,15 @@ export function SecurityScanReportView({
   const [selectedFindingKey, setSelectedFindingKey] = useState<string | null>(null);
 
   useEffect(() => {
+    if (open) {
+      setActiveReportIndex(0);
+      setActiveFileIndex(0);
+      setActiveSeverity('All');
+      setSelectedFindingKey(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
     setActiveReportIndex(0);
   }, [report, reportOptions]);
 
