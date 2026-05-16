@@ -694,7 +694,11 @@ impl SecurityScannerService {
             .ok_or_else(|| anyhow::anyhow!("Invalid archive extraction path"))?;
 
         while let Some(header) = archive.read_header().context("Failed to read RAR header")? {
-            if header.entry().is_directory() {
+            let entry = header.entry();
+            let is_directory = entry.is_directory();
+            validate_rar_entry_path(&entry.filename)?;
+
+            if is_directory {
                 archive = header
                     .skip()
                     .context("Failed to skip RAR directory entry")?;
@@ -1421,7 +1425,15 @@ fn archive_kind_for_path_or_signature(path: &Path) -> InputArchiveKind {
 }
 
 fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, String> {
-    let path = Path::new(entry_name);
+    let normalized_entry_name = entry_name.replace('\\', "/");
+    if normalized_entry_name.contains(':') {
+        return Err(format!(
+            "Archive entry contains an unsafe path: {}",
+            entry_name
+        ));
+    }
+
+    let path = Path::new(&normalized_entry_name);
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(format!(
             "Archive entry contains an unsafe path: {}",
@@ -1451,6 +1463,13 @@ fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, 
     } else {
         Ok(relative)
     }
+}
+
+fn validate_rar_entry_path(entry_path: &Path) -> Result<()> {
+    let entry_name = entry_path.to_string_lossy();
+    safe_archive_relative_path(entry_name.as_ref())
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!(error))
 }
 
 #[cfg(test)]
@@ -1797,6 +1816,31 @@ mod tests {
         assert!(!temp.path().join("escape.txt").exists());
         assert!(!target_dir.join("escape.txt").exists());
 
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rar_entry_path_rejects_unsafe_paths() {
+        for entry_name in [
+            "../escape.dll",
+            r"..\escape.dll",
+            "/tmp/escape.dll",
+            r"C:\Users\Public\escape.dll",
+            "",
+        ] {
+            let err = validate_rar_entry_path(Path::new(entry_name))
+                .expect_err("expected unsafe RAR entry path to be rejected");
+            assert!(
+                err.to_string().contains("unsafe path"),
+                "unexpected error for {entry_name:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rar_entry_path_allows_safe_nested_paths() -> Result<()> {
+        validate_rar_entry_path(Path::new("Mods/Example.dll"))?;
+        validate_rar_entry_path(Path::new(r"Plugins\Nested\Example.dll"))?;
         Ok(())
     }
 }

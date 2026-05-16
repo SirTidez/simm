@@ -163,6 +163,13 @@ fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, 
     }
 }
 
+fn validate_rar_entry_path(entry_path: &Path) -> Result<()> {
+    let entry_name = entry_path.to_string_lossy();
+    safe_archive_relative_path(entry_name.as_ref())
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!(error))
+}
+
 #[derive(Debug, Clone)]
 struct LocalSourcePreviewResolved {
     preview: LocalModSourcePreview,
@@ -7416,6 +7423,7 @@ exit 1
             while let Some(header) = archive.read_header().context("Failed to read RAR header")? {
                 let entry = header.entry();
                 let is_dir = entry.is_directory();
+                validate_rar_entry_path(&entry.filename)?;
 
                 if is_dir {
                     archive = header.skip().context("Failed to skip directory entry")?;
@@ -10633,6 +10641,31 @@ mod tests {
         assert!(mods_dir.join("Example.dll").exists());
         assert!(installed.iter().any(|file| file == "Example.dll"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rar_entry_path_rejects_unsafe_paths() {
+        for entry_name in [
+            "../escape.dll",
+            r"..\escape.dll",
+            "/tmp/escape.dll",
+            r"C:\Users\Public\escape.dll",
+            "",
+        ] {
+            let err = validate_rar_entry_path(Path::new(entry_name))
+                .expect_err("expected unsafe RAR entry path to be rejected");
+            assert!(
+                err.to_string().contains("unsafe path"),
+                "unexpected error for {entry_name:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rar_entry_path_allows_safe_nested_paths() -> Result<()> {
+        validate_rar_entry_path(Path::new("Mods/Example.dll"))?;
+        validate_rar_entry_path(Path::new(r"Plugins\Nested\Example.dll"))?;
         Ok(())
     }
 
