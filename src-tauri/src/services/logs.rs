@@ -650,6 +650,32 @@ impl LogsService {
         }
     }
 
+    fn split_complete_log_bytes(bytes: &[u8], encoding: LogEncoding) -> (Vec<u8>, Vec<u8>) {
+        let newline_end = match encoding {
+            LogEncoding::Utf8 => bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map(|index| index + 1),
+            LogEncoding::Utf16Le | LogEncoding::Utf16Be => bytes
+                .chunks_exact(2)
+                .enumerate()
+                .filter_map(|(index, chunk)| {
+                    let is_newline = match encoding {
+                        LogEncoding::Utf16Le => chunk == [0x0A, 0x00],
+                        LogEncoding::Utf16Be => chunk == [0x00, 0x0A],
+                        LogEncoding::Utf8 => false,
+                    };
+                    is_newline.then_some((index + 1) * 2)
+                })
+                .last(),
+        };
+
+        match newline_end {
+            Some(split_at) => (bytes[..split_at].to_vec(), bytes[split_at..].to_vec()),
+            None => (Vec::new(), bytes.to_vec()),
+        }
+    }
+
     fn extract_log_level(line: &str) -> Option<String> {
         // Try to match [LEVEL] pattern
         if let Some(start) = line.find('[') {
@@ -1001,6 +1027,7 @@ impl LogsService {
         let last_position = Arc::clone(&self.last_position);
         let last_line_count = Arc::clone(&self.last_line_count);
         let watch_session_id = Arc::clone(&self.watch_session_id);
+        let mut pending_bytes = Vec::new();
 
         // Watch loop
         while *watching.read().await && *watch_session_id.read().await == current_session {
@@ -1024,8 +1051,25 @@ impl LogsService {
                     if file.seek(SeekFrom::Start(read_start)).await.is_ok()
                         && file.read_to_end(&mut file_bytes).await.is_ok()
                     {
+                        if !pending_bytes.is_empty() {
+                            let mut combined =
+                                Vec::with_capacity(pending_bytes.len() + file_bytes.len());
+                            combined.extend_from_slice(&pending_bytes);
+                            combined.extend_from_slice(&file_bytes);
+                            file_bytes = combined;
+                        }
+
+                        let (complete_bytes, next_pending_bytes) =
+                            Self::split_complete_log_bytes(&file_bytes, encoding);
+                        pending_bytes = next_pending_bytes;
+
+                        if complete_bytes.is_empty() {
+                            *last_position.write().await = current_size;
+                            continue;
+                        }
+
                         let file_content =
-                            Self::decode_log_content_with_encoding(&file_bytes, encoding);
+                            Self::decode_log_content_with_encoding(&complete_bytes, encoding);
                         let lines: Vec<&str> = file_content.lines().collect();
                         let previous_line_count = *last_line_count.read().await;
 
@@ -1073,21 +1117,17 @@ impl LogsService {
                 *last_position.write().await = current_size;
             } else if current_size < last_pos {
                 // File was truncated or replaced; re-detect BOM/encoding before reading new bytes.
+                pending_bytes.clear();
                 if let Ok(mut refreshed_file) = fs::File::open(&path).await {
                     if let Ok((next_encoding, next_data_start)) =
                         Self::detect_log_encoding(&mut refreshed_file).await
                     {
                         encoding = next_encoding;
                         data_start = next_data_start;
-                        let refreshed_size = refreshed_file
-                            .metadata()
-                            .await
-                            .map(|value| value.len())
-                            .unwrap_or(current_size);
-                        *last_position.write().await = refreshed_size;
+                        *last_position.write().await = data_start;
                         *last_line_count.write().await = Self::count_lines(
                             &mut refreshed_file,
-                            refreshed_size,
+                            data_start,
                             data_start,
                             encoding,
                         )
@@ -1175,5 +1215,33 @@ mod tests {
         assert_eq!(lines[0].content, "second");
         assert_eq!(lines[1].line_number, 3);
         assert_eq!(lines[1].content, "third");
+    }
+
+    #[test]
+    fn split_complete_log_bytes_buffers_partial_lines_and_code_units() {
+        let (complete, pending) =
+            LogsService::split_complete_log_bytes(b"first\nsecond", LogEncoding::Utf8);
+        assert_eq!(complete, b"first\n");
+        assert_eq!(pending, b"second");
+
+        let utf16_bytes = "one\ntw"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .chain([0x00])
+            .collect::<Vec<_>>();
+        let (complete, pending) =
+            LogsService::split_complete_log_bytes(&utf16_bytes, LogEncoding::Utf16Le);
+        assert_eq!(
+            LogsService::decode_log_content_with_encoding(&complete, LogEncoding::Utf16Le),
+            "one\n"
+        );
+        assert_eq!(
+            LogsService::decode_log_content_with_encoding(
+                &pending[..pending.len() - 1],
+                LogEncoding::Utf16Le
+            ),
+            "tw"
+        );
+        assert_eq!(pending.last(), Some(&0x00));
     }
 }

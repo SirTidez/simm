@@ -638,38 +638,46 @@ pub async fn check_all_updates(
                 .cache_icon_for_metadata(icon_url.as_deref())
                 .await;
 
-            let mut metadata_update = mods_service
-                .load_storage_metadata_by_id(&storage_id)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(ModMetadata {
-                    source: None,
-                    source_id: None,
-                    source_version: None,
-                    author: None,
-                    mod_name: None,
-                    source_url: None,
-                    summary: None,
-                    icon_url: None,
-                    icon_cache_path: None,
-                    downloads: None,
-                    likes_or_endorsements: None,
-                    updated_at: None,
-                    tags: None,
-                    installed_version: None,
-                    library_added_at: None,
-                    installed_at: None,
-                    last_update_check: None,
-                    metadata_last_refreshed: None,
-                    update_available: None,
-                    remote_version: None,
-                    detected_runtime: None,
-                    runtime_match: None,
-                    mod_storage_id: None,
-                    symlink_paths: None,
-                    security_scan: None,
-                });
+            let existing_metadata =
+                match mods_service.load_storage_metadata_by_id(&storage_id).await {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        log::warn!(
+                            "[UpdateCheck] Failed to load existing metadata for {}: {}",
+                            storage_id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+
+            let mut metadata_update = existing_metadata.unwrap_or(ModMetadata {
+                source: None,
+                source_id: None,
+                source_version: None,
+                author: None,
+                mod_name: None,
+                source_url: None,
+                summary: None,
+                icon_url: None,
+                icon_cache_path: None,
+                downloads: None,
+                likes_or_endorsements: None,
+                updated_at: None,
+                tags: None,
+                installed_version: None,
+                library_added_at: None,
+                installed_at: None,
+                last_update_check: None,
+                metadata_last_refreshed: None,
+                update_available: None,
+                remote_version: None,
+                detected_runtime: None,
+                runtime_match: None,
+                mod_storage_id: None,
+                symlink_paths: None,
+                security_scan: None,
+            });
 
             metadata_update.source = Some(ModSource::Thunderstore);
             metadata_update.source_id = Some(source_id.clone());
