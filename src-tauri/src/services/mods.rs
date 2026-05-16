@@ -2039,6 +2039,44 @@ impl ModsService {
         }
     }
 
+    async fn load_storage_metadata_for_listing(&self, storage_id: &str) -> Option<ModMetadata> {
+        let storage_root = match self.get_mods_storage_dir().await {
+            Ok(storage_root) => storage_root,
+            Err(error) => {
+                log::warn!(
+                    "Skipping storage metadata lookup for {}: {}",
+                    storage_id,
+                    error
+                );
+                return None;
+            }
+        };
+
+        let storage_path = match Self::validated_storage_path(&storage_root, storage_id) {
+            Ok(storage_path) => storage_path,
+            Err(error) => {
+                log::warn!(
+                    "Skipping storage metadata lookup for invalid storage id {}: {}",
+                    storage_id,
+                    error
+                );
+                return None;
+            }
+        };
+
+        match self.load_storage_metadata(&storage_path).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                log::warn!(
+                    "Skipping storage metadata lookup for {}: {}",
+                    storage_id,
+                    error
+                );
+                None
+            }
+        }
+    }
+
     async fn save_storage_metadata(
         &self,
         storage_path: &Path,
@@ -2272,10 +2310,7 @@ impl ModsService {
         let mods_directory = self.get_mods_directory(game_dir);
         let resolved_path = self.resolve_installed_mod_path(game_dir, file_name).await?;
         let metadata_key = Self::metadata_key_for_resolved_mod(&mods_directory, &resolved_path)?;
-        let mut metadata = self
-            .load_mod_metadata(&mods_directory)
-            .await
-            .unwrap_or_else(|_| HashMap::new());
+        let mut metadata = self.load_mod_metadata(&mods_directory).await?;
         let entry = metadata
             .entry(metadata_key.clone())
             .or_insert_with(|| ModMetadata {
@@ -4225,9 +4260,7 @@ impl ModsService {
                 .and_then(|m| m.mod_storage_id.clone());
             let managed = mod_storage_id.is_some();
             let storage_metadata = if let Some(storage_id) = mod_storage_id.as_deref() {
-                let storage_root = self.get_mods_storage_dir().await?;
-                let storage_path = Self::validated_storage_path(&storage_root, storage_id)?;
-                self.load_storage_metadata(&storage_path).await?
+                self.load_storage_metadata_for_listing(storage_id).await
             } else {
                 None
             };
@@ -9657,6 +9690,72 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn list_mods_tolerates_invalid_managed_storage_id() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("env-invalid-storage-id");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        let outside_storage_file = download_dir
+            .join("bad-storage-id")
+            .join("Mods")
+            .join("BadStorage.dll");
+        fs::create_dir_all(outside_storage_file.parent().expect("storage parent")).await?;
+        fs::write(&outside_storage_file, b"data").await?;
+        std::fs::hard_link(&outside_storage_file, mods_dir.join("BadStorage.dll"))?;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "BadStorage.dll".to_string(),
+            sample_metadata(Some("../bad-storage-id"), Some("local"), Some("1.0.0")),
+        );
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let result = service
+            .list_mods(output_dir.to_string_lossy().as_ref())
+            .await?;
+        let mods = result
+            .get("mods")
+            .and_then(|value| value.as_array())
+            .expect("mods array");
+        assert_eq!(mods.len(), 1);
+        assert_eq!(
+            mods[0].get("fileName").and_then(|value| value.as_str()),
+            Some("BadStorage.dll")
+        );
+        assert_eq!(
+            mods[0].get("managed").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn list_mods_keeps_plain_file_copies_local_even_when_library_has_matching_storage(
     ) -> Result<()> {
         let temp = tempdir()?;
@@ -11693,6 +11792,96 @@ mod tests {
                 .map(|scan| scan.state.clone()),
             Some(SecurityScanState::Verified)
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn persist_installed_mod_security_scan_summary_propagates_metadata_load_errors(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let valid_download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": valid_download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("env-load-error");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        fs::write(mods_dir.join("ScanMe.dll"), b"scan").await?;
+        fs::write(mods_dir.join("KeepMe.dll"), b"keep").await?;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "ScanMe.dll".to_string(),
+            sample_metadata(None, Some("local"), Some("1.0.0")),
+        );
+        metadata.insert(
+            "KeepMe.dll".to_string(),
+            sample_metadata(None, Some("local"), Some("2.0.0")),
+        );
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let blocker_path = temp.path().join("download-dir-is-a-file");
+        fs::write(&blocker_path, b"not a directory").await?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": blocker_path.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let result = service
+            .persist_installed_mod_security_scan_summary(
+                output_dir.to_string_lossy().as_ref(),
+                "ScanMe.dll",
+                SecurityScanSummary {
+                    state: SecurityScanState::Verified,
+                    verified: true,
+                    disposition: None,
+                    highest_severity: None,
+                    total_findings: 0,
+                    threat_family_count: 0,
+                    scanned_at: None,
+                    scanner_version: None,
+                    schema_version: None,
+                    status_message: Some("Verified".to_string()),
+                },
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "metadata load errors should propagate instead of replacing existing metadata"
+        );
+
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'",
+        )
+        .bind(&env.id)
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(row_count, 2, "existing metadata should remain intact");
 
         Ok(())
     }
