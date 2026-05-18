@@ -1,7 +1,7 @@
 import type { ModLibraryEntry, ModLibraryResult } from '../types';
 
 const runtimeSuffixPatterns = [
-  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
+  /\s*(?:\(|\[)\s*(mono|il2cpp)\s*(?:\)|\])\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
   /\s+(mono|il2cpp)\s*$/i,
 ];
@@ -12,6 +12,9 @@ const featuredDownloadSourceIds = new Set([
   'ifbars/mlvscan',
   'hdlmrell/meshvault',
   'ifbars/s1mapi',
+  'ifbars/steamnetworklib',
+  'ifbars/steamnetworklib_mono',
+  'ifbars/steamnetworklib_il2cpp',
 ]);
 
 const s1ApiRevisionSourceIds = new Set([

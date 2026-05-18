@@ -270,12 +270,43 @@ impl FomodService {
         Self
     }
 
+    fn decode_module_config_xml(bytes: &[u8]) -> Result<String> {
+        if bytes.starts_with(&[0xFF, 0xFE]) {
+            let payload = &bytes[2..];
+            if payload.len() % 2 != 0 {
+                return Err(anyhow!("UTF-16 LE ModuleConfig.xml has an odd byte length"));
+            }
+            let units = payload
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            return String::from_utf16(&units)
+                .context("Failed to decode UTF-16 LE ModuleConfig.xml content");
+        }
+
+        if bytes.starts_with(&[0xFE, 0xFF]) {
+            let payload = &bytes[2..];
+            if payload.len() % 2 != 0 {
+                return Err(anyhow!("UTF-16 BE ModuleConfig.xml has an odd byte length"));
+            }
+            let units = payload
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            return String::from_utf16(&units)
+                .context("Failed to decode UTF-16 BE ModuleConfig.xml content");
+        }
+
+        String::from_utf8(bytes.to_vec()).context("Failed to read ModuleConfig.xml content")
+    }
+
     pub fn parse_fomod_xml_path(&self, config_path: &Path) -> Result<FomodConfig> {
-        let mut content = String::new();
+        let mut bytes = Vec::new();
         File::open(config_path)
             .context("Failed to open ModuleConfig.xml")?
-            .read_to_string(&mut content)
+            .read_to_end(&mut bytes)
             .context("Failed to read ModuleConfig.xml content")?;
+        let content = Self::decode_module_config_xml(&bytes)?;
         let config: FomodConfig = from_str(&content).context("Failed to parse ModuleConfig.xml")?;
         Ok(config)
     }
@@ -313,10 +344,11 @@ impl FomodService {
             let mut file_reader = archive
                 .by_index(idx)
                 .context("Failed to read ModuleConfig.xml")?;
-            let mut content = String::new();
+            let mut bytes = Vec::new();
             file_reader
-                .read_to_string(&mut content)
+                .read_to_end(&mut bytes)
                 .context("Failed to read ModuleConfig.xml content")?;
+            let content = Self::decode_module_config_xml(&bytes)?;
 
             // Parse XML (basic parsing for name and image)
             if let Ok(config) = from_str::<FomodConfig>(&content) {
@@ -363,10 +395,11 @@ impl FomodService {
         let mut file_reader = archive
             .by_index(idx)
             .context("Failed to read ModuleConfig.xml")?;
-        let mut content = String::new();
+        let mut bytes = Vec::new();
         file_reader
-            .read_to_string(&mut content)
+            .read_to_end(&mut bytes)
             .context("Failed to read ModuleConfig.xml content")?;
+        let content = Self::decode_module_config_xml(&bytes)?;
         let config: FomodConfig = from_str(&content).context("Failed to parse ModuleConfig.xml")?;
         Ok(config)
     }
@@ -709,6 +742,28 @@ impl Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_fomod_xml_path_reads_utf16_le_module_config() {
+        let service = FomodService::new();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config_path = temp_dir.path().join("ModuleConfig.xml");
+        let xml = r#"<?xml version="1.0" encoding="utf-16"?>
+<config>
+  <moduleName>Encoded Installer</moduleName>
+</config>"#;
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in xml.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&config_path, bytes).expect("write utf16 config");
+
+        let config = service
+            .parse_fomod_xml_path(&config_path)
+            .expect("UTF-16 ModuleConfig.xml should parse");
+
+        assert_eq!(config.module_name.as_deref(), Some("Encoded Installer"));
+    }
 
     #[test]
     fn build_install_entries_honors_visible_flag_dependencies() {

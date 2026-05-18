@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { FontAwesomeIcon, type FontAwesomeIconProps } from '@fortawesome/react-fontawesome';
 import { iconRegistry, resolveIconName, type IconName } from './icons';
 
@@ -6,7 +7,7 @@ type IconProps = Omit<FontAwesomeIconProps, 'icon'> & {
   label?: string;
 };
 
-export function Icon({ name, label, title, spin, pulse, ...props }: IconProps) {
+function IconComponent({ name, label, title, spin, pulse, ...props }: IconProps) {
   const resolvedName = resolveIconName(name);
   const impliedSpin = typeof name === 'string' && /\bfa-spin\b/.test(name);
   const impliedPulse = typeof name === 'string' && /\bfa-pulse\b/.test(name);
@@ -22,3 +23,5 @@ export function Icon({ name, label, title, spin, pulse, ...props }: IconProps) {
     />
   );
 }
+
+export const Icon = memo(IconComponent);

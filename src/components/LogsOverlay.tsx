@@ -1,12 +1,30 @@
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
+
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { Icon } from './Icon';
+import { SimmBadge, SimmButton } from './primitives';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
+const INITIAL_LOG_LINE_LIMIT = 4000;
+const LOG_LINE_CHUNK_SIZE = 4000;
+const LOG_FILE_CACHE_LIMIT = 10;
+const LOG_ROW_ESTIMATED_HEIGHT = 58;
+const LOG_ROW_OVERSCAN = 14;
+const LOG_LOAD_OLDER_THRESHOLD = LOG_ROW_ESTIMATED_HEIGHT * 8;
 
 interface LogFile {
   name: string;
@@ -25,6 +43,13 @@ interface LogLine {
   category: 'melonloader' | 'mod' | 'general';
 }
 
+interface CachedLogFile {
+  size: number;
+  modified: string | null;
+  loadedLimit: number;
+  lines: LogLine[];
+}
+
 interface Props {
   isOpen: boolean;
   onClose: () => void;
@@ -37,6 +62,34 @@ type TimePeriod = 'all' | 'last5min' | 'last15min' | 'last1hour' | 'custom';
 type LogLevelFilter = 'ALL' | 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
 type LogCategoryFilter = 'ALL' | 'melonloader' | 'mod' | 'general';
 type EffectiveLevel = 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
+
+type LogsSelectOption<TValue extends string> = {
+  value: TValue;
+  label: string;
+};
+
+const LOG_LEVEL_OPTIONS: LogsSelectOption<LogLevelFilter>[] = [
+  { value: 'ALL', label: 'All Levels' },
+  { value: 'ERROR', label: 'Error' },
+  { value: 'WARN', label: 'Warning' },
+  { value: 'INFO', label: 'Info' },
+  { value: 'DEBUG', label: 'Debug' },
+];
+
+const LOG_CATEGORY_OPTIONS: LogsSelectOption<LogCategoryFilter>[] = [
+  { value: 'ALL', label: 'All Categories' },
+  { value: 'melonloader', label: 'MelonLoader' },
+  { value: 'mod', label: 'Mods' },
+  { value: 'general', label: 'General' },
+];
+
+const TIME_PERIOD_OPTIONS: LogsSelectOption<TimePeriod>[] = [
+  { value: 'all', label: 'All Time' },
+  { value: 'last5min', label: 'Last 5 Minutes' },
+  { value: 'last15min', label: 'Last 15 Minutes' },
+  { value: 'last1hour', label: 'Last Hour' },
+  { value: 'custom', label: 'Custom Range' },
+];
 
 interface ModActivityItem {
   modTag: string;
@@ -51,6 +104,91 @@ function normalizeModTag(modTag: string): string {
 
 function getLineKey(line: LogLine): string {
   return `${line.lineNumber}-${line.timestamp ?? 'none'}-${line.modTag ?? 'none'}-${line.content}`;
+}
+
+function areLogLinesEqual(left: LogLine[], right: LogLine[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftLine = left[index];
+    const rightLine = right[index];
+    if (
+      leftLine.lineNumber !== rightLine.lineNumber
+      || leftLine.content !== rightLine.content
+      || leftLine.level !== rightLine.level
+      || leftLine.timestamp !== rightLine.timestamp
+      || leftLine.modTag !== rightLine.modTag
+      || leftLine.category !== rightLine.category
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function LogsToolbarSelect<TValue extends string>({
+  id,
+  value,
+  options,
+  onValueChange,
+}: {
+  id: string;
+  value: TValue;
+  options: LogsSelectOption<TValue>[];
+  onValueChange: (value: TValue) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === 'string') {
+          onValueChange(nextValue as TValue);
+        }
+      }}
+    >
+      <SelectTrigger id={id} className="logs-panel__select">
+        <SelectValue>
+          {(selectedValue) =>
+            options.find((option) => option.value === selectedValue)?.label
+            || options.find((option) => option.value === value)?.label
+            || options[0]?.label
+          }
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="logs-panel__select-content" align="start">
+        <SelectGroup>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+function areLogFilesEqual(left: LogFile[], right: LogFile[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+
+  for (let index = 0; index < left.length; index += 1) {
+    const leftFile = left[index];
+    const rightFile = right[index];
+    if (
+      leftFile.name !== rightFile.name
+      || leftFile.path !== rightFile.path
+      || leftFile.size !== rightFile.size
+      || leftFile.modified !== rightFile.modified
+      || leftFile.isLatest !== rightFile.isLatest
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function getEffectiveLevel(line: LogLine): EffectiveLevel {
@@ -195,9 +333,269 @@ function formatRelativeTime(timestamp: string | null): string {
   return parsed ? parsed.toLocaleTimeString() : timestamp;
 }
 
-function formatVisibleCount(count: number): string {
-  return `${count} ${count === 1 ? 'Line' : 'Lines'}`;
-}
+const LogStreamRow = memo(function LogStreamRow({
+  line,
+  searchQuery,
+  selected,
+  setRowRef,
+  onModFilter,
+  onSelect,
+}: {
+  line: LogLine;
+  searchQuery: string;
+  selected: boolean;
+  setRowRef: (key: string, element: HTMLDivElement | null) => void;
+  onModFilter: (line: LogLine, key: string) => void;
+  onSelect: (key: string) => void;
+}) {
+  const key = getLineKey(line);
+  const effectiveLevel = getEffectiveLevel(line);
+
+  return (
+    <div
+      ref={(element) => {
+        setRowRef(key, element);
+      }}
+      role="option"
+      aria-selected={selected}
+      tabIndex={-1}
+      className={`logs-panel__line ${selected ? 'logs-panel__line--selected' : ''}`}
+      onClick={() => onSelect(key)}
+      onDoubleClick={() => {
+        onSelect(key);
+        if (line.modTag) {
+          onModFilter(line, key);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect(key);
+        }
+      }}
+    >
+      <div className="logs-panel__line-meta">
+        <div className="logs-panel__line-meta-main">
+          <span className="logs-panel__line-number">{line.lineNumber}</span>
+          <span className="logs-panel__line-timestamp">{line.timestamp ?? '—'}</span>
+          <span className={`logs-panel__line-level logs-panel__line-level--${effectiveLevel.toLowerCase()}`}>
+            {getLevelLabel(effectiveLevel)}
+          </span>
+          <span className={`logs-panel__line-category logs-panel__line-category--${line.category}`}>
+            <Icon name={`fas ${getCategoryIcon(line.category)}`} />
+            {getCategoryLabel(line.category)}
+          </span>
+        </div>
+        {line.modTag ? (
+          <SimmButton
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="logs-panel__mod-chip"
+            style={getModAccentStyle(line.modTag)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onModFilter(line, key);
+            }}
+          >
+            {line.modTag}
+          </SimmButton>
+        ) : null}
+      </div>
+      <div className="logs-panel__line-content">{highlightText(line.content, searchQuery)}</div>
+    </div>
+  );
+});
+
+const LogStream = memo(function LogStream({
+  containerRef,
+  error,
+  isLiveFile,
+  loading,
+  loadingOlder,
+  logLineCount,
+  onKeyDown,
+  onLoadOlder,
+  onModFilter,
+  onScrollStateChange,
+  onSelectLine,
+  rowRefs,
+  searchQuery,
+  selectedLineKey,
+  selectedLogFile,
+  visibleLines,
+}: {
+  containerRef: React.MutableRefObject<HTMLDivElement | null>;
+  error: string | null;
+  isLiveFile: boolean;
+  loading: boolean;
+  loadingOlder: boolean;
+  logLineCount: number;
+  onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
+  onLoadOlder: () => void;
+  onModFilter: (line: LogLine, key: string) => void;
+  onScrollStateChange: (atBottom: boolean) => void;
+  onSelectLine: (key: string) => void;
+  rowRefs: React.MutableRefObject<Record<string, HTMLDivElement | null>>;
+  searchQuery: string;
+  selectedLineKey: string | null;
+  selectedLogFile: LogFile | null;
+  visibleLines: LogLine[];
+}) {
+  const [scrollMetrics, setScrollMetrics] = useState({ top: 0, height: 0 });
+  const scrollFrameRef = useRef<number | null>(null);
+
+  const updateScrollMetrics = useCallback((container: HTMLDivElement) => {
+    const nextTop = container.scrollTop;
+    const nextHeight = container.clientHeight;
+    setScrollMetrics((current) => (
+      current.top === nextTop && current.height === nextHeight
+        ? current
+        : { top: nextTop, height: nextHeight }
+    ));
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    onScrollStateChange(Math.abs(scrollHeight - clientHeight - scrollTop) < 12);
+    if (scrollTop <= LOG_LOAD_OLDER_THRESHOLD) {
+      onLoadOlder();
+    }
+
+    if (scrollFrameRef.current !== null) {
+      return;
+    }
+
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      updateScrollMetrics(container);
+    });
+  }, [containerRef, onLoadOlder, onScrollStateChange, updateScrollMetrics]);
+
+  const setRowRef = useCallback((key: string, element: HTMLDivElement | null) => {
+    if (element) {
+      rowRefs.current[key] = element;
+    } else {
+      delete rowRefs.current[key];
+    }
+  }, [rowRefs]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const syncViewport = () => updateScrollMetrics(container);
+
+    syncViewport();
+    if (typeof ResizeObserver !== 'undefined') {
+      const resizeObserver = new ResizeObserver(syncViewport);
+      resizeObserver.observe(container);
+      return () => resizeObserver.disconnect();
+    }
+
+    window.addEventListener('resize', syncViewport);
+    return () => window.removeEventListener('resize', syncViewport);
+  }, [containerRef, selectedLogFile?.path, updateScrollMetrics]);
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current !== null) {
+      cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
+    }
+  }, []);
+
+  const effectiveStreamViewportHeight = scrollMetrics.height > 0 ? scrollMetrics.height : 720;
+  const virtualStartIndex = Math.max(0, Math.floor(scrollMetrics.top / LOG_ROW_ESTIMATED_HEIGHT) - LOG_ROW_OVERSCAN);
+  const virtualEndIndex = Math.min(
+    visibleLines.length,
+    Math.ceil((scrollMetrics.top + effectiveStreamViewportHeight) / LOG_ROW_ESTIMATED_HEIGHT) + LOG_ROW_OVERSCAN,
+  );
+  const virtualLines = visibleLines.slice(virtualStartIndex, virtualEndIndex);
+  const virtualTopPadding = virtualStartIndex * LOG_ROW_ESTIMATED_HEIGHT;
+  const virtualBottomPadding = Math.max(0, (visibleLines.length - virtualEndIndex) * LOG_ROW_ESTIMATED_HEIGHT);
+
+  return (
+    <div
+      ref={containerRef}
+      className="logs-panel__stream"
+      onKeyDown={onKeyDown}
+      onScroll={handleScroll}
+      tabIndex={0}
+      role="listbox"
+      aria-label="Log lines"
+    >
+      {error ? (
+        <div className="logs-panel__empty-state logs-panel__empty-state--error">
+          <Icon name="fas fa-triangle-exclamation" />
+          <strong>Failed to load logs</strong>
+          <p>{error}</p>
+        </div>
+      ) : loading && logLineCount === 0 ? (
+        <div className="logs-panel__empty-state">
+          <Icon name="fas fa-spinner fa-spin" />
+          <strong>Loading log file</strong>
+          <p>Fetching the latest lines for this environment.</p>
+        </div>
+      ) : !selectedLogFile ? (
+        <div className="logs-panel__empty-state">
+          <Icon name="fas fa-file-lines" />
+          <strong>Select a log source</strong>
+          <p>Choose a live or archived log from the rail to begin reviewing output.</p>
+        </div>
+      ) : visibleLines.length === 0 ? (
+        <div className="logs-panel__empty-state">
+          <Icon name={`fas ${logLineCount === 0 ? 'fa-wave-square' : 'fa-filter-circle-xmark'}`} />
+          <strong>{logLineCount === 0 ? 'No log content yet' : 'No lines match the current filters'}</strong>
+          <p>
+            {logLineCount === 0
+              ? (isLiveFile ? 'Live file selected. New lines will appear here when the game writes output.' : 'This file is present but does not contain readable log lines.')
+              : 'Adjust the filters, search, or mod scope to widen the result set.'}
+          </p>
+        </div>
+      ) : (
+        <>
+          {loadingOlder ? (
+            <div className="logs-panel__load-older" role="status">
+              <Icon name="fas fa-spinner fa-spin" />
+              Loading earlier entries
+            </div>
+          ) : null}
+          {virtualTopPadding > 0 ? (
+            <div
+              aria-hidden="true"
+              className="logs-panel__virtual-spacer"
+              style={{ height: virtualTopPadding }}
+            />
+          ) : null}
+          {virtualLines.map((line) => {
+            const key = getLineKey(line);
+            return (
+              <LogStreamRow
+                key={key}
+                line={line}
+                searchQuery={searchQuery}
+                selected={key === selectedLineKey}
+                setRowRef={setRowRef}
+                onModFilter={onModFilter}
+                onSelect={onSelectLine}
+              />
+            );
+          })}
+          {virtualBottomPadding > 0 ? (
+            <div
+              aria-hidden="true"
+              className="logs-panel__virtual-spacer"
+              style={{ height: virtualBottomPadding }}
+            />
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+});
 
 export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibraryView }: Props) {
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
@@ -205,6 +603,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [selectedLineKey, setSelectedLineKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filterLevel, setFilterLevel] = useState<LogLevelFilter>('ALL');
   const [filterCategory, setFilterCategory] = useState<LogCategoryFilter>('ALL');
@@ -226,11 +625,20 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const logContainerRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const toastTimeoutRef = useRef<number | null>(null);
+  const logFileCacheRef = useRef<Map<string, CachedLogFile>>(new Map());
+  const displayedLogPathRef = useRef<string | null>(null);
+  const selectedLogPathRef = useRef<string | null>(null);
+  const loadedLogLineLimitRef = useRef(INITIAL_LOG_LINE_LIMIT);
+  const loadingOlderRef = useRef(false);
 
   const selectedLogFile = useMemo(
     () => logFiles.find((file) => file.path === selectedLogPath) ?? null,
     [logFiles, selectedLogPath],
   );
+
+  useEffect(() => {
+    selectedLogPathRef.current = selectedLogPath;
+  }, [selectedLogPath]);
 
   const isSharedPlayerLogFile = (file: LogFile | null): boolean => {
     if (!file) return false;
@@ -238,11 +646,61 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     return normalizedPath.endsWith('/player.log') || normalizedPath.endsWith('/player-prev.log');
   };
 
-  const isLiveLogFile = (file: LogFile | null): boolean => {
+  const isLiveLogFile = useCallback((file: LogFile | null): boolean => {
     if (!file) return false;
     const normalizedPath = file.path.replace(/\\/g, '/').toLowerCase();
     return file.isLatest || normalizedPath.endsWith('/player.log');
-  };
+  }, []);
+
+  const getCachedLogFile = useCallback((file: LogFile): CachedLogFile | null => {
+    const cached = logFileCacheRef.current.get(file.path);
+    if (!cached) return null;
+
+    if (cached.size !== file.size || cached.modified !== file.modified) {
+      logFileCacheRef.current.delete(file.path);
+      return null;
+    }
+
+    logFileCacheRef.current.delete(file.path);
+    logFileCacheRef.current.set(file.path, cached);
+    return cached;
+  }, []);
+
+  const cacheLogLines = useCallback((file: LogFile, lines: LogLine[], loadedLimit = loadedLogLineLimitRef.current): LogLine[] => {
+    const existing = logFileCacheRef.current.get(file.path);
+    const stableLines = existing && areLogLinesEqual(existing.lines, lines) ? existing.lines : lines;
+
+    logFileCacheRef.current.set(file.path, {
+      size: file.size,
+      modified: file.modified,
+      loadedLimit,
+      lines: stableLines,
+    });
+
+    while (logFileCacheRef.current.size > LOG_FILE_CACHE_LIMIT) {
+      const oldestPath = logFileCacheRef.current.keys().next().value;
+      if (!oldestPath) break;
+      logFileCacheRef.current.delete(oldestPath);
+    }
+
+    return stableLines;
+  }, []);
+
+  const resetLogViewport = useCallback(() => {
+    setSelectedLineKey(null);
+  }, []);
+
+  const showLogLines = useCallback((lines: LogLine[], logPath: string) => {
+    displayedLogPathRef.current = logPath;
+    setLogLines((current) => (areLogLinesEqual(current, lines) ? current : lines));
+    setAutoScroll(true);
+    setIsAtBottom(true);
+    requestAnimationFrame(() => {
+      if (logContainerRef.current) {
+        logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+      }
+    });
+  }, []);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -391,10 +849,30 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const isLiveFile = isLiveLogFile(selectedLogFile);
   const showCollapsedInspector = shouldCollapseInspector && isInspectorCollapsed;
 
+  const scrollLineIntoView = (line: LogLine, block: ScrollLogicalPosition = 'nearest') => {
+    const key = getLineKey(line);
+    const renderedRow = rowRefs.current[key];
+    if (renderedRow) {
+      renderedRow.scrollIntoView({ block });
+      return;
+    }
+
+    const targetIndex = visibleLines.findIndex((candidate) => getLineKey(candidate) === key);
+    if (targetIndex >= 0 && logContainerRef.current) {
+      logContainerRef.current.scrollTo({
+        top: Math.max(0, targetIndex * LOG_ROW_ESTIMATED_HEIGHT - LOG_ROW_ESTIMATED_HEIGHT),
+        behavior: 'auto',
+      });
+    }
+  };
+
   useEffect(() => {
     setLogFiles([]);
     setSelectedLogPath(null);
     setLogLines([]);
+    setLoadingOlder(false);
+    loadingOlderRef.current = false;
+    loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
     setSelectedLineKey(null);
     setLoading(false);
     setError(null);
@@ -403,6 +881,8 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     setOpeningModView(false);
     setAutoScroll(true);
     setIsAtBottom(true);
+    displayedLogPathRef.current = null;
+    logFileCacheRef.current.clear();
 
     if (toastTimeoutRef.current) {
       clearTimeout(toastTimeoutRef.current);
@@ -420,19 +900,27 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   }, [environmentId]);
 
   const reloadSelectedLogFile = async (logPath: string) => {
+    const file = logFiles.find((item) => item.path === logPath) ?? null;
+
     try {
       setLoading(true);
       setError(null);
-      const lines = await ApiService.readLogFile(logPath);
-      setLogLines(lines);
-      setSelectedLineKey(null);
-      setAutoScroll(true);
-      setIsAtBottom(true);
+      resetLogViewport();
+      loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
+      setLogLines([]);
+      const lines = await ApiService.readLogFile(logPath, INITIAL_LOG_LINE_LIMIT);
+      if (selectedLogPathRef.current !== logPath) return;
+      const stableLines = file ? cacheLogLines(file, lines, INITIAL_LOG_LINE_LIMIT) : lines;
+      showLogLines(stableLines, logPath);
     } catch (err) {
+      if (selectedLogPathRef.current !== logPath) return;
       setError(err instanceof Error ? err.message : 'Failed to load log file');
+      displayedLogPathRef.current = null;
       setLogLines([]);
     } finally {
-      setLoading(false);
+      if (selectedLogPathRef.current === logPath) {
+        setLoading(false);
+      }
     }
   };
 
@@ -447,7 +935,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         const files = await ApiService.getLogFiles(environmentId);
         if (cancelled) return;
 
-        setLogFiles(files);
+        setLogFiles((current) => (areLogFilesEqual(current, files) ? current : files));
         setSelectedLogPath((current) => {
           if (current && files.some((file) => file.path === current)) {
             return current;
@@ -508,18 +996,36 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     let cancelled = false;
     const loadSelectedLogFile = async () => {
+      resetLogViewport();
+      setError(null);
+
+      const cachedFile = getCachedLogFile(selectedLogFile);
+      const cachedLines = cachedFile?.lines ?? null;
+      if (cachedLines) {
+        loadedLogLineLimitRef.current = cachedFile?.loadedLimit ?? INITIAL_LOG_LINE_LIMIT;
+        setLoading(false);
+        showLogLines(cachedLines, selectedLogFile.path);
+        if (!isLiveLogFile(selectedLogFile)) {
+          return;
+        }
+      }
+
       try {
-        setLoading(true);
-        setError(null);
-        const lines = await ApiService.readLogFile(selectedLogFile.path);
+        if (!cachedLines) {
+          setLoading(true);
+        }
+        if (!cachedLines && displayedLogPathRef.current !== selectedLogFile.path) {
+          setLogLines([]);
+        }
+        loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
+        const lines = await ApiService.readLogFile(selectedLogFile.path, INITIAL_LOG_LINE_LIMIT);
         if (cancelled) return;
-        setLogLines(lines);
-        setSelectedLineKey(null);
-        setAutoScroll(true);
-        setIsAtBottom(true);
+        const stableLines = cacheLogLines(selectedLogFile, lines, INITIAL_LOG_LINE_LIMIT);
+        showLogLines(stableLines, selectedLogFile.path);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load log file');
+          displayedLogPathRef.current = null;
           setLogLines([]);
         }
       } finally {
@@ -534,7 +1040,29 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     return () => {
       cancelled = true;
     };
-  }, [selectedLogFile]);
+  }, [cacheLogLines, getCachedLogFile, isLiveLogFile, resetLogViewport, selectedLogFile, showLogLines]);
+
+  const selectLogFile = (logPath: string) => {
+    if (logPath === selectedLogPath) {
+      return;
+    }
+    const nextFile = logFiles.find((file) => file.path === logPath) ?? null;
+    const cachedFile = nextFile ? getCachedLogFile(nextFile) : null;
+    const cachedLines = cachedFile?.lines ?? null;
+
+    resetLogViewport();
+    setError(null);
+    if (cachedLines) {
+      loadedLogLineLimitRef.current = cachedFile?.loadedLimit ?? INITIAL_LOG_LINE_LIMIT;
+      setLoading(false);
+      showLogLines(cachedLines, logPath);
+    } else {
+      loadedLogLineLimitRef.current = INITIAL_LOG_LINE_LIMIT;
+      displayedLogPathRef.current = null;
+      setLogLines([]);
+    }
+    setSelectedLogPath(logPath);
+  };
 
   useEffect(() => {
     if (!selectedLogFile) return;
@@ -562,7 +1090,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     };
 
     void syncWatching();
-  }, [isWatching, selectedLogFile, watchedPath]);
+  }, [isLiveLogFile, isWatching, selectedLogFile, watchedPath]);
 
   useEffect(() => {
     if (!isWatching) return;
@@ -570,7 +1098,13 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     let unlisten: (() => void) | null = null;
     const bindListener = async () => {
       unlisten = await listen<{ lines: LogLine[] }>('log-update', (event) => {
-        setLogLines((current) => [...current, ...event.payload.lines]);
+        setLogLines((current) => {
+          const nextLines = [...current, ...event.payload.lines].slice(-loadedLogLineLimitRef.current);
+          if (selectedLogFile) {
+            cacheLogLines(selectedLogFile, nextLines, loadedLogLineLimitRef.current);
+          }
+          return nextLines;
+        });
       });
     };
 
@@ -581,7 +1115,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         unlisten();
       }
     };
-  }, [isWatching]);
+  }, [cacheLogLines, isWatching, selectedLogFile]);
 
   useEffect(() => {
     if (selectedModTag && !modActivity.some((item) => normalizeModTag(item.modTag) === normalizeModTag(selectedModTag))) {
@@ -620,15 +1154,53 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     };
   }, [isOpen, isWatching]);
 
-  const handleScroll = () => {
-    if (!logContainerRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
-    const atBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 12;
+  const loadOlderLogEntries = useCallback(() => {
+    if (!selectedLogFile || loadingOlderRef.current) return;
+    const firstLoadedLineNumber = logLines[0]?.lineNumber ?? 1;
+    if (firstLoadedLineNumber <= 1) return;
+
+    const container = logContainerRef.current;
+    const previousScrollHeight = container?.scrollHeight ?? 0;
+    const previousScrollTop = container?.scrollTop ?? 0;
+    const nextLimit = loadedLogLineLimitRef.current + LOG_LINE_CHUNK_SIZE;
+
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+
+    void ApiService.readLogFile(selectedLogFile.path, nextLimit)
+      .then((lines) => {
+        const currentPath = selectedLogFile.path;
+        if (selectedLogPathRef.current !== currentPath) return;
+        loadedLogLineLimitRef.current = nextLimit;
+        const stableLines = cacheLogLines(selectedLogFile, lines, nextLimit);
+        displayedLogPathRef.current = currentPath;
+        setLogLines((current) => (areLogLinesEqual(current, stableLines) ? current : stableLines));
+        setAutoScroll(false);
+        setIsAtBottom(false);
+        requestAnimationFrame(() => {
+          const latestContainer = logContainerRef.current;
+          if (!latestContainer || displayedLogPathRef.current !== currentPath) return;
+          const heightDelta = latestContainer.scrollHeight - previousScrollHeight;
+          latestContainer.scrollTop = Math.max(0, previousScrollTop + heightDelta);
+        });
+      })
+      .catch((err) => {
+        if (selectedLogPathRef.current !== selectedLogFile.path) return;
+        setError(err instanceof Error ? err.message : 'Failed to load earlier log entries');
+      })
+      .finally(() => {
+        loadingOlderRef.current = false;
+        if (selectedLogPathRef.current !== selectedLogFile.path) return;
+        setLoadingOlder(false);
+      });
+  }, [cacheLogLines, logLines, selectedLogFile]);
+
+  const handleStreamScrollStateChange = useCallback((atBottom: boolean) => {
     setIsAtBottom(atBottom);
     if (isLiveFile) {
       setAutoScroll(atBottom);
     }
-  };
+  }, [isLiveFile]);
 
   const jumpToLive = () => {
     if (!logContainerRef.current) return;
@@ -711,6 +1283,15 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     }
   };
 
+  const handleStreamLineSelect = useCallback((key: string) => {
+    setSelectedLineKey(key);
+  }, []);
+
+  const handleStreamModFilter = useCallback((line: LogLine, key: string) => {
+    setSelectedModTag(line.modTag);
+    setSelectedLineKey(key);
+  }, []);
+
   const handleJumpToNewestRelevantLine = () => {
     const targetMod = selectedLine?.modTag ?? selectedModTag;
     const candidate = targetMod
@@ -721,7 +1302,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     const key = getLineKey(candidate);
     setSelectedLineKey(key);
-    rowRefs.current[key]?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    scrollLineIntoView(candidate, 'center');
   };
 
   const resetFilters = () => {
@@ -743,7 +1324,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       const nextLine = visibleLines[Math.min(currentIndex + 1, visibleLines.length - 1)] ?? visibleLines[0];
       const nextKey = getLineKey(nextLine);
       setSelectedLineKey(nextKey);
-      rowRefs.current[nextKey]?.scrollIntoView({ block: 'nearest' });
+      scrollLineIntoView(nextLine);
     }
 
     if (event.key === 'ArrowUp') {
@@ -751,7 +1332,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
       const nextLine = currentIndex <= 0 ? visibleLines[0] : visibleLines[currentIndex - 1];
       const nextKey = getLineKey(nextLine);
       setSelectedLineKey(nextKey);
-      rowRefs.current[nextKey]?.scrollIntoView({ block: 'nearest' });
+      scrollLineIntoView(nextLine);
     }
   };
 
@@ -759,20 +1340,11 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
   return (
     <div className="modal-content workspace-panel logs-panel">
-      <div className="modal-header logs-panel__header">
-        <div className="logs-panel__header-title">
-          <div className="logs-panel__header-title-row">
-            <h2>Logs</h2>
-            <div className="logs-panel__header-pills">
-              <span className="logs-panel__header-pill">{logFiles.length} Sources</span>
-              <span className="logs-panel__header-pill">{modActivity.length} Mods</span>
-            </div>
-          </div>
-          <p className="logs-panel__subtitle">
-            Review live and archived environment logs for {environment.name}.
-          </p>
-        </div>
-      </div>
+      <WorkspacePageHeader
+        eyebrow={environment.name}
+        title="Logs"
+        description={`Review live and archived logs, mod activity, and selected log lines for ${environment.name}.`}
+      />
 
       <div
         className={[
@@ -788,22 +1360,23 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             </div>
             <div className="logs-panel__source-list">
               {currentFiles.map((file) => (
-                <button
+                <SimmButton
                   key={file.path}
                   type="button"
+                  variant="ghost"
                   className={`logs-panel__source-button ${selectedLogPath === file.path ? 'logs-panel__source-button--active' : ''}`}
-                  onClick={() => setSelectedLogPath(file.path)}
+                  onClick={() => selectLogFile(file.path)}
                 >
                   <div className="logs-panel__source-head">
                     <strong>{file.name}</strong>
                     <div className="logs-panel__source-badges">
-                      {file.isLatest && <span className="logs-panel__badge logs-panel__badge--live">Live</span>}
-                      {isSharedPlayerLogFile(file) && <span className="logs-panel__badge">Shared</span>}
+                      {file.isLatest && <SimmBadge className="logs-panel__badge logs-panel__badge--live">Live</SimmBadge>}
+                      {isSharedPlayerLogFile(file) && <SimmBadge className="logs-panel__badge">Shared</SimmBadge>}
                     </div>
                   </div>
                   <span>{formatFileSize(file.size)}</span>
                   <span>{file.modified ? new Date(file.modified).toLocaleDateString() : 'Unknown date'}</span>
-                </button>
+                </SimmButton>
               ))}
               {!loading && currentFiles.length === 0 && (
                 <div className="logs-panel__empty-small">No current log files.</div>
@@ -817,18 +1390,19 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             </div>
             <div className="logs-panel__source-list">
               {archivedFiles.map((file) => (
-                <button
+                <SimmButton
                   key={file.path}
                   type="button"
+                  variant="ghost"
                   className={`logs-panel__source-button ${selectedLogPath === file.path ? 'logs-panel__source-button--active' : ''}`}
-                  onClick={() => setSelectedLogPath(file.path)}
+                  onClick={() => selectLogFile(file.path)}
                 >
                   <div className="logs-panel__source-head">
                     <strong>{file.name}</strong>
                   </div>
                   <span>{formatFileSize(file.size)}</span>
                   <span>{file.modified ? new Date(file.modified).toLocaleDateString() : 'Unknown date'}</span>
-                </button>
+                </SimmButton>
               ))}
               {!loading && archivedFiles.length === 0 && (
                 <div className="logs-panel__empty-small">No archived log files.</div>
@@ -840,16 +1414,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             <div className="logs-panel__section-heading">
               <span>Mod Activity</span>
               {selectedModTag && (
-                <button type="button" className="logs-panel__clear-link" onClick={() => setSelectedModTag(null)}>
+                <SimmButton type="button" variant="ghost" size="xs" className="logs-panel__clear-link" onClick={() => setSelectedModTag(null)}>
                   Clear
-                </button>
+                </SimmButton>
               )}
             </div>
             <div className="logs-panel__mod-activity">
               {modActivity.map((item) => (
-                <button
+                <SimmButton
                   key={item.modTag}
                   type="button"
+                  variant="ghost"
                   className={`logs-panel__mod-button ${selectedModTag && normalizeModTag(selectedModTag) === normalizeModTag(item.modTag) ? 'logs-panel__mod-button--active' : ''}`}
                   onClick={() => setSelectedModTag((current) => (current && normalizeModTag(current) === normalizeModTag(item.modTag) ? null : item.modTag))}
                   style={getModAccentStyle(item.modTag)}
@@ -862,7 +1437,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     <span>{item.errorCount} errors</span>
                     <span>{formatRelativeTime(item.lastLogTime)}</span>
                   </div>
-                </button>
+                </SimmButton>
               ))}
               {!loading && modActivity.length === 0 && (
                 <div className="logs-panel__empty-small">No mod-tagged lines in this file.</div>
@@ -874,35 +1449,32 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
         <section className="logs-panel__viewer">
           <header className="logs-panel__viewer-header">
             <div>
-              <span className="settings-eyebrow">Selected File</span>
               <div className="logs-panel__viewer-title-row">
                 <h3>{selectedLogFile?.name ?? 'No log file selected'}</h3>
-                {isLiveFile && <span className="logs-panel__badge logs-panel__badge--live">Follow Live</span>}
-                {selectedLogFile && isSharedPlayerLogFile(selectedLogFile) && <span className="logs-panel__badge">Shared Player.log</span>}
               </div>
               <p className="logs-panel__file-meta">
                 {selectedLogFile
-                  ? `${formatModifiedDate(selectedLogFile.modified)} • ${formatFileSize(selectedLogFile.size)} • ${formatVisibleCount(logLines.length)} loaded`
+                  ? `${formatModifiedDate(selectedLogFile.modified)} • ${formatFileSize(selectedLogFile.size)}`
                   : 'Choose a log source from the rail.'}
               </p>
             </div>
             <div className="logs-panel__header-actions">
-              <button type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void ApiService.openPath(selectedFilePath)} disabled={!selectedLogFile}>
-                <Icon name="fas fa-file-lines" />
+              <SimmButton type="button" variant="outline" size="sm" className="logs-panel__viewer-action" onClick={() => selectedLogFile && void ApiService.openPath(selectedFilePath)} disabled={!selectedLogFile}>
+                <Icon name="fas fa-file-lines" data-icon="inline-start" />
                 Open File
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void ApiService.revealPath(selectedFilePath)} disabled={!selectedLogFile}>
-                <Icon name="fas fa-folder-open" />
+              </SimmButton>
+              <SimmButton type="button" variant="outline" size="sm" className="logs-panel__viewer-action" onClick={() => selectedLogFile && void ApiService.revealPath(selectedFilePath)} disabled={!selectedLogFile}>
+                <Icon name="fas fa-folder-open" data-icon="inline-start" />
                 Open Folder
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={() => selectedLogFile && void reloadSelectedLogFile(selectedLogFile.path)} disabled={!selectedLogFile || loading}>
-                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} />
+              </SimmButton>
+              <SimmButton type="button" variant="outline" size="sm" className="logs-panel__viewer-action" onClick={() => selectedLogFile && void reloadSelectedLogFile(selectedLogFile.path)} disabled={!selectedLogFile || loading}>
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-rotate'} data-icon="inline-start" />
                 Reload
-              </button>
-              <button type="button" className="btn btn-primary" onClick={() => void handleExport()} disabled={!selectedLogFile || exporting}>
-                <Icon name={exporting ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
+              </SimmButton>
+              <SimmButton type="button" variant="secondary" size="sm" className="logs-panel__viewer-action logs-panel__viewer-action--primary" onClick={() => void handleExport()} disabled={!selectedLogFile || exporting}>
+                <Icon name={exporting ? 'fas fa-spinner fa-spin' : 'fas fa-download'} data-icon="inline-start" />
                 {exporting ? 'Exporting…' : 'Export'}
-              </button>
+              </SimmButton>
             </div>
           </header>
 
@@ -910,7 +1482,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
             <div className="logs-panel__toolbar">
               <div className="logs-panel__toolbar-group logs-panel__toolbar-group--search">
                 <Icon name="fas fa-search" />
-                <input
+                <Input
                   type="text"
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
@@ -920,45 +1492,43 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
               <div className="logs-panel__toolbar-group">
                 <label htmlFor="logs-level-filter">Level</label>
-                <select id="logs-level-filter" value={filterLevel} onChange={(event) => setFilterLevel(event.target.value as LogLevelFilter)}>
-                  <option value="ALL">All Levels</option>
-                  <option value="ERROR">Error</option>
-                  <option value="WARN">Warning</option>
-                  <option value="INFO">Info</option>
-                  <option value="DEBUG">Debug</option>
-                </select>
+                <LogsToolbarSelect
+                  id="logs-level-filter"
+                  value={filterLevel}
+                  options={LOG_LEVEL_OPTIONS}
+                  onValueChange={setFilterLevel}
+                />
               </div>
 
               <div className="logs-panel__toolbar-group">
                 <label htmlFor="logs-category-filter">Category</label>
-                <select id="logs-category-filter" value={filterCategory} onChange={(event) => setFilterCategory(event.target.value as LogCategoryFilter)}>
-                  <option value="ALL">All Categories</option>
-                  <option value="melonloader">MelonLoader</option>
-                  <option value="mod">Mods</option>
-                  <option value="general">General</option>
-                </select>
+                <LogsToolbarSelect
+                  id="logs-category-filter"
+                  value={filterCategory}
+                  options={LOG_CATEGORY_OPTIONS}
+                  onValueChange={setFilterCategory}
+                />
               </div>
 
               <div className="logs-panel__toolbar-group">
                 <label htmlFor="logs-time-filter">Time</label>
-                <select id="logs-time-filter" value={timePeriod} onChange={(event) => setTimePeriod(event.target.value as TimePeriod)}>
-                  <option value="all">All Time</option>
-                  <option value="last5min">Last 5 Minutes</option>
-                  <option value="last15min">Last 15 Minutes</option>
-                  <option value="last1hour">Last Hour</option>
-                  <option value="custom">Custom Range</option>
-                </select>
+                <LogsToolbarSelect
+                  id="logs-time-filter"
+                  value={timePeriod}
+                  options={TIME_PERIOD_OPTIONS}
+                  onValueChange={setTimePeriod}
+                />
               </div>
 
               {timePeriod === 'custom' && (
                 <div className="logs-panel__toolbar-group logs-panel__toolbar-group--custom">
-                  <input
+                  <Input
                     type="text"
                     value={customTimeStart}
                     onChange={(event) => setCustomTimeStart(event.target.value)}
                     placeholder="Start HH:MM:SS.mmm"
                   />
-                  <input
+                  <Input
                     type="text"
                     value={customTimeEnd}
                     onChange={(event) => setCustomTimeEnd(event.target.value)}
@@ -968,15 +1538,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
               )}
 
               {selectedModTag && (
-                <button type="button" className="logs-panel__active-filter" onClick={() => setSelectedModTag(null)} style={getModAccentStyle(selectedModTag)}>
+                <SimmButton type="button" variant="outline" size="sm" className="logs-panel__active-filter" onClick={() => setSelectedModTag(null)} style={getModAccentStyle(selectedModTag)}>
                   <span>Mod: {selectedModTag}</span>
-                  <Icon name="fas fa-times" />
-                </button>
+                  <Icon name="fas fa-times" data-icon="inline-end" />
+                </SimmButton>
               )}
 
               {isLiveFile && (
-                <button
+                <SimmButton
                   type="button"
+                  variant="outline"
+                  size="sm"
                   className={`logs-panel__follow-toggle ${autoScroll ? 'logs-panel__follow-toggle--active' : ''}`}
                   onClick={() => {
                     if (autoScroll) {
@@ -986,9 +1558,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     jumpToLive();
                   }}
                 >
-                  <Icon name={`fas ${autoScroll ? 'fa-pause' : 'fa-play'}`} />
+                  <Icon name={`fas ${autoScroll ? 'fa-pause' : 'fa-play'}`} data-icon="inline-start" />
                   {autoScroll ? 'Pause Live' : 'Follow Live'}
-                </button>
+                </SimmButton>
               )}
             </div>
 
@@ -1007,130 +1579,49 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   <strong>{summaryCounts.mods}</strong>
                 </div>
                 <div className="logs-panel__summary-pill">
-                  <span>Visible Lines</span>
+                  <span>Lines</span>
                   <strong>{summaryCounts.visible}</strong>
                 </div>
               </div>
               <div className="logs-panel__summary-actions">
-                <button type="button" className="btn btn-secondary btn-small" onClick={() => setFilterLevel('ERROR')}>
-                  Show Errors
-                </button>
-                <button type="button" className="btn btn-secondary btn-small" onClick={() => setFilterLevel('WARN')}>
-                  Show Warnings
-                </button>
-                <button type="button" className="btn btn-secondary btn-small" onClick={resetFilters}>
+                <SimmButton type="button" variant="outline" size="xs" className="logs-panel__summary-action" onClick={() => setFilterLevel('ERROR')}>
+                  Errors
+                </SimmButton>
+                <SimmButton type="button" variant="outline" size="xs" className="logs-panel__summary-action" onClick={() => setFilterLevel('WARN')}>
+                  Warnings
+                </SimmButton>
+                <SimmButton type="button" variant="outline" size="xs" className="logs-panel__summary-action" onClick={resetFilters}>
                   Reset Filters
-                </button>
+                </SimmButton>
               </div>
             </div>
           </div>
 
           <div className="logs-panel__viewer-body">
-            <div
-              ref={logContainerRef}
-              className="logs-panel__stream"
+            <LogStream
+              containerRef={logContainerRef}
+              error={error}
+              isLiveFile={isLiveFile}
+              loading={loading}
+              loadingOlder={loadingOlder}
+              logLineCount={logLines.length}
               onKeyDown={handleViewerKeyDown}
-              onScroll={handleScroll}
-              tabIndex={0}
-              role="listbox"
-              aria-label="Log lines"
-            >
-              {error ? (
-                <div className="logs-panel__empty-state logs-panel__empty-state--error">
-                  <Icon name="fas fa-triangle-exclamation" />
-                  <strong>Failed to load logs</strong>
-                  <p>{error}</p>
-                </div>
-              ) : loading && logLines.length === 0 ? (
-                <div className="logs-panel__empty-state">
-                  <Icon name="fas fa-spinner fa-spin" />
-                  <strong>Loading log file</strong>
-                  <p>Fetching the latest lines for this environment.</p>
-                </div>
-              ) : !selectedLogFile ? (
-                <div className="logs-panel__empty-state">
-                  <Icon name="fas fa-file-lines" />
-                  <strong>Select a log source</strong>
-                  <p>Choose a live or archived log from the rail to begin reviewing output.</p>
-                </div>
-              ) : visibleLines.length === 0 ? (
-                <div className="logs-panel__empty-state">
-                  <Icon name={`fas ${logLines.length === 0 ? 'fa-wave-square' : 'fa-filter-circle-xmark'}`} />
-                  <strong>{logLines.length === 0 ? 'No log content yet' : 'No lines match the current filters'}</strong>
-                  <p>
-                    {logLines.length === 0
-                      ? (isLiveFile ? 'Live file selected. New lines will appear here when the game writes output.' : 'This file is present but does not contain readable log lines.')
-                      : 'Adjust the filters, search, or mod scope to widen the result set.'}
-                  </p>
-                </div>
-              ) : (
-                visibleLines.map((line) => {
-                  const key = getLineKey(line);
-                  const effectiveLevel = getEffectiveLevel(line);
-                  const isSelected = key === selectedLineKey;
-                  return (
-                    <div
-                      key={key}
-                      ref={(element) => {
-                        rowRefs.current[key] = element;
-                      }}
-                      role="option"
-                      aria-selected={isSelected}
-                      tabIndex={-1}
-                      className={`logs-panel__line ${isSelected ? 'logs-panel__line--selected' : ''}`}
-                      onClick={() => setSelectedLineKey(key)}
-                      onDoubleClick={() => {
-                        setSelectedLineKey(key);
-                        if (line.modTag) {
-                          setSelectedModTag(line.modTag);
-                        }
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault();
-                          setSelectedLineKey(key);
-                        }
-                      }}
-                    >
-                      <div className="logs-panel__line-meta">
-                        <div className="logs-panel__line-meta-main">
-                          <span className="logs-panel__line-number">{line.lineNumber}</span>
-                          <span className="logs-panel__line-timestamp">{line.timestamp ?? '—'}</span>
-                          <span className={`logs-panel__line-level logs-panel__line-level--${effectiveLevel.toLowerCase()}`}>
-                            {getLevelLabel(effectiveLevel)}
-                          </span>
-                          <span className={`logs-panel__line-category logs-panel__line-category--${line.category}`}>
-                            <Icon name={`fas ${getCategoryIcon(line.category)}`} />
-                            {getCategoryLabel(line.category)}
-                          </span>
-                        </div>
-                        {line.modTag && (
-                          <button
-                            type="button"
-                            className="logs-panel__mod-chip"
-                            style={getModAccentStyle(line.modTag)}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setSelectedModTag(line.modTag);
-                              setSelectedLineKey(key);
-                            }}
-                          >
-                            {line.modTag}
-                          </button>
-                        )}
-                      </div>
-                      <div className="logs-panel__line-content">{highlightText(line.content, searchQuery)}</div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+              onLoadOlder={loadOlderLogEntries}
+              onModFilter={handleStreamModFilter}
+              onScrollStateChange={handleStreamScrollStateChange}
+              onSelectLine={handleStreamLineSelect}
+              rowRefs={rowRefs}
+              searchQuery={searchQuery}
+              selectedLineKey={selectedLineKey}
+              selectedLogFile={selectedLogFile}
+              visibleLines={visibleLines}
+            />
             {!isAtBottom && isLiveFile && (
               <div className="logs-panel__jump-live-overlay">
-                <button type="button" className="logs-panel__jump-live-button" onClick={jumpToLive}>
-                  <Icon name="fas fa-arrow-down" />
+                <SimmButton type="button" variant="outline" size="sm" className="logs-panel__jump-live-button" onClick={jumpToLive}>
+                  <Icon name="fas fa-arrow-down" data-icon="inline-start" />
                   Jump to Live
-                </button>
+                </SimmButton>
               </div>
             )}
           </div>
@@ -1140,15 +1631,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
           <div className="logs-panel__inspector-toolbar">
             <span className="settings-eyebrow">Inspector</span>
             {shouldCollapseInspector && (
-              <button
+              <SimmButton
                 type="button"
-                className="btn btn-secondary btn-small"
+                variant="outline"
+                size="xs"
+                className="logs-panel__inspector-toggle"
                 onClick={() => setIsInspectorCollapsed((current) => !current)}
                 aria-label={showCollapsedInspector ? 'Expand Inspector' : 'Collapse Inspector'}
               >
                 <Icon name={`fas ${showCollapsedInspector ? 'fa-angles-left' : 'fa-angles-right'}`} />
                 {showCollapsedInspector ? 'Expand' : 'Collapse'}
-              </button>
+              </SimmButton>
             )}
           </div>
 
@@ -1170,9 +1663,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     <span>{getCategoryLabel(selectedLine.category)}</span>
                   </div>
                   {selectedLine.modTag && (
-                    <span className="logs-panel__badge logs-panel__badge--summary" style={getModAccentStyle(selectedLine.modTag)}>
+                    <SimmBadge className="logs-panel__badge logs-panel__badge--summary" style={getModAccentStyle(selectedLine.modTag)}>
                       {selectedLine.modTag}
-                    </span>
+                    </SimmBadge>
                   )}
                   <p className="logs-panel__context-note">Selection ready. Expand to inspect, copy, or open related mod context.</p>
                 </>
@@ -1250,27 +1743,50 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                   </>
                 )}
                 <div className="logs-panel__quick-actions logs-panel__quick-actions--compact">
-                  <button type="button" className="btn btn-secondary" onClick={() => void handleCopySelectedLine()} disabled={!selectedLine}>
+                  <SimmButton
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
+                    onClick={() => void handleCopySelectedLine()}
+                    disabled={!selectedLine}
+                  >
                     <Icon name="fas fa-copy" />
                     Copy Line
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
                     type="button"
-                    className="btn btn-secondary"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
                     onClick={() => selectedLine?.modTag && setSelectedModTag(selectedLine.modTag)}
                     disabled={!selectedLine?.modTag}
                   >
                     <Icon name="fas fa-filter" />
                     Filter to Mod
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={() => setSelectedModTag(null)} disabled={!selectedModTag}>
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
+                    onClick={() => setSelectedModTag(null)}
+                    disabled={!selectedModTag}
+                  >
                     <Icon name="fas fa-filter-circle-xmark" />
                     Clear Filter
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={handleJumpToNewestRelevantLine} disabled={visibleLines.length === 0}>
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="logs-panel__inspector-action"
+                    onClick={handleJumpToNewestRelevantLine}
+                    disabled={visibleLines.length === 0}
+                  >
                     <Icon name="fas fa-arrow-down" />
                     Jump to Live
-                  </button>
+                  </SimmButton>
                 </div>
               </section>
 
@@ -1283,9 +1799,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                     <div className="logs-panel__inspector-head">
                       <h3>File Context</h3>
                       <div className="logs-panel__inspector-meta logs-panel__inspector-meta--badges">
-                        {selectedLogFile.isLatest && <span>Latest</span>}
-                        {isSharedPlayerLogFile(selectedLogFile) && <span>Shared</span>}
-                        {isLiveFile && <span>Live</span>}
+                        {selectedLogFile.isLatest && <SimmBadge>Latest</SimmBadge>}
+                        {isSharedPlayerLogFile(selectedLogFile) && <SimmBadge>Shared</SimmBadge>}
+                        {isLiveFile && <SimmBadge>Live</SimmBadge>}
                       </div>
                     </div>
                     <p className="logs-panel__context-note">{selectedLogFile.name}</p>
@@ -1296,7 +1812,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                       <div className="logs-panel__context-block">
                         <div className="logs-panel__inspector-head">
                           <h3>{selectedModContext.modTag}</h3>
-                          <span className="logs-panel__badge">{selectedModContext.count} hits</span>
+                          <SimmBadge className="logs-panel__badge">{selectedModContext.count} hits</SimmBadge>
                         </div>
                         <div className="logs-panel__inspector-metrics">
                           <div>
@@ -1308,15 +1824,17 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
                             <strong>{formatRelativeTime(selectedModContext.lastLogTime)}</strong>
                           </div>
                         </div>
-                        <button
+                        <SimmButton
                           type="button"
-                          className="btn btn-secondary"
+                          variant="outline"
+                          size="sm"
+                          className="logs-panel__inspector-action logs-panel__inspector-action--wide"
                           onClick={() => void handleOpenModLibraryView(selectedModContext.modTag)}
                           disabled={openingModView || !onOpenModLibraryView}
                         >
                           <Icon name="fas fa-layer-group" />
                           {openingModView ? 'Opening…' : 'Open in Mod Library'}
-                        </button>
+                        </SimmButton>
                       </div>
                     ) : (
                       <p className="logs-panel__context-note">No mod tag is associated with the current selection.</p>

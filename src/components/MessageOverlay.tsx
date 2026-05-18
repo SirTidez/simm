@@ -1,7 +1,14 @@
-import { useEffect, useId } from 'react';
-import { createPortal } from 'react-dom';
+import { useId } from 'react';
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
+import { SimmButton, SimmDialogContent } from './primitives';
 
 interface MessageOverlayProps {
   isOpen: boolean;
@@ -50,45 +57,32 @@ export function MessageOverlay({
   const messageId = useId();
   const config = typeConfig[type];
 
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
-
   if (!isOpen) return null;
 
-  const overlayClass = isNested ? 'modal-overlay modal-overlay-nested' : 'modal-overlay';
   const contentClass = isNested
-    ? `modal-content modal-content-nested app-dialog app-dialog--message app-dialog--nested app-dialog--${config.tone}`
-    : `modal-content app-dialog app-dialog--message app-dialog--${config.tone}`;
+    ? `app-dialog app-dialog--message app-dialog--nested app-dialog--${config.tone}`
+    : `app-dialog app-dialog--message app-dialog--${config.tone}`;
 
-  const dialogElement = (
-    <div className={overlayClass} onClick={onClose}>
-      <div
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => {
+      if (!open) {
+        onClose();
+      }
+    }}>
+      <SimmDialogContent
+        nested={isNested}
         className={contentClass}
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
+        showCloseButton={false}
         aria-labelledby={titleId}
         aria-describedby={messageId}
       >
-        <div className="modal-header app-dialog__header">
+        <DialogHeader className="modal-header app-dialog__header">
           <div className="app-dialog__heading">
             <span className="app-dialog__eyebrow">{config.eyebrow}</span>
-            <h2 id={titleId}>{title}</h2>
+            <DialogTitle id={titleId}>{title}</DialogTitle>
           </div>
-          <button className="modal-close" onClick={onClose} aria-label="Close message dialog">×</button>
-        </div>
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close message dialog">×</SimmButton>
+        </DialogHeader>
 
         <div className="app-dialog__body">
           <div className={`app-dialog__callout app-dialog__callout--${config.tone}`}>
@@ -97,25 +91,19 @@ export function MessageOverlay({
             </div>
             <div className="app-dialog__meta">
               <strong>{config.headline}</strong>
-              <p id={messageId}>{message}</p>
+              <DialogDescription id={messageId}>{message}</DialogDescription>
             </div>
           </div>
         </div>
 
-        <div className="app-dialog__footer">
+        <DialogFooter className="app-dialog__footer">
           <div className="app-dialog__actions">
-            <button className="btn btn-primary" onClick={onClose} autoFocus>
+            <SimmButton className="btn btn-primary" onClick={onClose} autoFocus>
               OK
-            </button>
+            </SimmButton>
           </div>
-        </div>
-      </div>
-    </div>
+        </DialogFooter>
+      </SimmDialogContent>
+    </Dialog>
   );
-
-  if (typeof document === 'undefined' || !document.body) {
-    return dialogElement;
-  }
-
-  return createPortal(dialogElement, document.body);
 }

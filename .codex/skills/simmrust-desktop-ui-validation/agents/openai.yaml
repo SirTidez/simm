@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM Desktop UI Validation"
+  short_description: "Validate SIMM desktop UI changes"
+  default_prompt: "Use $simmrust-desktop-ui-validation to design or review SIMM desktop UI changes."

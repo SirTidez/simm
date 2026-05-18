@@ -246,11 +246,10 @@ Run before merging:
 
 ```bash
 # Frontend
-npm run build
-npm run test
-
-# TypeScript check
-npx tsc --noEmit
+bunx tsc --noEmit
+bun run lint
+bun run test
+bun run build
 
 # Backend
 cd src-tauri && cargo check
@@ -259,6 +258,19 @@ cd src-tauri && cargo fmt
 ```
 
 `tsconfig.json` strictness flags (`strict`, `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch`) must remain enabled.
+
+### Frontend Linting
+
+ESLint is intentionally configured as an advisory frontend guardrail while legacy warnings are paid down. A lint warning is not, by itself, permission to churn working React code. New or changed code should avoid adding warnings, and correctness-oriented warnings should be fixed when they are in touched code.
+
+Project-specific lint guidance:
+
+- `react-hooks/rules-of-hooks` findings are correctness issues. Hooks must not be placed after early returns or inside conditionals.
+- `react-hooks/exhaustive-deps` findings need judgment in Tauri event, timer, and store synchronization code. Fix clear stale-closure cases, but do not blindly add dependencies or rewrite effects without understanding the event flow.
+- `react-refresh/only-export-components` findings are development-experience cleanup. Split files only when already editing that area or when Fast Refresh behavior is actually a problem.
+- Direct `invoke` imports should stay in `src/services/api.ts`, and direct `listen` imports should stay in `src/services/events.ts`. Existing exceptions should be wrapped only when the change is small and behavior-preserving.
+- `no-useless-catch` findings are safe cleanup when touching the file, but they do not justify broad unrelated edits.
+- De-slop or no-`useEffect` policy rules should remain opt-in until they are proven against SIMM's desktop workflow code.
 
 ## Comments and Documentation
 

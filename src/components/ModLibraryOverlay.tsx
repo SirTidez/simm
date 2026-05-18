@@ -4,9 +4,23 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Dialog } from "@/components/ui/dialog";
+import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 import { ApiService } from "../services/api";
 import { logger } from "../services/logger";
 import { ConfirmOverlay } from "./ConfirmOverlay";
@@ -31,6 +45,8 @@ import {
   InstallTargetsDialog,
   getNormalizedRuntime,
 } from "./InstallTargetsDialog";
+import { SimmBadge, SimmButton, SimmDialogContent } from "./primitives";
+import { WorkspacePageHeader } from "./WorkspacePageHeader";
 import { getSecurityBadgeConfig } from "./securityScanHelpers";
 import {
   areVersionsEquivalent,
@@ -165,6 +181,21 @@ const FEATURED_THUNDERSTORE_DOWNLOADS = {
     summary:
       "Thunderstore package for shared Schedule I mapping and construction APIs.",
   },
+  steamnetworklib: {
+    key: "featured-steamnetworklib",
+    sourceId: "ifBars/SteamNetworkLib_Mono",
+    sourceIdsByRuntime: {
+      IL2CPP: "ifBars/SteamNetworkLib_Il2Cpp",
+      Mono: "ifBars/SteamNetworkLib_Mono",
+    },
+    displayName: "SteamNetworkLib",
+    packageUrl:
+      "https://thunderstore.io/c/schedule-i/p/ifBars/SteamNetworkLib_Mono/",
+    author: "ifBars",
+    installBucketLabel: "UserLibs",
+    summary:
+      "Thunderstore library for shared Steam networking support used by many tools.",
+  },
 } as const;
 
 function getDownloadedGroupSourceIds(group: DownloadedModGroup): string[] {
@@ -203,6 +234,17 @@ function isS1MApiDownloadedGroup(group: DownloadedModGroup): boolean {
   return (
     sourceIds.includes("ifbars/s1mapi") ||
     normalizeThunderstoreName(group.displayName).toLowerCase() === "s1mapi"
+  );
+}
+
+function isSteamNetworkLibDownloadedGroup(group: DownloadedModGroup): boolean {
+  const sourceIds = getDownloadedGroupSourceIds(group);
+  return (
+    sourceIds.includes("ifbars/steamnetworklib") ||
+    sourceIds.includes("ifbars/steamnetworklib_mono") ||
+    sourceIds.includes("ifbars/steamnetworklib_il2cpp") ||
+    normalizeThunderstoreName(group.displayName).toLowerCase() ===
+      "steamnetworklib"
   );
 }
 
@@ -285,6 +327,139 @@ export type DownloadedFilter =
   | "installed";
 export type LibraryTab = "discover" | "library" | "updates";
 type DiscoverSort = "relevance" | "updated" | "popularity" | "newest";
+
+const DISCOVER_SORT_OPTIONS: Array<{ value: DiscoverSort; label: string }> = [
+  { value: "relevance", label: "Relevance" },
+  { value: "updated", label: "Last updated" },
+  { value: "popularity", label: "Popularity" },
+  { value: "newest", label: "Newest" },
+];
+
+function CollectionEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+type WorkspaceBadgeTone = "source" | "success" | "warning" | "danger";
+
+function WorkspaceBadge({
+  children,
+  tone,
+  className,
+  style,
+}: {
+  children: ReactNode;
+  tone?: WorkspaceBadgeTone;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <SimmBadge
+      variant="outline"
+      className={cn(
+        "workspace-pill",
+        tone && `workspace-pill--${tone}`,
+        className,
+      )}
+      style={style}
+    >
+      {children}
+    </SimmBadge>
+  );
+}
+
+function SecurityScanBadge({ summary }: { summary?: SecurityScanSummary }) {
+  const config = getSecurityBadgeConfig(summary);
+
+  if (!config) {
+    return null;
+  }
+
+  return (
+    <div className="workspace-inspector-card__badge-row">
+      <WorkspaceBadge
+        className="workspace-pill--security"
+        style={{
+          borderColor: config.border,
+          background: config.background,
+          color: config.color,
+        }}
+      >
+        <Icon name={`fas ${config.icon}`} style={{ fontSize: "0.7rem" }} />
+        {config.label}
+      </WorkspaceBadge>
+    </div>
+  );
+}
+
+function InspectorCardEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-inspector-card__empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function DiscoverSortSelect({
+  value,
+  onValueChange,
+}: {
+  value: DiscoverSort;
+  onValueChange: (value: DiscoverSort) => void;
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === "string") {
+          onValueChange(nextValue as DiscoverSort);
+        }
+      }}
+    >
+      <SelectTrigger
+        aria-label="Sort discover results"
+        className="workspace-collection__toolbar-select-trigger"
+      >
+        <SelectValue>
+          {(selectedValue) =>
+            DISCOVER_SORT_OPTIONS.find((option) => option.value === selectedValue)
+              ?.label || "Last updated"
+          }
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="workspace-collection__select-content" align="start">
+        <SelectGroup>
+          {DISCOVER_SORT_OPTIONS.map((option) => (
+            <SelectItem
+              key={option.value}
+              value={option.value}
+              onClick={() => onValueChange(option.value)}
+            >
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
 
 export interface LibraryModViewState {
   id: string;
@@ -408,7 +583,59 @@ const formatVersionTag = (value?: string): string => {
 };
 
 const stripFileExtension = (fileName: string): string =>
-  fileName.replace(/\.(dll|zip|rar)$/i, "");
+  fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, "");
+
+const normalizeNexusVersionRowLabel = (value?: string): string =>
+  stripFileExtension(value || "")
+    .toLowerCase()
+    .replace(/\bv(?=\d)/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+
+const getNexusVersionRowDetail = (
+  file: Pick<NexusModFile, "file_name" | "name">,
+  modName: string,
+  versionLabel: string,
+): string | null => {
+  const candidate = stripFileExtension(file.file_name || file.name || "").trim();
+  if (!candidate) {
+    return null;
+  }
+
+  const normalizedCandidate = normalizeNexusVersionRowLabel(candidate);
+  const normalizedModName = normalizeNexusVersionRowLabel(modName);
+  const normalizedVersion = normalizeNexusVersionRowLabel(versionLabel);
+  const candidateWithoutVersion = normalizedVersion
+    ? normalizedCandidate.replace(normalizedVersion, "")
+    : normalizedCandidate;
+
+  if (
+    normalizedCandidate === normalizedModName ||
+    candidateWithoutVersion === normalizedModName ||
+    normalizedCandidate === `${normalizedModName}${normalizedVersion}` ||
+    normalizedCandidate === `${normalizedVersion}${normalizedModName}`
+  ) {
+    return null;
+  }
+
+  return candidate;
+};
+
+const getNexusVersionRowSummary = (
+  file: Pick<NexusModFile, "file_name" | "name">,
+  modName: string,
+  versionLabel: string,
+): string | null => {
+  const summary = stripFileExtension(file.name || "").trim();
+  if (!summary || summary === stripFileExtension(file.file_name || "").trim()) {
+    return null;
+  }
+
+  return getNexusVersionRowDetail(
+    { file_name: summary, name: summary },
+    modName,
+    versionLabel,
+  );
+};
 
 const detectRuntimeFromFileName = (
   fileName: string,
@@ -944,20 +1171,6 @@ const getNexusModAttribution = (mod: {
   return primary;
 };
 
-const getActiveModViewAttribution = (
-  activeModView: LibraryModViewState,
-): string | undefined => {
-  if (activeModView.kind !== "nexusmods") {
-    return normalizeAttributionName(activeModView.author);
-  }
-
-  return getNexusModAttribution({
-    author: activeModView.author,
-    uploader: activeModView.uploader,
-    original_author: activeModView.originalAuthor,
-  });
-};
-
 const sortThunderstoreGroups = (
   groups: ThunderstorePackageGroup[],
   sort: DiscoverSort,
@@ -1085,42 +1298,6 @@ const getSourceBadgeLabel = (source?: ModLibraryEntry["source"]): string => {
   }
 };
 
-const getSourceBadgeStyle = (
-  source?: ModLibraryEntry["source"],
-): { backgroundColor: string; color: string; border?: string } => {
-  switch (source) {
-    case "thunderstore":
-      return {
-        backgroundColor: "#7c3aed22",
-        color: "#c4b5fd",
-        border: "1px solid #7c3aed55",
-      };
-    case "nexusmods":
-      return {
-        backgroundColor: "#ea433522",
-        color: "#ffb4ac",
-        border: "1px solid #ea433555",
-      };
-    case "github":
-      return {
-        backgroundColor: "#2ea44f22",
-        color: "#95f0ad",
-        border: "1px solid #2ea44f55",
-      };
-    case "local":
-      return {
-        backgroundColor: "#2563eb22",
-        color: "#93c5fd",
-        border: "1px solid #2563eb55",
-      };
-    default:
-      return {
-        backgroundColor: "#6c757d",
-        color: "#fff",
-      };
-  }
-};
-
 interface Props {
   isOpen: boolean;
   onClose: () => void;
@@ -1158,7 +1335,6 @@ interface RuntimePromptState {
 
 export function ModLibraryOverlay({
   isOpen,
-  onClose,
   focusStorageId,
   focusRequestId,
   focusModTag,
@@ -1181,7 +1357,7 @@ export function ModLibraryOverlay({
   }, [navigationState?.searchSource]);
   const [library, setLibrary] = useState<ModLibraryResult | null>(null);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
-  const [selectedModIds, setSelectedModIds] = useState<Set<string>>(new Set());
+  const [, setSelectedModIds] = useState<Set<string>>(new Set());
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [confirmOverlay, setConfirmOverlay] = useState<{
     isOpen: boolean;
@@ -1216,7 +1392,7 @@ export function ModLibraryOverlay({
   const [showSearchResults, setShowSearchResults] = useState(
     () => navigationState?.showSearchResults ?? false,
   );
-  const [showDiscovery, setShowDiscovery] = useState(
+  const [showDiscovery] = useState(
     () => navigationState?.showDiscovery ?? true,
   );
 
@@ -1238,9 +1414,9 @@ export function ModLibraryOverlay({
   );
 
   const [downloading, setDownloading] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [, setDeleting] = useState<string | null>(null);
   const [activatingGroup, setActivatingGroup] = useState<string | null>(null);
-  const [updatingGroup, setUpdatingGroup] = useState<string | null>(null);
+  const [, setUpdatingGroup] = useState<string | null>(null);
   const [openVersionMenuGroup, setOpenVersionMenuGroup] = useState<
     string | null
   >(null);
@@ -1270,7 +1446,7 @@ export function ModLibraryOverlay({
   const [activeSecurityReport, setActiveSecurityReport] =
     useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [, setToastMessage] = useState<string | null>(null);
   const [installDialog, setInstallDialog] = useState<InstallDialogState>({
     isOpen: false,
     title: "",
@@ -1392,6 +1568,8 @@ export function ModLibraryOverlay({
     useState<ThunderstorePackageGroup | null>(null);
   const [s1mapiFeaturedPackage, setS1mapiFeaturedPackage] =
     useState<ThunderstorePackageGroup | null>(null);
+  const [steamNetworkLibFeaturedPackage, setSteamNetworkLibFeaturedPackage] =
+    useState<ThunderstorePackageGroup | null>(null);
 
   const downloadedGroups = useMemo(
     () => buildDownloadedGroups(library?.downloaded ?? []),
@@ -1404,22 +1582,6 @@ export function ModLibraryOverlay({
       setOpenedFromLogs({ active: false, modTag: null });
     }
   }, [isOpen]);
-
-  const closeModView = useCallback(() => {
-    if (openedFromLogs.active) {
-      onClose();
-      return;
-    }
-
-    setActiveModView(null);
-    window.requestAnimationFrame(() => {
-      if (libraryScrollContainerRef.current) {
-        libraryScrollContainerRef.current.scrollTop =
-          libraryScrollTopRef.current;
-      }
-    });
-  }, [onClose, openedFromLogs.active]);
-
   const openModView = useCallback((nextView: LibraryModViewState) => {
     if (libraryScrollContainerRef.current) {
       libraryScrollTopRef.current = libraryScrollContainerRef.current.scrollTop;
@@ -1458,11 +1620,15 @@ export function ModLibraryOverlay({
   const mlvscanGroups = downloadedGroups.filter(isMlvscanDownloadedGroup);
   const meshVaultGroups = downloadedGroups.filter(isMeshVaultDownloadedGroup);
   const s1mapiGroups = downloadedGroups.filter(isS1MApiDownloadedGroup);
+  const steamNetworkLibGroups = downloadedGroups.filter(
+    isSteamNetworkLibDownloadedGroup,
+  );
 
   const s1apiInLibrary = s1apiGroups.length > 0;
   const mlvscanInLibrary = mlvscanGroups.length > 0;
   const meshVaultInLibrary = meshVaultGroups.length > 0;
   const s1mapiInLibrary = s1mapiGroups.length > 0;
+  const steamNetworkLibInLibrary = steamNetworkLibGroups.length > 0;
   const s1apiInstalledVersion =
     getLatestDownloadedVersionForGroups(s1apiGroups);
   const s1apiLatestVersion = s1apiFeaturedRelease?.tag_name;
@@ -1510,6 +1676,22 @@ export function ModLibraryOverlay({
       s1mapiLatestVersion,
       s1mapiInstalledVersion,
     ) < 0;
+  const steamNetworkLibInstalledVersion = getLatestDownloadedVersionForGroups(
+    steamNetworkLibGroups,
+  );
+  const steamNetworkLibLatestVersion = buildThunderstoreVersionOptions(
+    steamNetworkLibFeaturedPackage,
+  )[0]?.versionNumber;
+  const steamNetworkLibNeedsUpdate =
+    steamNetworkLibInLibrary &&
+    steamNetworkLibInstalledVersion &&
+    steamNetworkLibLatestVersion &&
+    compareVersionTokensDescForSource(
+      getDownloadedVersionSourceId(steamNetworkLibGroups) ||
+        FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib.sourceId,
+      steamNetworkLibLatestVersion,
+      steamNetworkLibInstalledVersion,
+    ) < 0;
 
   const isGroupUpdateAvailable = useCallback(
     (group: DownloadedModGroup): boolean => {
@@ -1541,6 +1723,15 @@ export function ModLibraryOverlay({
         return !!s1mapiNeedsUpdate;
       }
 
+      const isSteamNetworkLibGroup = isSteamNetworkLibDownloadedGroup(group);
+      if (
+        isSteamNetworkLibGroup &&
+        !!steamNetworkLibInstalledVersion &&
+        !!steamNetworkLibLatestVersion
+      ) {
+        return !!steamNetworkLibNeedsUpdate;
+      }
+
       return !!group.updateAvailable;
     },
     [
@@ -1556,6 +1747,9 @@ export function ModLibraryOverlay({
       s1apiInstalledVersion,
       s1apiLatestVersion,
       s1apiNeedsUpdate,
+      steamNetworkLibInstalledVersion,
+      steamNetworkLibLatestVersion,
+      steamNetworkLibNeedsUpdate,
       getLatestDownloadedVersionForGroups,
     ],
   );
@@ -2280,20 +2474,6 @@ export function ModLibraryOverlay({
       metadataRefreshRunningRef.current = false;
     };
   }, [isOpen, refreshLibrary]);
-
-  const toggleGroupSelection = (storageIds: string[]) => {
-    setSelectedModIds((prev) => {
-      const next = new Set(prev);
-      const allSelected = storageIds.every((id) => next.has(id));
-      if (allSelected) {
-        storageIds.forEach((id) => next.delete(id));
-      } else {
-        storageIds.forEach((id) => next.add(id));
-      }
-      return next;
-    });
-  };
-
   const runThunderstoreSearch = useCallback(
     async (query: string) => {
       const trimmedQuery = query.trim();
@@ -2912,16 +3092,31 @@ export function ModLibraryOverlay({
         );
       };
 
+      const getFeaturedThunderstoreSourceId = (
+        featured:
+          (typeof FEATURED_THUNDERSTORE_DOWNLOADS)[keyof typeof FEATURED_THUNDERSTORE_DOWNLOADS],
+        runtime: ThunderstoreRuntime,
+      ) =>
+        ("sourceIdsByRuntime" in featured
+          ? featured.sourceIdsByRuntime?.[runtime]
+          : undefined) || featured.sourceId;
+
       setMeshVaultFeaturedPackage(
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.meshvault, {
           IL2CPP:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
+                "IL2CPP",
+              ),
               "IL2CPP",
             ) || undefined,
           Mono:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.meshvault.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
+                "Mono",
+              ),
               "Mono",
             ) || undefined,
         }),
@@ -2931,15 +3126,45 @@ export function ModLibraryOverlay({
         buildFeaturedThunderstorePackage(FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi, {
           IL2CPP:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
+                "IL2CPP",
+              ),
               "IL2CPP",
             ) || undefined,
           Mono:
             findFeaturedPackage(
-              FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi.sourceId,
+              getFeaturedThunderstoreSourceId(
+                FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
+                "Mono",
+              ),
               "Mono",
             ) || undefined,
         }),
+      );
+
+      setSteamNetworkLibFeaturedPackage(
+        buildFeaturedThunderstorePackage(
+          FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+          {
+            IL2CPP:
+              findFeaturedPackage(
+                getFeaturedThunderstoreSourceId(
+                  FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+                  "IL2CPP",
+                ),
+                "IL2CPP",
+              ) || undefined,
+            Mono:
+              findFeaturedPackage(
+                getFeaturedThunderstoreSourceId(
+                  FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+                  "Mono",
+                ),
+                "Mono",
+              ) || undefined,
+          },
+        ),
       );
     };
 
@@ -4361,34 +4586,6 @@ export function ModLibraryOverlay({
     showInstallSuccessNotice,
     showLibraryNotice,
   ]);
-
-  const handleStepGroupVersion = useCallback(
-    async (group: DownloadedModGroup, direction: "older" | "newer") => {
-      const sorted = getSortedGroupEntries(group);
-      if (sorted.length <= 1) {
-        return;
-      }
-
-      const active = getActiveEntryForGroup(group);
-      const currentIndex = active
-        ? sorted.findIndex((entry) => entry.storageId === active.storageId)
-        : 0;
-      const nextIndex =
-        direction === "older" ? currentIndex + 1 : currentIndex - 1;
-      if (nextIndex < 0 || nextIndex >= sorted.length) {
-        return;
-      }
-      const nextEntry = sorted[nextIndex];
-
-      if (!nextEntry) {
-        return;
-      }
-
-      await handleSelectVersion(group, nextEntry.storageId);
-    },
-    [getActiveEntryForGroup, getSortedGroupEntries, handleSelectVersion],
-  );
-
   const handleDownloadFeaturedGithubRelease = useCallback(
     async (
       featured: (typeof FEATURED_DOWNLOADS)[keyof typeof FEATURED_DOWNLOADS],
@@ -4531,6 +4728,13 @@ export function ModLibraryOverlay({
     );
   };
 
+  const handleDownloadSteamNetworkLibClick = () => {
+    handleDownloadFeaturedThunderstoreClick(
+      FEATURED_THUNDERSTORE_DOWNLOADS.steamnetworklib,
+      steamNetworkLibFeaturedPackage,
+    );
+  };
+
   const storeLocalArchiveWithSecurity = useCallback(
     async (
       item: SelectedLibraryImportItem,
@@ -4639,7 +4843,7 @@ export function ModLibraryOverlay({
         filters: [
           {
             name: "Mod Files",
-            extensions: ["dll", "zip", "rar"],
+            extensions: ["dll", "zip", "rar", "7z", "tar.gz", "tgz"],
           },
         ],
         title: "Select Mod Files",
@@ -4721,13 +4925,35 @@ export function ModLibraryOverlay({
     storeLocalArchiveWithSecurity,
   ]);
 
-  const handleDeleteDownloadedGroup = async (group: DownloadedModGroup) => {
+  const handleDeleteDownloadedGroup = useCallback(async (group: DownloadedModGroup) => {
+    const installedEnvironmentIds = Array.from(new Set(group.installedIn));
+    const installedEnvironmentNames = installedEnvironmentIds.map((envId) => {
+      return (
+        environments.find((environment) => environment.id === envId)?.name ||
+        envId
+      );
+    });
+    const installedSummary =
+      installedEnvironmentNames.length > 0
+        ? installedEnvironmentNames.length <= 3
+          ? installedEnvironmentNames.join(", ")
+          : `${installedEnvironmentNames.slice(0, 3).join(", ")} and ${installedEnvironmentNames.length - 3} more`
+        : "";
+
     setConfirmOverlay({
       isOpen: true,
-      title: "Delete Downloaded Files",
-      message: group.entries.some((entry) => entry.installedIn.length > 0)
-        ? "This will remove the mod from all environments and delete the downloaded files. Continue?"
+      title:
+        installedEnvironmentIds.length > 0
+          ? "Uninstall and Delete?"
+          : "Delete Downloaded Files",
+      message:
+        installedEnvironmentIds.length > 0
+          ? `This library copy is installed in ${installedEnvironmentIds.length} environment${installedEnvironmentIds.length === 1 ? "" : "s"}${installedSummary ? `: ${installedSummary}` : ""}. Delete will uninstall it from those environments and remove the downloaded files from the library. Continue?`
         : "Delete the downloaded files from the library? This cannot be undone.",
+      confirmText:
+        installedEnvironmentIds.length > 0
+          ? "Uninstall and Delete"
+          : "Delete Files",
       onConfirm: async () => {
         setConfirmOverlay({
           isOpen: false,
@@ -4751,50 +4977,18 @@ export function ModLibraryOverlay({
           });
         } catch (err) {
           console.error("Failed to delete downloaded mod files:", err);
+          showLibraryNotice(
+            "Delete Failed",
+            err instanceof Error
+              ? err.message
+              : "Failed to delete downloaded mod files.",
+          );
         } finally {
           setDeleting(null);
         }
       },
     });
-  };
-
-  const handleBulkDelete = async () => {
-    if (!library || selectedModIds.size === 0) return;
-    const selectedEntries = library.downloaded.filter((entry) =>
-      selectedModIds.has(entry.storageId),
-    );
-    setConfirmOverlay({
-      isOpen: true,
-      title: "Delete Downloaded Files",
-      message: selectedEntries.some((entry) => entry.installedIn.length > 0)
-        ? "Some selected mods are installed in environments. This will remove them from those environments and delete the downloaded files. Continue?"
-        : "Delete selected downloaded files from the library? This cannot be undone.",
-      onConfirm: async () => {
-        setConfirmOverlay({
-          isOpen: false,
-          title: "",
-          message: "",
-          onConfirm: () => {},
-        });
-        setDeleting("bulk");
-        try {
-          for (const entry of selectedEntries) {
-            const storageIds = getEntryStorageIds(entry);
-            for (const storageId of storageIds) {
-              await ApiService.deleteDownloadedMod(storageId);
-            }
-          }
-          await refreshLibrary();
-          setSelectedModIds(new Set());
-        } catch (err) {
-          console.error("Failed to bulk delete downloaded mods:", err);
-        } finally {
-          setDeleting(null);
-        }
-      },
-    });
-  };
-
+  }, [environments, getEntryStorageIds, refreshLibrary, showLibraryNotice]);
   const handleDownloadThunderstore = async (
     pkg: ThunderstorePackageGroup,
     selectedVersionOption?: ThunderstoreVersionOption | null,
@@ -6031,6 +6225,12 @@ export function ModLibraryOverlay({
       null
     );
   }, [downloadedGroupForSelectedNexus, getActiveEntryForGroup]);
+  const discoverResultCount = showSearchResults
+    ? searchResults.length
+    : showNexusModsResults
+      ? nexusModsSearchResults.length
+      : 0;
+  const activeQueueCount = downloading || installingTargets ? 1 : 0;
 
   useEffect(() => {
     if (
@@ -6204,2201 +6404,13 @@ export function ModLibraryOverlay({
       ? "Update"
       : "Downloaded"
     : "Download";
-
-  const renderFeaturedThunderstoreCard = (
-    featured:
-      (typeof FEATURED_THUNDERSTORE_DOWNLOADS)[keyof typeof FEATURED_THUNDERSTORE_DOWNLOADS],
-    installedVersion: string | undefined,
-    latestVersion: string | undefined,
-    inLibrary: boolean,
-    needsUpdate: boolean,
-    actionLabel: string,
-    onClick: () => void,
-  ) => (
-    <div
-      className="mod-card featured-mod-card"
-      style={{
-        padding: "1rem",
-        backgroundColor: "#2a2a2a",
-        borderRadius: "8px",
-        border: "1px solid #3a3a3a",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "flex-start",
-        gap: "1rem",
-      }}
-    >
-      <div style={{ flex: 1 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.5rem",
-            marginBottom: "0.35rem",
-          }}
-        >
-          <strong style={{ fontSize: "1rem" }}>{featured.displayName}</strong>
-          {needsUpdate ? (
-            <span
-              style={{
-                fontSize: "0.7rem",
-                padding: "0.2rem 0.45rem",
-                borderRadius: "4px",
-                backgroundColor: "rgba(255, 170, 0, 0.15)",
-                color: "#ffaa00",
-                border: "1px solid rgba(255, 170, 0, 0.3)",
-              }}
-            >
-              <Icon name="fas fa-arrow-up" style={{ marginRight: "0.25rem" }} />
-              Update Available
-            </span>
-          ) : inLibrary ? (
-            <span
-              style={{
-                fontSize: "0.7rem",
-                padding: "0.2rem 0.45rem",
-                borderRadius: "4px",
-                backgroundColor: "rgba(74, 222, 128, 0.15)",
-                color: "#4ade80",
-                border: "1px solid rgba(74, 222, 128, 0.3)",
-              }}
-            >
-              <Icon name="fas fa-check" style={{ marginRight: "0.25rem" }} />
-              Up to Date
-            </span>
-          ) : (
-            <span
-              style={{
-                fontSize: "0.7rem",
-                padding: "0.2rem 0.45rem",
-                borderRadius: "4px",
-                backgroundColor: "rgba(74, 144, 226, 0.15)",
-                color: "#4a90e2",
-                border: "1px solid rgba(74, 144, 226, 0.3)",
-              }}
-            >
-              <Icon name="fas fa-star" style={{ marginRight: "0.25rem" }} />
-              Featured
-            </span>
-          )}
-        </div>
-        <p
-          style={{
-            margin: "0 0 0.75rem",
-            fontSize: "0.85rem",
-            color: "#b9c2d0",
-            lineHeight: 1.5,
-          }}
-        >
-          {featured.summary}
-        </p>
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "0.75rem",
-            fontSize: "0.78rem",
-            color: "#9fb0c7",
-          }}
-        >
-          <span>
-            <Icon name="fas fa-cloud-download-alt"
-              style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-             />
-            Thunderstore Package
-          </span>
-          <span>
-            <Icon name="fas fa-folder-tree"
-              style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-             />
-            Installs to {featured.installBucketLabel}
-          </span>
-          {installedVersion && (
-            <span>
-              <Icon name="fas fa-tag" style={{ marginRight: "0.35rem" }} />
-              Installed: {formatVersionTag(installedVersion)}
-            </span>
-          )}
-          {latestVersion && (
-            <span style={needsUpdate ? { color: "#ffaa00" } : {}}>
-              <Icon name="fas fa-cloud" style={{ marginRight: "0.35rem" }} />
-              Latest: {formatVersionTag(latestVersion)}
-            </span>
-          )}
-        </div>
-      </div>
-      <div
-        style={{
-          display: "flex",
-          gap: "0.5rem",
-          flexWrap: "wrap",
-          justifyContent: "flex-end",
-        }}
-      >
-        <button
-          className={`btn btn-small ${needsUpdate ? "btn-warning" : "btn-primary"}`}
-          onClick={onClick}
-          disabled={downloading === featured.key}
-          title={
-            needsUpdate
-              ? `Update ${featured.displayName} to the latest version`
-              : `Download ${featured.displayName} from Thunderstore to the library`
-          }
-        >
-          {downloading === featured.key ? (
-            <Icon name="fas fa-spinner fa-spin" />
-          ) : (
-            <>
-              <Icon name={`fas ${needsUpdate ? "fa-arrow-up" : "fa-download"}`} />
-              <span style={{ marginLeft: "0.5rem" }}>{actionLabel}</span>
-            </>
-          )}
-        </button>
-        <a
-          href={featured.packageUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="btn btn-secondary btn-small"
-          style={{ textDecoration: "none", textAlign: "center" }}
-          title="View on Thunderstore"
-        >
-          <Icon name="fas fa-external-link-alt" />
-          <span style={{ marginLeft: "0.5rem" }}>View</span>
-        </a>
-      </div>
-    </div>
-  );
-
+  const steamNetworkLibActionLabel = steamNetworkLibInLibrary
+    ? steamNetworkLibNeedsUpdate
+      ? "Update"
+      : "Downloaded"
+    : "Download";
   if (!isOpen) return null;
 
-  const legacyLayout = () => (
-    <>
-      <ConfirmOverlay
-        isOpen={confirmOverlay.isOpen}
-        onClose={() =>
-          setConfirmOverlay({
-            isOpen: false,
-            title: "",
-            message: "",
-            onConfirm: () => {},
-          })
-        }
-        onConfirm={confirmOverlay.onConfirm}
-        title={confirmOverlay.title}
-        message={confirmOverlay.message}
-        confirmText={confirmOverlay.confirmText}
-        cancelText={confirmOverlay.cancelText}
-        isNested
-      />
-      <SecurityScanReportOverlay
-        isOpen={!!activeSecurityReport}
-        title={activeSecurityReport?.title || "Security Findings"}
-        report={activeSecurityReport?.report || null}
-        reportOptions={activeSecurityReport?.reportOptions}
-        onClose={closeSecurityReport}
-        onConfirm={
-          activeSecurityReport?.onConfirm
-            ? () => {
-                void handleSecurityReportConfirm();
-              }
-            : undefined
-        }
-        confirmLabel={activeSecurityReport?.confirmLabel || "Continue Download"}
-        busy={securityActionBusy}
-      />
-      {toastMessage && (
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: "fixed",
-            right: "1rem",
-            bottom: "1rem",
-            zIndex: 2200,
-            maxWidth: "28rem",
-            padding: "0.8rem 0.95rem",
-            borderRadius: "0.8rem",
-            background: "rgba(19, 29, 42, 0.96)",
-            border: "1px solid rgba(116, 168, 255, 0.42)",
-            color: "#e7f0fb",
-            boxShadow: "0 18px 40px rgba(0, 0, 0, 0.32)",
-            fontSize: "0.92rem",
-            lineHeight: 1.45,
-          }}
-        >
-          {toastMessage}
-        </div>
-      )}
-      {runtimePrompt && (
-        <div
-          className="modal-overlay modal-overlay-nested"
-          onClick={() => {
-            runtimePrompt.onDismiss?.();
-            setRuntimePrompt(null);
-          }}
-        >
-          <div
-            className="modal-content modal-content-nested"
-            onClick={(e) => e.stopPropagation()}
-            style={{ maxWidth: "420px" }}
-          >
-            <div className="modal-header">
-              <h2>{runtimePrompt.title}</h2>
-              <button
-                className="modal-close"
-                onClick={() => {
-                  runtimePrompt.onDismiss?.();
-                  setRuntimePrompt(null);
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <div style={{ padding: "1rem 1.25rem 1.25rem" }}>
-              <p style={{ marginTop: 0, color: "#ccc" }}>
-                {runtimePrompt.message}
-              </p>
-              <div
-                style={{
-                  display: "flex",
-                  gap: "0.5rem",
-                  justifyContent: "flex-end",
-                }}
-              >
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    const handler = runtimePrompt.onSelect;
-                    setRuntimePrompt(null);
-                    handler("Mono");
-                  }}
-                >
-                  Mono
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => {
-                    const handler = runtimePrompt.onSelect;
-                    setRuntimePrompt(null);
-                    handler("IL2CPP");
-                  }}
-                >
-                  IL2CPP
-                </button>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => {
-                    const handler = runtimePrompt.onSelect;
-                    setRuntimePrompt(null);
-                    handler("Both");
-                  }}
-                >
-                  Both
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      <div
-        className="mods-overlay mods-overlay--library"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          height: "100%",
-          minHeight: 0,
-          position: "relative",
-        }}
-      >
-        <div className="modal-header">
-          <h2>Mod Library</h2>
-        </div>
-
-        <div className="mods-content" ref={libraryScrollContainerRef}>
-          <div
-            className="mods-toolbar"
-            style={{
-              padding: "0.9rem 1.25rem 0.75rem",
-              borderBottom: "1px solid #3a3a3a",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: "0.75rem",
-              flexWrap: "wrap",
-            }}
-          >
-            <div style={{ color: "#9aa4b2", fontSize: "0.85rem" }}>
-              {downloadedSummary.total} downloaded, {downloadedSummary.updates}{" "}
-              updates, {downloadedSummary.installed} installed,{" "}
-              {downloadedSummary.managed} managed
-            </div>
-            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-              <button
-                className="btn btn-secondary btn-small"
-                onClick={() => setShowDiscovery((prev) => !prev)}
-                title="Show or hide discovery results"
-              >
-                <Icon name={`fas ${showDiscovery ? "fa-chevron-up" : "fa-chevron-down"}`}
-                  style={{ marginRight: "0.4rem" }}
-                 />
-                {showDiscovery ? "Hide Browse" : "Browse Mods"}
-              </button>
-              <button
-                className="btn btn-secondary btn-small"
-                onClick={handleRefreshLibrary}
-                disabled={loadingLibrary}
-                title="Refresh library entries"
-              >
-                <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
-                  style={{ marginRight: "0.4rem" }}
-                 />
-                Refresh
-              </button>
-            </div>
-          </div>
-
-          {showDiscovery && (
-            <>
-              <div
-                style={{
-                  padding: "17px 1.25rem 1rem",
-                  borderBottom: "1px solid #3a3a3a",
-                }}
-              >
-                <div
-                  style={{
-                    marginBottom: "1rem",
-                    color: "#888",
-                    fontSize: "0.85rem",
-                  }}
-                >
-                  Download to library, then install from each environment's Mods
-                  view.
-                </div>
-
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "0.5rem",
-                    marginBottom: "0.75rem",
-                  }}
-                >
-                  <button
-                    onClick={() => {
-                      setSearchSource("thunderstore");
-                      setShowSearchResults(false);
-                      setShowNexusModsResults(false);
-                    }}
-                    className="btn"
-                    style={{
-                      flex: 1,
-                      backgroundColor:
-                        searchSource === "thunderstore" ? "#4a90e2" : "#2a2a2a",
-                      color: searchSource === "thunderstore" ? "#fff" : "#888",
-                      border: `1px solid ${searchSource === "thunderstore" ? "#4a90e2" : "#3a3a3a"}`,
-                      padding: "0.5rem",
-                      fontSize: "0.875rem",
-                    }}
-                  >
-                    <Icon name="fas fa-cloud-download-alt"
-                      style={{ marginRight: "0.5rem" }}
-                     />
-                    Thunderstore
-                  </button>
-                  <button
-                    onClick={() => {
-                      setSearchSource("nexusmods");
-                      setShowSearchResults(false);
-                      setShowNexusModsResults(false);
-                    }}
-                    className="btn"
-                    style={{
-                      flex: 1,
-                      backgroundColor:
-                        searchSource === "nexusmods" ? "#ea4335" : "#2a2a2a",
-                      color: searchSource === "nexusmods" ? "#fff" : "#888",
-                      border: `1px solid ${searchSource === "nexusmods" ? "#ea4335" : "#3a3a3a"}`,
-                      padding: "0.5rem",
-                      fontSize: "0.875rem",
-                    }}
-                  >
-                    <Icon name="fas fa-download"
-                      style={{ marginRight: "0.5rem" }}
-                     />
-                    NexusMods
-                  </button>
-                </div>
-
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "0.5rem",
-                    alignItems: "center",
-                  }}
-                >
-                  <div style={{ flex: 1, position: "relative" }}>
-                    <input
-                      type="text"
-                      placeholder={
-                        searchSource === "thunderstore"
-                          ? "Search Thunderstore mods..."
-                          : "Search NexusMods mods..."
-                      }
-                      value={
-                        searchSource === "thunderstore"
-                          ? searchQuery
-                          : nexusModsSearchQuery
-                      }
-                      onChange={(e) => {
-                        if (searchSource === "thunderstore") {
-                          setSearchQuery(e.target.value);
-                        } else {
-                          setNexusModsSearchQuery(e.target.value);
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          if (searchSource === "thunderstore") handleSearch();
-                          else handleSearchNexusMods();
-                        }
-                      }}
-                      style={{
-                        width: "100%",
-                        padding: "0.5rem 2.5rem 0.5rem 0.75rem",
-                        backgroundColor: "#1a1a1a",
-                        border: "1px solid #3a3a3a",
-                        borderRadius: "4px",
-                        color: "#fff",
-                        fontSize: "0.875rem",
-                      }}
-                    />
-                    <Icon name="fas fa-search"
-                      style={{
-                        position: "absolute",
-                        right: "0.75rem",
-                        top: "50%",
-                        transform: "translateY(-50%)",
-                        color: "#888",
-                        cursor: "pointer",
-                      }}
-                      onClick={
-                        searchSource === "thunderstore"
-                          ? handleSearch
-                          : handleSearchNexusMods
-                      }
-                     />
-                  </div>
-                  <button
-                    onClick={
-                      searchSource === "thunderstore"
-                        ? handleSearch
-                        : handleSearchNexusMods
-                    }
-                    className="btn btn-primary"
-                    disabled={
-                      (searchSource === "thunderstore"
-                        ? searching
-                        : searchingNexusMods) ||
-                      (searchSource === "thunderstore"
-                        ? !searchQuery.trim()
-                        : !nexusModsSearchQuery.trim())
-                    }
-                    style={{ whiteSpace: "nowrap" }}
-                  >
-                    {(
-                      searchSource === "thunderstore"
-                        ? searching
-                        : searchingNexusMods
-                    ) ? (
-                      <>
-                        <Icon name="fas fa-spinner fa-spin"
-                          style={{ marginRight: "0.5rem" }}
-                         />
-                        Searching...
-                      </>
-                    ) : (
-                      <>
-                        <Icon name="fas fa-search"
-                          style={{ marginRight: "0.5rem" }}
-                         />
-                        Search
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              <div
-                className="mods-section"
-                style={{
-                  padding: "0 1.25rem 1rem",
-                  borderBottom: "1px solid #3a3a3a",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: "0.75rem",
-                  }}
-                >
-                  <h3 style={{ margin: 0 }}>Featured</h3>
-                </div>
-                <div style={{ display: "grid", gap: "1rem" }}>
-                  <div
-                    className="mod-card featured-mod-card"
-                    style={{
-                      padding: "1rem",
-                      backgroundColor: "#2a2a2a",
-                      borderRadius: "8px",
-                      border: "1px solid #3a3a3a",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      gap: "1rem",
-                    }}
-                  >
-                    <div style={{ flex: 1 }}>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                          marginBottom: "0.35rem",
-                        }}
-                      >
-                        <strong style={{ fontSize: "1rem" }}>S1API</strong>
-                        {s1apiNeedsUpdate ? (
-                          <span
-                            style={{
-                              fontSize: "0.7rem",
-                              padding: "0.2rem 0.45rem",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(255, 170, 0, 0.15)",
-                              color: "#ffaa00",
-                              border: "1px solid rgba(255, 170, 0, 0.3)",
-                            }}
-                          >
-                            <Icon name="fas fa-arrow-up"
-                              style={{ marginRight: "0.25rem" }}
-                             />
-                            Update Available
-                          </span>
-                        ) : s1apiInLibrary ? (
-                          <span
-                            style={{
-                              fontSize: "0.7rem",
-                              padding: "0.2rem 0.45rem",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(74, 222, 128, 0.15)",
-                              color: "#4ade80",
-                              border: "1px solid rgba(74, 222, 128, 0.3)",
-                            }}
-                          >
-                            <Icon name="fas fa-check"
-                              style={{ marginRight: "0.25rem" }}
-                             />
-                            Up to Date
-                          </span>
-                        ) : (
-                          <span
-                            style={{
-                              fontSize: "0.7rem",
-                              padding: "0.2rem 0.45rem",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(136,136,136,0.125)",
-                              color: "#888",
-                              border: "1px solid rgba(136,136,136,0.25)",
-                            }}
-                          >
-                            Not Downloaded
-                          </span>
-                        )}
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: "0.75rem",
-                          flexWrap: "wrap",
-                          fontSize: "0.8rem",
-                          color: "#888",
-                        }}
-                      >
-                        <span>
-                          <Icon name="fas fa-box-open"
-                            style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-                           />
-                          GitHub Release
-                        </span>
-                        {s1apiInstalledVersion && (
-                          <span>
-                            <Icon name="fas fa-tag"
-                              style={{ marginRight: "0.35rem" }}
-                             />
-                            Installed: {formatVersionTag(s1apiInstalledVersion)}
-                          </span>
-                        )}
-                        {s1apiLatestVersion && (
-                          <span
-                            style={s1apiNeedsUpdate ? { color: "#ffaa00" } : {}}
-                          >
-                            <Icon name="fas fa-cloud"
-                              style={{ marginRight: "0.35rem" }}
-                             />
-                            Latest: {formatVersionTag(s1apiLatestVersion)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: "0.5rem",
-                        flexWrap: "wrap",
-                        justifyContent: "flex-end",
-                      }}
-                    >
-                      <button
-                        className={`btn btn-small ${s1apiNeedsUpdate ? "btn-warning" : "btn-primary"}`}
-                        onClick={handleDownloadS1APIClick}
-                        disabled={downloading === FEATURED_DOWNLOADS.s1api.key}
-                        title={
-                          s1apiNeedsUpdate
-                            ? "Update S1API to the latest version"
-                            : "Download S1API from GitHub to the library"
-                        }
-                      >
-                        {downloading === FEATURED_DOWNLOADS.s1api.key ? (
-                          <Icon name="fas fa-spinner fa-spin" />
-                        ) : (
-                          <>
-                            <Icon name={`fas ${s1apiNeedsUpdate ? "fa-arrow-up" : "fa-download"}`}
-                             />
-                            <span style={{ marginLeft: "0.5rem" }}>
-                              {s1apiActionLabel}
-                            </span>
-                          </>
-                        )}
-                      </button>
-                      <a
-                        href={FEATURED_DOWNLOADS.s1api.packageUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn btn-secondary btn-small"
-                        style={{ textDecoration: "none", textAlign: "center" }}
-                        title="View on GitHub"
-                      >
-                        <Icon name="fas fa-external-link-alt" />
-                        <span style={{ marginLeft: "0.5rem" }}>View</span>
-                      </a>
-                    </div>
-                  </div>
-
-                  <div
-                    className="mod-card featured-mod-card"
-                    style={{
-                      padding: "1rem",
-                      backgroundColor: "#2a2a2a",
-                      borderRadius: "8px",
-                      border: "1px solid #3a3a3a",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      gap: "1rem",
-                    }}
-                  >
-                    <div style={{ flex: 1 }}>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                          marginBottom: "0.35rem",
-                        }}
-                      >
-                        <strong style={{ fontSize: "1rem" }}>
-                          <Icon name="fas fa-shield-alt"
-                            style={{ color: "#4a90e2", marginRight: "0.35rem" }}
-                           />
-                          MLVScan
-                        </strong>
-                        {mlvscanNeedsUpdate ? (
-                          <span
-                            style={{
-                              fontSize: "0.7rem",
-                              padding: "0.2rem 0.45rem",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(255, 170, 0, 0.15)",
-                              color: "#ffaa00",
-                              border: "1px solid rgba(255, 170, 0, 0.3)",
-                            }}
-                          >
-                            <Icon name="fas fa-arrow-up"
-                              style={{ marginRight: "0.25rem" }}
-                             />
-                            Update Available
-                          </span>
-                        ) : mlvscanInLibrary ? (
-                          <span
-                            style={{
-                              fontSize: "0.7rem",
-                              padding: "0.2rem 0.45rem",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(74, 222, 128, 0.15)",
-                              color: "#4ade80",
-                              border: "1px solid rgba(74, 222, 128, 0.3)",
-                            }}
-                          >
-                            <Icon name="fas fa-check"
-                              style={{ marginRight: "0.25rem" }}
-                             />
-                            Up to Date
-                          </span>
-                        ) : (
-                          <span
-                            style={{
-                              fontSize: "0.7rem",
-                              padding: "0.2rem 0.45rem",
-                              borderRadius: "4px",
-                              backgroundColor: "rgba(136,136,136,0.125)",
-                              color: "#888",
-                              border: "1px solid rgba(136,136,136,0.25)",
-                            }}
-                          >
-                            Not Downloaded
-                          </span>
-                        )}
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: "0.75rem",
-                          flexWrap: "wrap",
-                          fontSize: "0.8rem",
-                          color: "#888",
-                        }}
-                      >
-                        <span>
-                          <Icon name="fas fa-box-open"
-                            style={{ marginRight: "0.35rem", color: "#4a90e2" }}
-                           />
-                          GitHub Release
-                        </span>
-                        {mlvscanInstalledVersion && (
-                          <span>
-                            <Icon name="fas fa-tag"
-                              style={{ marginRight: "0.35rem" }}
-                             />
-                            Installed:{" "}
-                            {formatVersionTag(mlvscanInstalledVersion)}
-                          </span>
-                        )}
-                        {mlvscanLatestVersion && (
-                          <span
-                            style={
-                              mlvscanNeedsUpdate ? { color: "#ffaa00" } : {}
-                            }
-                          >
-                            <Icon name="fas fa-cloud"
-                              style={{ marginRight: "0.35rem" }}
-                             />
-                            Latest: {formatVersionTag(mlvscanLatestVersion)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: "0.5rem",
-                        flexWrap: "wrap",
-                        justifyContent: "flex-end",
-                      }}
-                    >
-                      <button
-                        className={`btn btn-small ${mlvscanNeedsUpdate ? "btn-warning" : "btn-primary"}`}
-                        onClick={handleDownloadMlvscanClick}
-                        disabled={downloading === FEATURED_DOWNLOADS.mlvscan.key}
-                        title={
-                          mlvscanNeedsUpdate
-                            ? "Update MLVScan to the latest version"
-                            : "Download MLVScan from GitHub to the library"
-                        }
-                      >
-                        {downloading === FEATURED_DOWNLOADS.mlvscan.key ? (
-                          <Icon name="fas fa-spinner fa-spin" />
-                        ) : (
-                          <>
-                            <Icon name={`fas ${mlvscanNeedsUpdate ? "fa-arrow-up" : "fa-download"}`}
-                             />
-                            <span style={{ marginLeft: "0.5rem" }}>
-                              {mlvscanActionLabel}
-                            </span>
-                          </>
-                        )}
-                      </button>
-                      <a
-                        href={FEATURED_DOWNLOADS.mlvscan.packageUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn btn-secondary btn-small"
-                        style={{ textDecoration: "none", textAlign: "center" }}
-                        title="View on GitHub"
-                      >
-                        <Icon name="fas fa-external-link-alt" />
-                        <span style={{ marginLeft: "0.5rem" }}>View</span>
-                      </a>
-                    </div>
-                  </div>
-                  {renderFeaturedThunderstoreCard(
-                    FEATURED_THUNDERSTORE_DOWNLOADS.meshvault,
-                    meshVaultInstalledVersion,
-                    meshVaultLatestVersion,
-                    meshVaultInLibrary,
-                    !!meshVaultNeedsUpdate,
-                    meshVaultActionLabel,
-                    handleDownloadMeshVaultClick,
-                  )}
-                  {renderFeaturedThunderstoreCard(
-                    FEATURED_THUNDERSTORE_DOWNLOADS.s1mapi,
-                    s1mapiInstalledVersion,
-                    s1mapiLatestVersion,
-                    s1mapiInLibrary,
-                    !!s1mapiNeedsUpdate,
-                    s1mapiActionLabel,
-                    handleDownloadS1MapiClick,
-                  )}
-                </div>
-              </div>
-
-              {(showSearchResults || showNexusModsResults) && (
-                <div
-                  className="mods-section"
-                  style={{ padding: "1rem 1.25rem 1rem" }}
-                >
-                  {showSearchResults && searchResults.length > 0 && (
-                    <div
-                      className="mods-grid"
-                      style={{
-                        display: "grid",
-                        gap: "1rem",
-                        gridTemplateColumns:
-                          "repeat(auto-fill, minmax(320px, 1fr))",
-                      }}
-                    >
-                      {searchResults
-                        .filter((pkg) => {
-                          // Hide mods that are already in the downloaded library
-                          const tsKey = `thunderstore::${pkg.key}`;
-                          return !downloadedGroups.some((g) => g.key === tsKey);
-                        })
-                        .map((pkg) => {
-                          const runtimes: ThunderstoreRuntime[] = [];
-                          if (pkg.packagesByRuntime.IL2CPP)
-                            runtimes.push("IL2CPP");
-                          if (pkg.packagesByRuntime.Mono) runtimes.push("Mono");
-                          const representative =
-                            pkg.packagesByRuntime.IL2CPP ||
-                            pkg.packagesByRuntime.Mono;
-                          const latestVersion = representative?.versions?.[0];
-                          const iconUrl =
-                            latestVersion?.icon ||
-                            representative?.icon ||
-                            representative?.icon_url;
-                          const summary = latestVersion?.description;
-                          const totalDownloads =
-                            representative?.versions?.reduce(
-                              (sum, item) => sum + (item.downloads || 0),
-                              0,
-                            ) || 0;
-                          return (
-                            <div
-                              key={pkg.key}
-                              className="mod-card store-card"
-                              style={{
-                                padding: "1rem",
-                                backgroundColor: "#2a2a2a",
-                                borderRadius: "8px",
-                                border: "1px solid #3a3a3a",
-                                cursor: "pointer",
-                              }}
-                              role="button"
-                              tabIndex={0}
-                              aria-label={`Open details for ${pkg.name}`}
-                              onClick={() => openThunderstoreModView(pkg)}
-                              onKeyDown={(event) =>
-                                handleCardActivationKeyDown(event, () =>
-                                  openThunderstoreModView(pkg),
-                                )
-                              }
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "flex-start",
-                                  gap: "1rem",
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    flex: 1,
-                                    minWidth: 0,
-                                    display: "flex",
-                                    gap: "0.7rem",
-                                  }}
-                                >
-                                  {renderCardIcon(
-                                    pkg.name,
-                                    undefined,
-                                    iconUrl,
-                                    "rail",
-                                  )}
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <strong style={{ fontSize: "1rem" }}>
-                                      {pkg.name}
-                                    </strong>
-                                    <div
-                                      style={{
-                                        fontSize: "0.85rem",
-                                        color: "#9aa4b2",
-                                      }}
-                                    >
-                                      {pkg.owner}
-                                    </div>
-                                    <div
-                                      style={{
-                                        marginTop: "0.35rem",
-                                        display: "flex",
-                                        gap: "0.35rem",
-                                        flexWrap: "wrap",
-                                      }}
-                                    >
-                                      {runtimes.length > 0 ? (
-                                        runtimes.map((runtime) => (
-                                          <span
-                                            key={`${pkg.key}-${runtime}`}
-                                            style={{
-                                              fontSize: "0.7rem",
-                                              padding: "0.15rem 0.4rem",
-                                              borderRadius: "4px",
-                                              backgroundColor: "#4a90e220",
-                                              color: "#4a90e2",
-                                              border: "1px solid #4a90e240",
-                                            }}
-                                          >
-                                            {runtime}
-                                          </span>
-                                        ))
-                                      ) : (
-                                        <span
-                                          style={{
-                                            fontSize: "0.7rem",
-                                            padding: "0.15rem 0.4rem",
-                                            borderRadius: "4px",
-                                            backgroundColor: "#6c757d",
-                                            color: "#fff",
-                                          }}
-                                        >
-                                          Runtime Unknown
-                                        </span>
-                                      )}
-                                    </div>
-                                    {summary && (
-                                      <p
-                                        className="mod-card-summary"
-                                        title={summary}
-                                        style={{ marginTop: "0.45rem" }}
-                                      >
-                                        {summary}
-                                      </p>
-                                    )}
-                                    <div
-                                      className="mod-card-meta-row"
-                                      style={{
-                                        marginTop: "0.45rem",
-                                        fontSize: "0.78rem",
-                                        color: "#8f9cb0",
-                                        display: "flex",
-                                        gap: "0.6rem",
-                                        flexWrap: "wrap",
-                                      }}
-                                    >
-                                      <span>
-                                        <Icon name="fas fa-download"
-                                          style={{ marginRight: "0.25rem" }}
-                                         />
-                                        {totalDownloads.toLocaleString()}
-                                      </span>
-                                      <span>
-                                        <Icon name="fas fa-thumbs-up"
-                                          style={{ marginRight: "0.25rem" }}
-                                         />
-                                        {(
-                                          representative?.rating_score || 0
-                                        ).toLocaleString()}
-                                      </span>
-                                      {latestVersion?.version_number && (
-                                        <span>
-                                          <Icon name="fas fa-tag"
-                                            style={{ marginRight: "0.25rem" }}
-                                           />
-                                          v{latestVersion.version_number}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    gap: "0.5rem",
-                                    flexWrap: "wrap",
-                                    justifyContent: "flex-end",
-                                  }}
-                                >
-                                  <button
-                                    className="btn btn-primary btn-small"
-                                    disabled={downloading === pkg.key}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleDownloadThunderstore(pkg);
-                                    }}
-                                  >
-                                    {downloading === pkg.key
-                                      ? "Downloading..."
-                                      : "Download"}
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  )}
-
-                  {showNexusModsResults &&
-                    nexusModsSearchResults.length > 0 && (
-                      <div
-                        className="mods-grid"
-                        style={{
-                          display: "grid",
-                          gap: "1rem",
-                          gridTemplateColumns:
-                            "repeat(auto-fill, minmax(320px, 1fr))",
-                        }}
-                      >
-                        {nexusModsSearchResults.map((mod) => {
-                          const files = nexusModsFiles.get(mod.mod_id) ?? null;
-                          const loading = nexusModsLoading.has(mod.mod_id);
-                          const fileNames = files
-                            ? files.map((file) =>
-                                (
-                                  file.file_name ||
-                                  file.name ||
-                                  ""
-                                ).toLowerCase(),
-                              )
-                            : [];
-                          const hasIl2cpp = fileNames.some((name) =>
-                            name.includes("il2cpp"),
-                          );
-                          const hasMono = fileNames.some((name) =>
-                            name.includes("mono"),
-                          );
-                          const summary = mod.summary || mod.description;
-                          return (
-                            <div
-                              key={mod.mod_id}
-                              className="mod-card store-card"
-                              style={{
-                                padding: "1rem",
-                                backgroundColor: "#2a2a2a",
-                                borderRadius: "8px",
-                                border: "1px solid #3a3a3a",
-                                cursor: "pointer",
-                              }}
-                              role="button"
-                              tabIndex={0}
-                              aria-label={`Open details for ${mod.name}`}
-                              onClick={() => openNexusModView(mod)}
-                              onKeyDown={(event) =>
-                                handleCardActivationKeyDown(event, () =>
-                                  openNexusModView(mod),
-                                )
-                              }
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "flex-start",
-                                  gap: "1rem",
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    flex: 1,
-                                    minWidth: 0,
-                                    display: "flex",
-                                    gap: "0.7rem",
-                                  }}
-                                >
-                                  {renderCardIcon(
-                                    mod.name,
-                                    undefined,
-                                    mod.picture_url,
-                                    "rail",
-                                  )}
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <strong style={{ fontSize: "1rem" }}>
-                                      {mod.name}
-                                    </strong>
-                                    <div
-                                      style={{
-                                        fontSize: "0.85rem",
-                                        color: "#9aa4b2",
-                                      }}
-                                    >
-                                      {getNexusModAttribution(mod)}
-                                    </div>
-                                    <div
-                                      style={{
-                                        marginTop: "0.35rem",
-                                        display: "flex",
-                                        gap: "0.35rem",
-                                        flexWrap: "wrap",
-                                      }}
-                                    >
-                                      {hasIl2cpp && (
-                                        <span
-                                          style={{
-                                            fontSize: "0.7rem",
-                                            padding: "0.15rem 0.4rem",
-                                            borderRadius: "4px",
-                                            backgroundColor: "#4a90e220",
-                                            color: "#4a90e2",
-                                            border: "1px solid #4a90e240",
-                                          }}
-                                        >
-                                          IL2CPP
-                                        </span>
-                                      )}
-                                      {hasMono && (
-                                        <span
-                                          style={{
-                                            fontSize: "0.7rem",
-                                            padding: "0.15rem 0.4rem",
-                                            borderRadius: "4px",
-                                            backgroundColor: "#4a90e220",
-                                            color: "#4a90e2",
-                                            border: "1px solid #4a90e240",
-                                          }}
-                                        >
-                                          Mono
-                                        </span>
-                                      )}
-                                      {!hasIl2cpp && !hasMono && (
-                                        <span
-                                          style={{
-                                            fontSize: "0.7rem",
-                                            padding: "0.15rem 0.4rem",
-                                            borderRadius: "4px",
-                                            backgroundColor: "#6c757d",
-                                            color: "#fff",
-                                          }}
-                                        >
-                                          Runtime Unknown
-                                        </span>
-                                      )}
-                                    </div>
-                                    {summary && (
-                                      <p
-                                        className="mod-card-summary"
-                                        title={summary}
-                                        style={{ marginTop: "0.45rem" }}
-                                      >
-                                        {summary}
-                                      </p>
-                                    )}
-                                    <div
-                                      className="mod-card-meta-row"
-                                      style={{
-                                        marginTop: "0.45rem",
-                                        fontSize: "0.78rem",
-                                        color: "#8f9cb0",
-                                        display: "flex",
-                                        gap: "0.6rem",
-                                        flexWrap: "wrap",
-                                      }}
-                                    >
-                                      <span>
-                                        <Icon name="fas fa-download"
-                                          style={{ marginRight: "0.25rem" }}
-                                         />
-                                        {(
-                                          mod.mod_downloads || 0
-                                        ).toLocaleString()}
-                                      </span>
-                                      <span>
-                                        <Icon name="fas fa-thumbs-up"
-                                          style={{ marginRight: "0.25rem" }}
-                                         />
-                                        {(
-                                          mod.endorsement_count || 0
-                                        ).toLocaleString()}
-                                      </span>
-                                      {mod.version && (
-                                        <span>
-                                          <Icon name="fas fa-tag"
-                                            style={{ marginRight: "0.25rem" }}
-                                           />
-                                          v{mod.version}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    gap: "0.5rem",
-                                    flexWrap: "wrap",
-                                    justifyContent: "flex-end",
-                                  }}
-                                >
-                                  <button
-                                    className="btn btn-primary btn-small"
-                                    disabled={
-                                      downloading === `nexus-${mod.mod_id}` ||
-                                      loading
-                                    }
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleDownloadNexusMod(mod.mod_id);
-                                    }}
-                                  >
-                                    {downloading === `nexus-${mod.mod_id}`
-                                      ? "Downloading..."
-                                      : loading
-                                        ? "Loading..."
-                                        : "Download"}
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                </div>
-              )}
-            </>
-          )}
-
-          <div
-            className="mods-section"
-            style={{
-              padding: "0.9rem 1.25rem 1rem",
-              borderTop: "1px solid #3a3a3a",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: "0.75rem",
-                flexWrap: "wrap",
-                marginBottom: "0.75rem",
-              }}
-            >
-              <h3 style={{ margin: 0 }}>Downloaded Mods</h3>
-              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                <span
-                  style={{
-                    color: "#9aa4b2",
-                    fontSize: "0.8rem",
-                    alignSelf: "center",
-                  }}
-                >
-                  {selectedModIds.size} selected
-                </span>
-                <button
-                  className="btn btn-danger btn-small"
-                  disabled={selectedModIds.size === 0 || deleting === "bulk"}
-                  onClick={handleBulkDelete}
-                >
-                  {deleting === "bulk" ? "Deleting..." : "Delete selected"}
-                </button>
-              </div>
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: "0.5rem",
-                marginBottom: "0.65rem",
-                flexWrap: "wrap",
-              }}
-            >
-              {(
-                [
-                  "all",
-                  "updates",
-                  "managed",
-                  "external",
-                  "installed",
-                ] as DownloadedFilter[]
-              ).map((filter) => (
-                <button
-                  key={filter}
-                  className="btn btn-small"
-                  onClick={() => setDownloadedFilter(filter)}
-                  style={{
-                    backgroundColor:
-                      downloadedFilter === filter ? "#4a90e2" : "#2a2a2a",
-                    border: `1px solid ${downloadedFilter === filter ? "#4a90e2" : "#3a3a3a"}`,
-                    color: downloadedFilter === filter ? "#fff" : "#ccc",
-                  }}
-                >
-                  {filter === "all"
-                    ? "All"
-                    : filter === "updates"
-                      ? "Updates"
-                      : filter === "managed"
-                        ? "Managed"
-                        : filter === "external"
-                          ? "External"
-                          : "Installed"}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ marginBottom: "0.75rem" }}>
-              <input
-                type="text"
-                value={downloadedSearch}
-                onChange={(e) => setDownloadedSearch(e.target.value)}
-                placeholder="Filter by mod, author, or version"
-                style={{
-                  width: "100%",
-                  padding: "0.5rem 0.75rem",
-                  backgroundColor: "#1a1a1a",
-                  border: "1px solid #3a3a3a",
-                  borderRadius: "4px",
-                  color: "#fff",
-                  fontSize: "0.875rem",
-                }}
-              />
-            </div>
-
-            {loadingLibrary && (
-              <div style={{ color: "#888" }}>Loading mod library...</div>
-            )}
-            {!loadingLibrary && downloadedGroups.length === 0 && (
-              <div style={{ color: "#888" }}>No downloaded mods yet.</div>
-            )}
-            {!loadingLibrary &&
-              downloadedGroups.length > 0 &&
-              filteredDownloadedGroups.length === 0 && (
-                <div style={{ color: "#888" }}>
-                  No downloaded mods match this filter.
-                </div>
-              )}
-            {!loadingLibrary && filteredDownloadedGroups.length > 0 ? (
-              <div
-                className="mods-grid"
-                style={{
-                  display: "grid",
-                  gap: "0.65rem",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))",
-                }}
-              >
-                {filteredDownloadedGroups.map((group) => {
-                  const sortedEntries = getSortedGroupEntries(group);
-                  const activeEntry = getActiveEntryForGroup(group);
-                  const securityBadge =
-                    settings?.showSecurityScanBadges !== false
-                      ? getSecurityBadgeConfig(activeEntry?.securityScan)
-                      : null;
-                  const groupHasUpdate = isGroupUpdateAvailable(group);
-                  const activeVersionLabel = activeEntry
-                    ? getEntryVersionLabel(activeEntry)
-                    : "unknown";
-                  const activeIndex = activeEntry
-                    ? sortedEntries.findIndex(
-                        (entry) => entry.storageId === activeEntry.storageId,
-                      )
-                    : -1;
-                  const hasOlderVersion =
-                    sortedEntries.length > 1 &&
-                    activeIndex >= 0 &&
-                    activeIndex < sortedEntries.length - 1;
-                  const hasNewerVersion =
-                    sortedEntries.length > 1 && activeIndex > 0;
-
-                  return (
-                    <div
-                      key={group.key}
-                      className="mod-card compact-row library-row-card"
-                      style={{
-                        padding: "0.68rem 0.75rem",
-                        backgroundColor: "#2a2a2a",
-                        borderRadius: "7px",
-                        border: "1px solid #3a3a3a",
-                        cursor: "pointer",
-                      }}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Open details for ${group.displayName}`}
-                      onClick={() => openDownloadedModView(group)}
-                      onKeyDown={(event) =>
-                        handleCardActivationKeyDown(event, () =>
-                          openDownloadedModView(group),
-                        )
-                      }
-                    >
-                      <div
-                        className="mod-card-row-shell"
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "stretch",
-                          gap: "0.7rem",
-                        }}
-                      >
-                        <div
-                          className="mod-card-main-shell"
-                          style={{
-                            display: "flex",
-                            alignItems: "stretch",
-                            gap: "0.55rem",
-                            flex: 1,
-                            minWidth: 0,
-                          }}
-                        >
-                          <div
-                            className="mod-card-checkbox-zone"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={group.storageIds.every((id) =>
-                                selectedModIds.has(id),
-                              )}
-                              onChange={() =>
-                                toggleGroupSelection(group.storageIds)
-                              }
-                              style={{ margin: 0 }}
-                            />
-                          </div>
-                          {renderCardIcon(
-                            group.displayName,
-                            activeEntry?.iconCachePath,
-                            activeEntry?.iconUrl,
-                            "rail",
-                          )}
-                          <div
-                            className="mod-card-main-column"
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              display: "grid",
-                              gap: "0.3rem",
-                              alignContent: "start",
-                            }}
-                          >
-                            <div className="mod-card-title-row">
-                              <strong
-                                className="mod-card-title-text"
-                                style={{ fontSize: "0.94rem" }}
-                                title={group.displayName}
-                              >
-                                {group.displayName}
-                              </strong>
-                            </div>
-                            <div
-                              className="mod-card-meta-row"
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "0.35rem",
-                                flexWrap: "wrap",
-                              }}
-                            >
-                              <span
-                                style={{
-                                  fontSize: "0.64rem",
-                                  padding: "0.1rem 0.35rem",
-                                  borderRadius: "999px",
-                                  ...getSourceBadgeStyle(activeEntry?.source),
-                                }}
-                              >
-                                {getSourceBadgeLabel(activeEntry?.source)}
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: "0.64rem",
-                                  padding: "0.1rem 0.35rem",
-                                  borderRadius: "999px",
-                                  backgroundColor: "#4a90e220",
-                                  color: "#8fc0ff",
-                                  border: "1px solid #4a90e240",
-                                }}
-                              >
-                                {sortedEntries.length} version
-                                {sortedEntries.length === 1 ? "" : "s"}
-                              </span>
-                            </div>
-                            {activeEntry?.summary && (
-                              <p
-                                className="mod-card-summary"
-                                title={activeEntry.summary}
-                              >
-                                {activeEntry.summary}
-                              </p>
-                            )}
-                            {securityBadge && activeEntry?.storageId && (
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void openStoredSecurityReport(
-                                    activeEntry.storageId!,
-                                    `Security Findings - ${group.displayName}`,
-                                  );
-                                }}
-                                style={{
-                                  alignSelf: "start",
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: "0.35rem",
-                                  marginTop: "0.1rem",
-                                  borderRadius: "4px",
-                                  border: `1px solid ${securityBadge.border}`,
-                                  background: securityBadge.background,
-                                  color: securityBadge.color,
-                                  padding: "0.15rem 0.4rem",
-                                  fontSize: "0.7rem",
-                                  cursor: "pointer",
-                                  whiteSpace: "nowrap",
-                                  lineHeight: 1,
-                                }}
-                              >
-                                <Icon name={`fas ${securityBadge.icon}`}
-                                  style={{ fontSize: "0.7rem" }}
-                                 />
-                                {securityBadge.label}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="mod-card-actions mod-card-actions--stacked">
-                          <div
-                            className="mod-card-actions-buttons"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {groupHasUpdate && (
-                              <button
-                                className="btn btn-warning btn-small mod-card-action-button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleUpdateAndActivateGroup(group);
-                                }}
-                                disabled={
-                                  updatingGroup === group.key ||
-                                  activatingGroup === group.key
-                                }
-                                title="Download latest update and make it active"
-                              >
-                                {updatingGroup === group.key ? (
-                                  <>
-                                    <Icon name="fas fa-spinner fa-spin"
-                                      style={{ marginRight: "0.35rem" }}
-                                     />
-                                    Updating...
-                                  </>
-                                ) : (
-                                  <>
-                                    <Icon name="fas fa-arrow-up"
-                                      style={{ marginRight: "0.35rem" }}
-                                     />
-                                    Update
-                                  </>
-                                )}
-                              </button>
-                            )}
-                            <button
-                              className="btn btn-danger btn-small mod-card-action-button"
-                              disabled={
-                                deleting === group.key ||
-                                activatingGroup === group.key ||
-                                updatingGroup === group.key
-                              }
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteDownloadedGroup(group);
-                              }}
-                              title="Delete downloaded files from library"
-                            >
-                              {deleting === group.key
-                                ? "Deleting..."
-                                : "Delete Files"}
-                            </button>
-                          </div>
-                          <div
-                            className="mod-card-version-row"
-                            data-version-switcher
-                            style={{
-                              position: "relative",
-                              zIndex:
-                                openVersionMenuGroup === group.key
-                                  ? 100
-                                  : "auto",
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <div
-                              style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                border: "1px solid #3a3a3a",
-                                borderRadius: "999px",
-                                overflow: "hidden",
-                                backgroundColor: "#131a25",
-                              }}
-                              title="Cycle active version"
-                            >
-                              {hasOlderVersion && (
-                                <button
-                                  className="btn btn-secondary btn-small"
-                                  onClick={() =>
-                                    void handleStepGroupVersion(group, "older")
-                                  }
-                                  disabled={
-                                    activatingGroup === group.key ||
-                                    updatingGroup === group.key
-                                  }
-                                  style={{
-                                    borderRadius: 0,
-                                    border: "none",
-                                    borderRight: "1px solid #2d3b52",
-                                    padding: "0.08rem 0.32rem",
-                                    minHeight: "1.22rem",
-                                  }}
-                                  title="Older version"
-                                >
-                                  <Icon name="fas fa-chevron-left"
-                                    style={{ fontSize: "0.62rem" }}
-                                   />
-                                </button>
-                              )}
-                              <button
-                                className="btn btn-secondary btn-small"
-                                onClick={() => {
-                                  if (sortedEntries.length > 1) {
-                                    setOpenVersionMenuGroup((prev) =>
-                                      prev === group.key ? null : group.key,
-                                    );
-                                  }
-                                }}
-                                disabled={
-                                  activatingGroup === group.key ||
-                                  updatingGroup === group.key
-                                }
-                                style={{
-                                  borderRadius: 0,
-                                  border: "none",
-                                  padding: "0.08rem 0.36rem",
-                                  minHeight: "1.22rem",
-                                  backgroundColor: "#131a25",
-                                  color: "#d9e6fb",
-                                }}
-                                title={
-                                  sortedEntries.length > 1
-                                    ? "Choose version"
-                                    : "Active version"
-                                }
-                              >
-                                <span
-                                  className="mod-card-version-pill"
-                                  style={{
-                                    fontSize: "0.67rem",
-                                    minWidth: "94px",
-                                    textAlign: "center",
-                                  }}
-                                >
-                                  {formatVersionTag(activeVersionLabel)}
-                                  {sortedEntries.length > 1 ? " ▾" : ""}
-                                </span>
-                              </button>
-                              {hasNewerVersion && (
-                                <button
-                                  className="btn btn-secondary btn-small"
-                                  onClick={() =>
-                                    void handleStepGroupVersion(group, "newer")
-                                  }
-                                  disabled={
-                                    activatingGroup === group.key ||
-                                    updatingGroup === group.key
-                                  }
-                                  style={{
-                                    borderRadius: 0,
-                                    border: "none",
-                                    borderLeft: "1px solid #2d3b52",
-                                    padding: "0.08rem 0.32rem",
-                                    minHeight: "1.22rem",
-                                  }}
-                                  title="Newer version"
-                                >
-                                  <Icon name="fas fa-chevron-right"
-                                    style={{ fontSize: "0.62rem" }}
-                                   />
-                                </button>
-                              )}
-                            </div>
-                            {openVersionMenuGroup === group.key &&
-                              sortedEntries.length > 1 && (
-                                <div
-                                  style={{
-                                    position: "absolute",
-                                    top: 0,
-                                    right: 0,
-                                    minWidth: "180px",
-                                    backgroundColor: "#172131",
-                                    border: "1px solid #31445f",
-                                    borderRadius: "8px",
-                                    boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
-                                    zIndex: 1000,
-                                    padding: "0.25rem",
-                                  }}
-                                >
-                                  {sortedEntries.map((entry) => {
-                                    const isActive =
-                                      activeEntry?.storageId ===
-                                      entry.storageId;
-                                    return (
-                                      <button
-                                        key={`${group.key}-pick-${entry.storageId}`}
-                                        onClick={() =>
-                                          void handleSelectVersion(
-                                            group,
-                                            entry.storageId,
-                                          )
-                                        }
-                                        style={{
-                                          display: "block",
-                                          width: "100%",
-                                          textAlign: "left",
-                                          border: "none",
-                                          borderRadius: "6px",
-                                          padding: "0.35rem 0.5rem",
-                                          marginBottom: "2px",
-                                          backgroundColor: isActive
-                                            ? "#2b4666"
-                                            : "transparent",
-                                          color: isActive
-                                            ? "#e8f3ff"
-                                            : "#c8d8ee",
-                                          fontSize: "0.72rem",
-                                          cursor: "pointer",
-                                          transition: "background-color 0.1s",
-                                        }}
-                                        onMouseEnter={(e) => {
-                                          if (!isActive)
-                                            e.currentTarget.style.backgroundColor =
-                                              "#1e3048";
-                                        }}
-                                        onMouseLeave={(e) => {
-                                          if (!isActive)
-                                            e.currentTarget.style.backgroundColor =
-                                              "transparent";
-                                        }}
-                                      >
-                                        {`${formatVersionTag(getEntryVersionLabel(entry))} · ${entry.availableRuntimes.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                          </div>
-                        </div>
-                      </div>
-                      <div
-                        className="mod-card-meta-row"
-                        style={{
-                          fontSize: "0.74rem",
-                          color: "#94a4bb",
-                          marginTop: "0.4rem",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.45rem",
-                          flexWrap: "wrap",
-                          lineHeight: 1.35,
-                        }}
-                      >
-                        {group.author && (
-                          <span>
-                            <Icon name="fas fa-user"
-                              style={{ marginRight: "0.25rem", opacity: 0.7 }}
-                             />
-                            {group.author}
-                          </span>
-                        )}
-                        <span>
-                          <Icon name="fas fa-tag"
-                            style={{ marginRight: "0.25rem", opacity: 0.7 }}
-                           />
-                          Active {formatVersionTag(activeVersionLabel)}
-                        </span>
-                        {groupHasUpdate && group.remoteVersion && (
-                          <span className="mod-card-update-hint-inline">
-                            <Icon name="fas fa-arrow-up"
-                              style={{ marginRight: "0.25rem", opacity: 0.8 }}
-                             />
-                            Latest {formatVersionTag(group.remoteVersion)}
-                          </span>
-                        )}
-                        <span>
-                          <Icon name="fas fa-folder"
-                            style={{ marginRight: "0.25rem", opacity: 0.7 }}
-                           />
-                          {group.installedIn.length
-                            ? group.installedIn.length
-                            : "0"}{" "}
-                          envs
-                        </span>
-                        {group.availableRuntimes?.map((runtime) => (
-                          <span
-                            key={`${group.key}-${runtime}`}
-                            style={{
-                              fontSize: "0.62rem",
-                              padding: "0.08rem 0.34rem",
-                              borderRadius: "999px",
-                              backgroundColor: "#4a90e220",
-                              color: "#4a90e2",
-                              border: "1px solid #4a90e240",
-                            }}
-                          >
-                            {runtime}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        {activeModView && (
-          <div
-            className="mod-view-overlay"
-            style={{
-              position: "absolute",
-              inset: 0,
-              backgroundColor: "rgba(9, 14, 24, 0.96)",
-              borderRadius: "0.75rem",
-              border: "1px solid #344259",
-              display: "flex",
-              flexDirection: "column",
-              zIndex: 40,
-            }}
-          >
-            <div
-              className="modal-header"
-              style={{ borderBottom: "1px solid #2f3a4f" }}
-            >
-              <h2
-                style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}
-              >
-                <Icon name="fas fa-cube" />
-                Mod View
-                {openedFromLogs.active && (
-                  <span
-                    style={{
-                      fontSize: "0.72rem",
-                      color: "#9ed0ff",
-                      backgroundColor: "#1a2f46",
-                      border: "1px solid #335d83",
-                      borderRadius: "999px",
-                      padding: "0.12rem 0.5rem",
-                    }}
-                  >
-                    <Icon name="fas fa-file-alt" /> Opened from Logs
-                    {openedFromLogs.modTag ? `: ${openedFromLogs.modTag}` : ""}
-                  </span>
-                )}
-              </h2>
-              <button
-                className="btn btn-secondary btn-small"
-                onClick={closeModView}
-              >
-                <Icon name="fas fa-arrow-left"
-                  style={{ marginRight: "0.45rem" }}
-                 />
-                Back
-              </button>
-            </div>
-            <div
-              className="mod-view-content"
-              style={{
-                padding: "1rem 1.25rem 1.25rem",
-                overflowY: "auto",
-                display: "grid",
-                gap: "1rem",
-              }}
-            >
-              <div
-                className="mod-view-header-grid"
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "92px 1fr",
-                  gap: "1rem",
-                  alignItems: "start",
-                }}
-              >
-                <div
-                  className="mod-view-icon"
-                  style={{
-                    width: "92px",
-                    height: "92px",
-                    borderRadius: "14px",
-                    overflow: "hidden",
-                    border: "1px solid #3a4a66",
-                    background: "#172131",
-                  }}
-                >
-                  {activeModView.iconCachePath || activeModView.iconUrl ? (
-                    <img
-                      src={
-                        resolveImageSource(activeModView.iconCachePath) ||
-                        resolveImageSource(activeModView.iconUrl)
-                      }
-                      alt={`${activeModView.name} icon`}
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                      }}
-                      onError={(e) => {
-                        const target = e.currentTarget;
-                        const remoteSource = resolveImageSource(
-                          activeModView.iconUrl,
-                        );
-                        if (remoteSource && target.src !== remoteSource) {
-                          target.src = remoteSource;
-                        }
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        display: "grid",
-                        placeItems: "center",
-                        color: "#7d8fa9",
-                      }}
-                    >
-                      <Icon name="fas fa-puzzle-piece"
-                        style={{ fontSize: "1.6rem" }}
-                       />
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <h3 style={{ margin: 0 }}>{activeModView.name}</h3>
-                  <div
-                    style={{
-                      marginTop: "0.35rem",
-                      color: "#9ab0cb",
-                      fontSize: "0.85rem",
-                    }}
-                  >
-                    Source: {activeModView.source}{" "}
-                    {getActiveModViewAttribution(activeModView)
-                      ? `• ${getActiveModViewAttribution(activeModView)}`
-                      : ""}
-                  </div>
-                  {settings?.showSecurityScanBadges !== false &&
-                    getSecurityBadgeConfig(activeModView.securityScan) && (
-                      <div
-                        style={{
-                          marginTop: "0.55rem",
-                          display: "flex",
-                          gap: "0.45rem",
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: "0.35rem",
-                            borderRadius: "999px",
-                            border: `1px solid ${getSecurityBadgeConfig(activeModView.securityScan)?.border}`,
-                            background: getSecurityBadgeConfig(
-                              activeModView.securityScan,
-                            )?.background,
-                            color: getSecurityBadgeConfig(
-                              activeModView.securityScan,
-                            )?.color,
-                            padding: "0.1rem 0.4rem",
-                            fontSize: "0.72rem",
-                            whiteSpace: "nowrap",
-                            lineHeight: 1,
-                          }}
-                        >
-                          <Icon name={`fas ${getSecurityBadgeConfig(activeModView.securityScan)?.icon}`}
-                            style={{ fontSize: "0.7rem" }}
-                           />
-                          {
-                            getSecurityBadgeConfig(activeModView.securityScan)
-                              ?.label
-                          }
-                        </span>
-                      </div>
-                    )}
-                  {activeModView.summary && (
-                    <p
-                      style={{
-                        margin: "0.65rem 0 0",
-                        color: "#d5dfec",
-                        lineHeight: 1.55,
-                      }}
-                    >
-                      {activeModView.summary}
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div
-                className="mod-view-metrics"
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                  gap: "0.75rem",
-                }}
-              >
-                <div
-                  className="mod-card mod-view-metric"
-                  style={{ padding: "0.7rem 0.8rem" }}
-                >
-                  <div style={{ color: "#8ea5c4", fontSize: "0.75rem" }}>
-                    Downloads
-                  </div>
-                  <strong>
-                    {(activeModView.downloads || 0).toLocaleString()}
-                  </strong>
-                </div>
-                <div
-                  className="mod-card mod-view-metric"
-                  style={{ padding: "0.7rem 0.8rem" }}
-                >
-                  <div style={{ color: "#8ea5c4", fontSize: "0.75rem" }}>
-                    {activeModView.source === "nexusmods"
-                      ? "Endorsements"
-                      : "Likes"}
-                  </div>
-                  <strong>
-                    {(activeModView.likesOrEndorsements || 0).toLocaleString()}
-                  </strong>
-                </div>
-                <div
-                  className="mod-card mod-view-metric"
-                  style={{ padding: "0.7rem 0.8rem" }}
-                >
-                  <div style={{ color: "#8ea5c4", fontSize: "0.75rem" }}>
-                    Installed Version
-                  </div>
-                  <strong>{activeModView.installedVersion || "unknown"}</strong>
-                </div>
-                <div
-                  className="mod-card mod-view-metric"
-                  style={{ padding: "0.7rem 0.8rem" }}
-                >
-                  <div style={{ color: "#8ea5c4", fontSize: "0.75rem" }}>
-                    Latest Version
-                  </div>
-                  <strong>{activeModView.latestVersion || "unknown"}</strong>
-                </div>
-              </div>
-              {(activeModView.tags || []).length > 0 && (
-                <div
-                  className="mod-view-tags"
-                  style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}
-                >
-                  {(activeModView.tags || []).map((tag) => (
-                    <span
-                      className="mod-view-tag"
-                      key={`${activeModView.id}-${tag}`}
-                      style={{
-                        padding: "0.2rem 0.45rem",
-                        borderRadius: "999px",
-                        backgroundColor: "#38537a33",
-                        border: "1px solid #38537a66",
-                        color: "#a9c1e6",
-                        fontSize: "0.72rem",
-                      }}
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-              <div
-                className="mod-view-actions"
-                style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}
-              >
-                {activeModView.storageId && activeModView.securityScan && (
-                  <button
-                    className="btn btn-secondary btn-small"
-                    onClick={() =>
-                      void openStoredSecurityReport(
-                        activeModView.storageId!,
-                        `Security Findings - ${activeModView.name}`,
-                      )
-                    }
-                  >
-                    <Icon name="fas fa-shield-alt"
-                      style={{ marginRight: "0.45rem" }}
-                     />
-                    Security Report
-                  </button>
-                )}
-                {safeExternalUrl(activeModView.sourceUrl) && (
-                  <a
-                    href={safeExternalUrl(activeModView.sourceUrl)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn btn-secondary btn-small"
-                    style={{ textDecoration: "none" }}
-                  >
-                    <Icon name="fas fa-external-link-alt"
-                      style={{ marginRight: "0.45rem" }}
-                     />
-                    Open Source Page
-                  </a>
-                )}
-                <button
-                  className="btn btn-secondary btn-small"
-                  onClick={closeModView}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </>
-  );
-
-  void legacyLayout;
 
   return (
     <>
@@ -8482,21 +6494,23 @@ export function ModLibraryOverlay({
         busy={securityActionBusy}
       />
       {runtimePrompt && (
-        <div
-          className="modal-overlay modal-overlay-nested"
-          onClick={() => {
+        <Dialog open onOpenChange={(open) => {
+          if (!open) {
             runtimePrompt.onDismiss?.();
             setRuntimePrompt(null);
-          }}
-        >
-          <div
-            className="modal-content modal-content-nested"
-            onClick={(e) => e.stopPropagation()}
+          }
+        }}>
+          <SimmDialogContent
+            nested
+            showCloseButton={false}
             style={{ maxWidth: "420px" }}
           >
             <div className="modal-header">
               <h2>{runtimePrompt.title}</h2>
-              <button
+              <SimmButton
+                type="button"
+                variant="ghost"
+                size="icon-sm"
                 className="modal-close"
                 onClick={() => {
                   runtimePrompt.onDismiss?.();
@@ -8504,7 +6518,7 @@ export function ModLibraryOverlay({
                 }}
               >
                 ×
-              </button>
+              </SimmButton>
             </div>
             <div style={{ padding: "1rem 1.25rem 1.25rem" }}>
               <p style={{ marginTop: 0, color: "#ccc" }}>
@@ -8517,7 +6531,9 @@ export function ModLibraryOverlay({
                   justifyContent: "flex-end",
                 }}
               >
-                <button
+                <SimmButton
+                  type="button"
+                  variant="secondary"
                   className="btn btn-secondary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -8526,8 +6542,10 @@ export function ModLibraryOverlay({
                   }}
                 >
                   Mono
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  type="button"
+                  variant="secondary"
                   className="btn btn-secondary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -8536,8 +6554,9 @@ export function ModLibraryOverlay({
                   }}
                 >
                   IL2CPP
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
+                  type="button"
                   className="btn btn-primary"
                   onClick={() => {
                     const handler = runtimePrompt.onSelect;
@@ -8546,17 +6565,19 @@ export function ModLibraryOverlay({
                   }}
                 >
                   Both
-                </button>
+                </SimmButton>
               </div>
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
 
       <div className="mods-overlay mods-overlay--library workspace-collection-shell">
-        <div className="modal-header">
-          <h2>Mod Library</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow="Workspace"
+          title="Mod Library"
+          description="Browse sources, manage downloaded entries, and install library versions into environments."
+        />
 
         <div className="workspace-collection">
           <div className="workspace-collection__main">
@@ -8570,30 +6591,31 @@ export function ModLibraryOverlay({
                       ["updates", "Updates", "fas fa-arrow-up"],
                     ] as Array<[LibraryTab, string, string]>
                   ).map(([tab, label, icon]) => (
-                    <button
+                    <SimmButton
                       key={tab}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button ${libraryTab === tab ? "workspace-collection__rail-button--active" : ""}`}
                       onClick={() => setLibraryTab(tab)}
                     >
                       <Icon name={icon} />
                       <span>{label}</span>
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
 
                 <div className="workspace-collection__summary">
                   <div className="workspace-collection__summary-chip">
-                    <span>Downloaded</span>
-                    <strong>{downloadedSummary.total}</strong>
+                    <span>{libraryTab === "discover" ? "Sources" : "Downloaded"}</span>
+                    <strong>{libraryTab === "discover" ? 2 : downloadedSummary.total}</strong>
                   </div>
                   <div className="workspace-collection__summary-chip">
-                    <span>Updates</span>
-                    <strong>{downloadedSummary.updates}</strong>
+                    <span>{libraryTab === "discover" ? "Results" : "Updates"}</span>
+                    <strong>{libraryTab === "discover" ? discoverResultCount : downloadedSummary.updates}</strong>
                   </div>
                   <div className="workspace-collection__summary-chip">
-                    <span>Installed</span>
-                    <strong>{downloadedSummary.installed}</strong>
+                    <span>{libraryTab === "discover" ? "Queue" : "Installed"}</span>
+                    <strong>{libraryTab === "discover" ? activeQueueCount : downloadedSummary.installed}</strong>
                   </div>
                 </div>
               </div>
@@ -8609,9 +6631,10 @@ export function ModLibraryOverlay({
                       "installed",
                     ] as DownloadedFilter[]
                   ).map((filter) => (
-                    <button
+                    <SimmButton
                       key={filter}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${downloadedFilter === filter ? "workspace-collection__rail-button--active" : ""}`}
                       onClick={() => setDownloadedFilter(filter)}
                     >
@@ -8624,7 +6647,7 @@ export function ModLibraryOverlay({
                             : filter === "external"
                               ? "External"
                               : "Installed"}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               )}
@@ -8632,9 +6655,11 @@ export function ModLibraryOverlay({
               <div className="workspace-collection__toolbar">
                 {libraryTab === "discover" ? (
                   <>
-                    <div className="workspace-collection__toolbar-group">
-                      <button
+                    <div className="workspace-collection__toolbar-group workspace-source-toggle" aria-label="Search source">
+                      <span className="workspace-control-label">Sources</span>
+                      <SimmButton
                         type="button"
+                        variant={searchSource === "thunderstore" ? "default" : "secondary"}
                         className={`btn btn-small ${searchSource === "thunderstore" ? "btn-primary" : "btn-secondary"}`}
                         onClick={() => {
                           setSearchSource("thunderstore");
@@ -8644,9 +6669,10 @@ export function ModLibraryOverlay({
                         }}
                       >
                         Thunderstore
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant={searchSource === "nexusmods" ? "default" : "secondary"}
                         className={`btn btn-small ${searchSource === "nexusmods" ? "btn-primary" : "btn-secondary"}`}
                         onClick={() => {
                           setSearchSource("nexusmods");
@@ -8656,10 +6682,10 @@ export function ModLibraryOverlay({
                         }}
                       >
                         Nexus Mods
-                      </button>
+                      </SimmButton>
                     </div>
                     <div className="workspace-collection__toolbar-search">
-                      <input
+                      <Input
                         type="text"
                         placeholder={
                           searchSource === "thunderstore"
@@ -8683,7 +6709,7 @@ export function ModLibraryOverlay({
                           }
                         }}
                       />
-                      <button
+                      <SimmButton
                         type="button"
                         className="btn btn-primary btn-small"
                         onClick={
@@ -8704,32 +6730,20 @@ export function ModLibraryOverlay({
                         )
                           ? "Search"
                           : "Browse"}
-                      </button>
+                      </SimmButton>
                     </div>
                     <div className="workspace-collection__toolbar-group">
-                      <label className="workspace-collection__toolbar-select">
-                        <span className="workspace-collection__toolbar-select-wrap">
-                          <select
-                            aria-label="Sort discover results"
-                            value={discoverSort}
-                            onChange={(event) =>
-                              setDiscoverSort(
-                                event.target.value as DiscoverSort,
-                              )
-                            }
-                          >
-                            <option value="relevance">Relevance</option>
-                            <option value="updated">Last updated</option>
-                            <option value="popularity">Popularity</option>
-                            <option value="newest">Newest</option>
-                          </select>
-                          <Icon name="fas fa-chevron-down"
-                            aria-hidden="true"
-                           />
-                        </span>
-                      </label>
+                      <span className="workspace-control-label">Sort</span>
+                      <div className="workspace-collection__toolbar-select">
+                        <DiscoverSortSelect
+                          value={discoverSort}
+                          onValueChange={setDiscoverSort}
+                        />
+                      </div>
                     </div>
-                    <button
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
                       className="btn btn-secondary btn-small"
                       onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
@@ -8737,7 +6751,7 @@ export function ModLibraryOverlay({
                       <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
                        />
                       <span>Refresh</span>
-                    </button>
+                    </SimmButton>
                   </>
                 ) : (
                   <>
@@ -8747,10 +6761,15 @@ export function ModLibraryOverlay({
                           ? "Available Updates"
                           : "Downloaded Library"}
                       </strong>
-                      <span>{displayedDownloadedGroups.length} entries</span>
+                      <span>
+                        {displayedDownloadedGroups.length}{" "}
+                        {displayedDownloadedGroups.length === 1
+                          ? "group"
+                          : "groups"}
+                      </span>
                     </div>
                     <div className="workspace-collection__toolbar-search">
-                      <input
+                      <Input
                         type="text"
                         value={downloadedSearch}
                         onChange={(event) =>
@@ -8760,7 +6779,8 @@ export function ModLibraryOverlay({
                       />
                     </div>
                     {libraryTab === "library" ? (
-                      <button
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary btn-small"
                         onClick={handleAddFilesClick}
                         disabled={downloading === "library-import"}
@@ -8772,9 +6792,11 @@ export function ModLibraryOverlay({
                             ? "Adding..."
                             : "Add Files"}
                         </span>
-                      </button>
+                      </SimmButton>
                     ) : null}
-                    <button
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
                       className="btn btn-secondary btn-small"
                       onClick={handleRefreshLibrary}
                       disabled={loadingLibrary}
@@ -8782,7 +6804,7 @@ export function ModLibraryOverlay({
                       <Icon name={`fas ${loadingLibrary ? "fa-spinner fa-spin" : "fa-sync-alt"}`}
                        />
                       <span>Refresh</span>
-                    </button>
+                    </SimmButton>
                   </>
                 )}
               </div>
@@ -8798,8 +6820,9 @@ export function ModLibraryOverlay({
                       <span>Core tools and recommended downloads</span>
                     </div>
                     <div className="workspace-feature-grid">
-                      <button
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadS1APIClick}
                       >
@@ -8811,9 +6834,10 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{s1apiActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadMlvscanClick}
                       >
@@ -8825,11 +6849,13 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{mlvscanActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadMeshVaultClick}
+                        disabled={!meshVaultFeaturedPackage}
                       >
                         <div>
                           <strong>MeshVault</strong>
@@ -8839,11 +6865,13 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{meshVaultActionLabel}</span>
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
+                        variant="ghost"
                         className="workspace-feature-card"
                         onClick={handleDownloadS1MapiClick}
+                        disabled={!s1mapiFeaturedPackage}
                       >
                         <div>
                           <strong>S1MAPI</strong>
@@ -8853,28 +6881,37 @@ export function ModLibraryOverlay({
                           </p>
                         </div>
                         <span>{s1mapiActionLabel}</span>
-                      </button>
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
+                        variant="ghost"
+                        className="workspace-feature-card"
+                        onClick={handleDownloadSteamNetworkLibClick}
+                        disabled={!steamNetworkLibFeaturedPackage}
+                      >
+                        <div>
+                          <strong>SteamNetworkLib</strong>
+                          <p>
+                            Thunderstore library for shared Steam networking in
+                            UserLibs.
+                          </p>
+                        </div>
+                        <span>{steamNetworkLibActionLabel}</span>
+                      </SimmButton>
                     </div>
                   </section>
                 )}
 
               {libraryTab === "discover" &&
                 (showSearchResults || showNexusModsResults) && (
-                  <section className="workspace-collection__section">
-                    <div className="workspace-collection__section-header">
-                      <h3>
-                        {showSearchResults
-                          ? "Discover Results"
-                          : "Nexus Results"}
-                      </h3>
-                      <span>
-                        {showSearchResults
-                          ? searchResults.length
-                          : nexusModsSearchResults.length}{" "}
-                        result(s)
-                      </span>
-                    </div>
-                    <div className="workspace-collection__list">
+                  <section className="workspace-collection__section workspace-collection__section--inventory">
+                    <div className="workspace-collection__list workspace-collection__list--inventory">
+                      <div className="workspace-collection__table-head workspace-collection__table-head--discover" aria-hidden="true">
+                        <span>Name</span>
+                        <span>Author</span>
+                        <span>Source</span>
+                        <span>Status</span>
+                      </div>
                       {showSearchResults &&
                         searchResults.map((pkg) => {
                           const representative =
@@ -8892,7 +6929,7 @@ export function ModLibraryOverlay({
                           return (
                             <div
                               key={pkg.key}
-                              className={`workspace-collection__row ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                              className={`workspace-collection__row workspace-collection__row--discover ${isSelected ? "workspace-collection__row--selected" : ""}`}
                               role="button"
                               tabIndex={0}
                               onClick={() => openThunderstoreModView(pkg)}
@@ -8915,31 +6952,36 @@ export function ModLibraryOverlay({
                                   {pkg.name}
                                 </div>
                                 <div className="workspace-collection__row-meta">
-                                  <span>{pkg.owner}</span>
-                                  <span className="workspace-pill workspace-pill--source">
-                                    Thunderstore
-                                  </span>
                                   {updatedLabel !== "unknown" && (
-                                    <span className="workspace-pill">
-                                      Updated {updatedLabel}
-                                    </span>
+                                    <span>Updated {updatedLabel}</span>
                                   )}
-                                  {downloadedGroup && (
-                                    <span className="workspace-pill workspace-pill--success">
-                                      Downloaded
-                                    </span>
-                                  )}
-                                  {downloadedGroup &&
-                                    isGroupUpdateAvailable(downloadedGroup) && (
-                                      <span className="workspace-pill workspace-pill--warning">
-                                        Update available
-                                      </span>
-                                    )}
                                 </div>
                                 <p className="workspace-collection__row-summary">
                                   {latestVersion?.description ||
                                     "No summary provided."}
                                 </p>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>{pkg.owner}</span>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>Thunderstore</span>
+                              </div>
+                              <div className="workspace-collection__row-cell workspace-collection__row-cell--status">
+                                {downloadedGroup &&
+                                isGroupUpdateAvailable(downloadedGroup) ? (
+                                  <span className="workspace-collection__status workspace-collection__status--warning">
+                                    Update
+                                  </span>
+                                ) : downloadedGroup ? (
+                                  <span className="workspace-collection__status workspace-collection__status--success">
+                                    Downloaded
+                                  </span>
+                                ) : (
+                                  <span className="workspace-collection__status workspace-collection__status--muted">
+                                    Available
+                                  </span>
+                                )}
                               </div>
                             </div>
                           );
@@ -8958,7 +7000,7 @@ export function ModLibraryOverlay({
                           return (
                             <div
                               key={mod.mod_id}
-                              className={`workspace-collection__row ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                              className={`workspace-collection__row workspace-collection__row--discover ${isSelected ? "workspace-collection__row--selected" : ""}`}
                               role="button"
                               tabIndex={0}
                               onClick={() => openNexusModView(mod)}
@@ -8979,74 +7021,71 @@ export function ModLibraryOverlay({
                                   {mod.name}
                                 </div>
                                 <div className="workspace-collection__row-meta">
-                                  <span>{getNexusModAttribution(mod)}</span>
-                                  <span className="workspace-pill workspace-pill--source">
-                                    Nexus Mods
-                                  </span>
                                   {updatedLabel !== "unknown" && (
-                                    <span className="workspace-pill">
-                                      Updated {updatedLabel}
-                                    </span>
+                                    <span>Updated {updatedLabel}</span>
                                   )}
-                                  {downloadedGroup && (
-                                    <span className="workspace-pill workspace-pill--success">
-                                      Downloaded
-                                    </span>
-                                  )}
-                                  {downloadedGroup &&
-                                    isGroupUpdateAvailable(downloadedGroup) && (
-                                      <span className="workspace-pill workspace-pill--warning">
-                                        Update available
-                                      </span>
-                                    )}
                                 </div>
                                 <p className="workspace-collection__row-summary">
                                   {mod.summary || "No summary provided."}
                                 </p>
                               </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>{getNexusModAttribution(mod)}</span>
+                              </div>
+                              <div className="workspace-collection__row-cell">
+                                <span>Nexus Mods</span>
+                              </div>
+                              <div className="workspace-collection__row-cell workspace-collection__row-cell--status">
+                                {downloadedGroup &&
+                                isGroupUpdateAvailable(downloadedGroup) ? (
+                                  <span className="workspace-collection__status workspace-collection__status--warning">
+                                    Update
+                                  </span>
+                                ) : downloadedGroup ? (
+                                  <span className="workspace-collection__status workspace-collection__status--success">
+                                    Downloaded
+                                  </span>
+                                ) : (
+                                  <span className="workspace-collection__status workspace-collection__status--muted">
+                                    Available
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           );
                         })}
                       {showSearchResults && searchResults.length === 0 && (
-                        <div className="workspace-collection__empty">
-                          No Thunderstore mods matched this search.
-                        </div>
+                        <CollectionEmpty>No Thunderstore mods matched this search.</CollectionEmpty>
                       )}
                       {showNexusModsResults &&
                         nexusModsSearchResults.length === 0 && (
-                          <div className="workspace-collection__empty">
-                            No Nexus Mods matched this search.
-                          </div>
+                          <CollectionEmpty>No Nexus Mods matched this search.</CollectionEmpty>
                         )}
                     </div>
                   </section>
-                )}
+              )}
 
               {(libraryTab === "library" || libraryTab === "updates") && (
-                <section className="workspace-collection__section">
-                  <div className="workspace-collection__section-header">
-                    <h3>
-                      {libraryTab === "updates"
-                        ? "Available Updates"
-                        : "Downloaded Library"}
-                    </h3>
-                    <span>{displayedDownloadedGroups.length} group(s)</span>
-                  </div>
+                <section className="workspace-collection__section workspace-collection__section--inventory">
                   {loadingLibrary && (
-                    <div className="workspace-collection__empty">
-                      Loading mod library…
-                    </div>
+                    <CollectionEmpty>Loading mod library...</CollectionEmpty>
                   )}
                   {!loadingLibrary &&
                     displayedDownloadedGroups.length === 0 && (
-                      <div className="workspace-collection__empty">
+                      <CollectionEmpty>
                         {libraryTab === "updates"
                           ? "No downloaded mods currently need updates."
                           : "No downloaded mods match this filter."}
-                      </div>
-                    )}
+                      </CollectionEmpty>
+                  )}
                   {!loadingLibrary && displayedDownloadedGroups.length > 0 && (
-                    <div className="workspace-collection__list">
+                    <div className="workspace-collection__list workspace-collection__list--inventory">
+                      <div className="workspace-collection__table-head workspace-collection__table-head--downloaded" aria-hidden="true">
+                        <span>Name</span>
+                        <span>Source</span>
+                        <span>Version</span>
+                        <span>Installed</span>
+                      </div>
                       {displayedDownloadedGroups.map((group) => {
                         const activeEntry =
                           getActiveEntryForGroup(group) || group.entries[0];
@@ -9060,7 +7099,7 @@ export function ModLibraryOverlay({
                         return (
                           <div
                             key={group.key}
-                            className={`workspace-collection__row ${isSelected ? "workspace-collection__row--selected" : ""}`}
+                            className={`workspace-collection__row workspace-collection__row--downloaded ${isSelected ? "workspace-collection__row--selected" : ""}`}
                             role="button"
                             tabIndex={0}
                             onClick={() => openDownloadedModView(group)}
@@ -9087,44 +7126,62 @@ export function ModLibraryOverlay({
                                 {group.displayName}
                               </div>
                               <div className="workspace-collection__row-meta">
-                                <span className="workspace-pill workspace-pill--source">
-                                  {getSourceBadgeLabel(activeEntry?.source)}
-                                </span>
-                                <span className="workspace-pill">
-                                  {formatVersionTag(
-                                    getEntryVersionLabel(activeEntry!),
-                                  )}
-                                </span>
-                                <span className="workspace-pill">{`${group.installedIn.length} env${group.installedIn.length === 1 ? "" : "s"}`}</span>
                                 {group.availableRuntimes.map((runtime) => (
-                                  <span
+                                  <WorkspaceBadge
                                     key={`${group.key}-${runtime}`}
-                                    className="workspace-pill"
                                   >
                                     {runtime}
-                                  </span>
+                                  </WorkspaceBadge>
                                 ))}
                                 {isGroupUpdateAvailable(group) && (
-                                  <span className="workspace-pill workspace-pill--warning">
+                                  <WorkspaceBadge tone="warning">
                                     Update available
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                                 {securityBadge && (
-                                  <span
-                                    className="workspace-pill"
+                                  <WorkspaceBadge
+                                    className="workspace-pill--security"
                                     style={{
-                                      border: `1px solid ${securityBadge.border}`,
+                                      borderColor: securityBadge.border,
                                       background: securityBadge.background,
                                       color: securityBadge.color,
                                     }}
                                   >
                                     {securityBadge.label}
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                               </div>
                               <p className="workspace-collection__row-summary">
                                 {activeEntry?.summary || "No summary provided."}
                               </p>
+                            </div>
+                            <div className="workspace-collection__row-cell workspace-collection__row-cell--source">
+                              <span>
+                                {getSourceBadgeLabel(activeEntry?.source)}
+                              </span>
+                              {group.author ? <small>{group.author}</small> : null}
+                            </div>
+                            <div className="workspace-collection__row-cell">
+                              <span>
+                                {formatVersionTag(
+                                  getEntryVersionLabel(activeEntry!),
+                                )}
+                              </span>
+                              {group.remoteVersion &&
+                              group.remoteVersion !==
+                                getEntryVersionLabel(activeEntry!) ? (
+                                <small>
+                                  Latest {formatVersionTag(group.remoteVersion)}
+                                </small>
+                              ) : null}
+                            </div>
+                            <div className="workspace-collection__row-cell">
+                              <span>{group.installedIn.length}</span>
+                              <small>
+                                {group.installedIn.length === 1
+                                  ? "environment"
+                                  : "environments"}
+                              </small>
                             </div>
                           </div>
                         );
@@ -9138,9 +7195,7 @@ export function ModLibraryOverlay({
 
           <aside className="workspace-collection__inspector">
             {!activeModView && (
-              <div className="workspace-collection__inspector-empty">
-                Select a mod to review details and actions.
-              </div>
+              <InspectorEmpty>Select a mod to review details and actions.</InspectorEmpty>
             )}
 
             {selectedDownloadedGroup && selectedDownloadedEntry && (
@@ -9161,48 +7216,11 @@ export function ModLibraryOverlay({
                         : ""}
                       {` • ${selectedDownloadedGroupEntries.length} version${selectedDownloadedGroupEntries.length === 1 ? "" : "s"}`}
                     </div>
-                    {settings?.showSecurityScanBadges !== false &&
-                      getSecurityBadgeConfig(
-                        selectedDownloadedEntry.securityScan,
-                      ) && (
-                        <div
-                          style={{
-                            marginTop: "0.55rem",
-                            display: "flex",
-                            gap: "0.45rem",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <span
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: "0.35rem",
-                              borderRadius: "999px",
-                              border: `1px solid ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.border}`,
-                              background: getSecurityBadgeConfig(
-                                selectedDownloadedEntry.securityScan,
-                              )?.background,
-                              color: getSecurityBadgeConfig(
-                                selectedDownloadedEntry.securityScan,
-                              )?.color,
-                              padding: "0.1rem 0.4rem",
-                              fontSize: "0.72rem",
-                              whiteSpace: "nowrap",
-                              lineHeight: 1,
-                            }}
-                          >
-                            <Icon name={`fas ${getSecurityBadgeConfig(selectedDownloadedEntry.securityScan)?.icon}`}
-                              style={{ fontSize: "0.7rem" }}
-                             />
-                            {
-                              getSecurityBadgeConfig(
-                                selectedDownloadedEntry.securityScan,
-                              )?.label
-                            }
-                          </span>
-                        </div>
-                      )}
+                    {settings?.showSecurityScanBadges !== false && (
+                      <SecurityScanBadge
+                        summary={selectedDownloadedEntry.securityScan}
+                      />
+                    )}
                   </div>
                 </div>
                 <p className="workspace-inspector-card__summary">
@@ -9244,29 +7262,58 @@ export function ModLibraryOverlay({
                   >
                     Available versions
                   </label>
-                  <select
-                    id={`mod-library-version-${selectedDownloadedGroup.key}`}
+                  <Select
                     value={selectedDownloadedEntry.storageId}
-                    onChange={(event) => {
-                      const nextStorageId = event.target.value;
-                      setSelectedStorageByGroup((prev) => ({
-                        ...prev,
-                        [selectedDownloadedGroup.key]: nextStorageId,
-                      }));
+                    onValueChange={(nextStorageId) => {
+                      if (typeof nextStorageId === "string") {
+                        setSelectedStorageByGroup((prev) => ({
+                          ...prev,
+                          [selectedDownloadedGroup.key]: nextStorageId,
+                        }));
+                      }
                     }}
                     disabled={selectedDownloadedGroupEntries.length < 2}
                   >
-                    {selectedDownloadedGroupEntries.map((entry) => (
-                      <option key={entry.storageId} value={entry.storageId}>
-                        {`${formatVersionTag(getEntryVersionLabel(entry))} • ${entry.availableRuntimes?.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger
+                      id={`mod-library-version-${selectedDownloadedGroup.key}`}
+                      className="workspace-inspector-card__select"
+                    >
+                      <SelectValue>
+                        {(selectedStorageId) => {
+                          const selectedEntry =
+                            selectedDownloadedGroupEntries.find(
+                              (entry) => entry.storageId === selectedStorageId,
+                            ) || selectedDownloadedEntry;
+                          return `${formatVersionTag(getEntryVersionLabel(selectedEntry))} - ${selectedEntry.availableRuntimes?.length ? selectedEntry.availableRuntimes.join("/") : "Runtime?"}`;
+                        }}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent className="workspace-inspector-card__select-content" align="start">
+                      <SelectGroup>
+                        {selectedDownloadedGroupEntries.map((entry) => (
+                          <SelectItem
+                            key={entry.storageId}
+                            value={entry.storageId}
+                            onClick={() =>
+                              setSelectedStorageByGroup((prev) => ({
+                                ...prev,
+                                [selectedDownloadedGroup.key]: entry.storageId,
+                              }))
+                            }
+                          >
+                            {`${formatVersionTag(getEntryVersionLabel(entry))} - ${entry.availableRuntimes?.length ? entry.availableRuntimes.join("/") : "Runtime?"}`}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="workspace-inspector-card__actions">
                   {selectedDownloadedEntry.storageId &&
                     selectedDownloadedEntry.securityScan && (
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() =>
                           void openStoredSecurityReport(
@@ -9276,7 +7323,7 @@ export function ModLibraryOverlay({
                         }
                       >
                         Security Report
-                      </button>
+                      </SimmButton>
                     )}
                   {(() => {
                     const installMoreOnly =
@@ -9306,7 +7353,8 @@ export function ModLibraryOverlay({
                         ).message
                       : undefined;
                     return (
-                      <button
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() =>
                           void promptInstallTargets(
@@ -9319,10 +7367,12 @@ export function ModLibraryOverlay({
                         title={installTitle}
                       >
                         {installMoreOnly ? "Install to more…" : "Install…"}
-                      </button>
+                      </SimmButton>
                     );
                   })()}
-                  <button
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() =>
                       void handleSelectVersion(
@@ -9339,8 +7389,10 @@ export function ModLibraryOverlay({
                     {activatingGroup === selectedDownloadedGroup.key
                       ? "Activating…"
                       : "Activate selected version"}
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() =>
                       void handleUpdateAndActivateGroup(selectedDownloadedGroup)
@@ -9348,15 +7400,17 @@ export function ModLibraryOverlay({
                     disabled={!isGroupUpdateAvailable(selectedDownloadedGroup)}
                   >
                     Update and activate
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="destructive"
                     className="btn btn-danger"
                     onClick={() =>
                       void handleDeleteDownloadedGroup(selectedDownloadedGroup)
                     }
                   >
                     Delete downloaded files
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             )}
@@ -9432,17 +7486,16 @@ export function ModLibraryOverlay({
                         <label>Runtime support</label>
                         <div className="workspace-inspector-card__tags">
                           {runtimeLabels.map((runtime) => (
-                            <span
+                            <WorkspaceBadge
                               key={`${selectedThunderstorePackage.key}-${runtime}`}
-                              className="workspace-pill"
                             >
                               {runtime}
-                            </span>
+                            </WorkspaceBadge>
                           ))}
                           {runtimeLabels.length === 0 && (
-                            <span className="workspace-pill">
+                            <WorkspaceBadge>
                               Unknown runtime
-                            </span>
+                            </WorkspaceBadge>
                           )}
                         </div>
                       </div>
@@ -9451,12 +7504,11 @@ export function ModLibraryOverlay({
                           <label>Categories</label>
                           <div className="workspace-inspector-card__tags">
                             {categories.slice(0, 6).map((category) => (
-                              <span
+                              <WorkspaceBadge
                                 key={`${selectedThunderstorePackage.key}-${category}`}
-                                className="workspace-pill"
                               >
                                 {category}
-                              </span>
+                              </WorkspaceBadge>
                             ))}
                           </div>
                         </div>
@@ -9464,29 +7516,29 @@ export function ModLibraryOverlay({
                       <div className="workspace-inspector-card__field">
                         <label>Status</label>
                         <div className="workspace-inspector-card__tags">
-                          <span className="workspace-pill workspace-pill--source">
+                          <WorkspaceBadge tone="source">
                             Thunderstore
-                          </span>
+                          </WorkspaceBadge>
                           {downloadedGroupForSelectedThunderstore && (
-                            <span className="workspace-pill workspace-pill--success">
+                            <WorkspaceBadge tone="success">
                               Downloaded
-                            </span>
+                            </WorkspaceBadge>
                           )}
                           {downloadedGroupForSelectedThunderstore &&
                             isGroupUpdateAvailable(
                               downloadedGroupForSelectedThunderstore,
                             ) && (
-                              <span className="workspace-pill workspace-pill--warning">
+                              <WorkspaceBadge tone="warning">
                                 Update available
-                              </span>
+                              </WorkspaceBadge>
                             )}
                           {representativePackage?.is_pinned && (
-                            <span className="workspace-pill">Pinned</span>
+                            <WorkspaceBadge>Pinned</WorkspaceBadge>
                           )}
                           {representativePackage?.is_deprecated && (
-                            <span className="workspace-pill workspace-pill--danger">
+                            <WorkspaceBadge tone="danger">
                               Deprecated
-                            </span>
+                            </WorkspaceBadge>
                           )}
                         </div>
                       </div>
@@ -9494,7 +7546,8 @@ export function ModLibraryOverlay({
                   );
                 })()}
                 <div className="workspace-inspector-card__actions">
-                  <button
+                  <SimmButton
+                    type="button"
                     className="btn btn-primary"
                     onClick={() =>
                       void handleDownloadThunderstore(
@@ -9504,10 +7557,12 @@ export function ModLibraryOverlay({
                     }
                   >
                     Download selected version
-                  </button>
+                  </SimmButton>
                   {downloadedGroupForSelectedThunderstore &&
                     selectedThunderstoreDownloadedEntry && (
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() =>
                           void promptInstallTargets(
@@ -9522,7 +7577,7 @@ export function ModLibraryOverlay({
                           .length > 0
                           ? "Install library version…"
                           : "Install library version"}
-                      </button>
+                      </SimmButton>
                     )}
                   {safeExternalUrl(selectedThunderstorePackage.packageUrl) && (
                     <a
@@ -9550,9 +7605,9 @@ export function ModLibraryOverlay({
                         Pick the package version you want to add to the library.
                       </p>
                     </div>
-                    <span className="workspace-inspector-card__subsection-count">
+                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
                       {selectedThunderstoreVersionOptions.length} available
-                    </span>
+                    </WorkspaceBadge>
                   </div>
                   <div
                     className="workspace-version-list"
@@ -9563,9 +7618,10 @@ export function ModLibraryOverlay({
                       const isActive =
                         selectedThunderstoreVersion?.key === versionOption.key;
                       return (
-                        <button
+                        <SimmButton
                           key={versionOption.key}
                           type="button"
+                          variant="ghost"
                           role="option"
                           aria-selected={isActive}
                           className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
@@ -9583,12 +7639,11 @@ export function ModLibraryOverlay({
                             </div>
                             <div className="workspace-version-row__badges">
                               {versionOption.runtimes.map((runtime) => (
-                                <span
+                                <WorkspaceBadge
                                   key={`${versionOption.key}-${runtime}`}
-                                  className="workspace-pill"
                                 >
                                   {runtime}
-                                </span>
+                                </WorkspaceBadge>
                               ))}
                             </div>
                           </div>
@@ -9607,7 +7662,7 @@ export function ModLibraryOverlay({
                               {versionOption.description}
                             </p>
                           )}
-                        </button>
+                        </SimmButton>
                       );
                     })}
                   </div>
@@ -9675,36 +7730,37 @@ export function ModLibraryOverlay({
                 <div className="workspace-inspector-card__field">
                   <label>Status</label>
                   <div className="workspace-inspector-card__tags">
-                    <span className="workspace-pill workspace-pill--source">
+                    <WorkspaceBadge tone="source">
                       Nexus Mods
-                    </span>
+                    </WorkspaceBadge>
                     {downloadedGroupForSelectedNexus && (
-                      <span className="workspace-pill workspace-pill--success">
+                      <WorkspaceBadge tone="success">
                         Downloaded
-                      </span>
+                      </WorkspaceBadge>
                     )}
                     {downloadedGroupForSelectedNexus &&
                       isGroupUpdateAvailable(
                         downloadedGroupForSelectedNexus,
                       ) && (
-                        <span className="workspace-pill workspace-pill--warning">
+                        <WorkspaceBadge tone="warning">
                           Update available
-                        </span>
+                        </WorkspaceBadge>
                       )}
                     {selectedNexusResult.contains_adult_content && (
-                      <span className="workspace-pill workspace-pill--danger">
+                      <WorkspaceBadge tone="danger">
                         Adult content
-                      </span>
+                      </WorkspaceBadge>
                     )}
                     {selectedNexusResult.status && (
-                      <span className="workspace-pill">
+                      <WorkspaceBadge>
                         {selectedNexusResult.status}
-                      </span>
+                      </WorkspaceBadge>
                     )}
                   </div>
                 </div>
                 <div className="workspace-inspector-card__actions">
-                  <button
+                  <SimmButton
+                    type="button"
                     className="btn btn-primary"
                     onClick={() =>
                       void handleDownloadNexusMod(
@@ -9715,7 +7771,7 @@ export function ModLibraryOverlay({
                     disabled={selectedNexusFiles.length === 0}
                   >
                     Download selected version
-                  </button>
+                  </SimmButton>
                   {downloadedGroupForSelectedNexus &&
                     selectedNexusDownloadedEntry &&
                     (() => {
@@ -9746,7 +7802,9 @@ export function ModLibraryOverlay({
                           ).message
                         : undefined;
                       return (
-                        <button
+                        <SimmButton
+                          type="button"
+                          variant="secondary"
                           className="btn btn-secondary"
                           onClick={() =>
                             void promptInstallTargets(
@@ -9761,7 +7819,7 @@ export function ModLibraryOverlay({
                           {installMoreOnly
                             ? "Install library version…"
                             : "Install library version"}
-                        </button>
+                        </SimmButton>
                       );
                     })()}
                   <a
@@ -9785,9 +7843,9 @@ export function ModLibraryOverlay({
                         downloading.
                       </p>
                     </div>
-                    <span className="workspace-inspector-card__subsection-count">
+                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
                       {selectedNexusFiles.length} available
-                    </span>
+                    </WorkspaceBadge>
                   </div>
                   {selectedNexusFiles.length > 0 ? (
                     <div
@@ -9801,10 +7859,21 @@ export function ModLibraryOverlay({
                           file.version || file.mod_version || "unknown";
                         const isActive =
                           selectedNexusFile?.file_id === file.file_id;
+                        const detailLabel = getNexusVersionRowDetail(
+                          file,
+                          selectedNexusResult.name,
+                          versionLabel,
+                        );
+                        const summaryLabel = getNexusVersionRowSummary(
+                          file,
+                          selectedNexusResult.name,
+                          versionLabel,
+                        );
                         return (
-                          <button
+                          <SimmButton
                             key={file.file_id}
                             type="button"
+                            variant="ghost"
                             role="option"
                             aria-selected={isActive}
                             className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
@@ -9820,18 +7889,18 @@ export function ModLibraryOverlay({
                                 {formatVersionTag(versionLabel)}
                               </div>
                               <div className="workspace-version-row__badges">
-                                <span className="workspace-pill">
+                                <WorkspaceBadge>
                                   {displayKind}
-                                </span>
+                                </WorkspaceBadge>
                                 {file.is_primary && (
-                                  <span className="workspace-pill workspace-pill--success">
+                                  <WorkspaceBadge tone="success">
                                     Primary
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                                 {file.category_name && (
-                                  <span className="workspace-pill workspace-pill--source">
+                                  <WorkspaceBadge tone="source">
                                     {file.category_name}
-                                  </span>
+                                  </WorkspaceBadge>
                                 )}
                               </div>
                             </div>
@@ -9843,22 +7912,22 @@ export function ModLibraryOverlay({
                                     getNexusModUpdatedAt(selectedNexusResult),
                                 )}
                               </span>
-                              <span>{file.file_name || file.name}</span>
+                              {detailLabel && <span>{detailLabel}</span>}
                             </div>
-                            {file.name && file.file_name !== file.name && (
+                            {summaryLabel && (
                               <p className="workspace-version-row__summary">
-                                {file.name}
+                                {summaryLabel}
                               </p>
                             )}
-                          </button>
+                          </SimmButton>
                         );
                       })}
                     </div>
                   ) : (
-                    <div className="workspace-inspector-card__empty">
+                    <InspectorCardEmpty>
                       No downloadable files were returned for this Nexus mod
                       yet.
-                    </div>
+                    </InspectorCardEmpty>
                   )}
                 </section>
               </div>

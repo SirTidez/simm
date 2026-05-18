@@ -6,32 +6,35 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
   const { browser, page } = await connectToTauriApp();
 
   try {
-    const shellModLibraryButton = page.getByTitle('Open Mod Library').first();
+    const shellModLibraryButton = page.getByRole('button', { name: 'Mod Library' }).first();
     await expect(shellModLibraryButton).toBeVisible();
-    await expect(page.getByRole('button', { name: 'New Game' })).toBeVisible();
+    await page.getByRole('button', { name: 'Environments', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Add Environment' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Accounts' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Help' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
 
-    const createEnvironmentHeading = page.getByRole('heading', { name: 'Create Environment' });
+    const createEnvironmentHeading = page.getByRole('heading', { name: 'Add Game' });
     if (!(await createEnvironmentHeading.isVisible().catch(() => false))) {
-      await page.getByRole('button', { name: 'New Game' }).click();
+      await page.getByRole('button', { name: 'Add Environment' }).click();
     }
 
     await expect(createEnvironmentHeading).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Close create environment panel' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Download New Branch' })).toBeVisible();
+    await expect(page.getByLabel('Create environment panel')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Import Existing Folder' })).toBeVisible();
     await expect(page.getByRole('heading', { name: /Steam install/i }).first()).toBeVisible();
 
-    await page.getByRole('button', { name: /Browse Branches/i }).click();
-    const enabledBranchCards = page.locator('.wizard-branch-card:not(.wizard-branch-card--disabled)');
-    await expect(enabledBranchCards.first()).toBeVisible();
-    await enabledBranchCards.first().click();
+    const downloadBranchHeading = page.getByRole('heading', { name: 'Download Separate Branch' });
+    if (await downloadBranchHeading.isVisible().catch(() => false)) {
+      await page.getByRole('button', { name: /Browse Branches/i }).click();
+      const enabledBranchCards = page.locator('.wizard-branch-card:not(.wizard-branch-card--disabled)');
+      await expect(enabledBranchCards.first()).toBeVisible({ timeout: 30000 });
+      await enabledBranchCards.first().click();
 
-    await expect(page.getByRole('heading', { name: 'Configure Environment' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Configure Environment' })).toBeVisible();
+    }
 
-    await page.getByRole('button', { name: 'Close create environment panel' }).click();
+    await page.getByRole('button', { name: 'Environments', exact: true }).click();
     await expect(createEnvironmentHeading).toBeHidden();
 
     await shellModLibraryButton.click();
@@ -40,7 +43,7 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
     await expect(page.locator('.mods-overlay--library .workspace-collection__rail-button', { hasText: 'Library' }).first()).toBeVisible();
     await expect(page.locator('.mods-overlay--library .workspace-collection__rail-button', { hasText: 'Updates' }).first()).toBeVisible();
 
-    await page.locator('.mods-overlay--library .modal-header .btn', { hasText: 'Back' }).first().click();
+    await page.getByRole('button', { name: 'Environments', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Launch' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Mods' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Config' }).first()).toBeVisible();
@@ -50,7 +53,7 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
     await expect(page.locator('.config-editor')).toBeVisible({ timeout: 30000 });
     await expect(page.locator('.config-explorer')).toBeVisible();
     await expect(page.getByPlaceholder('Search config files')).toBeVisible();
-    await page.locator('.config-editor .modal-header .btn', { hasText: 'Back' }).first().click();
+    await page.getByRole('button', { name: 'Environments', exact: true }).click();
 
     await page.getByRole('button', { name: 'Logs' }).first().click();
     await expect(page.locator('.logs-panel')).toBeVisible({ timeout: 30000 });
@@ -69,7 +72,7 @@ test('opens the real Tauri app shell and reaches environment configuration', asy
       await expect(page.locator('.logs-panel__inspector .logs-panel__inspector-card').first()).toContainText('Line');
     }
 
-    await page.locator('.logs-panel .modal-header .btn', { hasText: 'Back' }).first().click();
+    await page.getByRole('button', { name: 'Environments', exact: true }).click();
 
     await page.getByRole('button', { name: 'Mods' }).first().click();
     await expect(page.locator('.mods-overlay--environment')).toBeVisible({ timeout: 30000 });

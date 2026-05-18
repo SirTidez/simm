@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM Release Updater"
+  short_description: "Ship SIMM releases and updater manifests"
+  default_prompt: "Use $simmrust-release-updater to prepare or debug a SIMM release, changelog, or updater workflow."

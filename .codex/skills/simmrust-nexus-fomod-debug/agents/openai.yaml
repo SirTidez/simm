@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM Nexus FOMOD Debug"
+  short_description: "Debug Nexus and FOMOD flows"
+  default_prompt: "Use $simmrust-nexus-fomod-debug to diagnose a SIMM Nexus manual download or FOMOD issue."

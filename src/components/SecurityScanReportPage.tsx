@@ -56,34 +56,17 @@ export function SecurityScanReportPage({
   };
 
   return (
-    <div className="mods-overlay security-report-page workspace-collection-shell">
-      <div className="modal-header">
-        <div>
-          <h2>Security Findings</h2>
-          <p
-            style={{
-              margin: '0.3rem 0 0',
-              color: '#8fa7c5',
-              lineHeight: 1.5,
-            }}
-          >
-            Review all scanned files and use the sidebar Back button to return to the previous workspace.
-          </p>
-        </div>
-      </div>
-      <div className="workspace-collection">
-        <div className="workspace-collection__main" style={{ padding: '1rem', minHeight: 0 }}>
-          <SecurityScanReportView
-            title={title}
-            report={report}
-            reportOptions={reportOptions}
-            onConfirm={onConfirm ? () => void handleConfirm() : undefined}
-            confirmLabel={confirmLabel}
-            busy={busy}
-            presentation="page"
-          />
-        </div>
-      </div>
+    <div className="security-report-page">
+      <SecurityScanReportView
+        title={title}
+        report={report}
+        reportOptions={reportOptions}
+        onClose={onReturn}
+        onConfirm={onConfirm ? () => void handleConfirm() : undefined}
+        confirmLabel={confirmLabel}
+        busy={busy}
+        presentation="page"
+      />
     </div>
   );
 }

@@ -1924,15 +1924,7 @@ pub async fn complete_nexus_manual_download_session(
     )
     .await;
 
-    let requires_runtime_selection = matches!(
-        &result,
-        Ok(value) if value.get("runtimeSelectionRequired").and_then(|item| item.as_bool()) == Some(true)
-    );
-
-    let cleanup_result = if requires_runtime_selection {
-        Ok(())
-    } else if matches!(&result, Ok(value) if value.get("success").and_then(|item| item.as_bool()) == Some(true))
-    {
+    let cleanup_result = if should_clear_pending_after_manual_completion(&result) {
         clear_nxm_pending_download(db.inner().clone()).await
     } else {
         Ok(())
@@ -1951,6 +1943,17 @@ pub async fn complete_nexus_manual_download_session(
             error, cleanup_error
         ))),
     }
+}
+
+fn should_clear_pending_after_manual_completion(result: &Result<Value, String>) -> bool {
+    !matches!(
+        result,
+        Ok(value)
+            if value
+                .get("runtimeSelectionRequired")
+                .and_then(|item| item.as_bool())
+                == Some(true)
+    )
 }
 
 #[tauri::command]
@@ -2219,30 +2222,6 @@ pub async fn download_nexus_mod_to_library(
         .to_string();
 
     let mods_service = ModsService::new(db_pool.clone());
-    match mods_service
-        .find_existing_mod_storage_by_source_version(
-            &mod_id.to_string(),
-            &version,
-            requested_runtime.clone(),
-        )
-        .await
-    {
-        Ok(Some(existing_mod_id)) => {
-            return Ok(json!({
-                "success": true,
-                "fromStorage": true,
-                "alreadyStored": true,
-                "storageId": existing_mod_id,
-            }));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            nexus_warn(format!(
-                "Failed to check existing Nexus mod storage for mod {} version {}: {}",
-                mod_id, version, error
-            ));
-        }
-    }
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2278,11 +2257,18 @@ pub async fn download_nexus_mod_to_library(
         .get("file_name")
         .and_then(|f| f.as_str())
         .unwrap_or(&default_filename);
-    let tracked_download = crate::services::tracked_downloads::start_file_download(
+    let icon_url = mod_info
+        .get("picture_url")
+        .or_else(|| mod_info.get("pictureUrl"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let tracked_download = crate::services::tracked_downloads::start_file_download_with_icon(
         crate::services::tracked_downloads::new_download_id("nexus-library"),
         crate::types::TrackedDownloadKind::Mod,
         original_filename.to_string(),
         "Nexus Mods",
+        icon_url,
+        None,
         Some("Downloading archive".to_string()),
     );
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
@@ -2469,38 +2455,6 @@ pub async fn install_nexus_mods_mod(
         .to_string();
 
     let mods_service = ModsService::new(db_pool.clone());
-    match mods_service
-        .find_existing_mod_storage_by_source_version(
-            &mod_id.to_string(),
-            &version,
-            Some(env.runtime.clone()),
-        )
-        .await
-    {
-        Ok(Some(existing_mod_id)) => {
-            let install_result = mods_service
-                .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
-                .await
-                .map_err(|e| {
-                    nexus_error(format!(
-                        "Failed to install cached Nexus mod {} into environment {}: {}",
-                        existing_mod_id, environment_id, e
-                    ))
-                })?;
-            return Ok(json!({
-                "success": true,
-                "fromStorage": true,
-                "result": install_result
-            }));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            nexus_warn(format!(
-                "Failed to check existing Nexus mod storage for mod {} version {}: {}",
-                mod_id, version, error
-            ));
-        }
-    }
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2769,7 +2723,7 @@ pub async fn install_nexus_mods_mod(
 mod tests {
     use super::{
         classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
-        derive_account_summary, OAuthRefreshFailure,
+        derive_account_summary, should_clear_pending_after_manual_completion, OAuthRefreshFailure,
     };
     use serde_json::json;
 
@@ -2877,5 +2831,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn manual_download_completion_clears_pending_session_after_failures() {
+        let failed = Err("Failed to store manually downloaded Nexus archive".to_string());
+        assert!(should_clear_pending_after_manual_completion(&failed));
+
+        let runtime_selection = Ok(json!({
+            "success": false,
+            "runtimeSelectionRequired": true,
+        }));
+        assert!(!should_clear_pending_after_manual_completion(
+            &runtime_selection
+        ));
     }
 }

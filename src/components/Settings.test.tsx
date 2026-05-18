@@ -216,36 +216,15 @@ describe("Settings", () => {
   it("shows separate built-in and custom theme selectors", async () => {
     render(<Settings isOpen={true} onClose={vi.fn()} />);
 
-    const presetLabel = screen
-      .getAllByText(/^theme preset$/i)
-      .find((node) => node.tagName === "LABEL");
-    const presetField = presetLabel?.closest(".settings-field");
-    const presetSelect = presetField?.querySelector(
-      "select",
-    ) as HTMLSelectElement | null;
-    const customLabel = screen
-      .getAllByText(/^custom theme$/i)
-      .find((node) => node.tagName === "LABEL");
-    const customField = customLabel?.closest(".settings-field");
-    const customSelect = customField?.querySelector(
-      "select",
-    ) as HTMLSelectElement | null;
+    fireEvent.click(screen.getByRole("combobox", { name: /theme preset/i }));
+    expect(await screen.findByRole("option", { name: "Modern Blue" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Dark" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Light" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
 
-    expect(presetSelect).toBeTruthy();
-    expect(customSelect).toBeTruthy();
-    if (!presetSelect || !customSelect) {
-      throw new Error("Theme preset select not found");
-    }
-
-    const presetOptionValues = Array.from(presetSelect.options).map(
-      (option) => option.value,
-    );
-    const customOptionValues = Array.from(customSelect.options).map(
-      (option) => option.value,
-    );
-
-    expect(presetOptionValues).toEqual(["modern-blue", "dark", "light"]);
-    expect(customOptionValues).toEqual(["", "sunset"]);
+    fireEvent.click(screen.getByRole("combobox", { name: /custom theme/i }));
+    expect(await screen.findByRole("option", { name: "None" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Sunset" })).toBeTruthy();
     expect(screen.getByText(/drop json files here/i)).toBeTruthy();
     expect(screen.getByText(/sunset/i)).toBeTruthy();
   });
@@ -428,15 +407,13 @@ describe("Settings", () => {
 
     render(<Settings isOpen={true} onClose={vi.fn()} onRunSetupGuide={vi.fn()} />);
 
-    const modeLabel = screen
-      .getAllByText(/^app mode$/i)
-      .find((node) => node.tagName === "LABEL");
-    const modeSelect = modeLabel
-      ?.closest(".settings-field")
-      ?.querySelector("select") as HTMLSelectElement | null;
-    expect(modeSelect).toBeTruthy();
-
-    fireEvent.change(modeSelect!, { target: { value: "player" } });
+    fireEvent.click(screen.getByRole("combobox", { name: /app mode/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    const playerOption = screen.getByRole("option", { name: "Player" });
+    fireEvent.pointerEnter(playerOption, { pointerType: "touch" });
+    fireEvent.click(playerOption);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);

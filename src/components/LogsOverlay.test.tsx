@@ -148,11 +148,360 @@ describe('LogsOverlay', () => {
     );
 
     await waitFor(() => {
-      expect(apiMocks.readLogFile).toHaveBeenCalledWith('C:/Games/Schedule I/Logs/Session-latest.log');
+      expect(apiMocks.readLogFile).toHaveBeenCalledWith('C:/Games/Schedule I/Logs/Session-latest.log', 4000);
     });
     const viewerHeader = container.querySelector('.logs-panel__viewer-header');
     expect(viewerHeader).toBeTruthy();
     expect(within(viewerHeader as HTMLElement).getByRole('heading', { name: 'Session-latest.log' })).toBeTruthy();
+  });
+
+  it('shows a loading state immediately after selecting a different log file', async () => {
+    const archivedLoad = createDeferred<Array<ReturnType<typeof makeLogLine>>>();
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+      makeLogFile({
+        name: 'Archived.log',
+        path: 'C:/Games/Schedule I/Logs/Archived.log',
+        isLatest: false,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 1,
+          content: 'Initial latest log line',
+        }),
+      ])
+      .mockImplementationOnce(() => archivedLoad.promise);
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Initial latest log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived\.log/i }));
+
+    expect(await screen.findByText('Loading log file')).toBeTruthy();
+    expect(screen.queryByText('Initial latest log line')).toBeNull();
+
+    archivedLoad.resolve([
+      makeLogLine({
+        lineNumber: 2,
+        content: 'Archived log line loaded',
+      }),
+    ]);
+
+    expect(await screen.findByText('Archived log line loaded')).toBeTruthy();
+  });
+
+  it('uses cached archived log content when switching back to an unchanged file', async () => {
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session.log',
+        path: 'C:/Games/Schedule I/Logs/Session.log',
+        size: 1024,
+        modified: '2026-03-24T18:00:00.000Z',
+        isLatest: false,
+      }),
+      makeLogFile({
+        name: 'Archived.log',
+        path: 'C:/Games/Schedule I/Logs/Archived.log',
+        size: 2048,
+        modified: '2026-03-23T18:00:00.000Z',
+        isLatest: false,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 1,
+          content: 'Cached session log line',
+        }),
+      ])
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 2,
+          content: 'Archived log line',
+        }),
+      ]);
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Cached session log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived\.log/i }));
+    expect(await screen.findByText('Archived log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Session\.log/i }));
+
+    expect(await screen.findByText('Cached session log line')).toBeTruthy();
+    expect(apiMocks.readLogFile).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Loading log file')).toBeNull();
+  });
+
+  it('shows cached latest log content immediately while revalidating it with the backend', async () => {
+    const latestReload = createDeferred<Array<ReturnType<typeof makeLogLine>>>();
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Latest.log',
+        path: 'C:/Games/Schedule I/Logs/Latest.log',
+        size: 1024,
+        modified: '2026-03-24T18:00:00.000Z',
+        isLatest: true,
+      }),
+      makeLogFile({
+        name: 'Archived.log',
+        path: 'C:/Games/Schedule I/Logs/Archived.log',
+        size: 2048,
+        modified: '2026-03-23T18:00:00.000Z',
+        isLatest: false,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 1,
+          content: 'Cached latest log line',
+        }),
+      ])
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 2,
+          content: 'Archived log line',
+        }),
+      ])
+      .mockImplementationOnce(() => latestReload.promise);
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Cached latest log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived\.log/i }));
+    expect(await screen.findByText('Archived log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Latest\.log/i }));
+
+    expect(await screen.findByText('Cached latest log line')).toBeTruthy();
+    expect(apiMocks.readLogFile).toHaveBeenCalledTimes(3);
+
+    latestReload.resolve([
+      makeLogLine({
+        lineNumber: 3,
+        content: 'Fresh latest log line',
+      }),
+    ]);
+
+    expect(await screen.findByText('Fresh latest log line')).toBeTruthy();
+  });
+
+  it('keeps the rendered latest log rows stable when revalidation returns unchanged content', async () => {
+    const latestReload = createDeferred<Array<ReturnType<typeof makeLogLine>>>();
+    const latestLine = makeLogLine({
+      lineNumber: 1,
+      content: 'Stable latest log line',
+    });
+
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Latest.log',
+        path: 'C:/Games/Schedule I/Logs/Latest.log',
+        size: 1024,
+        modified: '2026-03-24T18:00:00.000Z',
+        isLatest: true,
+      }),
+      makeLogFile({
+        name: 'Archived.log',
+        path: 'C:/Games/Schedule I/Logs/Archived.log',
+        size: 2048,
+        modified: '2026-03-23T18:00:00.000Z',
+        isLatest: false,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce([latestLine])
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 2,
+          content: 'Archived log line',
+        }),
+      ])
+      .mockImplementationOnce(() => latestReload.promise);
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Stable latest log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Archived\.log/i }));
+    expect(await screen.findByText('Archived log line')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Latest\.log/i }));
+    expect(await screen.findByText('Stable latest log line')).toBeTruthy();
+
+    const renderedLine = screen.getByText('Stable latest log line').closest('.logs-panel__line');
+    expect(renderedLine).toBeTruthy();
+    expect(screen.getByText('Stable latest log line').closest('.logs-panel__line')).toBe(renderedLine);
+
+    latestReload.resolve([
+      makeLogLine({
+        lineNumber: 1,
+        content: 'Stable latest log line',
+      }),
+    ]);
+
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenCalledTimes(3);
+    });
+    expect(screen.getByText('Stable latest log line').closest('.logs-panel__line')).toBe(renderedLine);
+  });
+
+  it('keeps the last ten archived log files cached and evicts only the oldest entry', async () => {
+    const files = Array.from({ length: 11 }, (_, index) => {
+      const logNumber = index + 1;
+      return makeLogFile({
+        name: `Log-${logNumber}.log`,
+        path: `C:/Games/Schedule I/Logs/Log-${logNumber}.log`,
+        size: 1000 + logNumber,
+        modified: `2026-03-24T18:${String(logNumber).padStart(2, '0')}:00.000Z`,
+        isLatest: false,
+      });
+    });
+
+    apiMocks.getLogFiles.mockResolvedValue(files);
+    apiMocks.readLogFile.mockImplementation(async (logPath: string) => {
+      const pathParts = logPath.split('/');
+      const name = pathParts[pathParts.length - 1] ?? logPath;
+      return [
+        makeLogLine({
+          lineNumber: 1,
+          content: `Loaded ${name}`,
+        }),
+      ];
+    });
+
+    render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Loaded Log-1.log')).toBeTruthy();
+
+    for (let logNumber = 2; logNumber <= 11; logNumber += 1) {
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(`Log-${logNumber}\\.log`, 'i') }));
+      expect(await screen.findByText(`Loaded Log-${logNumber}.log`)).toBeTruthy();
+    }
+
+    expect(apiMocks.readLogFile).toHaveBeenCalledTimes(11);
+
+    fireEvent.click(screen.getByRole('button', { name: /Log-2\.log/i }));
+    expect(await screen.findByText('Loaded Log-2.log')).toBeTruthy();
+    expect(apiMocks.readLogFile).toHaveBeenCalledTimes(11);
+
+    fireEvent.click(screen.getByRole('button', { name: /Log-1\.log/i }));
+    expect(await screen.findByText('Loaded Log-1.log')).toBeTruthy();
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenCalledTimes(12);
+    });
+  });
+
+  it('reloads cached log content when the file metadata changes', async () => {
+    apiMocks.getLogFiles
+      .mockResolvedValueOnce([
+        makeLogFile({
+          name: 'Session.log',
+          path: 'C:/Games/Schedule I/Logs/Session.log',
+          size: 1024,
+          modified: '2026-03-24T18:00:00.000Z',
+          isLatest: false,
+        }),
+      ])
+      .mockResolvedValueOnce([
+        makeLogFile({
+          name: 'Session.log',
+          path: 'C:/Games/Schedule I/Logs/Session.log',
+          size: 2048,
+          modified: '2026-03-24T18:05:00.000Z',
+          isLatest: false,
+        }),
+      ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 1,
+          content: 'Original session log line',
+        }),
+      ])
+      .mockResolvedValueOnce([
+        makeLogLine({
+          lineNumber: 2,
+          content: 'Updated session log line',
+        }),
+      ]);
+
+    const { rerender } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Original session log line')).toBeTruthy();
+
+    rerender(
+      <LogsOverlay
+        isOpen={false}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+    rerender(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Updated session log line')).toBeTruthy();
+    expect(apiMocks.readLogFile).toHaveBeenCalledTimes(2);
   });
 
   it('clears stale log sources before loading the next environment', async () => {
@@ -224,7 +573,7 @@ describe('LogsOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: /Env2-archived\.log/i }));
 
     await waitFor(() => {
-      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I Depot/Logs/Env2-archived.log');
+      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I Depot/Logs/Env2-archived.log', 4000);
     });
   });
 
@@ -426,6 +775,102 @@ describe('LogsOverlay', () => {
     expect(directChildren).toHaveLength(2);
     expect(directChildren[0]?.classList.contains('logs-panel__line-meta')).toBe(true);
     expect(directChildren[1]?.classList.contains('logs-panel__line-content')).toBe(true);
+  });
+
+  it('virtualizes large log files instead of mounting every line at once', async () => {
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue(
+      Array.from({ length: 500 }, (_, index) => makeLogLine({
+        lineNumber: index + 1,
+        content: `Large log line ${index + 1}`,
+        category: 'general',
+      })),
+    );
+
+    const { container } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Large log line 1')).toBeTruthy();
+    expect(screen.queryByText(/500 Lines loaded/)).toBeNull();
+    expect(container.querySelectorAll('.logs-panel__line').length).toBeLessThan(80);
+    expect(container.querySelector('.logs-panel__virtual-spacer')).toBeTruthy();
+  });
+
+  it('loads an older log chunk when scrolling near the top of a tailed file', async () => {
+    const olderLoad = createDeferred<Array<ReturnType<typeof makeLogLine>>>();
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({
+        name: 'Session-latest.log',
+        path: 'C:/Games/Schedule I/Logs/Session-latest.log',
+        isLatest: true,
+      }),
+    ]);
+    apiMocks.readLogFile
+      .mockResolvedValueOnce(
+        Array.from({ length: 4000 }, (_, index) => makeLogLine({
+          lineNumber: index + 101,
+          content: `Tailed log line ${index + 101}`,
+          category: 'general',
+        })),
+      )
+      .mockImplementationOnce(() => olderLoad.promise);
+
+    const { container } = render(
+      <LogsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+        environment={environment}
+      />
+    );
+
+    expect(await screen.findByText('Tailed log line 101')).toBeTruthy();
+
+    const stream = container.querySelector('.logs-panel__stream') as HTMLDivElement | null;
+    expect(stream).toBeTruthy();
+
+    if (stream) {
+      Object.defineProperty(stream, 'scrollHeight', {
+        configurable: true,
+        value: 240000,
+      });
+      Object.defineProperty(stream, 'clientHeight', {
+        configurable: true,
+        value: 720,
+      });
+      Object.defineProperty(stream, 'scrollTop', {
+        configurable: true,
+        value: 100,
+        writable: true,
+      });
+      fireEvent.scroll(stream);
+    }
+
+    await waitFor(() => {
+      expect(apiMocks.readLogFile).toHaveBeenLastCalledWith('C:/Games/Schedule I/Logs/Session-latest.log', 8000);
+    });
+
+    olderLoad.resolve(
+      Array.from({ length: 4100 }, (_, index) => makeLogLine({
+        lineNumber: index + 1,
+        content: `Expanded log line ${index + 1}`,
+        category: 'general',
+      })),
+    );
+
+    expect(await screen.findByText('Expanded log line 1')).toBeTruthy();
   });
 
   it('keeps edge-case metadata visible for missing timestamps and long mod tags', async () => {

@@ -1,6 +1,13 @@
-import { type ReactNode, useEffect, useId, useMemo } from 'react';
-import { createPortal } from 'react-dom';
+import { type ReactNode, useId, useMemo } from 'react';
+import {
+  AlertDialog,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Icon } from './Icon';
+import { SimmAlertDialogContent, SimmButton } from './primitives';
 
 interface ConfirmOverlayProps {
   isOpen: boolean;
@@ -40,21 +47,6 @@ export function ConfirmOverlay({
     return dangerPattern.test(`${title} ${confirmText} ${message}`) ? 'danger' : 'neutral';
   }, [confirmText, message, title, tone]);
 
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
-
   if (!isOpen) return null;
 
   const handleConfirm = () => {
@@ -62,28 +54,29 @@ export function ConfirmOverlay({
     onClose();
   };
 
-  const overlayClass = isNested ? 'modal-overlay modal-overlay-nested' : 'modal-overlay';
   const contentClass = isNested
-    ? `modal-content modal-content-nested app-dialog app-dialog--confirm app-dialog--nested app-dialog--${resolvedTone}`
-    : `modal-content app-dialog app-dialog--confirm app-dialog--${resolvedTone}`;
+    ? `app-dialog app-dialog--confirm app-dialog--nested app-dialog--${resolvedTone}`
+    : `app-dialog app-dialog--confirm app-dialog--${resolvedTone}`;
 
-  const dialogElement = (
-    <div className={overlayClass} onClick={onClose}>
-      <div
+  return (
+    <AlertDialog open={isOpen} onOpenChange={(open) => {
+      if (!open) {
+        onClose();
+      }
+    }}>
+      <SimmAlertDialogContent
+        nested={isNested}
         className={contentClass}
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={messageId}
       >
-        <div className="modal-header app-dialog__header">
+        <AlertDialogHeader className="modal-header app-dialog__header">
           <div className="app-dialog__heading">
             <span className="app-dialog__eyebrow">{resolvedTone === 'danger' ? 'Confirm Action' : 'Confirmation'}</span>
-            <h2 id={titleId}>{title}</h2>
+            <AlertDialogTitle id={titleId}>{title}</AlertDialogTitle>
           </div>
-          <button className="modal-close" onClick={onClose} aria-label="Close confirmation dialog">×</button>
-        </div>
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close confirmation dialog">×</SimmButton>
+        </AlertDialogHeader>
 
         <div className="app-dialog__body">
           <div className={`app-dialog__callout app-dialog__callout--${resolvedTone}`}>
@@ -92,33 +85,27 @@ export function ConfirmOverlay({
             </div>
             <div className="app-dialog__meta">
               <strong>{resolvedTone === 'danger' ? 'Review before continuing' : 'Confirm to continue'}</strong>
-              <p id={messageId}>{message}</p>
+              <AlertDialogDescription id={messageId}>{message}</AlertDialogDescription>
             </div>
           </div>
           {bodyContent ? <div className="app-dialog__supplement">{bodyContent}</div> : null}
         </div>
 
-        <div className="app-dialog__footer">
+        <AlertDialogFooter className="app-dialog__footer">
           <div className="app-dialog__actions">
-            <button className="btn btn-secondary" onClick={onClose} autoFocus={resolvedTone === 'danger'}>
+            <SimmButton className="btn btn-secondary" onClick={onClose} autoFocus={resolvedTone === 'danger'}>
               {cancelText}
-            </button>
-            <button
+            </SimmButton>
+            <SimmButton
               className={resolvedTone === 'danger' ? 'btn btn-danger' : 'btn btn-primary'}
               onClick={handleConfirm}
               autoFocus={resolvedTone !== 'danger'}
             >
               {confirmText}
-            </button>
+            </SimmButton>
           </div>
-        </div>
-      </div>
-    </div>
+        </AlertDialogFooter>
+      </SimmAlertDialogContent>
+    </AlertDialog>
   );
-
-  if (typeof document === 'undefined' || !document.body) {
-    return dialogElement;
-  }
-
-  return createPortal(dialogElement, document.body);
 }

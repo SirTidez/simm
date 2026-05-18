@@ -1,13 +1,13 @@
 import {
   Suspense,
   lazy,
-  startTransition,
+  memo,
   useState,
   useEffect,
   useCallback,
   useRef,
 } from 'react';
-import type { ComponentType } from 'react';
+import type { ComponentType, TransitionEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -19,7 +19,7 @@ import appIcon256 from '../assets/app-icon-256.png';
 import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
-import { DownloadStatusStoreProvider } from '../stores/downloadStatusStore';
+import { DownloadStatusStoreProvider, useDownloadStatusStore } from '../stores/downloadStatusStore';
 import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
@@ -29,20 +29,91 @@ import {
   resolveExperienceMode,
   settingsNeedUpgradeSetupPrompt,
 } from '../utils/uxSettings';
+import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import type {
+  Environment,
   ExperienceMode,
   AppUpdateChannel,
   AppUpdatePreferences,
   AppUpdateStatus,
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
-import { DownloadsPanel } from './DownloadsPanel';
 import { Icon } from './Icon';
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Skeleton } from '@/components/ui/skeleton';
+import { SimmBadge, SimmButton, SimmDialogContent, SimmIconButton } from './primitives';
+import type { IconName } from './icons';
 import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
 import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 
 const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const LAST_ENV_KEY = 'simm:lastEnvId';
+const SHELL_NAV_COLLAPSED_KEY = 'simm:shellNavCollapsed';
+const CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY = 'simm:consumedNexusOAuthCallbacks';
+const SIMM_RELEASES_URL = 'https://api.github.com/repos/SirTidez/simm/releases?per_page=4';
+const SIMM_CHANGELOG_URL = 'https://raw.githubusercontent.com/SirTidez/simm/master/CHANGELOG.md';
+
+const readConsumedNexusOAuthCallbacks = () => {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY) || '[]');
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((value): value is string => typeof value === 'string'))
+      : new Set<string>();
+  } catch {
+    return new Set<string>();
+  }
+};
+
+const rememberConsumedNexusOAuthCallback = (callbackUrl: string) => {
+  try {
+    const callbacks = readConsumedNexusOAuthCallbacks();
+    callbacks.add(callbackUrl);
+    sessionStorage.setItem(
+      CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY,
+      JSON.stringify(Array.from(callbacks).slice(-12)),
+    );
+  } catch {
+    // Ignore storage failures; the in-memory replay guard still works for this session.
+  }
+};
+
+const readStoredShellNavCollapsed = () => {
+  try {
+    return localStorage.getItem(SHELL_NAV_COLLAPSED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+const prefersReducedShellMotion = () => (
+  typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+);
+
+const requestShellAnimationFrame = (callback: FrameRequestCallback) => {
+  if (typeof window.requestAnimationFrame === 'function') {
+    return window.requestAnimationFrame(callback);
+  }
+
+  return window.setTimeout(() => callback(typeof performance !== 'undefined' ? performance.now() : Date.now()), 0);
+};
+
+const cancelShellAnimationFrame = (handle: number) => {
+  if (typeof window.cancelAnimationFrame === 'function') {
+    window.cancelAnimationFrame(handle);
+    return;
+  }
+
+  window.clearTimeout(handle);
+};
 
 const lazyNamed = <T,>(
   loader: () => Promise<T>,
@@ -99,6 +170,10 @@ const SecurityScanReportPage = lazyNamed(
   () => import('./SecurityScanReportPage'),
   (module) => module.SecurityScanReportPage,
 );
+const DownloadsPanel = lazyNamed(
+  () => import('./DownloadsPanel'),
+  (module) => module.DownloadsPanel,
+);
 
 function WorkspacePanelFallback() {
   return (
@@ -135,6 +210,907 @@ const compareVersionCores = (left: string, right: string) => {
   return 0;
 };
 
+function formatDashboardTime(value: string | number | undefined) {
+  if (!value) return 'Not checked yet';
+  const date = typeof value === 'number'
+    ? new Date(value > 1_000_000_000_000 ? value : value * 1000)
+    : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Not checked yet';
+  }
+
+  return date.toLocaleString();
+}
+
+type HomeFeedItem = {
+  id: string;
+  source: 'Release' | 'Changelog';
+  title: string;
+  detail?: string;
+  bullets: string[];
+  date?: string;
+  url?: string;
+};
+
+type GitHubReleasePayload = {
+  html_url?: string;
+  name?: string | null;
+  tag_name?: string;
+  body?: string | null;
+  published_at?: string | null;
+  prerelease?: boolean;
+};
+
+function cleanFeedText(value: string | null | undefined): string {
+  return (value ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\s+by\s+@\S+(?:\s+in\s*)?$/i, '')
+    .replace(/\s+by\s+@\S+\s+in\s*$/i, '')
+    .replace(/\s+in\s*$/i, '')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function summarizeFeedText(value: string | null | undefined): string {
+  const cleaned = cleanFeedText(value);
+  if (!cleaned) return '';
+  return cleaned.length > 132 ? `${cleaned.slice(0, 129).trimEnd()}...` : cleaned;
+}
+
+function formatFeedDate(value: string | undefined): string {
+  if (!value) return 'Recent';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Recent';
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function normalizeReleaseTitle(value: string | null | undefined, tag: string | undefined): string {
+  return (value?.trim() || tag || 'Release').replace(/^release\s+/i, '');
+}
+
+function extractReleaseBullets(body: string | null | undefined): string[] {
+  if (!body) return [];
+
+  return body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*]\s+/.test(line))
+    .filter((line) => !/full changelog/i.test(line))
+    .map((line) => {
+      const withoutMarker = line.replace(/^[-*]\s+/, '');
+      const withoutVersionPrefix = withoutMarker.replace(/^\d+(?:\.\d+)+(?:-[\w.-]+)?\s*[-:]\s*/i, '');
+      return summarizeFeedText(withoutVersionPrefix);
+    })
+    .filter((line) => line.length > 0)
+    .slice(0, 2);
+}
+
+function extractChangelogBullets(body: string): string[] {
+  const bullets: string[] = [];
+  const lines = body.split(/\r?\n/);
+
+  for (const line of lines) {
+    if (/^\s*-\s+contributors\s*:/i.test(line)) break;
+    if (/^\s+-\s+`/.test(line)) continue;
+    if (!/^\s*-\s+/.test(line)) continue;
+
+    const cleaned = summarizeFeedText(line.replace(/^\s*-\s+/, ''));
+    if (cleaned) {
+      bullets.push(cleaned);
+    }
+    if (bullets.length >= 2) break;
+  }
+
+  return bullets;
+}
+
+function parseChangelogFeed(markdown: string): HomeFeedItem[] {
+  const sections: Array<{ version: string; body: string }> = [];
+  const headingPattern = /^##\s+\[?([^\]\n]+)\]?\s*$/gm;
+  const headings = [...markdown.matchAll(headingPattern)];
+
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index];
+    const nextHeading = headings[index + 1];
+    const bodyStart = (heading.index ?? 0) + heading[0].length;
+    const bodyEnd = nextHeading?.index ?? markdown.length;
+    sections.push({
+      version: heading[1].trim(),
+      body: markdown.slice(bodyStart, bodyEnd),
+    });
+  }
+
+  return sections.slice(0, 2).map((section, index) => {
+    const version = section.version;
+    const body = section.body;
+    const bullets = extractChangelogBullets(body);
+
+    return {
+      id: `changelog-${version}-${index}`,
+      source: 'Changelog' as const,
+      title: `SIMM ${version}`,
+      detail: 'Project changelog',
+      bullets,
+      url: 'https://github.com/SirTidez/simm/blob/master/CHANGELOG.md',
+    };
+  }).filter((item) => item.bullets.length > 0);
+}
+
+async function loadHomeFeed(signal?: AbortSignal): Promise<HomeFeedItem[]> {
+  if (typeof fetch !== 'function') {
+    return [];
+  }
+
+  const [releaseResult, changelogResult] = await Promise.allSettled([
+    fetch(SIMM_RELEASES_URL, { headers: { Accept: 'application/vnd.github+json' }, signal }),
+    fetch(SIMM_CHANGELOG_URL, { signal }),
+  ]);
+
+  const feed: HomeFeedItem[] = [];
+
+  if (releaseResult.status === 'fulfilled' && releaseResult.value.ok) {
+    const releases = await releaseResult.value.json() as GitHubReleasePayload[];
+    for (const release of releases) {
+      const tag = release.tag_name ?? 'release';
+      const bullets = extractReleaseBullets(release.body);
+      if (bullets.length === 0) {
+        continue;
+      }
+      feed.push({
+        id: `release-${tag}`,
+        source: 'Release',
+        title: normalizeReleaseTitle(release.name, tag),
+        detail: release.prerelease ? 'Beta release' : 'Stable release',
+        bullets,
+        date: release.published_at ?? undefined,
+        url: release.html_url,
+      });
+      if (feed.filter((item) => item.source === 'Release').length >= 2) {
+        break;
+      }
+    }
+  }
+
+  if (changelogResult.status === 'fulfilled' && changelogResult.value.ok) {
+    const markdown = await changelogResult.value.text();
+    feed.push(...parseChangelogFeed(markdown));
+  }
+
+  return feed.slice(0, 4);
+}
+
+function HomeDashboard({
+  environments,
+  environmentsLoading,
+  downloadsInProgress,
+  appUpdateState,
+  selectedEnvironmentId,
+  onOpenEnvironments,
+  onOpenModLibrary,
+  onOpenModUpdates,
+  onOpenWizard,
+  onOpenSettings,
+}: {
+  environments: Environment[];
+  environmentsLoading: boolean;
+  downloadsInProgress: number;
+  appUpdateState:
+    | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
+    | { status: 'available'; result: AppUpdateStatus };
+  selectedEnvironmentId?: string | null;
+  onOpenEnvironments: (environmentId?: string | null) => void;
+  onOpenModLibrary: () => void;
+  onOpenModUpdates: () => void;
+  onOpenWizard: () => void;
+  onOpenSettings: () => void;
+}) {
+  const completed = environments.filter((env) => env.status === 'completed');
+  const updateCount = completed.filter((env) => env.updateAvailable).length;
+  const steamCount = completed.filter((env) => env.environmentType === 'Steam' || env.environmentType === 'steam' || env.id.startsWith('steam-')).length;
+  const lastChecked = completed
+    .map((env) => env.lastUpdateCheck)
+    .filter((value): value is string | number => Boolean(value))
+    .map((value) => ({
+      raw: value,
+      time: typeof value === 'number'
+        ? (value > 1_000_000_000_000 ? value : value * 1000)
+        : Date.parse(value),
+    }))
+    .filter((entry) => Number.isFinite(entry.time))
+    .sort((a, b) => b.time - a.time)[0]?.raw;
+  const selectedEnvironment = selectedEnvironmentId
+    ? environments.find((env) => env.id === selectedEnvironmentId) ?? null
+    : null;
+  const primaryEnvironment = selectedEnvironment ?? completed.find((env) => env.updateAvailable) ?? completed[0] ?? environments[0] ?? null;
+  const [feedItems, setFeedItems] = useState<HomeFeedItem[]>([]);
+  const [feedStatus, setFeedStatus] = useState<'loading' | 'ready' | 'empty'>('loading');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
+
+    const loadFeed = async () => {
+      setFeedStatus('loading');
+      try {
+        const items = await loadHomeFeed(controller.signal);
+        if (cancelled) return;
+        setFeedItems(items);
+        setFeedStatus(items.length > 0 ? 'ready' : 'empty');
+      } catch (error) {
+        if (cancelled) return;
+        logger.warn('Failed to load home news feed', { error });
+        setFeedStatus('empty');
+      }
+    };
+
+    void loadFeed();
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, []);
+
+  return (
+    <section className="home-dashboard" aria-label="Home dashboard">
+      <div className="home-dashboard__header">
+        <div>
+          <span className="workspace-eyebrow">Home</span>
+          <h1>Welcome back to SIMM</h1>
+          <p>Review install health, updates, and common mod manager actions from one desktop workspace.</p>
+        </div>
+        <div className="home-dashboard__header-actions">
+          <SimmButton type="button" className="btn btn-primary" onClick={onOpenModLibrary} aria-label="Open Mod Library from dashboard">
+            <Icon name="boxOpen" />
+            Mod Library
+          </SimmButton>
+          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenWizard}>
+            <Icon name="plus" />
+            Add Environment
+          </SimmButton>
+        </div>
+      </div>
+
+      <div className="home-dashboard__stats">
+        <article className="home-dashboard__stat">
+          <span>Installs</span>
+          {environmentsLoading ? (
+            <>
+              <Skeleton className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <strong>{completed.length}</strong>
+              <small>{steamCount} Steam linked</small>
+            </>
+          )}
+        </article>
+        <article className="home-dashboard__stat">
+          <span>Game Updates</span>
+          {environmentsLoading ? (
+            <>
+              <Skeleton className="loading-skeleton loading-skeleton--stat" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <strong>{updateCount}</strong>
+              <small>{updateCount > 0 ? 'Attention needed' : 'Everything current'}</small>
+            </>
+          )}
+        </article>
+        <article className="home-dashboard__stat">
+          <span>Downloads</span>
+          <strong>{downloadsInProgress}</strong>
+          <small>{downloadsInProgress > 0 ? 'In progress' : 'Queue is clear'}</small>
+        </article>
+        <article className="home-dashboard__stat">
+          <span>Last Check</span>
+          {environmentsLoading ? (
+            <>
+              <Skeleton className="loading-skeleton loading-skeleton--wide" aria-hidden="true" />
+              <Skeleton className="loading-skeleton loading-skeleton--text" aria-hidden="true" />
+            </>
+          ) : (
+            <>
+              <strong title={formatDashboardTime(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
+              <small>Environment metadata</small>
+            </>
+          )}
+        </article>
+      </div>
+
+      <div className="home-dashboard__layout">
+        <section className="home-dashboard__panel home-dashboard__panel--wide">
+          <div className="home-dashboard__panel-header">
+            <div>
+              <span className="workspace-eyebrow">Status</span>
+              <h2>
+                {environmentsLoading
+                  ? 'Loading your game installs'
+                  : updateCount > 0 ? 'Updates are waiting' : 'Your installs look ready'}
+              </h2>
+            </div>
+            <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => onOpenEnvironments()} aria-label="Open Environments from dashboard">
+              <Icon name="hardDrive" />
+              Environments
+            </SimmButton>
+          </div>
+          {environmentsLoading ? (
+            <div className="home-dashboard__focus home-dashboard__focus--loading" role="status" aria-live="polite">
+              <div>
+                <Skeleton className="loading-skeleton loading-skeleton--title" aria-hidden="true" />
+                <Skeleton className="loading-skeleton loading-skeleton--line" aria-hidden="true" />
+              </div>
+              <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--loading">Scanning</SimmBadge>
+            </div>
+          ) : (
+            <SimmButton
+              type="button"
+              variant="ghost"
+              className="home-dashboard__focus home-dashboard__focus--action h-auto"
+              onClick={primaryEnvironment ? () => onOpenEnvironments(primaryEnvironment.id) : onOpenWizard}
+              aria-label={primaryEnvironment ? `Open Environments for ${primaryEnvironment.name}` : 'Add an environment'}
+            >
+              <div>
+                <strong>{primaryEnvironment?.name ?? 'No environments yet'}</strong>
+                <p>
+                  {primaryEnvironment
+                    ? `${primaryEnvironment.runtime} ${primaryEnvironment.currentGameVersion ?? primaryEnvironment.updateGameVersion ?? 'version unknown'} on ${primaryEnvironment.branch}.`
+                    : 'Add or import a Schedule I install to start managing mods.'}
+                </p>
+              </div>
+              {primaryEnvironment?.updateAvailable && (
+                <SimmBadge variant="secondary" className="home-dashboard__badge home-dashboard__badge--warn">
+                  Update available
+                </SimmBadge>
+              )}
+            </SimmButton>
+          )}
+          <div className="home-dashboard__quick-grid">
+            <SimmButton type="button" variant="ghost" onClick={onOpenModUpdates}>
+              <Icon name="arrowUp" />
+              Mod Updates
+            </SimmButton>
+            <SimmButton type="button" variant="ghost" onClick={onOpenModLibrary}>
+              <Icon name="boxOpen" />
+              Discover Mods
+            </SimmButton>
+            <SimmButton type="button" variant="ghost" onClick={onOpenSettings}>
+              <Icon name="sliders" />
+              Preferences
+            </SimmButton>
+          </div>
+        </section>
+
+        <aside className="home-dashboard__panel home-dashboard__feed" aria-label="News and changes">
+          <div className="home-dashboard__panel-header">
+            <div>
+              <span className="workspace-eyebrow">Updates</span>
+              <h2>News & Changes</h2>
+            </div>
+          </div>
+          <div className="home-dashboard__feed-list">
+            {appUpdateState.status === 'available' && (
+              <article className="home-dashboard__feed-item home-dashboard__feed-item--action">
+                <span>{appUpdateState.result.channel} channel</span>
+                <strong>SIMM {appUpdateState.result.version} is available</strong>
+                <p>{summarizeFeedText(appUpdateState.result.notes) || 'A new SIMM build is ready to install.'}</p>
+              </article>
+            )}
+
+            {feedStatus === 'loading' && (
+              <article className="home-dashboard__feed-item">
+                <span>GitHub</span>
+                <strong>Loading project updates</strong>
+                <p>Checking recent releases and changelog entries.</p>
+              </article>
+            )}
+
+            {feedStatus === 'empty' && (
+              <article className="home-dashboard__feed-item">
+                <span>Offline</span>
+                <strong>Project feed unavailable</strong>
+                <p>Recent SIMM releases and changelog entries will appear here when GitHub can be reached.</p>
+              </article>
+            )}
+
+            {feedItems.map((item) => (
+              <article className="home-dashboard__feed-item" key={item.id}>
+                <span>{item.source}{item.date ? ` / ${formatFeedDate(item.date)}` : ''}</span>
+                {item.url ? (
+                  <a href={item.url} target="_blank" rel="noreferrer">{item.title}</a>
+                ) : (
+                  <strong>{item.title}</strong>
+                )}
+                {item.detail && <p>{item.detail}</p>}
+                <ul className="home-dashboard__feed-points">
+                  {item.bullets.map((bullet) => (
+                    <li key={bullet}>{bullet}</li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function AppShellDownloadsDock({
+  badge,
+  icon,
+  label,
+  shellNavCollapsed,
+}: {
+  badge: number;
+  icon: 'download';
+  label: string;
+  shellNavCollapsed: boolean;
+}) {
+  const [downloadsPanelMounted, setDownloadsPanelMounted] = useState(false);
+  const [downloadsPanelVisible, setDownloadsPanelVisible] = useState(false);
+  const downloadsPanelDismissTimerRef = useRef<number | null>(null);
+  const downloadsPanelAnimationFrameRef = useRef<number | null>(null);
+
+  const clearDownloadsPanelAnimationFrame = useCallback(() => {
+    if (downloadsPanelAnimationFrameRef.current !== null) {
+      cancelShellAnimationFrame(downloadsPanelAnimationFrameRef.current);
+      downloadsPanelAnimationFrameRef.current = null;
+    }
+  }, []);
+
+  const clearDownloadsPanelDismissTimer = useCallback(() => {
+    if (downloadsPanelDismissTimerRef.current !== null) {
+      window.clearTimeout(downloadsPanelDismissTimerRef.current);
+      downloadsPanelDismissTimerRef.current = null;
+    }
+  }, []);
+
+  const openDownloadsPanel = useCallback(() => {
+    clearDownloadsPanelAnimationFrame();
+    setDownloadsPanelMounted(true);
+
+    if (prefersReducedShellMotion()) {
+      setDownloadsPanelVisible(true);
+      return;
+    }
+
+    downloadsPanelAnimationFrameRef.current = requestShellAnimationFrame(() => {
+      downloadsPanelAnimationFrameRef.current = null;
+      setDownloadsPanelVisible(true);
+    });
+  }, [clearDownloadsPanelAnimationFrame]);
+
+  const closeDownloadsPanel = useCallback(() => {
+    clearDownloadsPanelDismissTimer();
+    clearDownloadsPanelAnimationFrame();
+
+    if (prefersReducedShellMotion()) {
+      setDownloadsPanelVisible(false);
+      setDownloadsPanelMounted(false);
+      return;
+    }
+
+    setDownloadsPanelVisible(false);
+  }, [clearDownloadsPanelAnimationFrame, clearDownloadsPanelDismissTimer]);
+
+  const scheduleDownloadsPanelDismiss = useCallback(() => {
+    clearDownloadsPanelDismissTimer();
+    downloadsPanelDismissTimerRef.current = window.setTimeout(() => {
+      downloadsPanelDismissTimerRef.current = null;
+      closeDownloadsPanel();
+    }, 850);
+  }, [clearDownloadsPanelDismissTimer, closeDownloadsPanel]);
+
+  const toggleDownloadsPanel = useCallback(() => {
+    clearDownloadsPanelDismissTimer();
+    if (downloadsPanelVisible) {
+      closeDownloadsPanel();
+      return;
+    }
+
+    openDownloadsPanel();
+  }, [clearDownloadsPanelDismissTimer, closeDownloadsPanel, downloadsPanelVisible, openDownloadsPanel]);
+
+  const handleDownloadsPanelTransitionEnd = useCallback((event: TransitionEvent<HTMLDivElement>) => {
+    if (event.currentTarget !== event.target || event.propertyName !== 'opacity' || downloadsPanelVisible) {
+      return;
+    }
+
+    setDownloadsPanelMounted(false);
+  }, [downloadsPanelVisible]);
+
+  useEffect(() => () => {
+    clearDownloadsPanelDismissTimer();
+    clearDownloadsPanelAnimationFrame();
+  }, [clearDownloadsPanelAnimationFrame, clearDownloadsPanelDismissTimer]);
+
+  return (
+    <>
+      <div
+        className="app-shell-sidebar__download-dock"
+        onPointerEnter={clearDownloadsPanelDismissTimer}
+        onPointerLeave={scheduleDownloadsPanelDismiss}
+      >
+        <SimmButton
+          type="button"
+          variant="ghost"
+          className="app-shell-sidebar__tool-item app-shell-sidebar__download-item"
+          onClick={toggleDownloadsPanel}
+          aria-expanded={downloadsPanelVisible}
+          aria-controls="downloads-popover"
+          title={label}
+        >
+          <Icon name={icon} />
+          <span>{label}</span>
+          <SimmBadge variant="secondary" className="app-shell-sidebar__tool-badge">{badge}</SimmBadge>
+        </SimmButton>
+      </div>
+      {downloadsPanelMounted && (
+        <div
+          className={[
+            'downloads-popover',
+            downloadsPanelVisible ? 'downloads-popover--open' : 'downloads-popover--closing',
+            shellNavCollapsed ? 'downloads-popover--nav-collapsed' : '',
+          ].filter(Boolean).join(' ')}
+          id="downloads-popover"
+          role="dialog"
+          aria-label="Downloads"
+          onPointerEnter={clearDownloadsPanelDismissTimer}
+          onPointerLeave={scheduleDownloadsPanelDismiss}
+          onTransitionEnd={handleDownloadsPanelTransitionEnd}
+        >
+          <Suspense fallback={<WorkspacePanelFallback />}>
+            <DownloadsPanel presentation="popup" onClose={closeDownloadsPanel} />
+          </Suspense>
+        </div>
+      )}
+    </>
+  );
+}
+
+const AppShellSidebar = memo(function AppShellSidebar({
+  activeWorkspace,
+  currentEnvironmentId,
+  downloadsBadgeCount,
+  environments,
+  environmentsLoading,
+  onEnvironmentSelect,
+  onOpenEnvironmentWorkspace,
+  onOpenEnvironmentsWorkspace,
+  onOpenHome,
+  onOpenLibrary,
+  onShellNavTransitionEnd,
+  onToggleShellNavigation,
+  shellNavAnimating,
+  shellNavCollapsed,
+  shellNavExpandedContentVisible,
+}: {
+  activeWorkspace: WorkspaceRoute;
+  currentEnvironmentId: string | null;
+  downloadsBadgeCount: number;
+  environments: Environment[];
+  environmentsLoading: boolean;
+  onEnvironmentSelect: (environmentId: string) => void;
+  onOpenEnvironmentWorkspace: (view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => void;
+  onOpenEnvironmentsWorkspace: () => void;
+  onOpenHome: () => void;
+  onOpenLibrary: () => void;
+  onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
+  onToggleShellNavigation: () => void;
+  shellNavAnimating: boolean;
+  shellNavCollapsed: boolean;
+  shellNavExpandedContentVisible: boolean;
+}) {
+  const [collapsedShellSections, setCollapsedShellSections] = useState({
+    environments: false,
+    tools: false,
+  });
+
+  const toggleShellSection = useCallback((section: 'environments' | 'tools') => {
+    setCollapsedShellSections((previous) => ({
+      ...previous,
+      [section]: !previous[section],
+    }));
+  }, []);
+
+  const sortedEnvironments = sortEnvironmentsForDisplay(environments);
+  const shellSidebarClassName = [
+    'app-shell-sidebar',
+    shellNavCollapsed ? 'app-shell-sidebar--collapsed' : '',
+    shellNavAnimating ? 'app-shell-sidebar--animating' : '',
+    shellNavExpandedContentVisible ? 'app-shell-sidebar--expanded-content-visible' : '',
+  ].filter(Boolean).join(' ');
+  const toolNavItems = [
+    {
+      key: 'home',
+      label: 'Home',
+      icon: 'house',
+      active: activeWorkspace.view === 'home',
+      onClick: onOpenHome,
+    },
+    {
+      key: 'environments',
+      label: 'Environments',
+      icon: 'hardDrive',
+      active: activeWorkspace.view === 'environments' || activeWorkspace.view === 'wizard',
+      onClick: () => onOpenEnvironmentsWorkspace(),
+    },
+    {
+      key: 'library',
+      label: 'Mod Library',
+      icon: 'boxOpen',
+      active: activeWorkspace.view === 'library',
+      onClick: onOpenLibrary,
+    },
+    {
+      key: 'mods',
+      label: 'Installed Mods',
+      icon: 'boxArchive',
+      active: activeWorkspace.view === 'mods',
+      onClick: () => onOpenEnvironmentWorkspace('mods'),
+    },
+    {
+      key: 'config',
+      label: 'Config Files',
+      icon: 'fileCode',
+      active: activeWorkspace.view === 'config',
+      onClick: () => onOpenEnvironmentWorkspace('config'),
+    },
+    {
+      key: 'logs',
+      label: 'Logs',
+      icon: 'fileLines',
+      active: activeWorkspace.view === 'logs',
+      onClick: () => onOpenEnvironmentWorkspace('logs'),
+    },
+  ] as const;
+
+  return (
+    <aside className={shellSidebarClassName} aria-label="Primary navigation" onTransitionEnd={onShellNavTransitionEnd}>
+      <SimmButton
+        type="button"
+        variant="ghost"
+        className="app-shell-sidebar__collapse-toggle"
+        onClick={onToggleShellNavigation}
+        aria-label={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+        title={shellNavCollapsed ? 'Expand navigation sidebar' : 'Collapse navigation sidebar'}
+      >
+        <Icon name={shellNavCollapsed ? 'anglesRight' : 'anglesLeft'} />
+      </SimmButton>
+      {shellNavExpandedContentVisible ? (
+        <section className="app-shell-sidebar__section app-shell-sidebar__section--environments">
+          <SimmButton
+            type="button"
+            variant="ghost"
+            className="app-shell-sidebar__section-toggle"
+            onClick={() => toggleShellSection('environments')}
+            aria-expanded={!collapsedShellSections.environments}
+          >
+            <span>Environments</span>
+            <Icon name={collapsedShellSections.environments ? 'chevronRight' : 'chevronDown'} />
+          </SimmButton>
+          {!collapsedShellSections.environments ? (
+            <div className="app-shell-sidebar__section-body">
+              {environmentsLoading && sortedEnvironments.length === 0 ? (
+                <div className="app-shell-sidebar__environment-list app-shell-sidebar__environment-list--loading" role="status" aria-live="polite" aria-label="Loading environments">
+                  {[0, 1, 2].map((index) => (
+                    <div key={index} className="app-shell-sidebar__environment-item app-shell-sidebar__environment-item--skeleton">
+                      <Skeleton className="loading-skeleton loading-skeleton--env-name" aria-hidden="true" />
+                      <Skeleton className="loading-skeleton loading-skeleton--env-meta" aria-hidden="true" />
+                    </div>
+                  ))}
+                </div>
+              ) : sortedEnvironments.length > 0 ? (
+                <div className="app-shell-sidebar__environment-list">
+                  {sortedEnvironments.map((environment) => (
+                    <SimmButton
+                      key={environment.id}
+                      type="button"
+                      variant="ghost"
+                      className={`app-shell-sidebar__environment-item${currentEnvironmentId === environment.id ? ' app-shell-sidebar__environment-item--active' : ''}`}
+                      onClick={() => onEnvironmentSelect(environment.id)}
+                      aria-current={currentEnvironmentId === environment.id ? 'page' : undefined}
+                      title={`${environment.name}${environment.updateAvailable ? ' - Update available' : environment.status === 'completed' ? ' - Ready' : ''}`}
+                    >
+                      <span className="app-shell-sidebar__environment-icon" aria-hidden="true">
+                        <Icon name={environment.environmentType === 'Steam' ? 'steam' : 'hardDrive'} />
+                      </span>
+                      <span className="app-shell-sidebar__environment-name">{environment.name}</span>
+                      {environment.updateAvailable ? (
+                        <SimmBadge variant="secondary" className="app-shell-sidebar__environment-meta app-shell-sidebar__environment-meta--warning">
+                          Update
+                        </SimmBadge>
+                      ) : environment.status === 'completed' ? (
+                        <SimmBadge variant="outline" className="app-shell-sidebar__environment-meta">Ready</SimmBadge>
+                      ) : null}
+                    </SimmButton>
+                  ))}
+                </div>
+              ) : (
+                <div className="app-shell-sidebar__empty">
+                  <span>No environments yet.</span>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      <section className="app-shell-sidebar__section app-shell-sidebar__section--tools">
+        <SimmButton
+          type="button"
+          variant="ghost"
+          className="app-shell-sidebar__section-toggle"
+          onClick={() => toggleShellSection('tools')}
+          aria-expanded={!collapsedShellSections.tools}
+        >
+          <span>Tools</span>
+          <Icon name={collapsedShellSections.tools ? 'chevronRight' : 'chevronDown'} />
+        </SimmButton>
+        {!collapsedShellSections.tools || shellNavCollapsed ? (
+          <div className="app-shell-sidebar__section-body">
+            <div className="app-shell-sidebar__tool-list">
+              {toolNavItems.map((item) => (
+                <SimmButton
+                  key={item.key}
+                  type="button"
+                  variant="ghost"
+                  className={`app-shell-sidebar__tool-item${item.active ? ' app-shell-sidebar__tool-item--active' : ''}`}
+                  onClick={item.onClick}
+                  aria-current={item.active ? 'page' : undefined}
+                  title={item.label}
+                >
+                  <Icon name={item.icon} />
+                  <span>{item.label}</span>
+                </SimmButton>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+      <AppShellDownloadsDock
+        badge={downloadsBadgeCount}
+        label="Downloads"
+        icon="download"
+        shellNavCollapsed={shellNavCollapsed}
+      />
+    </aside>
+  );
+});
+
+type ShellUtilityAction = {
+  key: string;
+  label: string;
+  icon: IconName;
+  active: boolean;
+  variant: 'btn-primary' | 'btn-secondary';
+  onClick: () => void;
+  disabled: boolean;
+  title: string;
+};
+
+function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUtilityAction[] }) {
+  const appWindow = getCurrentWindow();
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const bindWindowState = async () => {
+      try {
+        setIsMaximized(await appWindow.isMaximized());
+        unlisten = await appWindow.onResized(async () => {
+          setIsMaximized(await appWindow.isMaximized());
+        });
+      } catch (error) {
+        console.error('Failed to bind window state:', error);
+      }
+    };
+
+    bindWindowState();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [appWindow]);
+
+  const handleMinimize = async () => {
+    try {
+      await appWindow.minimize();
+    } catch (error) {
+      console.error('Failed to minimize window:', error);
+    }
+  };
+
+  const handleToggleMaximize = async () => {
+    try {
+      await appWindow.toggleMaximize();
+      setIsMaximized(await appWindow.isMaximized());
+    } catch (error) {
+      console.error('Failed to toggle maximize:', error);
+    }
+  };
+
+  const handleCloseWindow = async () => {
+    try {
+      await appWindow.close();
+    } catch (error) {
+      console.error('Failed to close window:', error);
+    }
+  };
+
+  return (
+    <header className="window-chrome">
+      <div className="window-brand" data-tauri-drag-region>
+        <img src={appIcon256} alt="SIMM" className="window-brand-icon" />
+        <div className="window-brand-text">
+          <strong>SIMM - Schedule I Mod Manager</strong>
+        </div>
+      </div>
+
+      <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
+
+      <div className="window-toolbar-actions window-toolbar-actions--shell" aria-label="Shell actions">
+        {utilityActions.map((action) => (
+          <SimmButton
+            key={action.key}
+            type="button"
+            variant={action.variant === 'btn-primary' ? 'default' : 'secondary'}
+            className={`btn ${action.variant} app-shell-toolbar-button${action.active ? ' app-shell-toolbar-button--active' : ''}`}
+            onClick={action.onClick}
+            aria-current={action.active ? 'page' : undefined}
+            disabled={action.disabled}
+            title={action.title}
+          >
+            <Icon name={action.icon} spin={action.icon === 'spinner'} />
+            <span>{action.label}</span>
+          </SimmButton>
+        ))}
+      </div>
+
+      <div className="window-controls" aria-label="Window controls">
+        <SimmIconButton
+          onClick={handleMinimize}
+          className="window-control-btn"
+          title="Minimize"
+          aria-label="Minimize"
+        >
+          <Icon name="minus" />
+        </SimmIconButton>
+        <SimmIconButton
+          onClick={handleToggleMaximize}
+          className="window-control-btn"
+          title={isMaximized ? 'Restore Down' : 'Maximize'}
+          aria-label={isMaximized ? 'Restore Down' : 'Maximize'}
+        >
+          <Icon name={isMaximized ? 'windowRestore' : 'square'} />
+        </SimmIconButton>
+        <SimmIconButton
+          onClick={handleCloseWindow}
+          className="window-control-btn window-control-btn-close"
+          title="Close"
+          aria-label="Close"
+        >
+          <Icon name="times" />
+        </SimmIconButton>
+      </div>
+    </header>
+  );
+}
+
 function AppContent() {
   type PendingNexusRuntimeSelection = {
     nxmUrl: string;
@@ -163,8 +1139,8 @@ function AppContent() {
     | { status: 'idle' | 'checking' | 'upToDate' | 'error'; result: null }
     | { status: 'available'; result: AppUpdateStatus };
 
-  const appWindow = getCurrentWindow();
-  const { environments } = useEnvironmentStore();
+  const { environments, loading: environmentsLoading } = useEnvironmentStore();
+  const { downloads } = useDownloadStatusStore();
   const { settings, updateSettings } = useSettingsStore();
   const workspaceIdRef = useRef(0);
   const libraryFocusRequestIdRef = useRef(0);
@@ -181,9 +1157,6 @@ function AppContent() {
   const [workspaceStack, setWorkspaceStack] = useState<WorkspaceEntry[]>(() => [
     createWorkspaceEntry({ view: 'home' }),
   ]);
-  const [showStartupSplash, setShowStartupSplash] = useState(true);
-  const [isMaximized, setIsMaximized] = useState(false);
-  const [lastEnvironmentWorkspaceView, setLastEnvironmentWorkspaceView] = useState<'mods' | 'plugins' | 'userLibs' | 'logs' | 'config'>('mods');
   const completedNexusCallbackRef = useRef<string | null>(null);
   const inFlightNexusCallbackRef = useRef<string | null>(null);
   const completedNxmCallbackRef = useRef(new Set<string>());
@@ -193,18 +1166,69 @@ function AppContent() {
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
   const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
+  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string | null>(null);
+  const [environmentFocusRequestId, setEnvironmentFocusRequestId] = useState(0);
+  const [launchingEnvironmentId, setLaunchingEnvironmentId] = useState<string | null>(null);
+  const [shellNavCollapsed, setShellNavCollapsed] = useState(readStoredShellNavCollapsed);
+  const [shellNavAnimating, setShellNavAnimating] = useState(false);
+  const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
   const startupSetupCheckedRef = useRef(false);
+  const shellNavAnimationFrameRef = useRef<number | null>(null);
   const hasSettings = settings !== null;
   const activeEntry = workspaceStack[workspaceStack.length - 1];
   const activeWorkspace = activeEntry.route;
-  const canGoBack = workspaceStack.length > 1;
-  const isToolbarWorkspaceActive = useCallback(
-    (view: WorkspaceRoute['view']) => activeWorkspace.view === view,
-    [activeWorkspace.view],
-  );
+  const persistShellNavCollapsed = useCallback((collapsed: boolean) => {
+    try {
+      localStorage.setItem(SHELL_NAV_COLLAPSED_KEY, String(collapsed));
+    } catch {
+      // Ignore storage failures; the in-session state still updates.
+    }
+  }, []);
+  const toggleShellNavigation = useCallback(() => {
+    if (shellNavAnimationFrameRef.current !== null) {
+      cancelShellAnimationFrame(shellNavAnimationFrameRef.current);
+      shellNavAnimationFrameRef.current = null;
+    }
 
+    const nextCollapsed = !shellNavCollapsed;
+    const reducedMotion = prefersReducedShellMotion();
+    persistShellNavCollapsed(nextCollapsed);
+    setShellNavAnimating(!reducedMotion);
+
+    if (nextCollapsed) {
+      setShellNavExpandedContentVisible(false);
+      setShellNavCollapsed(true);
+      return;
+    }
+
+    setShellNavExpandedContentVisible(true);
+    if (reducedMotion) {
+      setShellNavCollapsed(false);
+      return;
+    }
+
+    shellNavAnimationFrameRef.current = requestShellAnimationFrame(() => {
+      shellNavAnimationFrameRef.current = null;
+      setShellNavCollapsed(false);
+    });
+  }, [persistShellNavCollapsed, shellNavCollapsed]);
+  const handleShellNavTransitionEnd = useCallback((event: TransitionEvent<HTMLElement>) => {
+    if (event.currentTarget !== event.target || event.propertyName !== 'width') {
+      return;
+    }
+
+    setShellNavAnimating(false);
+    if (shellNavCollapsed) {
+      setShellNavExpandedContentVisible(false);
+    }
+  }, [shellNavCollapsed]);
+  useEffect(() => () => {
+    if (shellNavAnimationFrameRef.current !== null) {
+      cancelShellAnimationFrame(shellNavAnimationFrameRef.current);
+    }
+  }, []);
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
       return false;
@@ -226,46 +1250,65 @@ function AppContent() {
   }, []);
 
   const pushWorkspace = useCallback((route: Exclude<WorkspaceRoute, { view: 'home' }>, seed?: Partial<WorkspaceEntry>) => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        const current = previous[previous.length - 1];
-        if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
-          if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
-            return previous;
-          }
-          return [
-            ...previous.slice(0, -1),
-            {
-              ...current,
-              route,
-              libraryState: seed?.libraryState ?? current.libraryState,
-              modsState: seed?.modsState ?? current.modsState,
-              securityReportState: seed?.securityReportState ?? current.securityReportState,
-            },
-          ];
+    setWorkspaceStack((previous) => {
+      const current = previous[previous.length - 1];
+      if (current && isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
+        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+          return previous;
         }
+        return [
+          ...previous.slice(0, -1),
+          {
+            ...current,
+            route,
+            libraryState: seed?.libraryState ?? current.libraryState,
+            modsState: seed?.modsState ?? current.modsState,
+            securityReportState: seed?.securityReportState ?? current.securityReportState,
+          },
+        ];
+      }
+      return [...previous, createWorkspaceEntry(route, seed)];
+    });
+  }, [createWorkspaceEntry, isSameWorkspaceRoute]);
+
+  const replaceWorkspace = useCallback((route: Exclude<WorkspaceRoute, { view: 'home' }>, seed?: Partial<WorkspaceEntry>) => {
+    setWorkspaceStack((previous) => {
+      const current = previous[previous.length - 1];
+      if (!current || current.route.view === 'home') {
         return [...previous, createWorkspaceEntry(route, seed)];
-      });
+      }
+      if (isSameWorkspaceRoute(current.route, route) && !seed?.libraryFocusRequest) {
+        if (!seed?.libraryState && !seed?.modsState && !seed?.securityReportState) {
+          return previous;
+        }
+        return [
+          ...previous.slice(0, -1),
+          {
+            ...current,
+            route,
+            libraryState: seed?.libraryState ?? current.libraryState,
+            modsState: seed?.modsState ?? current.modsState,
+            securityReportState: seed?.securityReportState ?? current.securityReportState,
+          },
+        ];
+      }
+      return [...previous.slice(0, -1), createWorkspaceEntry(route, seed)];
     });
   }, [createWorkspaceEntry, isSameWorkspaceRoute]);
 
   const popWorkspace = useCallback(() => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        if (previous.length <= 1) {
-          return previous;
-        }
-        return previous.slice(0, -1);
-      });
+    setWorkspaceStack((previous) => {
+      if (previous.length <= 1) {
+        return previous;
+      }
+      return previous.slice(0, -1);
     });
   }, []);
 
   const goHome = useCallback(() => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        const homeEntry = previous.find((entry) => entry.route.view === 'home');
-        return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
-      });
+    setWorkspaceStack((previous) => {
+      const homeEntry = previous.find((entry) => entry.route.view === 'home');
+      return [homeEntry ?? createWorkspaceEntry({ view: 'home' })];
     });
   }, [createWorkspaceEntry]);
 
@@ -274,8 +1317,20 @@ function AppContent() {
   }, []);
 
   const openWorkspace = useCallback((workspace: Exclude<WorkspaceRoute, { view: 'home' }>) => {
+    const activeIsEnvironmentWorkspace = 'environmentId' in activeWorkspace;
+    const nextIsEnvironmentWorkspace = 'environmentId' in workspace;
+    const shouldReplaceCurrent =
+      !activeIsEnvironmentWorkspace
+      && !nextIsEnvironmentWorkspace
+      && activeWorkspace.view !== 'home';
+
+    if (shouldReplaceCurrent) {
+      replaceWorkspace(workspace);
+      return;
+    }
+
     pushWorkspace(workspace);
-  }, [pushWorkspace]);
+  }, [activeWorkspace, pushWorkspace, replaceWorkspace]);
 
   const openSecurityReportWorkspace = useCallback((reportState: SecurityReportWorkspaceRequest) => {
     pushWorkspace(
@@ -306,14 +1361,19 @@ function AppContent() {
 
     lastLibraryNavigationStateRef.current = mergedNavigationState;
 
-    pushWorkspace(
-      options?.initialTab ? { view: 'library', initialTab: options.initialTab } : { view: 'library' },
-      {
-        libraryState: mergedNavigationState,
-        libraryFocusRequest: options?.focusRequest ?? null,
-      },
-    );
-  }, [pushWorkspace, workspaceStack]);
+    const route = options?.initialTab ? { view: 'library' as const, initialTab: options.initialTab } : { view: 'library' as const };
+    const seed = {
+      libraryState: mergedNavigationState,
+      libraryFocusRequest: options?.focusRequest ?? null,
+    };
+
+    if (!('environmentId' in activeWorkspace) && activeWorkspace.view !== 'home') {
+      replaceWorkspace(route, seed);
+      return;
+    }
+
+    pushWorkspace(route, seed);
+  }, [activeWorkspace, pushWorkspace, replaceWorkspace, workspaceStack]);
 
   const openLibraryFromLogs = useCallback((focus: { storageId: string; modTag: string }) => {
     const requestId = ++libraryFocusRequestIdRef.current;
@@ -333,52 +1393,27 @@ function AppContent() {
   }, [environments]);
 
   useEffect(() => {
-    if (
-      activeWorkspace.view === 'mods' ||
-      activeWorkspace.view === 'plugins' ||
-      activeWorkspace.view === 'userLibs' ||
-      activeWorkspace.view === 'logs' ||
-      activeWorkspace.view === 'config'
-    ) {
-      setLastEnvironmentWorkspaceView(activeWorkspace.view);
+    if ('environmentId' in activeWorkspace) {
+      setSelectedEnvironmentId(activeWorkspace.environmentId);
+      localStorage.setItem(LAST_ENV_KEY, activeWorkspace.environmentId);
+      return;
     }
-  }, [activeWorkspace.view]);
 
-  const handleWorkspaceEnvironmentSelect = useCallback((environmentId: string) => {
-    startTransition(() => {
-      setWorkspaceStack((previous) => {
-        const next = [...previous];
-        const current = next[next.length - 1];
-        if (!current) {
-          return previous;
-        }
+    setSelectedEnvironmentId((previous) => {
+      if (previous && environments.some((environment) => environment.id === previous)) {
+        return previous;
+      }
 
-        if (!('environmentId' in current.route)) {
-          next[next.length - 1] = {
-            ...current,
-            route: {
-              view: lastEnvironmentWorkspaceView,
-              environmentId,
-            },
-          };
-          return next;
-        }
+      const storedEnvironmentId = localStorage.getItem(LAST_ENV_KEY);
+      if (storedEnvironmentId && environments.some((environment) => environment.id === storedEnvironmentId)) {
+        return storedEnvironmentId;
+      }
 
-        next[next.length - 1] = {
-          ...current,
-          route: {
-            ...current.route,
-            environmentId,
-          },
-        };
-        return next;
-      });
+      return environments.find((environment) => environment.status === 'completed')?.id
+        ?? environments[0]?.id
+        ?? null;
     });
-  }, [lastEnvironmentWorkspaceView]);
-
-  const handleInitialDetectionComplete = useCallback(() => {
-    setShowStartupSplash(false);
-  }, []);
+  }, [activeWorkspace, environments]);
 
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
@@ -409,29 +1444,6 @@ function AppContent() {
     };
     checkWelcome();
   }, [hasSettings, pushWorkspace, settings]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-
-    const bindWindowState = async () => {
-      try {
-        setIsMaximized(await appWindow.isMaximized());
-        unlisten = await appWindow.onResized(async () => {
-          setIsMaximized(await appWindow.isMaximized());
-        });
-      } catch (error) {
-        console.error('Failed to bind window state:', error);
-      }
-    };
-
-    bindWindowState();
-
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, [appWindow]);
 
   const dispatchNexusOAuthResult = useCallback((detail: { success: boolean; error?: string }) => {
     window.dispatchEvent(new CustomEvent('nexus-oauth-result', { detail }));
@@ -498,7 +1510,7 @@ function AppContent() {
   }, [updateSettings]);
 
   useEffect(() => {
-    if (!hasSettings || showStartupSplash) {
+    if (!hasSettings || environmentsLoading) {
       return;
     }
 
@@ -584,7 +1596,7 @@ function AppContent() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [appUpdateChannel, hasSettings, persistAppUpdateSettings, showStartupSplash]);
+  }, [appUpdateChannel, environmentsLoading, hasSettings, persistAppUpdateSettings]);
 
   const handleSkipAppUpdateVersion = useCallback(() => {
     if (appUpdateState.status !== 'available') {
@@ -660,7 +1672,9 @@ function AppContent() {
       return;
     }
 
+    const consumedCallbacks = readConsumedNexusOAuthCallbacks();
     if (
+      consumedCallbacks.has(callbackUrl) ||
       completedNexusCallbackRef.current === callbackUrl ||
       inFlightNexusCallbackRef.current === callbackUrl
     ) {
@@ -680,11 +1694,27 @@ function AppContent() {
         return;
       }
       completedNexusCallbackRef.current = callbackUrl;
+      rememberConsumedNexusOAuthCallback(callbackUrl);
       dispatchNexusOAuthResult({ success: true });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login';
+      if (errorMessage.includes('No pending Nexus OAuth login flow')) {
+        try {
+          const status = await ApiService.getNexusOAuthStatus();
+          if (status.connected) {
+            completedNexusCallbackRef.current = callbackUrl;
+            rememberConsumedNexusOAuthCallback(callbackUrl);
+            dispatchNexusOAuthResult({ success: true });
+            return;
+          }
+        } catch {
+          // Fall through to the original callback failure below.
+        }
+      }
+
       dispatchNexusOAuthResult({
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to complete Nexus OAuth login',
+        error: errorMessage,
       });
       return;
     } finally {
@@ -721,6 +1751,7 @@ function AppContent() {
         return;
       }
       if (!result.success) {
+        completedNxmCallbackRef.current.add(nxmUrl);
         dispatchNexusManualDownloadResult({
           success: false,
           error: result.error || 'Failed to complete Nexus manual download',
@@ -738,13 +1769,14 @@ function AppContent() {
       });
     } catch (error) {
       console.error('Failed to complete Nexus manual download callback:', nxmUrl, error);
-      const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
-      if (message.includes('Close SIMM to download Nexus mods for other games')) {
-        setAppNotice(message);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      completedNxmCallbackRef.current.add(nxmUrl);
+      if (errorMessage.includes('Close SIMM to download Nexus mods for other games')) {
+        setAppNotice(errorMessage);
       }
       dispatchNexusManualDownloadResult({
         success: false,
-        error: message,
+        error: errorMessage,
         nxmUrl,
       });
       return;
@@ -765,6 +1797,7 @@ function AppContent() {
     try {
       const result = await ApiService.completeNexusManualDownloadSession(pending.nxmUrl, runtime);
       if (!result.success) {
+        completedNxmCallbackRef.current.add(pending.nxmUrl);
         dispatchNexusManualDownloadResult({
           success: false,
           error: result.error || 'Failed to complete Nexus manual download',
@@ -782,13 +1815,14 @@ function AppContent() {
       });
     } catch (error) {
       console.error('Failed to complete Nexus manual download after runtime selection:', pending.nxmUrl, error);
-      const message = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
-      if (message.includes('Close SIMM to download Nexus mods for other games')) {
-        setAppNotice(message);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to complete Nexus manual download';
+      completedNxmCallbackRef.current.add(pending.nxmUrl);
+      if (errorMessage.includes('Close SIMM to download Nexus mods for other games')) {
+        setAppNotice(errorMessage);
       }
       dispatchNexusManualDownloadResult({
         success: false,
-        error: message,
+        error: errorMessage,
         nxmUrl: pending.nxmUrl,
       });
     } finally {
@@ -874,31 +1908,6 @@ function AppContent() {
     };
   }, [dispatchNexusOAuthResult, handleExternalProtocolUrl]);
 
-  const handleMinimize = async () => {
-    try {
-      await appWindow.minimize();
-    } catch (error) {
-      console.error('Failed to minimize window:', error);
-    }
-  };
-
-  const handleToggleMaximize = async () => {
-    try {
-      await appWindow.toggleMaximize();
-      setIsMaximized(await appWindow.isMaximized());
-    } catch (error) {
-      console.error('Failed to toggle maximize:', error);
-    }
-  };
-
-  const handleCloseWindow = async () => {
-    try {
-      await appWindow.close();
-    } catch (error) {
-      console.error('Failed to close window:', error);
-    }
-  };
-
   const renderWorkspacePanelFor = useCallback((entry: WorkspaceEntry, onCloseHandler: () => void) => {
     const workspace = entry.route;
     switch (workspace.view) {
@@ -938,6 +1947,14 @@ function AppContent() {
         ) : null;
       case 'wizard':
         return <EnvironmentCreationWizard onClose={onCloseHandler} />;
+      case 'environments':
+        return (
+          <EnvironmentList
+            onOpenWorkspace={openWorkspace}
+            focusedEnvironmentId={selectedEnvironmentId}
+            focusedEnvironmentRequestId={environmentFocusRequestId}
+          />
+        );
       case 'accounts':
         return <SteamAccountOverlay isOpen={true} onClose={onCloseHandler} />;
       case 'help':
@@ -1035,69 +2052,10 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, pushWorkspace, settings, skipSetupGuide, updateWorkspaceEntry]);
+  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
-  };
-
-  const renderWorkspaceSidebar = (showNavigationControls: boolean) => {
-    const selectedEnvironmentId =
-      'environmentId' in activeWorkspace
-        ? activeWorkspace.environmentId
-        : null;
-    const sortedEnvironments = [...environments].sort((a, b) => a.name.localeCompare(b.name));
-
-    return (
-      <aside className="workspace-sidebar">
-        {showNavigationControls && (
-          <div className="workspace-sidebar__nav">
-            <button
-              onClick={popWorkspace}
-              className="btn btn-secondary app-workspace-home-button"
-              disabled={!canGoBack}
-            >
-              <Icon name="arrowLeft" />
-              Back
-            </button>
-            <button onClick={goHome} className="btn btn-secondary app-workspace-home-button">
-              <Icon name="house" />
-              Home
-            </button>
-          </div>
-        )}
-
-        <div className="workspace-environment-sidebar">
-          <h3 className="workspace-environment-sidebar__title">Environments</h3>
-          <p className="workspace-environment-sidebar__copy">
-            Select an environment to open its active tools workspace.
-          </p>
-          <div className="workspace-environment-sidebar__list">
-            {sortedEnvironments.length > 0 ? (
-              sortedEnvironments.map((env) => (
-                <div key={env.id} className="workspace-environment-sidebar__item">
-                  <button
-                    onClick={() => {
-                      localStorage.setItem('simm:lastEnvId', env.id);
-                      handleWorkspaceEnvironmentSelect(env.id);
-                    }}
-                    className={`workspace-environment-sidebar__button ${selectedEnvironmentId === env.id ? 'workspace-environment-sidebar__button--active' : ''}`}
-                    title={env.name}
-                    aria-current={selectedEnvironmentId === env.id ? 'page' : undefined}
-                  >
-                    <span className="workspace-environment-sidebar__button-label">{env.name}</span>
-                  </button>
-                </div>
-              ))
-            ) : (
-              <div className="workspace-environment-sidebar__empty">No game installs yet.</div>
-            )}
-          </div>
-        </div>
-
-        <DownloadsPanel />
-      </aside>
-    );
   };
 
   const appUpdatePreferences = settings?.appUpdate ?? null;
@@ -1116,112 +2074,207 @@ function AppContent() {
     && !isAppUpdateSnoozed
     && !isAppUpdateSkipped
     && !isAppUpdateDismissedForSession;
+  const currentEnvironmentId =
+    'environmentId' in activeWorkspace
+      ? activeWorkspace.environmentId
+      : selectedEnvironmentId
+        ?? localStorage.getItem(LAST_ENV_KEY)
+        ?? environments.find((env) => env.status === 'completed')?.id
+        ?? environments[0]?.id
+        ?? null;
+  const currentEnvironment = currentEnvironmentId ? getEnvironmentById(currentEnvironmentId) : null;
+  const isShellLaunchInProgress = currentEnvironmentId !== null && launchingEnvironmentId === currentEnvironmentId;
+  const downloadsInProgress = downloads.filter((download) => (
+    download.status === 'queued'
+    || download.status === 'downloading'
+    || download.status === 'validating'
+  )).length;
+  const downloadsBadgeCount = downloads.length;
+  const selectEnvironmentForShell = useCallback((environmentId: string) => {
+    setSelectedEnvironmentId(environmentId);
+    setEnvironmentFocusRequestId((previous) => previous + 1);
+    localStorage.setItem(LAST_ENV_KEY, environmentId);
+  }, []);
+
+  const openEnvironmentsWorkspace = useCallback((environmentId?: string | null) => {
+    const targetEnvironmentId = environmentId ?? currentEnvironmentId;
+    if (targetEnvironmentId) {
+      selectEnvironmentForShell(targetEnvironmentId);
+    }
+    openWorkspace({ view: 'environments' });
+  }, [currentEnvironmentId, openWorkspace, selectEnvironmentForShell]);
+  const openEnvironmentWorkspace = useCallback((view: 'mods' | 'plugins' | 'userLibs' | 'logs' | 'config') => {
+    if (!currentEnvironmentId) {
+      openWorkspace({ view: 'wizard' });
+      return;
+    }
+    pushWorkspace({ view, environmentId: currentEnvironmentId });
+  }, [currentEnvironmentId, openWorkspace, pushWorkspace]);
+  const openLibraryWorkspaceFromShell = useCallback(() => {
+    openLibraryWorkspace();
+  }, [openLibraryWorkspace]);
+  const handleShellEnvironmentSelect = useCallback((environmentId: string) => {
+    switch (activeWorkspace.view) {
+      case 'mods':
+        selectEnvironmentForShell(environmentId);
+        openWorkspace({
+          view: 'mods',
+          environmentId,
+          initialTab: activeWorkspace.initialTab,
+        });
+        return;
+      case 'plugins':
+        selectEnvironmentForShell(environmentId);
+        openWorkspace({ view: 'plugins', environmentId });
+        return;
+      case 'userLibs':
+        selectEnvironmentForShell(environmentId);
+        openWorkspace({ view: 'userLibs', environmentId });
+        return;
+      case 'logs':
+        selectEnvironmentForShell(environmentId);
+        openWorkspace({ view: 'logs', environmentId });
+        return;
+      case 'config':
+        selectEnvironmentForShell(environmentId);
+        openWorkspace({ view: 'config', environmentId });
+        return;
+      case 'home':
+      case 'environments':
+      case 'wizard':
+        openEnvironmentsWorkspace(environmentId);
+        return;
+      default:
+        selectEnvironmentForShell(environmentId);
+        return;
+    }
+  }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace, selectEnvironmentForShell]);
+  const handleShellLaunchGame = useCallback(async () => {
+    if (!currentEnvironmentId) {
+      openWorkspace({ view: 'wizard' });
+      return;
+    }
+
+    try {
+      setLaunchingEnvironmentId(currentEnvironmentId);
+      const result = await ApiService.launchGame(currentEnvironmentId, 'steam');
+      if (!result.success) {
+        throw new Error('Launch request was not accepted.');
+      }
+    } catch (error) {
+      await message(
+        error instanceof Error ? error.message : 'Failed to launch the selected environment.',
+        {
+          title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
+          kind: 'error',
+        },
+      );
+    } finally {
+      setLaunchingEnvironmentId(null);
+    }
+  }, [currentEnvironment, currentEnvironmentId, openWorkspace]);
+  const utilityActions = [
+    {
+      key: 'launch',
+      label: isShellLaunchInProgress ? 'Launching...' : 'Launch Game',
+      icon: isShellLaunchInProgress ? 'spinner' : 'play',
+      active: false,
+      variant: 'btn-primary' as const,
+      onClick: handleShellLaunchGame,
+      disabled: launchingEnvironmentId !== null || !currentEnvironmentId,
+      title: currentEnvironment
+        ? `Launch ${currentEnvironment.name} via Steam`
+        : 'Select or create an environment to launch the game',
+    },
+    {
+      key: 'wizard',
+      label: 'Add Environment',
+      icon: 'plus',
+      active: activeWorkspace.view === 'wizard',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'wizard' }),
+      disabled: false,
+      title: 'Create or import another environment',
+    },
+    {
+      key: 'accounts',
+      label: 'Accounts',
+      icon: 'userCircle',
+      active: activeWorkspace.view === 'accounts',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'accounts' }),
+      disabled: false,
+      title: 'Open connected accounts and services',
+    },
+    {
+      key: 'help',
+      label: 'Help',
+      icon: 'circleQuestion',
+      active: activeWorkspace.view === 'help',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'help' }),
+      disabled: false,
+      title: 'Open help and troubleshooting guidance',
+    },
+    {
+      key: 'settings',
+      label: 'Settings',
+      icon: 'cog',
+      active: activeWorkspace.view === 'settings',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'settings' }),
+      disabled: false,
+      title: 'Open application settings',
+    },
+  ] as const;
 
   return (
     <div className="app app-desktop-shell">
       <div className="app-window">
-        <header className="window-chrome">
-          <div className="window-brand" data-tauri-drag-region>
-            <img src={appIcon256} alt="SIMM" className="window-brand-icon" />
-            <div className="window-brand-text">
-              <strong>SIMM</strong>
-              <span>Schedule I Mod Manager</span>
-            </div>
-          </div>
-
-          <div className="window-drag-region" data-tauri-drag-region aria-hidden="true" />
-
-          <div className="window-toolbar-actions">
-            <button
-              onClick={() => openLibraryWorkspace()}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('library') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Open Mod Library"
-              aria-pressed={isToolbarWorkspaceActive('library')}
-            >
-              <Icon name="layerGroup" />
-              Mod Library
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'wizard' })}
-              className={`btn btn-primary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('wizard') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Add or import a game install"
-              aria-pressed={isToolbarWorkspaceActive('wizard')}
-            >
-              <Icon name="plus" />
-              Add Game
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'accounts' })}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('accounts') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Manage connected accounts"
-              aria-pressed={isToolbarWorkspaceActive('accounts')}
-            >
-              <Icon name="userCircle" />
-              Accounts
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'help' })}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('help') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Open help and guides"
-              aria-pressed={isToolbarWorkspaceActive('help')}
-            >
-              <Icon name="questionCircle" />
-              Help
-            </button>
-            <button
-              onClick={() => openWorkspace({ view: 'settings' })}
-              className={`btn btn-secondary btn-small app-shell-toolbar-button${isToolbarWorkspaceActive('settings') ? ' app-shell-toolbar-button--active' : ''}`}
-              title="Open settings"
-              aria-pressed={isToolbarWorkspaceActive('settings')}
-            >
-              <Icon name="cog" />
-              Settings
-            </button>
-          </div>
-
-          <div className="window-controls" aria-label="Window controls">
-            <button
-              onClick={handleMinimize}
-              className="window-control-btn"
-              title="Minimize"
-              aria-label="Minimize"
-            >
-              <Icon name="minus" />
-            </button>
-            <button
-              onClick={handleToggleMaximize}
-              className="window-control-btn"
-              title={isMaximized ? 'Restore Down' : 'Maximize'}
-              aria-label={isMaximized ? 'Restore Down' : 'Maximize'}
-            >
-              <Icon name={isMaximized ? 'windowRestore' : 'square'} />
-            </button>
-            <button
-              onClick={handleCloseWindow}
-              className="window-control-btn window-control-btn-close"
-              title="Close"
-              aria-label="Close"
-            >
-              <Icon name="times" />
-            </button>
-          </div>
-        </header>
-
-        <div className="app-body">
+        <AppWindowChrome utilityActions={utilityActions} />
+        <div className={`app-body ${shellNavCollapsed ? 'app-body--nav-collapsed' : ''}`}>
+          <AppShellSidebar
+            activeWorkspace={activeWorkspace}
+            currentEnvironmentId={currentEnvironmentId}
+            downloadsBadgeCount={downloadsBadgeCount}
+            environments={environments}
+            environmentsLoading={environmentsLoading}
+            onEnvironmentSelect={handleShellEnvironmentSelect}
+            onOpenEnvironmentWorkspace={openEnvironmentWorkspace}
+            onOpenEnvironmentsWorkspace={openEnvironmentsWorkspace}
+            onOpenHome={goHome}
+            onOpenLibrary={openLibraryWorkspaceFromShell}
+            onShellNavTransitionEnd={handleShellNavTransitionEnd}
+            onToggleShellNavigation={toggleShellNavigation}
+            shellNavAnimating={shellNavAnimating}
+            shellNavCollapsed={shellNavCollapsed}
+            shellNavExpandedContentVisible={shellNavExpandedContentVisible}
+          />
           <div className="app-content workspace-active">
             {activeWorkspace.view === 'home' ? (
               <div className="workspace-layout">
-                {renderWorkspaceSidebar(false)}
                 <main className="app-main app-home-main">
-                  <EnvironmentList
-                    onInitialDetectionComplete={handleInitialDetectionComplete}
-                    onOpenWorkspace={openWorkspace}
+                  <HomeDashboard
+                    environments={environments}
+                    environmentsLoading={environmentsLoading}
+                    downloadsInProgress={downloadsInProgress}
+                    appUpdateState={appUpdateState}
+                    selectedEnvironmentId={currentEnvironmentId}
+                    onOpenEnvironments={openEnvironmentsWorkspace}
+                    onOpenModLibrary={() => openLibraryWorkspace()}
+                    onOpenModUpdates={() => openLibraryWorkspace({
+                      initialTab: 'updates',
+                      navigationState: {
+                        libraryTab: 'updates',
+                      },
+                    })}
+                    onOpenWizard={() => openWorkspace({ view: 'wizard' })}
+                    onOpenSettings={() => openWorkspace({ view: 'settings' })}
                   />
                 </main>
               </div>
             ) : (
               <div className="workspace-layout">
-                {renderWorkspaceSidebar(true)}
                 <main className="app-main workspace-main app-workspace-main">
                   <Suspense fallback={<WorkspacePanelFallback />}>
                     {renderWorkspacePanel()}
@@ -1259,26 +2312,32 @@ function AppContent() {
         <div className="app-notice app-notice--danger" role="alert" aria-live="assertive">
           <div className="app-notice__header">
             <strong>Nexus Download Blocked</strong>
-            <button
-              type="button"
+            <SimmIconButton
               className="window-control-btn app-notice__dismiss"
               onClick={() => setAppNotice(null)}
               aria-label="Dismiss notice"
             >
               <Icon name="times" />
-            </button>
+            </SimmIconButton>
           </div>
           <span className="app-notice__body">{appNotice}</span>
         </div>
       )}
 
       {pendingNexusRuntimeSelection && (
-        <div className="modal-overlay" onClick={() => void handleCancelNexusRuntimeSelection()}>
-          <div className="modal-content app-dialog app-dialog--message app-runtime-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Select Runtime</h2>
-              <button className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()}>×</button>
-            </div>
+        <Dialog open={!!pendingNexusRuntimeSelection} onOpenChange={(open) => {
+          if (!open) {
+            void handleCancelNexusRuntimeSelection();
+          }
+        }}>
+          <SimmDialogContent
+            className="app-dialog app-dialog--message app-runtime-dialog"
+            showCloseButton={false}
+          >
+            <DialogHeader className="modal-header">
+              <DialogTitle>Select Runtime</DialogTitle>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => void handleCancelNexusRuntimeSelection()} aria-label="Close runtime selection dialog">×</SimmButton>
+            </DialogHeader>
             <div className="app-dialog__body app-runtime-dialog__body">
               <div className="app-dialog__callout app-dialog__callout--info">
                 <div className="app-dialog__icon">
@@ -1286,9 +2345,9 @@ function AppContent() {
                 </div>
                 <div className="app-dialog__meta">
                   <strong>Runtime selection required</strong>
-                  <p>
+                  <DialogDescription>
                     SIMM could not determine the runtime for this Nexus download. Choose the runtime before it is added to the library or installed.
-                  </p>
+                  </DialogDescription>
                 </div>
               </div>
               <div className="app-runtime-dialog__details">
@@ -1299,43 +2358,26 @@ function AppContent() {
                 )}
               </div>
             </div>
-            <div className="app-dialog__footer">
+            <DialogFooter className="app-dialog__footer">
               <div className="app-runtime-dialog__actions">
-                <button className="btn btn-secondary" onClick={() => void handleCancelNexusRuntimeSelection()}>
+                <SimmButton className="btn btn-secondary" onClick={() => void handleCancelNexusRuntimeSelection()}>
                   Cancel
-                </button>
+                </SimmButton>
                 <div className="app-runtime-dialog__runtime-actions">
-                  <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Mono')}>
+                  <SimmButton className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Mono')}>
                     Use Mono
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Both')}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => void handleNexusRuntimeSelection('Both')}>
                     Use Both
-                  </button>
-                  <button className="btn btn-primary" onClick={() => void handleNexusRuntimeSelection('IL2CPP')}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-primary" onClick={() => void handleNexusRuntimeSelection('IL2CPP')}>
                     Use IL2CPP
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showStartupSplash && (
-        <div className="boot-screen-shell">
-          <div className="boot-screen" role="status" aria-live="polite">
-            <div className="boot-card">
-              <div className="boot-title">Schedule I</div>
-              <div className="boot-subtitle">Detecting game and MelonLoader versions</div>
-              <div className="boot-loader" aria-hidden="true">
-                <span className="boot-dot"></span>
-                <span className="boot-dot"></span>
-                <span className="boot-dot"></span>
-              </div>
-              <div className="boot-bar"></div>
-            </div>
-          </div>
-        </div>
+            </DialogFooter>
+          </SimmDialogContent>
+        </Dialog>
       )}
     </div>
   );

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM IPC Contracts"
+  short_description: "Maintain SIMM IPC contracts"
+  default_prompt: "Use $simmrust-ipc-contracts to update a SIMM frontend/backend command contract safely."

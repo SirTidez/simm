@@ -71,6 +71,8 @@ pub struct TrackedDownload {
     pub progress: f64,
     pub downloaded_files: Option<u64>,
     pub total_files: Option<u64>,
+    pub icon_url: Option<String>,
+    pub icon_cache_path: Option<String>,
     pub message: Option<String>,
     pub error: Option<String>,
     #[serde(with = "chrono::serde::ts_milliseconds")]
@@ -729,6 +731,8 @@ mod tests {
             progress: 0.0,
             downloaded_files: Some(0),
             total_files: Some(1),
+            icon_url: Some("https://example.com/icon.png".to_string()),
+            icon_cache_path: Some("C:/Users/test/SIMM/cache/mod-icons/icon.png".to_string()),
             message: Some("Downloading archive".to_string()),
             error: None,
             started_at,
@@ -739,6 +743,8 @@ mod tests {
         assert!(json.get("contextLabel").is_some());
         assert!(json.get("downloadedFiles").is_some());
         assert!(json.get("totalFiles").is_some());
+        assert!(json.get("iconUrl").is_some());
+        assert!(json.get("iconCachePath").is_some());
         assert!(json.get("startedAt").is_some());
         assert!(json.get("finishedAt").is_some());
         assert!(json.get("context_label").is_none());

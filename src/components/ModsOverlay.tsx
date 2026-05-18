@@ -1,4 +1,31 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { ApiService } from '../services/api';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import {
@@ -10,18 +37,21 @@ import { handleCardActivationKeyDown, resolveImageSource, safeExternalUrl } from
 import { onModMetadataRefreshStatus, onModsChanged as onModsChangedEvent, onModsSnapshotUpdated } from '../services/events';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { getSecurityBadgeConfig } from './securityScanHelpers';
+import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
+import { cn } from '@/lib/utils';
 import type {
   Environment,
   LocalModOwnershipCandidate,
   LocalModSourcePreview,
+  LocalModSourceVersionOption,
   ModLibraryEntry,
   NexusMod,
-  NexusModFile,
   SecurityScanReport,
   SecurityScanSummary,
 } from '../types';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Icon } from './Icon';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface ModInfo {
   name: string;
@@ -44,6 +74,12 @@ interface ModInfo {
   installedAt?: number;
   securityScan?: SecurityScanSummary;
 }
+
+type ModUpdateInfo = {
+  updateAvailable: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+};
 
 export interface ModViewState {
   id: string;
@@ -130,6 +166,20 @@ const normalizeNexusId = (value: unknown): number | null => {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
 };
 
+const managedRemoteSources = new Set(['thunderstore', 'nexusmods', 'github']);
+
+const getInstalledModLatestVersion = (mod: ModInfo, update?: ModUpdateInfo): string | undefined => {
+  if (update?.latestVersion) {
+    return update.latestVersion;
+  }
+
+  if (mod.managed && mod.source && managedRemoteSources.has(mod.source) && mod.version) {
+    return mod.version;
+  }
+
+  return undefined;
+};
+
 export interface ModsOverlayNavigationState {
   modsTab?: ModsTab;
   searchSource?: 'thunderstore' | 'nexusmods';
@@ -147,6 +197,7 @@ export interface ModsOverlayNavigationState {
 
 type LocalSourceLinkStage = 'chooseSource' | 'edit' | 'confirmMismatch' | 'pickOwnership' | 'saving';
 type LocalSourceLinkStrategy = 'existing' | 'manual' | null;
+const LOCAL_SOURCE_VERSION_UNSELECTED = '__select-installed-version__';
 
 interface LocalSourceLinkState {
   modId: string;
@@ -165,6 +216,169 @@ interface LocalSourceLinkState {
   error?: string | null;
   ownershipCandidates: LocalModOwnershipCandidate[];
   selectedOwnershipIds: string[];
+}
+
+function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+  return (
+    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+type WorkspaceBadgeTone = 'source' | 'success' | 'warning' | 'danger';
+
+function WorkspaceBadge({
+  children,
+  tone,
+  className,
+  style,
+}: {
+  children: ReactNode;
+  tone?: WorkspaceBadgeTone;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <SimmBadge
+      variant="outline"
+      className={cn(
+        'workspace-pill',
+        tone && `workspace-pill--${tone}`,
+        className,
+      )}
+      style={style}
+    >
+      {children}
+    </SimmBadge>
+  );
+}
+
+function SecurityScanBadge({
+  config,
+}: {
+  config?: ReturnType<typeof getSecurityBadgeConfig>;
+}) {
+  if (!config) {
+    return null;
+  }
+
+  return (
+    <WorkspaceBadge
+      className="workspace-pill--security"
+      style={{
+        borderColor: config.border,
+        background: config.background,
+        color: config.color,
+      }}
+    >
+      <Icon name={`fas ${config.icon}`} style={{ fontSize: '0.7rem' }} />
+      {config.label}
+    </WorkspaceBadge>
+  );
+}
+
+function InspectorSecurityScanBadge({
+  config,
+}: {
+  config?: ReturnType<typeof getSecurityBadgeConfig>;
+}) {
+  if (!config) {
+    return null;
+  }
+
+  return (
+    <div className="workspace-inspector-card__badge-row">
+      <SecurityScanBadge config={config} />
+    </div>
+  );
+}
+
+function getLocalSourceVersionOptions(
+  versions: LocalModSourceVersionOption[] | undefined,
+  strategy: LocalSourceLinkStrategy,
+  runtime?: string,
+) {
+  return (versions || []).filter((version) => {
+    if (strategy !== 'existing' || !runtime) {
+      return true;
+    }
+    return !version.runtime || version.runtime === runtime;
+  });
+}
+
+function formatLocalSourceVersionOption(version: LocalModSourceVersionOption) {
+  return [
+    version.version,
+    version.runtime,
+    version.isLatest ? 'Latest' : null,
+    version.updatedAt ? new Date(version.updatedAt).toLocaleDateString() : null,
+  ].filter(Boolean).join(' • ');
+}
+
+function LocalSourceVersionSelect({
+  value,
+  preview,
+  strategy,
+  runtime,
+  loadingPreview,
+  onValueChange,
+}: {
+  value?: string;
+  preview?: LocalModSourcePreview;
+  strategy: LocalSourceLinkStrategy;
+  runtime?: string;
+  loadingPreview: boolean;
+  onValueChange: (value: string) => void;
+}) {
+  const options = getLocalSourceVersionOptions(preview?.versions, strategy, runtime);
+  const selectedValue = value || LOCAL_SOURCE_VERSION_UNSELECTED;
+
+  return (
+    <Select
+      value={selectedValue}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === 'string') {
+          onValueChange(nextValue === LOCAL_SOURCE_VERSION_UNSELECTED ? '' : nextValue);
+        }
+      }}
+      disabled={!preview || loadingPreview}
+    >
+      <SelectTrigger id="local-source-version" className="workspace-inspector-link-panel__input">
+        <SelectValue>
+          {(currentValue) => {
+            if (currentValue === LOCAL_SOURCE_VERSION_UNSELECTED) {
+              return 'Select installed version';
+            }
+            const selectedOption = options.find((option) => option.version === currentValue);
+            return selectedOption ? formatLocalSourceVersionOption(selectedOption) : 'Select installed version';
+          }}
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="workspace-inspector-link-panel__select-content" align="start">
+        <SelectGroup>
+          <SelectItem value={LOCAL_SOURCE_VERSION_UNSELECTED}>Select installed version</SelectItem>
+          {options.map((version) => (
+            <SelectItem key={version.key} value={version.version}>
+              {formatLocalSourceVersionOption(version)}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
 }
 
 interface ManualUploadSourceInfo {
@@ -237,7 +451,7 @@ export interface ThunderstorePackage {
 }
 
 const runtimeSuffixPatterns = [
-  /\s*[\(\[]\s*(mono|il2cpp)\s*[\)\]]\s*$/i,
+  /\s*(?:\(|\[)\s*(mono|il2cpp)\s*(?:\)|\])\s*$/i,
   /\s*[_-]\s*(mono|il2cpp)\s*$/i,
   /\s+(mono|il2cpp)\s*$/i,
 ];
@@ -275,86 +489,6 @@ function normalizeVersionToken(value?: string): string {
     normalized = normalized.slice(1);
   }
   return normalized.toLowerCase();
-}
-
-function compareVersionTokensDesc(a?: string, b?: string): number {
-  const normalizedA = normalizeVersionToken(a);
-  const normalizedB = normalizeVersionToken(b);
-  if (normalizedA === normalizedB) {
-    return 0;
-  }
-
-  const tokensA = normalizedA.split(/[^a-z0-9]+/i).filter(Boolean);
-  const tokensB = normalizedB.split(/[^a-z0-9]+/i).filter(Boolean);
-  const max = Math.max(tokensA.length, tokensB.length);
-
-  for (let index = 0; index < max; index += 1) {
-    const tokenA = tokensA[index] || '';
-    const tokenB = tokensB[index] || '';
-    const numericA = /^\d+$/.test(tokenA);
-    const numericB = /^\d+$/.test(tokenB);
-
-    if (numericA && numericB) {
-      const numberA = Number(tokenA);
-      const numberB = Number(tokenB);
-      if (numberA !== numberB) {
-        return numberB - numberA;
-      }
-      continue;
-    }
-
-    const compare = tokenB.localeCompare(tokenA, undefined, { sensitivity: 'base' });
-    if (compare !== 0) {
-      return compare;
-    }
-  }
-
-  return normalizedB.localeCompare(normalizedA, undefined, { sensitivity: 'base' });
-}
-
-function getLibraryEntryGroupKey(entry: ModLibraryEntry): string {
-  if (entry.source === 'thunderstore') {
-    const [, ...rest] = (entry.sourceId || '').split('/');
-    const thunderstoreName = rest.join('/');
-    return `thunderstore::${normalizeModNameKey(thunderstoreName || entry.displayName || '')}`;
-  }
-
-  if ((entry.source === 'nexusmods' || entry.source === 'github') && entry.sourceId) {
-    return `${entry.source}::${entry.sourceId.toLowerCase()}`;
-  }
-
-  if (entry.managed) {
-    return `managed::${normalizeModNameKey(entry.displayName || '')}`;
-  }
-
-  return entry.storageId;
-}
-
-function pickVisibleLibraryEntry(entries: ModLibraryEntry[], environmentId: string): ModLibraryEntry {
-  const sorted = [...entries].sort((a, b) =>
-    compareVersionTokensDesc(a.sourceVersion || a.installedVersion, b.sourceVersion || b.installedVersion)
-  );
-
-  return sorted.find(entry => entry.installedIn?.includes(environmentId))
-    || sorted.find(entry => (entry.installedIn?.length || 0) > 0)
-    || sorted[0];
-}
-
-function buildVisibleLibraryEntries(downloaded: ModLibraryEntry[], environmentId: string): ModLibraryEntry[] {
-  const groups = new Map<string, ModLibraryEntry[]>();
-  for (const entry of downloaded) {
-    const key = getLibraryEntryGroupKey(entry);
-    const existing = groups.get(key);
-    if (existing) {
-      existing.push(entry);
-    } else {
-      groups.set(key, [entry]);
-    }
-  }
-
-  return Array.from(groups.values())
-    .map(entries => pickVisibleLibraryEntry(entries, environmentId))
-    .sort((a, b) => (a.displayName || '').localeCompare(b.displayName || '', undefined, { sensitivity: 'base' }));
 }
 
 function mergeModSnapshots(previous: ModInfo[], incoming: ModInfo[]): ModInfo[] {
@@ -413,10 +547,12 @@ export function ModsOverlay({
   const [downloadedMods, setDownloadedMods] = useState<ModLibraryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [modsDirectory, setModsDirectory] = useState<string>('');
-  const [deletingMod, setDeletingMod] = useState<string | null>(null);
-  const [enablingMod, setEnablingMod] = useState<string | null>(null);
-  const [disablingMod, setDisablingMod] = useState<string | null>(null);
+  const [, setModsDirectory] = useState<string>('');
+  const [, setDeletingMod] = useState<string | null>(null);
+  const [, setEnablingMod] = useState<string | null>(null);
+  const [, setDisablingMod] = useState<string | null>(null);
+  const [scanningInstalledMod, setScanningInstalledMod] = useState<string | null>(null);
+  const [scanningLocalMods, setScanningLocalMods] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<ManualUploadItem[]>([]);
   const [currentUploadItem, setCurrentUploadItem] = useState<ManualUploadItem | null>(null);
@@ -426,37 +562,31 @@ export function ModsOverlay({
   const [pendingUpload, setPendingUpload] = useState<RuntimeMismatchWarningState | null>(null);
   const [pendingRuntimeSelection, setPendingRuntimeSelection] = useState<PendingRuntimeSelectionState | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
-  const [installingDownloaded, setInstallingDownloaded] = useState<string | null>(null);
   const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [, setToastMessage] = useState<string | null>(null);
 
   // Search state
   const [environment, setEnvironment] = useState<Environment | null>(null);
-  const [searchQuery, setSearchQuery] = useState<string>(() => navigationState?.searchQuery ?? '');
-  const [searchResults, setSearchResults] = useState<ThunderstorePackage[]>(() => navigationState?.searchResults ?? []);
-  const [searching, setSearching] = useState(false);
-  const [installingPackage, setInstallingPackage] = useState<string | null>(null);
-  const [showSearchResults, setShowSearchResults] = useState(() => navigationState?.showSearchResults ?? false);
-  const [searchSource, setSearchSource] = useState<'thunderstore' | 'nexusmods'>(defaultSearchSource);
+  const [searchQuery] = useState<string>(() => navigationState?.searchQuery ?? '');
+  const [searchResults] = useState<ThunderstorePackage[]>(() => navigationState?.searchResults ?? []);
+  const [showSearchResults] = useState(() => navigationState?.showSearchResults ?? false);
+  const [searchSource] = useState<'thunderstore' | 'nexusmods'>(defaultSearchSource);
 
   // NexusMods search state
   const [nexusModsSearchQuery, setNexusModsSearchQuery] = useState<string>(() => navigationState?.nexusModsSearchQuery ?? '');
-  const [nexusModsSearchResults, setNexusModsSearchResults] = useState<NexusMod[]>(() => navigationState?.nexusModsSearchResults ?? []);
-  const [searchingNexusMods, setSearchingNexusMods] = useState(false);
+  const [nexusModsSearchResults] = useState<NexusMod[]>(() => navigationState?.nexusModsSearchResults ?? []);
   const [installingNexusMod, setInstallingNexusMod] = useState<{ modId: number; fileId: number } | null>(null);
   const [showNexusModsResults, setShowNexusModsResults] = useState(() => navigationState?.showNexusModsResults ?? false);
-  const [nexusModsFiles, setNexusModsFiles] = useState<Map<number, NexusModFile[]>>(new Map());
   const [showNexusKeyRequiredModal, setShowNexusKeyRequiredModal] = useState(false);
-  const [hasNexusDownloadAccess, setHasNexusDownloadAccess] = useState<boolean>(false);
+  const [, setHasNexusDownloadAccess] = useState<boolean>(false);
   const [nexusRequiresSiteConfirmation, setNexusRequiresSiteConfirmation] = useState<boolean>(true);
 
   // Mod updates state
-  const [modUpdates, setModUpdates] = useState<Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>>(new Map());
+  const [modUpdates, setModUpdates] = useState<Map<string, ModUpdateInfo>>(new Map());
   const [checkingModUpdates, setCheckingModUpdates] = useState(false);
-  const [updatingMod, setUpdatingMod] = useState<string | null>(null);
-  const [updatingAllMods, setUpdatingAllMods] = useState(false);
-  const [showSearchInOverlay, setShowSearchInOverlay] = useState(() => navigationState?.showSearchInOverlay ?? false);
+  const [, setUpdatingMod] = useState<string | null>(null);
+  const [showSearchInOverlay] = useState(() => navigationState?.showSearchInOverlay ?? false);
   const [modListFilter, setModListFilter] = useState<ModListFilter>(() => navigationState?.modListFilter ?? 'all');
   const [modsTab, setModsTab] = useState<ModsTab>(() => navigationState?.modsTab ?? 'installed');
   const [installedSearchTerm, setInstalledSearchTerm] = useState(() => navigationState?.installedSearchTerm ?? '');
@@ -474,7 +604,6 @@ export function ModsOverlay({
   const navigationChangeHandlerRef = useRef(onNavigationStateChange);
   const [localSourceLinkState, setLocalSourceLinkState] = useState<LocalSourceLinkState | null>(null);
   const activeModViewSourceUrl = safeExternalUrl(activeModView?.sourceUrl);
-  const activeModViewSecurityBadge = getSecurityBadgeConfig(activeModView?.securityScan);
 
   useEffect(() => {
     navigationChangeHandlerRef.current = onNavigationStateChange;
@@ -515,7 +644,9 @@ export function ModsOverlay({
     if (!safeUrl) {
       return;
     }
-    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+    void ApiService.openExternalUrl(safeUrl).catch((err) => {
+      setError(getErrorMessage(err, 'Failed to open source page'));
+    });
   }, []);
   const getUpdateDisabledReason = useCallback((mod: ModInfo, updateAvailable?: boolean) => {
     if (!(mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github')) {
@@ -538,20 +669,6 @@ export function ModsOverlay({
   useEffect(() => {
     navigationChangeHandlerRef.current?.(reportedNavigationState);
   }, [reportedNavigationState]);
-
-  const libraryVersionCountByName = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const entry of downloadedMods) {
-      const key = normalizeModNameKey(entry.displayName || '');
-      counts.set(key, (counts.get(key) || 0) + 1);
-    }
-    return counts;
-  }, [downloadedMods]);
-
-  const visibleDownloadedMods = useMemo(() => {
-    return buildVisibleLibraryEntries(downloadedMods, environmentId);
-  }, [downloadedMods, environmentId]);
-
   const loadEnvironment = async () => {
     try {
       const env = await ApiService.getEnvironment(environmentId);
@@ -756,6 +873,76 @@ export function ModsOverlay({
     }
   };
 
+  const handleScanInstalledMod = async (mod: ModInfo) => {
+    const modKey = `${mod.fileName}-${mod.path}`;
+    setScanningInstalledMod(modKey);
+    setError(null);
+
+    try {
+      const report = await ApiService.scanInstalledModForSecurity(environmentId, mod.fileName);
+      setMods(previous => previous.map((entry) => (
+        `${entry.fileName}-${entry.path}` === modKey
+          ? { ...entry, securityScan: report.summary }
+          : entry
+      )));
+      openSecurityReport({
+        title: `Security Report - ${mod.name}`,
+        report,
+        onConfirm: null,
+      });
+      await loadInstalledMods(false, true);
+      if (onModsChanged) {
+        onModsChanged();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to scan installed mod');
+    } finally {
+      setScanningInstalledMod(null);
+    }
+  };
+
+  const handleScanLocalInstalledMods = async () => {
+    const candidates = mods.filter((mod) => !mod.managed && !mod.modStorageId);
+    if (candidates.length === 0) {
+      showToast('No local installed mods need scanning.');
+      return;
+    }
+
+    setScanningLocalMods(true);
+    setError(null);
+    let scannedCount = 0;
+    const failures: string[] = [];
+
+    try {
+      for (const mod of candidates) {
+        try {
+          const report = await ApiService.scanInstalledModForSecurity(environmentId, mod.fileName);
+          scannedCount += 1;
+          setMods(previous => previous.map((entry) => (
+            `${entry.fileName}-${entry.path}` === `${mod.fileName}-${mod.path}`
+              ? { ...entry, securityScan: report.summary }
+              : entry
+          )));
+        } catch (err) {
+          failures.push(`${mod.name}: ${getErrorMessage(err, 'scan failed')}`);
+        }
+      }
+
+      await loadInstalledMods(false, true);
+      if (onModsChanged && scannedCount > 0) {
+        onModsChanged();
+      }
+
+      if (failures.length > 0) {
+        setError(`Scanned ${scannedCount}/${candidates.length} local mods. ${failures[0]}`);
+      } else {
+        showToast(`Scanned ${scannedCount} local mod${scannedCount === 1 ? '' : 's'}.`);
+      }
+    } finally {
+      setScanningLocalMods(false);
+    }
+  };
+
   const startNexusManualTimeout = () => {
     clearNexusManualTimeout();
     nexusManualTimeoutRef.current = window.setTimeout(() => {
@@ -843,7 +1030,7 @@ export function ModsOverlay({
   const loadCachedModUpdates = async () => {
     try {
       const summary = await ApiService.getModUpdatesSummary(environmentId);
-      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
+      const updatesMap = new Map<string, ModUpdateInfo>();
       for (const update of summary.updates || []) {
         updatesMap.set(update.modFileName, {
           updateAvailable: true,
@@ -852,7 +1039,7 @@ export function ModsOverlay({
         });
       }
       setModUpdates(updatesMap);
-      onModUpdatesChecked?.(summary.count || updatesMap.size);
+      onModUpdatesChecked?.(summary.count ?? updatesMap.size);
     } catch (err) {
       console.warn('Failed to load cached mod update summary:', err);
     }
@@ -977,16 +1164,6 @@ export function ModsOverlay({
     }
     setActiveModView(nextView);
   };
-
-  const closeModView = () => {
-    setActiveModView(null);
-    window.requestAnimationFrame(() => {
-      if (modsScrollContainerRef.current) {
-        modsScrollContainerRef.current.scrollTop = modsScrollTopRef.current;
-      }
-    });
-  };
-
   // Refresh library when notified (e.g. after download in another view) or when opening
   useEffect(() => {
     if (!isOpen || !environmentId) return;
@@ -1068,7 +1245,7 @@ export function ModsOverlay({
   const checkModUpdates = async (showErrors: boolean = false) => {
     try {
       const updates = await ApiService.checkModUpdates(environmentId);
-      const updatesMap = new Map<string, { updateAvailable: boolean; currentVersion?: string; latestVersion?: string }>();
+      const updatesMap = new Map<string, ModUpdateInfo>();
       updates.forEach(update => {
         updatesMap.set(update.modFileName, {
           updateAvailable: update.updateAvailable,
@@ -1175,55 +1352,14 @@ export function ModsOverlay({
       setUpdatingMod(null);
     }
   };
-
-  const handleUpdateAllMods = async () => {
-    const updatableMods = mods.filter((mod) => {
-      const updateInfo = modUpdates.get(mod.fileName);
-      const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
-      return !!updateInfo?.updateAvailable && canAutoUpdate;
-    });
-
-    if (updatableMods.length === 0) {
-      setError('No supported mod updates are currently available');
-      return;
-    }
-
-    setUpdatingAllMods(true);
-    setError(null);
-
-    const failed: string[] = [];
-    for (const mod of updatableMods) {
-      setUpdatingMod(mod.fileName);
-      try {
-        const result = await ApiService.updateMod(environmentId, mod.fileName);
-        if (!result.success) {
-          failed.push(mod.name);
-        }
-      } catch {
-        failed.push(mod.name);
-      }
-    }
-
-    setUpdatingMod(null);
-    setUpdatingAllMods(false);
-
-    await loadInstalledMods(false, true);
-    await loadDownloadedLibrary();
-    await loadCachedModUpdates();
-    if (onModsChanged) {
-      onModsChanged();
-    }
-
-    if (failed.length > 0) {
-      setError(`Updated ${updatableMods.length - failed.length}/${updatableMods.length} mods. Failed: ${failed.join(', ')}`);
-    }
-  };
-
   const requestDeleteMod = (mod: ModInfo) => {
+    const isManagedInstall = Boolean(mod.managed || mod.modStorageId);
     const dialog: ConfirmDialog = {
-      title: 'Uninstall from Environment',
-      message: `Remove "${mod.name}" from this environment? The downloaded library copy is kept separately.`,
-      confirmText: 'Uninstall',
+      title: isManagedInstall ? 'Uninstall Managed Mod?' : 'Delete Installed File?',
+      message: isManagedInstall
+        ? `Remove "${mod.name}" from this environment? SIMM will uninstall the managed link from this environment and keep the downloaded library copy.`
+        : `Delete "${mod.name}" from this environment? This removes the installed file from the Mods folder.`,
+      confirmText: isManagedInstall ? 'Uninstall from Environment' : 'Delete File',
       cancelText: 'Cancel',
       onConfirm: () => handleDeleteMod(mod),
       readyAt: Date.now() + 200,
@@ -1274,58 +1410,7 @@ export function ModsOverlay({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to open mods folder');
     }
-  };
-
-  const handleInstallDownloaded = async (entry: ModLibraryEntry) => {
-    const runtime = environment?.runtime;
-    const storageId = runtime
-      ? entry.storageIdsByRuntime?.[runtime] || entry.storageId
-      : entry.storageId;
-
-    if (!storageId) {
-      setError('No compatible storage entry found for this runtime');
-      return;
-    }
-
-    setInstallingDownloaded(storageId);
-    try {
-      const result = await ApiService.installDownloadedMod(storageId, [environmentId]);
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-      await loadCachedModUpdates();
-      const warnings = result.results.flatMap((entry) => entry.warnings || []);
-      if (warnings.length > 0) {
-        showToast(
-          warnings.length === 1
-            ? warnings[0]
-            : `${warnings[0]} (+${warnings.length - 1} more warning${warnings.length > 2 ? 's' : ''})`,
-        );
-      }
-      if (onModsChanged) {
-        onModsChanged();
-      }
-    } catch (err) {
-      setError(getErrorMessage(err, 'Failed to install downloaded mod'));
-    } finally {
-      setInstallingDownloaded(null);
-    }
-  };
-
-  const handleViewSecurityReport = async (entry: ModLibraryEntry) => {
-    const runtime = environment?.runtime;
-    const storageId = runtime
-      ? entry.storageIdsByRuntime?.[runtime] || entry.storageId
-      : entry.storageId;
-
-    if (!storageId) {
-      setError('No storage ID available for security report');
-      return;
-    }
-
-    await openStoredSecurityReport(storageId, `Security Report - ${entry.displayName}`);
-  };
-
-  const handleConfirmDialog = () => {
+  };  const handleConfirmDialog = () => {
     if (!confirmDialog) return;
     if (confirmDialog.readyAt && Date.now() < confirmDialog.readyAt) {
       return;
@@ -1339,7 +1424,7 @@ export function ModsOverlay({
   };
 
   const extractModNameFromFileName = (fileName: string): string => {
-    let modName = fileName.replace(/\.(dll|zip|rar)$/i, '');
+    let modName = fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, '');
 
     modName = modName.replace(/[-_ ]?v?\d+\.\d+(\.\d+)?([-_ ].*)?$/i, '');
     modName = modName.replace(/[-_ ]?\d+\.\d+\.\d+.*$/i, '');
@@ -1348,7 +1433,7 @@ export function ModsOverlay({
 
     modName = modName.trim().replace(/[-_]+/g, ' ').trim();
 
-    return modName || fileName.replace(/\.(dll|zip|rar)$/i, '');
+    return modName || fileName.replace(/\.(dll|zip|rar|7z|tar\.gz|tgz)$/i, '');
   };
 
   const fuzzyMatchModName = (searchName: string, modName: string): number => {
@@ -1704,7 +1789,7 @@ export function ModsOverlay({
         multiple: true,
         filters: [{
           name: 'Mod Files',
-          extensions: ['dll', 'zip', 'rar']
+          extensions: ['dll', 'zip', 'rar', '7z', 'tar.gz', 'tgz']
         }],
         title: 'Select Mod Files',
       }) as string | { path: string; name?: string } | Array<string | { path: string; name?: string }> | null;
@@ -1737,7 +1822,7 @@ export function ModsOverlay({
     return null;
   };
 
-  const isArchiveFile = (fileName: string): boolean => /\.(zip|rar)$/i.test(fileName);
+  const isArchiveFile = (fileName: string): boolean => /\.(zip|rar|7z|tar\.gz|tgz)$/i.test(fileName);
 
   const handleRuntimeSelectionConfirm = async (selectedRuntime: 'IL2CPP' | 'Mono') => {
     if (!pendingRuntimeSelection) return;
@@ -1795,415 +1880,7 @@ export function ModsOverlay({
       },
       remainingQueue,
     );
-  };
-
-  // Filter mods to ensure they are for Schedule I, match the runtime, and match the search query
-  const filterModsForScheduleI = (
-    packages: ThunderstorePackage[],
-    runtime: 'IL2CPP' | 'Mono',
-    searchQuery: string
-  ): ThunderstorePackage[] => {
-    const runtimeLower = runtime.toLowerCase();
-    const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
-    const searchLower = searchQuery.toLowerCase().trim();
-
-    return packages.filter((pkg) => {
-      // 1. Check if it's for Schedule I - verify package URL contains schedule-i
-      // Since we're using the Schedule I endpoint, all results should be for Schedule I,
-      // but we verify this client-side as requested
-      const packageUrl = (pkg.package_url || '').toLowerCase();
-      const isScheduleI =
-        packageUrl.includes('schedule-i') ||
-        packageUrl.includes('c/schedule-i') ||
-        packageUrl.includes('/schedule-i/');
-
-      if (!isScheduleI) {
-        // If no URL available, we can't verify, so exclude to be safe
-        // (though in practice, if the API endpoint is correct, all results should have the URL)
-        return false;
-      }
-
-      // 2. Check runtime compatibility
-      const name = (pkg.name || '').toLowerCase();
-      const fullName = (pkg.full_name || '').toLowerCase();
-      const categories = (pkg.categories || []).map(c => c.toLowerCase());
-
-      // Check categories for runtime tags
-      const hasTargetRuntimeCategory = categories.some(c => c === runtimeLower);
-      const hasOtherRuntimeCategory = categories.some(c => c === otherRuntime);
-
-      // If it has the target runtime category, include it (even if it also has the other)
-      if (hasTargetRuntimeCategory) {
-        // Package supports this runtime, continue to search query check
-      } else if (hasOtherRuntimeCategory) {
-        // Has only the other runtime category, exclude
-        return false;
-      }
-
-      // For name-based checking (when no categories match)
-      // Check if explicitly mentions the other runtime in name (exclude)
-      const mentionsOtherRuntimeInName =
-        name.includes(otherRuntime) ||
-        fullName.includes(otherRuntime);
-
-      if (mentionsOtherRuntimeInName && !hasTargetRuntimeCategory) {
-        return false;
-      }
-
-      // Check if it mentions the target runtime in name or has no runtime specified (assume compatible)
-      const mentionsTargetRuntime =
-        name.includes(runtimeLower) ||
-        fullName.includes(runtimeLower) ||
-        hasTargetRuntimeCategory;
-
-      const noRuntimeSpecified =
-        !name.includes('il2cpp') &&
-        !name.includes('mono') &&
-        !fullName.includes('il2cpp') &&
-        !fullName.includes('mono') &&
-        !categories.some(c => c.includes('il2cpp') || c.includes('mono'));
-
-      // Must either mention target runtime or have no runtime specified
-      if (!mentionsTargetRuntime && !noRuntimeSpecified) {
-        return false;
-      }
-
-      // 3. Check if it matches the search query
-      if (searchLower) {
-        const matchesSearch =
-          name.includes(searchLower) ||
-          fullName.includes(searchLower) ||
-          (pkg.versions?.[0]?.description || '').toLowerCase().includes(searchLower) ||
-          (pkg.owner || '').toLowerCase().includes(searchLower);
-
-        if (!matchesSearch) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-  };
-
-  const handleSearch = async () => {
-    if (!searchQuery.trim() || !environment) {
-      return;
-    }
-
-    // Use hardcoded game ID for Schedule I
-    const gameId = 'schedule-i';
-
-    setSearching(true);
-    setError(null);
-    setShowSearchResults(false);
-    try {
-      const result = await ApiService.searchThunderstore(
-        gameId,
-        searchQuery.trim(),
-        environment.runtime
-      );
-
-      // Apply client-side filtering to ensure only Schedule I mods for the correct runtime are shown
-      const filteredResults = filterModsForScheduleI(
-        result.packages || [],
-        environment.runtime,
-        searchQuery.trim()
-      );
-
-      setSearchResults(filteredResults);
-      setShowSearchResults(true);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to search Thunderstore';
-      setError(errorMessage);
-      setSearchResults([]);
-      setShowSearchResults(false);
-      console.error('Error searching Thunderstore:', err);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleInstallThunderstoreMod = async (pkg: ThunderstorePackage, securityOverride = false) => {
-    if (!environment) return;
-
-    setInstallingPackage(pkg.uuid4);
-    setError(null);
-    try {
-      console.log(`Installing Thunderstore mod: ${pkg.name} (${pkg.uuid4})`);
-      const result = await ApiService.installThunderstoreMod(environmentId, pkg.uuid4, securityOverride);
-
-      if (!result.success) {
-        const handled = handleSecurityGateResponse(`Security Findings - ${pkg.name}`, result, async () => {
-          await handleInstallThunderstoreMod(pkg, true);
-        });
-        if (handled) {
-          return;
-        }
-
-        const errorMsg = result.error || 'Failed to install mod';
-        console.error(`Failed to install mod ${pkg.name}:`, errorMsg);
-        setError(errorMsg);
-        return;
-      }
-
-      // Check for runtime mismatch
-      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-        setConfirmDialog({
-          title: 'Runtime Mismatch Warning',
-          message: result.runtimeMismatch.warning,
-          confirmText: 'Continue Anyway',
-          cancelText: 'Cancel',
-          onConfirm: async () => {
-            console.log(`Successfully installed mod: ${pkg.name}`);
-
-            await loadInstalledMods(false, true);
-            await loadDownloadedLibrary();
-            await loadCachedModUpdates();
-            if (onModsChanged) {
-              onModsChanged();
-            }
-
-            setShowSearchResults(false);
-            setSearchQuery('');
-          }
-        });
-        return;
-      }
-
-      console.log(`Successfully installed mod: ${pkg.name}`);
-
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-      await loadCachedModUpdates();
-      if (onModsChanged) {
-        onModsChanged();
-      }
-
-      setShowSearchResults(false);
-      setSearchQuery('');
-    } catch (err) {
-      const errorMsg = getErrorMessage(err, 'Failed to install mod');
-      console.error(`Error installing mod ${pkg.name}:`, err);
-      setError(errorMsg);
-    } finally {
-      setInstallingPackage(null);
-    }
-  };
-
-  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      if (searchSource === 'thunderstore') {
-        handleSearch();
-      } else {
-        handleSearchNexusMods();
-      }
-    }
-  };
-
-  const handleSearchNexusMods = async () => {
-    if (!nexusModsSearchQuery.trim() || !environment) {
-      return;
-    }
-
-    const gameId = 'schedule1';
-    await refreshNexusDownloadAccess();
-
-    setSearchingNexusMods(true);
-    setError(null);
-    setShowNexusModsResults(false);
-    try {
-      const result = await ApiService.searchNexusMods(
-        gameId,
-        nexusModsSearchQuery.trim()
-      );
-
-      setNexusModsSearchResults(result.mods || []);
-      setShowNexusModsResults(true);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to search NexusMods';
-      setError(errorMessage);
-      setNexusModsSearchResults([]);
-      setShowNexusModsResults(false);
-      console.error('Error searching NexusMods:', err);
-    } finally {
-      setSearchingNexusMods(false);
-    }
-  };
-
-  const handleLoadNexusModFiles = async (modId: number): Promise<NexusModFile[]> => {
-    const cached = nexusModsFiles.get(modId);
-    if (cached) {
-      return cached;
-    }
-
-    try {
-      const files = await ApiService.getNexusModsModFiles('schedule1', modId);
-      setNexusModsFiles(prev => new Map(prev).set(modId, files));
-      return files;
-    } catch (err) {
-      console.error('Failed to load NexusMods mod files:', err);
-      return [];
-    }
-  };
-
-  const handleInstallNexusModsMod = async (modId: number, fileId?: number, securityOverride = false) => {
-    if (!environment) {
-      setError('Environment not loaded');
-      return;
-    }
-
-    const status = await ApiService.getNexusOAuthStatus();
-    const isConnected = !!status.connected;
-    const canDirectDownload = isConnected && !!status.account?.canDirectDownload;
-    const requiresSiteConfirmation = isConnected && !!status.account?.requiresSiteConfirmation;
-
-    setHasNexusDownloadAccess(isConnected);
-    setNexusRequiresSiteConfirmation(requiresSiteConfirmation);
-    if (!isConnected) {
-      setShowNexusKeyRequiredModal(true);
-      return;
-    }
-
-    // Load files if not already loaded
-    let files = nexusModsFiles.get(modId) || [];
-    if (files.length === 0) {
-      files = await handleLoadNexusModFiles(modId);
-    }
-
-    // Filter files by runtime type if fileId not specified
-    // NexusMods uses separate files for IL2CPP and Mono, so we filter by file name
-    let targetFile;
-    if (fileId) {
-      targetFile = files.find((f: any) => f.file_id === fileId);
-    } else {
-      // Filter files by runtime type based on file name
-      const runtimeLower = environment.runtime.toLowerCase();
-      const otherRuntime = runtimeLower === 'il2cpp' ? 'mono' : 'il2cpp';
-
-      // First, try to find files that match the current runtime
-      const runtimeFiles = files.filter((f: any) => {
-        const fileName = (f.file_name || f.name || '').toLowerCase();
-        return fileName.includes(runtimeLower);
-      });
-
-      if (runtimeFiles.length > 0) {
-        // Prefer primary file if it matches runtime, otherwise use first match
-        targetFile = runtimeFiles.find((f: any) => f.is_primary) || runtimeFiles[0];
-      } else {
-        // No exact runtime match, exclude files that explicitly mention the other runtime
-        const compatibleFiles = files.filter((f: any) => {
-          const fileName = (f.file_name || f.name || '').toLowerCase();
-          return !fileName.includes(otherRuntime);
-        });
-        targetFile = compatibleFiles.find((f: any) => f.is_primary) || compatibleFiles[0] || files[0];
-      }
-    }
-
-    if (!targetFile) {
-      setError('No file available to install for your runtime type');
-      return;
-    }
-
-    setInstallingNexusMod({ modId, fileId: targetFile.file_id });
-    setError(null);
-    let keepPendingInstall = false;
-    try {
-      if (!canDirectDownload && requiresSiteConfirmation) {
-        await ApiService.beginNexusManualDownloadSession({
-          kind: 'install',
-          modId,
-          fileId: targetFile.file_id,
-          gameId: 'schedule1',
-          environmentId,
-          runtime: environment.runtime,
-        });
-        startNexusManualTimeout();
-        showToast('Opened the Nexus Mods Files tab in your browser. Confirm the download there; SIMM will continue when the nxm link returns.');
-        keepPendingInstall = true;
-        return;
-      }
-
-      console.log(`Installing NexusMods mod: ${modId} file: ${targetFile.file_id}`);
-      const result = await ApiService.installNexusModsMod(environmentId, modId, targetFile.file_id, undefined, securityOverride);
-
-      if (!result.success) {
-        if (result.requiresManualDownload && result.modUrl) {
-          await beginManualNexusInstallSession({
-            modId,
-            fileId: targetFile.file_id,
-            gameId: 'schedule1',
-            runtime: environment.runtime,
-            modUrl: result.modUrl,
-            error: result.error,
-          });
-          keepPendingInstall = true;
-          return;
-        }
-
-        const handled = handleSecurityGateResponse(`Security Findings - Nexus Mod ${modId}`, result, async () => {
-          await handleInstallNexusModsMod(modId, targetFile.file_id, true);
-        });
-        if (handled) {
-          return;
-        }
-
-        const errorMsg = result.error || 'Failed to install mod';
-        console.error(`Failed to install mod ${modId}:`, errorMsg);
-        setError(errorMsg);
-        return;
-      }
-
-      if (result.runtimeMismatch && result.runtimeMismatch.requiresConfirmation) {
-        setConfirmDialog({
-          title: 'Runtime Mismatch Warning',
-          message: result.runtimeMismatch.warning,
-          confirmText: 'Continue Anyway',
-          cancelText: 'Cancel',
-          onConfirm: async () => {
-            console.log(`Successfully installed mod: ${modId}`);
-
-            await loadInstalledMods(false, true);
-            await loadDownloadedLibrary();
-            await loadCachedModUpdates();
-            if (onModsChanged) {
-              onModsChanged();
-            }
-
-            setShowNexusModsResults(false);
-            setNexusModsSearchQuery('');
-          }
-        });
-        return;
-      }
-
-      console.log(`Successfully installed mod: ${modId}`);
-
-      await loadInstalledMods(false, true);
-      await loadDownloadedLibrary();
-      await loadCachedModUpdates();
-      if (onModsChanged) {
-        onModsChanged();
-      }
-
-      setShowNexusModsResults(false);
-      setNexusModsSearchQuery('');
-    } catch (err) {
-      // Log the full error object to see its structure
-      console.error(`Error installing mod ${modId} - Full error object:`, err);
-      console.error(`Error type:`, typeof err);
-      console.error(`Error keys:`, err ? Object.keys(err) : 'null');
-
-      const errorMsg = getErrorMessage(err, 'Failed to install mod');
-      console.error(`Extracted error message:`, errorMsg);
-      setError(errorMsg);
-    } finally {
-      if (!keepPendingInstall) {
-        setInstallingNexusMod(null);
-      }
-    }
-  };
-
-  const getSourceLabel = (source?: string): string => {
+  };  const getSourceLabel = (source?: string): string => {
     switch (source) {
       case 'thunderstore':
         return 'ThunderStore';
@@ -2217,22 +1894,6 @@ export function ModsOverlay({
         return 'Unknown';
     }
   };
-
-  const getSourceColor = (source?: string): string => {
-    switch (source) {
-      case 'thunderstore':
-        return '#7c3aed'; // Purple
-      case 'nexusmods':
-        return '#ea4335'; // Red
-      case 'github':
-        return '#2ea44f'; // Green
-      case 'local':
-        return '#34a853'; // Green
-      default:
-        return '#888';
-    }
-  };
-
   const isLinkableLocalMod = useCallback((mod?: ModInfo | null) => {
     if (!mod) {
       return false;
@@ -2457,27 +2118,6 @@ export function ModsOverlay({
     await prepareLocalOwnershipStep(mod, preview, resolvedVersion);
   }, [localModRequiresLinkConfirmation, prepareLocalOwnershipStep, requestLocalSourcePreview]);
 
-  if (!isOpen) return null;
-
-  const envRuntime = environment?.runtime;
-  const downloadedNotInstalled = visibleDownloadedMods.filter(entry => {
-    const installedIn = envRuntime ? entry.installedInByRuntime?.[envRuntime] || entry.installedIn : entry.installedIn;
-    if (installedIn?.includes(environmentId)) return false;
-    // Exclude mods that have declared runtimes but none match the current environment runtime
-    if (envRuntime) {
-      const runtimeMatch = envRuntime.toUpperCase();
-      const hasMatchingRuntime = (entry.availableRuntimes?.length ?? 0) > 0
-        ? entry.availableRuntimes.some(r => (r ?? '').toUpperCase() === runtimeMatch)
-        : false;
-      // Fallback: if we have storage for this runtime, include (handles backend inconsistency / key casing)
-      const hasStorageForRuntime = !!entry.storageIdsByRuntime?.[envRuntime]
-        || Object.entries(entry.storageIdsByRuntime || {}).some(([k]) => k.toUpperCase() === runtimeMatch);
-      if (!hasMatchingRuntime && !hasStorageForRuntime && (entry.availableRuntimes?.length ?? 0) > 0) {
-        return false;
-      }
-    }
-    return true;
-  });
   const totalUpdatesAvailable = mods.filter((mod) => {
     const updateInfo = modUpdates.get(mod.fileName);
     const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
@@ -2533,88 +2173,27 @@ export function ModsOverlay({
       updatedAt: mod.updatedAt,
       tags: mod.tags,
       installedVersion: mod.version,
-      latestVersion: update?.latestVersion,
+      latestVersion: getInstalledModLatestVersion(mod, update),
       installedAt: mod.installedAt,
       securityScan: mod.securityScan,
       kind: 'installed',
     });
-  };
-
-  const openLibraryModView = (entry: ModLibraryEntry) => {
-    openModView({
-      id: entry.storageId,
-      storageId: entry.storageId,
-      name: entry.displayName,
-      source: entry.source || 'unknown',
-      summary: entry.summary,
-      iconUrl: entry.iconUrl,
-      iconCachePath: entry.iconCachePath,
-      sourceUrl: entry.sourceUrl,
-      downloads: entry.downloads,
-      likesOrEndorsements: entry.likesOrEndorsements,
-      updatedAt: entry.updatedAt,
-      tags: entry.tags,
-      installedVersion: entry.installedVersion || entry.sourceVersion,
-      installedAt: entry.installedAt,
-      securityScan: entry.securityScan,
-      kind: 'library',
-    });
-  };
-
-  const openThunderstoreModView = (pkg: ThunderstorePackage) => {
-    const latestVersion = pkg.versions?.[0];
-    openModView({
-      id: pkg.uuid4,
-      name: pkg.name || pkg.full_name,
-      source: 'thunderstore',
-      summary: latestVersion?.description,
-      iconUrl: latestVersion?.icon || pkg.icon || pkg.icon_url,
-      sourceUrl: pkg.package_url,
-      author: pkg.owner,
-      downloads: Array.isArray(pkg.versions)
-        ? pkg.versions.reduce((sum, version) => sum + (version.downloads || 0), 0)
-        : 0,
-      likesOrEndorsements: pkg.rating_score,
-      updatedAt: pkg.date_updated,
-      tags: pkg.categories,
-      installedVersion: latestVersion?.version_number,
-      kind: 'thunderstore',
-    });
-  };
-
-  const openNexusModView = (mod: NexusMod) => {
-    openModView({
-      id: `nexus-${mod.mod_id}`,
-      name: mod.name,
-      source: 'nexusmods',
-      summary: mod.summary,
-      iconUrl: mod.picture_url,
-      sourceUrl: `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`,
-      author: mod.author,
-      downloads: mod.mod_downloads,
-      likesOrEndorsements: mod.endorsement_count,
-      updatedAt: mod.updated_time,
-      installedVersion: mod.version,
-      kind: 'nexusmods',
-    });
-  };
-
-  const selectedInstalledMod = useMemo(() => {
-    if (activeModView?.kind !== 'installed') {
+  };  const selectedInstalledMod = useMemo(() => {
+    if (!isOpen || activeModView?.kind !== 'installed') {
       return null;
     }
     return mods.find((mod) => `${mod.fileName}-${mod.path}` === activeModView.id) || null;
-  }, [activeModView, mods]);
+  }, [activeModView, isOpen, mods]);
   const selectedInstalledSecurityBadge = getSecurityBadgeConfig(selectedInstalledMod?.securityScan);
 
   useEffect(() => {
-    if (!localSourceLinkState) {
+    if (!isOpen || !localSourceLinkState) {
       return;
     }
     if (!selectedInstalledMod || `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` !== localSourceLinkState.modId) {
       setLocalSourceLinkState(null);
     }
-  }, [localSourceLinkState, selectedInstalledMod]);
+  }, [isOpen, localSourceLinkState, selectedInstalledMod]);
 
   useEffect(() => {
     if (!isOpen || filteredMods.length === 0) {
@@ -2628,6 +2207,8 @@ export function ModsOverlay({
       openInstalledModView(filteredMods[0]);
     }
   }, [activeModView, filteredMods, isOpen]);
+
+  if (!isOpen) return null;
 
   const openContextMenu = (event: ReactMouseEvent, items: AnchoredContextMenuItem[]) => {
     event.preventDefault();
@@ -2666,1199 +2247,6 @@ export function ModsOverlay({
     );
   };
 
-  const legacyLayout = () => (
-    <>
-      <ConfirmOverlay
-        isOpen={showNexusKeyRequiredModal}
-        onClose={() => setShowNexusKeyRequiredModal(false)}
-        onConfirm={() => {
-          setShowNexusKeyRequiredModal(false);
-          if (onOpenAccounts) {
-            onOpenAccounts();
-          } else {
-            setError('Nexus Login is required to download files. Open Accounts to continue.');
-          }
-        }}
-        title="Nexus Login Required"
-        message={nexusRequiresSiteConfirmation ? 'This Nexus account must confirm downloads on NexusMods website for each file. Open Accounts for details.' : 'Downloading from NexusMods requires Nexus Login. Open Accounts to continue.'}
-        confirmText="Open Accounts"
-        cancelText="Not Now"
-        isNested
-      />
-      <ConfirmOverlay
-        isOpen={!!pendingUpload}
-        onClose={handleRuntimeMismatchCancel}
-        onConfirm={handleRuntimeMismatchConfirm}
-        title="Runtime Mismatch Warning"
-        message={pendingUpload?.runtimeMismatch.warning || ''}
-        confirmText="Continue Anyway"
-        cancelText="Cancel"
-        isNested
-      />
-      <ConfirmOverlay
-        isOpen={!!confirmDialog}
-        onClose={() => setConfirmDialog(null)}
-        onConfirm={handleConfirmDialog}
-        title={confirmDialog?.title || ''}
-        message={confirmDialog?.message || ''}
-        confirmText={confirmDialog?.confirmText}
-        cancelText={confirmDialog?.cancelText}
-        isNested
-      />
-      <SecurityScanReportOverlay
-        isOpen={!!activeSecurityReport}
-        title={activeSecurityReport?.title || 'Security Findings'}
-        report={activeSecurityReport?.report || null}
-        reportOptions={activeSecurityReport?.reportOptions}
-        onClose={closeSecurityReport}
-        onConfirm={activeSecurityReport?.onConfirm ? () => { void handleSecurityReportConfirm(); } : undefined}
-        confirmLabel={activeSecurityReport?.confirmLabel || 'Continue Install'}
-        busy={securityActionBusy}
-      />
-      {toastMessage && (
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: 'fixed',
-            right: '1rem',
-            bottom: '1rem',
-            zIndex: 2200,
-            maxWidth: '28rem',
-            padding: '0.8rem 0.95rem',
-            borderRadius: '0.8rem',
-            background: 'rgba(19, 29, 42, 0.96)',
-            border: '1px solid rgba(116, 168, 255, 0.42)',
-            color: '#e7f0fb',
-            boxShadow: '0 18px 40px rgba(0, 0, 0, 0.32)',
-            fontSize: '0.92rem',
-            lineHeight: 1.45,
-          }}
-        >
-          {toastMessage}
-        </div>
-      )}
-      {pendingRuntimeSelection && (
-        <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
-          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
-            <div className="modal-header">
-              <h2>Select Mod Runtime</h2>
-              <button className="modal-close" onClick={handleRuntimeSelectionCancel}>×</button>
-            </div>
-            <div style={{ padding: '1.5rem' }}>
-              <p style={{ marginBottom: '1rem', color: '#ccc' }}>
-                Could not determine the runtime for <strong>{pendingRuntimeSelection.fileName}</strong>.
-                Please select which runtime this mod is designed for:
-              </p>
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', marginBottom: '1.5rem' }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => handleRuntimeSelectionConfirm('Mono')}
-                  style={{ minWidth: '100px' }}
-                >
-                  Mono
-                </button>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}
-                  style={{ minWidth: '100px' }}
-                >
-                  IL2CPP
-                </button>
-              </div>
-              <p style={{ fontSize: '0.85rem', color: '#888', textAlign: 'center' }}>
-                This helps ensure the mod is tagged correctly in your library.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-      <div className="mods-overlay mods-overlay--environment" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, position: 'relative' }}>
-        <div className="modal-header">
-          <h2>Mods</h2>
-          <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-            <button
-              onClick={() => {
-                const next = !showSearchInOverlay;
-                setShowSearchInOverlay(next);
-                if (!next) {
-                  setShowSearchResults(false);
-                  setShowNexusModsResults(false);
-                }
-              }}
-              className="btn btn-secondary btn-small"
-              title="Browse mods from Thunderstore/NexusMods"
-            >
-              <Icon name="fas fa-compass" style={{ marginRight: '0.45rem' }} />
-              {showSearchInOverlay ? 'Hide Browse' : 'Browse Mods'}
-            </button>
-            <button
-              onClick={handleCheckModUpdates}
-              className="btn btn-secondary btn-small"
-              disabled={checkingModUpdates}
-              title="Check for mod and plugin updates"
-            >
-              {checkingModUpdates ? (
-                <>
-                  <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }} />
-                  Checking...
-                </>
-              ) : (
-                <>
-                  <Icon name="fas fa-sync-alt" style={{ marginRight: '0.45rem' }} />
-                  Check Updates
-                </>
-              )}
-            </button>
-            <button
-              onClick={handleUpdateAllMods}
-              className="btn btn-primary btn-small"
-              disabled={updatingAllMods || totalUpdatesAvailable === 0}
-              title="Update all supported mods with updates"
-            >
-              {updatingAllMods ? (
-                <>
-                  <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }} />
-                  Updating...
-                </>
-              ) : (
-                <>
-                  <Icon name="fas fa-arrow-up" style={{ marginRight: '0.45rem' }} />
-                  Update All ({totalUpdatesAvailable})
-                </>
-              )}
-            </button>
-            <button
-              onClick={handleUploadClick}
-              className="btn btn-primary btn-small"
-              disabled={uploading}
-              title="Add one or more mod files (.dll, .zip, or .rar)"
-            >
-              {uploading ? (
-                <>
-                  <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.45rem' }} />
-                  {uploadButtonBusyLabel}
-                </>
-              ) : (
-                <>
-                  <Icon name="fas fa-upload" style={{ marginRight: '0.45rem' }} />
-                  Add Mod
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        <div className="mods-content" ref={modsScrollContainerRef}>
-          {error && (
-            <div className="error-message" style={{ margin: '0 1.25rem', padding: '0.75rem', backgroundColor: '#dc3545', color: '#fff', borderRadius: '4px' }}>
-              {error}
-            </div>
-          )}
-
-          {/* Mod Search Bar */}
-          {showSearchInOverlay && environment && (
-            <div className="mods-section" style={{ padding: '0 1.25rem', marginBottom: '1rem', borderBottom: '1px solid #3a3a3a', paddingBottom: '1rem' }}>
-              {/* Source Tabs */}
-              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                <button
-                  onClick={() => {
-                    setSearchSource('thunderstore');
-                    setShowSearchResults(false);
-                    setShowNexusModsResults(false);
-                  }}
-                  className="btn"
-                  style={{
-                    flex: 1,
-                    backgroundColor: searchSource === 'thunderstore' ? '#4a90e2' : '#2a2a2a',
-                    color: searchSource === 'thunderstore' ? '#fff' : '#888',
-                    border: `1px solid ${searchSource === 'thunderstore' ? '#4a90e2' : '#3a3a3a'}`,
-                    padding: '0.5rem',
-                    fontSize: '0.875rem'
-                  }}
-                >
-                  <Icon name="fas fa-cloud-download-alt" style={{ marginRight: '0.5rem' }} />
-                  Thunderstore
-                </button>
-                <button
-                  onClick={() => {
-                    setSearchSource('nexusmods');
-                    setShowSearchResults(false);
-                    setShowNexusModsResults(false);
-                  }}
-                  className="btn"
-                  style={{
-                    flex: 1,
-                    backgroundColor: searchSource === 'nexusmods' ? '#ea4335' : '#2a2a2a',
-                    color: searchSource === 'nexusmods' ? '#fff' : '#888',
-                    border: `1px solid ${searchSource === 'nexusmods' ? '#ea4335' : '#3a3a3a'}`,
-                    padding: '0.5rem',
-                    fontSize: '0.875rem'
-                  }}
-                >
-                  <Icon name="fas fa-download" style={{ marginRight: '0.5rem' }} />
-                  NexusMods
-                </button>
-              </div>
-
-              {/* Search Input */}
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                <div style={{ flex: 1, position: 'relative' }}>
-                  <input
-                    type="text"
-                    placeholder={searchSource === 'thunderstore'
-                      ? `Search Thunderstore for ${environment.runtime} mods...`
-                      : `Search NexusMods for ${environment.runtime} mods...`}
-                    value={searchSource === 'thunderstore' ? searchQuery : nexusModsSearchQuery}
-                    onChange={(e) => {
-                      if (searchSource === 'thunderstore') {
-                        setSearchQuery(e.target.value);
-                      } else {
-                        setNexusModsSearchQuery(e.target.value);
-                      }
-                    }}
-                    onKeyDown={handleSearchKeyDown}
-                    style={{
-                      width: '100%',
-                      padding: '0.5rem 2.5rem 0.5rem 0.75rem',
-                      backgroundColor: '#1a1a1a',
-                      border: '1px solid #3a3a3a',
-                      borderRadius: '4px',
-                      color: '#fff',
-                      fontSize: '0.875rem'
-                    }}
-                  />
-                  <Icon name="fas fa-search"
-                    style={{
-                      position: 'absolute',
-                      right: '0.75rem',
-                      top: '50%',
-                      transform: 'translateY(-50%)',
-                      color: '#888',
-                      cursor: 'pointer'
-                    }}
-                    onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
-                   />
-                </div>
-                <button
-                  onClick={searchSource === 'thunderstore' ? handleSearch : handleSearchNexusMods}
-                  className="btn btn-primary"
-                  disabled={(searchSource === 'thunderstore' ? searching : searchingNexusMods) ||
-                           (searchSource === 'thunderstore' ? !searchQuery.trim() : !nexusModsSearchQuery.trim())}
-                  style={{ whiteSpace: 'nowrap' }}
-                >
-                  {(searchSource === 'thunderstore' ? searching : searchingNexusMods) ? (
-                    <>
-                      <Icon name="fas fa-spinner fa-spin" style={{ marginRight: '0.5rem' }} />
-                      Searching...
-                    </>
-                  ) : (
-                    <>
-                      <Icon name="fas fa-search" style={{ marginRight: '0.5rem' }} />
-                      Search
-                    </>
-                  )}
-                </button>
-                {(showSearchResults || showNexusModsResults) && (
-                  <button
-                    onClick={() => {
-                      setShowSearchResults(false);
-                      setShowNexusModsResults(false);
-                      setSearchQuery('');
-                      setNexusModsSearchQuery('');
-                      setSearchResults([]);
-                      setNexusModsSearchResults([]);
-                    }}
-                    className="btn btn-secondary"
-                    style={{ whiteSpace: 'nowrap' }}
-                  >
-                    <Icon name="fas fa-times" style={{ marginRight: '0.5rem' }} />
-                    Close
-                  </button>
-                )}
-              </div>
-              {environment && (
-                  <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.75rem', color: '#888' }}>
-                    Showing Schedule I results for <strong>{environment.runtime}</strong>
-                  </p>
-                )}
-            </div>
-          )}
-
-          {/* Search Results - Loading State */}
-          {(searching || searchingNexusMods) && (
-            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <Icon name="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-              <p>Searching {searchSource === 'thunderstore' ? 'Thunderstore' : 'NexusMods'}...</p>
-            </div>
-          )}
-
-          {/* Thunderstore Search Results */}
-          {!searching && showSearchResults && searchResults.length > 0 && (
-            <div className="mods-section" style={{ padding: '1rem 1.25rem 1rem', marginBottom: '1rem' }}>
-              <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
-                Search Results ({searchResults.length})
-              </h3>
-              <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
-                {searchResults.map((pkg) => {
-                  const latestVersion = pkg.versions?.[0];
-                  const iconUrl = latestVersion?.icon || pkg.icon || pkg.icon_url;
-                  const runtimeText = `${pkg.name} ${pkg.full_name} ${(pkg.categories || []).join(' ')}`.toLowerCase();
-                  const runtimes: Array<'IL2CPP' | 'Mono'> = [];
-                  if (runtimeText.includes('il2cpp')) runtimes.push('IL2CPP');
-                  if (runtimeText.includes('mono')) runtimes.push('Mono');
-                  if (runtimes.length === 0 && environment?.runtime) {
-                    runtimes.push(environment.runtime);
-                  }
-                  const summary = latestVersion?.description;
-                  const totalDownloads = Array.isArray(pkg.versions)
-                    ? pkg.versions.reduce((sum, version) => sum + (version.downloads || 0), 0)
-                    : 0;
-
-                  return (
-                    <div
-                      key={pkg.uuid4}
-                      className="mod-card store-card"
-                      style={{ padding: '1rem', backgroundColor: '#2a2a2a', borderRadius: '8px', border: '1px solid #3a3a3a', cursor: 'pointer' }}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Open details for ${pkg.name || pkg.full_name || 'Unknown Mod'}`}
-                      onClick={() => openThunderstoreModView(pkg)}
-                      onKeyDown={(event) => handleCardActivationKeyDown(event, () => openThunderstoreModView(pkg))}
-                    >
-                      <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '1rem' }}>
-                        <div className="mod-card-main-shell" style={{ flex: 1, minWidth: 0, alignItems: 'stretch', gap: '1rem' }}>
-                          {renderCardIcon(pkg.name || pkg.full_name || 'Unknown Mod', undefined, iconUrl, 'rail')}
-                          <div className="mod-card-main-column" style={{ minWidth: 0 }}>
-                            <div className="mod-card-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                              <strong className="mod-card-title-text" style={{ fontSize: '1rem' }}>
-                                {pkg.name || (pkg.full_name ? pkg.full_name.split('-').slice(1).join('-') : 'Unknown Mod')}
-                              </strong>
-                            </div>
-                            <div style={{ fontSize: '0.85rem', color: '#9aa4b2' }}>{pkg.owner || 'Unknown'}</div>
-                            <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
-                              {runtimes.map((runtime) => (
-                                <span
-                                  key={`${pkg.uuid4}-${runtime}`}
-                                  style={{
-                                    fontSize: '0.7rem',
-                                    padding: '0.15rem 0.4rem',
-                                    borderRadius: '4px',
-                                    backgroundColor: '#4a90e220',
-                                    color: '#4a90e2',
-                                    border: '1px solid #4a90e240'
-                                  }}
-                                >
-                                  {runtime}
-                                </span>
-                              ))}
-                            </div>
-                            {summary && (
-                              <p className="mod-card-summary" title={summary} style={{ marginTop: '0.45rem' }}>
-                                {summary}
-                              </p>
-                            )}
-                            <div className="mod-card-meta-row" style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                              <span><Icon name="fas fa-download" style={{ marginRight: '0.25rem' }} />{totalDownloads.toLocaleString()}</span>
-                              <span><Icon name="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }} />{(pkg.rating_score || 0).toLocaleString()}</span>
-                              {latestVersion?.version_number && (
-                                <span><Icon name="fas fa-tag" style={{ marginRight: '0.25rem' }} />v{latestVersion.version_number}</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mod-card-actions mod-card-actions--stacked" onClick={(e) => e.stopPropagation()}>
-                          <div className="mod-card-actions-buttons">
-                            <button
-                              onClick={() => handleInstallThunderstoreMod(pkg)}
-                              className="btn btn-primary btn-small mod-card-action-button"
-                              disabled={installingPackage === pkg.uuid4}
-                              title={`Install ${pkg.full_name || pkg.name || 'mod'}`}
-                            >
-                              {installingPackage === pkg.uuid4 ? 'Installing...' : 'Install'}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {!searching && showSearchResults && searchResults.length === 0 && (
-            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <Icon name="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-              <p>No mods found matching your search</p>
-            </div>
-          )}
-
-          {/* NexusMods Search Results - Loading State */}
-          {searchingNexusMods && (
-            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <Icon name="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-              <p>Searching NexusMods...</p>
-            </div>
-          )}
-
-          {/* NexusMods Search Results */}
-          {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length > 0 && (() => {
-            const runtimeLower = environment?.runtime?.toLowerCase() || '';
-
-            // Only filter by files after a user has loaded that mod's file list.
-            const compatibleMods = nexusModsSearchResults.filter((mod) => {
-              const files = nexusModsFiles.get(mod.mod_id) || [];
-              if (files.length === 0) {
-                return true;
-              }
-
-              const runtimeFiles = files.filter((f: any) => {
-                const fileName = (f.file_name || f.name || '').toLowerCase();
-
-                // Define runtime-specific keywords:
-                // IL2CPP: il2cpp, main, beta
-                // Mono: mono, alternate, alternatebeta
-                if (runtimeLower === 'il2cpp') {
-                  // For IL2CPP, file must contain: il2cpp, main, or beta
-                  return fileName.includes('il2cpp') || fileName.includes('main') || fileName.includes('beta');
-                } else {
-                  // For Mono, file must contain: mono, alternate, or alternatebeta
-                  return fileName.includes('mono') || fileName.includes('alternate');
-                }
-              });
-
-              return runtimeFiles.length > 0;
-            });
-
-            return compatibleMods.length > 0 ? (
-              <div className="mods-section" style={{ padding: '1rem 1.25rem 1rem', marginBottom: '1rem' }}>
-                <h3 style={{ margin: '0 0 1rem 0', fontSize: '1rem', color: '#fff' }}>
-                  Search Results ({compatibleMods.length})
-                </h3>
-                {!hasNexusDownloadAccess && (
-                  <div style={{
-                    marginBottom: '0.75rem',
-                    padding: '0.5rem 0.75rem',
-                    borderRadius: '6px',
-                    backgroundColor: '#3a2a1a',
-                    border: '1px solid #6a4a2a',
-                    color: '#ffd7a3',
-                    fontSize: '0.85rem'
-                  }}>
-                    <Icon name="fas fa-info-circle" style={{ marginRight: '0.5rem' }} />
-                    Browsing is available without login. Downloading requires Nexus Login.
-                  </div>
-                )}
-                <div className="mods-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
-                  {compatibleMods.map((mod) => {
-                    const files = nexusModsFiles.get(mod.mod_id) || [];
-
-                    // Check if mod is already installed
-                    const isAlreadyInstalled = mods.some(installedMod => {
-                      // Check by source URL or mod name + author
-                      const sourceUrl = `https://www.nexusmods.com/schedule1/mods/${mod.mod_id}`;
-                      return installedMod.sourceUrl === sourceUrl ||
-                             (installedMod.name === mod.name && installedMod.source === 'nexusmods');
-                    });
-
-                    // Filter files to ONLY show runtime-compatible files with valid naming
-                    const runtimeFiles = files.filter((f: any) => {
-                      const fileName = (f.file_name || f.name || '').toLowerCase();
-
-                      // Define runtime-specific keywords:
-                      // IL2CPP: il2cpp, main, beta
-                      // Mono: mono, alternate, alternatebeta
-                      if (runtimeLower === 'il2cpp') {
-                        // For IL2CPP, file must contain: il2cpp, main, or beta
-                        return fileName.includes('il2cpp') || fileName.includes('main') || fileName.includes('beta');
-                      } else {
-                        // For Mono, file must contain: mono, alternate, or alternatebeta
-                        return fileName.includes('mono') || fileName.includes('alternate');
-                      }
-                    });
-
-                  // Find the best matching file for current runtime
-                    const bestFile = runtimeFiles.find((f: any) => {
-                      const fileName = (f.file_name || f.name || '').toLowerCase();
-                      return fileName.includes(runtimeLower);
-                    }) || runtimeFiles.find((f: any) => f.is_primary) || runtimeFiles[0];
-
-                    const fileNames = files.map((f: any) => (f.file_name || f.name || '').toLowerCase());
-                    const hasIl2cpp = fileNames.some((name: string) => name.includes('il2cpp'));
-                    const hasMono = fileNames.some((name: string) => name.includes('mono'));
-                    const summaryText = mod.summary || mod.description || '';
-
-                  return (
-                    <div
-                      key={mod.mod_id}
-                      className="mod-card store-card"
-                      style={{
-                        padding: '1rem',
-                        cursor: 'pointer'
-                      }}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Open details for ${mod.name || 'Unknown Mod'}`}
-                      onClick={() => openNexusModView(mod)}
-                      onKeyDown={(event) => handleCardActivationKeyDown(event, () => openNexusModView(mod))}
-                    >
-                      <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '1rem' }}>
-                        <div className="mod-card-main-shell" style={{ flex: 1, minWidth: 0, alignItems: 'stretch', gap: '1rem' }}>
-                          {renderCardIcon(mod.name || 'Unknown Mod', undefined, mod.picture_url, 'rail')}
-                          <div className="mod-card-main-column" style={{ minWidth: 0 }}>
-                            <div className="mod-card-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
-                              <strong className="mod-card-title-text" style={{ fontSize: '1rem' }}>{mod.name || 'Unknown Mod'}</strong>
-                            </div>
-                            <div style={{ fontSize: '0.85rem', color: '#9aa4b2' }}>{mod.author || 'Unknown'}</div>
-                            <div style={{ marginTop: '0.35rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
-                              {hasIl2cpp && (
-                                <span style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderRadius: '4px', backgroundColor: '#4a90e220', color: '#4a90e2', border: '1px solid #4a90e240' }}>
-                                  IL2CPP
-                                </span>
-                              )}
-                              {hasMono && (
-                                <span style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderRadius: '4px', backgroundColor: '#4a90e220', color: '#4a90e2', border: '1px solid #4a90e240' }}>
-                                  Mono
-                                </span>
-                              )}
-                              {!hasIl2cpp && !hasMono && (
-                                <span style={{ fontSize: '0.7rem', padding: '0.15rem 0.4rem', borderRadius: '4px', backgroundColor: '#6c757d', color: '#fff' }}>
-                                  Runtime Unknown
-                                </span>
-                              )}
-                            </div>
-                            {summaryText && (
-                              <p className="mod-card-summary" title={summaryText} style={{ marginTop: '0.45rem' }}>
-                                {summaryText.length > 200 ? `${summaryText.substring(0, 200)}...` : summaryText}
-                              </p>
-                            )}
-                            <div className="mod-card-meta-row" style={{ marginTop: '0.45rem', fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                              <span><Icon name="fas fa-download" style={{ marginRight: '0.25rem' }} />{(mod.mod_downloads || 0).toLocaleString()}</span>
-                              <span><Icon name="fas fa-thumbs-up" style={{ marginRight: '0.25rem' }} />{(mod.endorsement_count || 0).toLocaleString()}</span>
-                              {mod.version && (
-                                <span><Icon name="fas fa-tag" style={{ marginRight: '0.25rem' }} />v{mod.version}</span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mod-card-actions mod-card-actions--stacked" onClick={(e) => e.stopPropagation()}>
-                          <div className="mod-card-actions-buttons">
-                            <button
-                              onClick={() => handleInstallNexusModsMod(mod.mod_id, bestFile?.file_id)}
-                              className={`${isAlreadyInstalled ? 'btn btn-secondary' : 'btn btn-primary'} btn-small mod-card-action-button`}
-                              disabled={installingNexusMod?.modId === mod.mod_id || isAlreadyInstalled}
-                              title={isAlreadyInstalled
-                                ? 'This mod is already installed'
-                                : !hasNexusDownloadAccess
-                                  ? 'Requires Nexus Login to download'
-                                  : nexusRequiresSiteConfirmation
-                                    ? 'Open NexusMods website to confirm and download this mod'
-                                  : bestFile
-                                    ? `Install ${bestFile.file_name || bestFile.name || 'mod'}`
-                                    : 'Load files and install the best match for this runtime'}
-                            >
-                              {installingNexusMod?.modId === mod.mod_id
-                                ? 'Installing...'
-                                : isAlreadyInstalled
-                                  ? 'Installed'
-                                  : nexusRequiresSiteConfirmation
-                                    ? 'Open Page'
-                                    : 'Install'}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-            ) : (
-              <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                <Icon name="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-                <p>No compatible mods found for {environment?.runtime} runtime</p>
-              </div>
-            );
-          })()}
-
-          {!searchingNexusMods && showNexusModsResults && nexusModsSearchResults.length === 0 && (
-            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <Icon name="fas fa-search" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-              <p>No mods found matching your search</p>
-            </div>
-          )}
-
-          <div className="mods-actions mods-toolbar" style={{ padding: '0 1.25rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.6rem' }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              {modsDirectory && (
-                <p style={{ margin: 0, color: '#888', fontSize: '0.875rem', wordBreak: 'break-all' }}>
-                  <Icon name="fas fa-folder" style={{ marginRight: '0.5rem' }} />
-                  {modsDirectory}
-                </p>
-              )}
-              <p style={{ margin: '0.35rem 0 0 0', color: '#9aa4b2', fontSize: '0.8rem' }}>
-                {mods.length} installed, {mods.filter(m => !!m.disabled).length} disabled, {totalUpdatesAvailable} updates
-              </p>
-            </div>
-            <button
-              onClick={handleOpenFolder}
-              className="btn btn-secondary btn-small"
-              title="Open mods folder in file explorer"
-            >
-              <Icon name="fas fa-folder-open" />
-            </button>
-          </div>
-
-          {!showSearchResults && loading ? (
-            <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-              <Icon name="fas fa-spinner fa-spin" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-              <p>Loading mods...</p>
-            </div>
-          ) : !showSearchResults && (
-            <div className="mods-section" style={{ padding: '0 1.25rem 1.25rem', flex: 1, minHeight: 0, overflowY: 'auto' }}>
-              <div className="mods-env-layout mods-env-layout--grid">
-                <section className="mods-env-panel mods-env-panel--library">
-                  <div className="mods-env-panel-header">
-                    <h3 style={{ margin: 0, fontSize: '1rem' }}>Library Downloads</h3>
-                    <div className="mods-panel-controls mods-panel-controls--single">
-                      <button
-                        type="button"
-                        className="btn btn-small mods-panel-control-button"
-                        onClick={() => void loadDownloadedLibrary()}
-                        title="Refresh library list (e.g. after downloading in Library view)"
-                      >
-                        <Icon name="fas fa-sync-alt" style={{ marginRight: '0.25rem' }} />
-                        Refresh
-                      </button>
-                    </div>
-                  </div>
-                  {downloadedNotInstalled.length === 0 ? (
-                    <div style={{ padding: '1rem', textAlign: 'center', color: '#888' }}>
-                      <p>No downloaded mods waiting to be installed in this environment.</p>
-                    </div>
-                  ) : (
-                    <div className="mods-env-list">
-                      {downloadedNotInstalled.map(entry => {
-                        const storageId = envRuntime ? entry.storageIdsByRuntime?.[envRuntime] || entry.storageId : entry.storageId;
-                        const activeVersion = entry.installedVersion || entry.sourceVersion;
-                        const primaryFile = entry.files[0] || entry.displayName;
-                        const extraFiles = Math.max(0, entry.files.length - 1);
-                        return (
-                        <div
-                          key={entry.storageId}
-                          className="mod-card compact-row library-row-card"
-                          style={{
-                            backgroundColor: '#2a2a2a',
-                            border: '1px solid #3a3a3a',
-                            borderRadius: '7px',
-                            padding: '0.65rem 0.75rem',
-                            cursor: 'pointer'
-                          }}
-                          role="button"
-                          tabIndex={0}
-                          aria-label={`Open details for ${entry.displayName}`}
-                          onClick={() => openLibraryModView(entry)}
-                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openLibraryModView(entry))}
-                        >
-                          <div className="mod-card-row-shell" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'stretch', gap: '0.65rem' }}>
-                            <div className="mod-card-main-shell" style={{ display: 'flex', alignItems: 'stretch', gap: '0.65rem', minWidth: 0, flex: 1 }}>
-                              {renderCardIcon(entry.displayName, entry.iconCachePath, entry.iconUrl, 'rail')}
-                              <div className="mod-card-main-column" style={{ minWidth: 0, display: 'grid', gap: '0.3rem', alignContent: 'start' }}>
-                              <div className="mod-card-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                                <strong className="mod-card-title-text" style={{ fontSize: '0.94rem' }}>{entry.displayName}</strong>
-                                <span style={{
-                                  fontSize: '0.64rem',
-                                  padding: '0.1rem 0.38rem',
-                                  borderRadius: '999px',
-                                  backgroundColor: entry.managed ? '#28a745' : '#6c757d',
-                                  color: '#fff'
-                                }}>
-                                  {entry.managed ? 'Managed' : 'External'}
-                                </span>
-                              </div>
-                              <div className="mod-card-meta-row" style={{ fontSize: '0.74rem', color: '#8d9bb0', marginTop: '0.2rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                                <span>{entry.files.length} file(s)</span>
-                                {entry.availableRuntimes?.map(runtime => (
-                                  <span key={`${entry.storageId}-${runtime}`} style={{
-                                    fontSize: '0.64rem',
-                                    padding: '0.1rem 0.38rem',
-                                    borderRadius: '999px',
-                                    backgroundColor: '#4a90e220',
-                                    color: '#4a90e2',
-                                    border: '1px solid #4a90e240'
-                                  }}>
-                                    {runtime}
-                                  </span>
-                                ))}
-                                {getSecurityBadgeConfig(entry.securityScan) && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleViewSecurityReport(entry);
-                                    }}
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      padding: '0.1rem 0.38rem',
-                                      borderRadius: '999px',
-                                      border: `1px solid ${getSecurityBadgeConfig(entry.securityScan)?.border}`,
-                                      background: getSecurityBadgeConfig(entry.securityScan)?.background,
-                                      color: getSecurityBadgeConfig(entry.securityScan)?.color,
-                                      fontSize: '0.64rem',
-                                      cursor: 'pointer',
-                                      whiteSpace: 'nowrap',
-                                      lineHeight: 1,
-                                    }}
-                                    title="Click to view security report"
-                                  >
-                                    <Icon name={`fas ${getSecurityBadgeConfig(entry.securityScan)?.icon}`} style={{ marginRight: '0.15rem', fontSize: '0.64rem' }} />
-                                    {getSecurityBadgeConfig(entry.securityScan)?.label}
-                                  </button>
-                                )}
-                              </div>
-                              {entry.summary && (
-                                <p className="mod-card-summary" title={entry.summary}>
-                                  {entry.summary}
-                                </p>
-                              )}
-                            </div>
-                            </div>
-                            <div className="mod-card-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              <button
-                                className="btn btn-primary btn-small"
-                                disabled={!storageId || installingDownloaded === storageId}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleInstallDownloaded(entry);
-                                }}
-                                title={storageId ? `Install ${entry.displayName}` : 'No compatible runtime found'}
-                              >
-                                {installingDownloaded === storageId ? 'Installing...' : 'Install'}
-                              </button>
-                            </div>
-                          </div>
-                          <div className="mod-card-meta-row mod-card-meta-row--footer" style={{ fontSize: '0.78rem', color: '#8f9cb0', display: 'flex', gap: '0.65rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                            <span>
-                              <Icon name="fas fa-file-code" style={{ marginRight: '0.25rem' }} />
-                              {primaryFile}{extraFiles > 0 ? ` +${extraFiles}` : ''}
-                            </span>
-                            {activeVersion && (
-                              <span>
-                                <Icon name="fas fa-tag" style={{ marginRight: '0.25rem' }} />
-                                {activeVersion}
-                              </span>
-                            )}
-                            {entry.source && (
-                              <span className="mod-card-source-tag" style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                padding: '0.12rem 0.42rem',
-                                borderRadius: '999px',
-                                backgroundColor: `${getSourceColor(entry.source)}20`,
-                                color: getSourceColor(entry.source),
-                                border: `1px solid ${getSourceColor(entry.source)}40`
-                              }}>
-                                <Icon name="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }} />
-                                {getSourceLabel(entry.source)}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
-
-                <section className="mods-env-panel mods-env-panel--installed">
-                <div className="mods-env-panel-header">
-                  <h3 style={{ margin: 0, fontSize: '1rem' }}>Installed Here</h3>
-                  <div className="mods-panel-controls mods-filter-bar mods-filter-bar--inline">
-                    {(['all', 'updates', 'enabled', 'disabled'] as ModListFilter[]).map(filter => (
-                      <button
-                        key={filter}
-                        className={`btn btn-small mods-filter-pill ${modListFilter === filter ? 'mods-filter-pill--active' : ''}`}
-                        onClick={() => setModListFilter(filter)}
-                      >
-                        {filter === 'all' ? 'All' : filter === 'updates' ? 'Updates' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {filteredMods.length === 0 ? (
-                  <div style={{ padding: '2rem', textAlign: 'center', color: '#888' }}>
-                    <Icon name="fas fa-box-open" style={{ fontSize: '2rem', marginBottom: '1rem' }} />
-                    <p>No mods match this filter</p>
-                    <p style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
-                      Mods should be placed in the Mods directory as .dll files
-                    </p>
-                  </div>
-                ) : (
-                  <div className="mods-env-list">
-                  {filteredMods.map((mod) => {
-                  const updateInfo = modUpdates.get(mod.fileName);
-                  const canAutoUpdate = mod.source === 'thunderstore' || mod.source === 'nexusmods' || mod.source === 'github';
-                  const updateAvailable = !!updateInfo?.updateAvailable;
-                  const libraryVersionCount = mod.managed
-                    ? (libraryVersionCountByName.get(normalizeModNameKey(mod.name)) || 0)
-                    : 0;
-
-                  return (
-                  <div
-                    key={`${mod.fileName}-${mod.path}`}
-                    className="mod-card compact-row installed-row-card"
-                    style={{
-                      backgroundColor: '#2a2a2a',
-                      border: '1px solid #3a3a3a',
-                      borderRadius: '7px',
-                      padding: '0.65rem 0.75rem',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'stretch',
-                      cursor: 'pointer'
-                    }}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open details for ${mod.name}`}
-                    onClick={() => openInstalledModView(mod)}
-                    onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
-                  >
-                    <div className="mod-card-row-shell mod-card-row-shell--no-checkbox" style={{ flex: 1, display: 'flex', gap: '0.75rem', minWidth: 0 }}>
-                      <div className="mod-card-main-shell" style={{ flex: 1, minWidth: 0, alignItems: 'stretch', gap: '0.75rem' }}>
-                        {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'rail')}
-                        <div className="mod-card-main-column mod-card-main-column--installed" style={{ minWidth: 0 }}>
-                          <h3 className="mod-card-title-row" style={{ margin: 0, marginBottom: '0.32rem', fontSize: '0.98rem', color: mod.disabled ? '#93a0b2' : '#fff', display: 'flex', alignItems: 'center', gap: '0.42rem', flexWrap: 'wrap' }}>
-                            <span className="mod-card-title-text">{mod.name}</span>
-                            {mod.disabled && (
-                              <span style={{
-                                fontSize: '0.64rem',
-                                padding: '0.12rem 0.38rem',
-                                backgroundColor: '#ff6b6b20',
-                                color: '#ff6b6b',
-                                borderRadius: '999px',
-                                border: '1px solid #ff6b6b40'
-                              }}>
-                                Disabled
-                              </span>
-                            )}
-                            {mod.managed !== undefined && (
-                              <span style={{
-                                fontSize: '0.64rem',
-                                padding: '0.12rem 0.38rem',
-                                backgroundColor: mod.managed ? '#28a745' : '#6c757d',
-                                color: '#fff',
-                                borderRadius: '999px'
-                              }}>
-                                {mod.managed ? 'Managed' : 'External'}
-                              </span>
-                            )}
-                            {libraryVersionCount > 1 && (
-                              <span style={{
-                                fontSize: '0.64rem',
-                                padding: '0.12rem 0.38rem',
-                                backgroundColor: '#4a90e220',
-                                color: '#8fc0ff',
-                                borderRadius: '999px',
-                                border: '1px solid #4a90e240'
-                              }}>
-                                {libraryVersionCount} versions
-                              </span>
-                            )}
-                          </h3>
-                          {mod.summary && (
-                            <p className="mod-card-summary mod-card-summary--installed" title={mod.summary}>
-                              {mod.summary}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                     <div className="mod-card-actions mod-card-actions--stacked" onClick={(e) => e.stopPropagation()}>
-                      {canAutoUpdate && updateAvailable && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleUpdateMod(mod);
-                          }}
-                          className="btn btn-primary btn-small mod-card-action-button"
-                          disabled={updatingMod === mod.fileName}
-                          title={`Update ${mod.name}`}
-                        >
-                          {updatingMod === mod.fileName ? (
-                            <Icon name="fas fa-spinner fa-spin" />
-                          ) : (
-                            <>
-                              <Icon name="fas fa-arrow-up" />
-                              <span style={{ marginLeft: '0.5rem' }}>Update</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-                      {mod.disabled ? (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleEnableMod(mod);
-                          }}
-                          className="btn btn-primary btn-small mod-card-action-button"
-                          disabled={enablingMod === mod.fileName}
-                          title={`Enable ${mod.name}`}
-                        >
-                          {enablingMod === mod.fileName ? (
-                            <Icon name="fas fa-spinner fa-spin" />
-                          ) : (
-                            <>
-                              <Icon name="fas fa-check" />
-                              <span style={{ marginLeft: '0.5rem' }}>Enable</span>
-                            </>
-                          )}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDisableMod(mod);
-                          }}
-                          className="btn btn-secondary btn-small mod-card-action-button"
-                          disabled={disablingMod === mod.fileName}
-                          title={`Disable ${mod.name}`}
-                        >
-                          {disablingMod === mod.fileName ? (
-                            <Icon name="fas fa-spinner fa-spin" />
-                          ) : (
-                            <>
-                              <Icon name="fas fa-ban" />
-                              <span style={{ marginLeft: '0.5rem' }}>Disable</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          requestDeleteMod(mod);
-                        }}
-                        className="btn btn-danger btn-small mod-card-action-button"
-                        disabled={deletingMod === mod.fileName}
-                        title={`Delete ${mod.name}`}
-                      >
-                        {deletingMod === mod.fileName ? (
-                          <Icon name="fas fa-spinner fa-spin" />
-                        ) : (
-                          <>
-                            <Icon name="fas fa-trash" />
-                            <span style={{ marginLeft: '0.5rem' }}>Delete</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                    </div>
-                    <div className="mod-card-meta-row mod-card-meta-row--footer" style={{ display: 'flex', gap: '0.65rem', alignItems: 'center', fontSize: '0.78rem', color: '#8f9cb0', flexWrap: 'wrap' }}>
-                      <span>
-                        <Icon name="fas fa-file-code" style={{ marginRight: '0.25rem' }} />
-                        {mod.fileName}
-                      </span>
-                      {mod.version && (() => {
-                        let versionColor = '#888';
-
-                        if (updateInfo) {
-                          if (!updateInfo.updateAvailable && updateInfo.latestVersion) {
-                            versionColor = '#00ff00';
-                          } else if (updateInfo.updateAvailable) {
-                            versionColor = '#ffd700';
-                          }
-                        }
-
-                        return (
-                          <span>
-                            <Icon name="fas fa-tag" style={{ marginRight: '0.25rem', color: versionColor }} />
-                            <span style={{ color: versionColor, fontWeight: versionColor !== '#888' ? 'bold' : 'normal' }}>
-                              {mod.version}
-                            </span>
-                          </span>
-                        );
-                      })()}
-                      {updateAvailable && updateInfo?.latestVersion && (
-                        <span style={{ color: '#ffd700', fontWeight: 600 }}>
-                          Latest {updateInfo.latestVersion}
-                        </span>
-                      )}
-                      {mod.source && (
-                        <span className="mod-card-source-tag" style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          padding: '0.12rem 0.42rem',
-                          borderRadius: '999px',
-                          backgroundColor: `${getSourceColor(mod.source)}20`,
-                          color: getSourceColor(mod.source),
-                          border: `1px solid ${getSourceColor(mod.source)}40`
-                        }}>
-                          <Icon name="fas fa-download" style={{ marginRight: '0.25rem', fontSize: '0.75rem' }} />
-                          {getSourceLabel(mod.source)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  );
-                  })
-                  }
-                  </div>
-                )}
-                </section>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {activeModView && (
-          <div
-            className="mod-view-overlay"
-            style={{
-              position: 'absolute',
-              inset: 0,
-              backgroundColor: 'rgba(9, 14, 24, 0.96)',
-              borderRadius: '0.75rem',
-              border: '1px solid #344259',
-              display: 'flex',
-              flexDirection: 'column',
-              zIndex: 45
-            }}
-          >
-            <div className="modal-header" style={{ borderBottom: '1px solid #2f3a4f' }}>
-              <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <Icon name="fas fa-cube" />
-                Mod View
-              </h2>
-              <button className="btn btn-secondary btn-small" onClick={closeModView}>
-                <Icon name="fas fa-arrow-left" style={{ marginRight: '0.45rem' }} />
-                Back
-              </button>
-            </div>
-
-            <div className="mod-view-content" style={{ padding: '1rem 1.25rem 1.25rem', overflowY: 'auto', display: 'grid', gap: '1rem' }}>
-              <div className="mod-view-header-grid" style={{ display: 'grid', gridTemplateColumns: '92px 1fr', gap: '1rem', alignItems: 'start' }}>
-                <div className="mod-view-icon" style={{ width: '92px', height: '92px', borderRadius: '14px', overflow: 'hidden', border: '1px solid #3a4a66', background: '#172131' }}>
-                  {(activeModView.iconCachePath || activeModView.iconUrl) ? (
-                    <img
-                      src={resolveImageSource(activeModView.iconCachePath) || resolveImageSource(activeModView.iconUrl)}
-                      alt={`${activeModView.name} icon`}
-                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                      onError={(e) => {
-                        const remote = resolveImageSource(activeModView.iconUrl);
-                        if (remote && e.currentTarget.src !== remote) {
-                          e.currentTarget.src = remote;
-                        }
-                      }}
-                    />
-                  ) : (
-                    <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: '#7d8fa9' }}>
-                      <Icon name="fas fa-puzzle-piece" style={{ fontSize: '1.6rem' }} />
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <h3 style={{ margin: 0 }}>{activeModView.name}</h3>
-                  <div style={{ marginTop: '0.35rem', color: '#9ab0cb', fontSize: '0.85rem' }}>
-                    Source: {getSourceLabel(activeModView.source)} {activeModView.author ? `• ${activeModView.author}` : ''}
-                  </div>
-                  {activeModViewSecurityBadge && (
-                    <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
-                      <span
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '0.35rem',
-                          borderRadius: '999px',
-                          border: `1px solid ${activeModViewSecurityBadge.border}`,
-                          background: activeModViewSecurityBadge.background,
-                          color: activeModViewSecurityBadge.color,
-                          padding: '0.1rem 0.4rem',
-                          fontSize: '0.72rem',
-                          whiteSpace: 'nowrap',
-                          lineHeight: 1,
-                        }}
-                      >
-                        <Icon name={`fas ${activeModViewSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }} />
-                        {activeModViewSecurityBadge.label}
-                      </span>
-                    </div>
-                  )}
-                  {activeModView.summary && (
-                    <p style={{ margin: '0.65rem 0 0', color: '#d5dfec', lineHeight: 1.55 }}>
-                      {activeModView.summary}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              <div className="mod-view-metrics" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
-                <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
-                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Downloads</div>
-                  <strong>{(activeModView.downloads || 0).toLocaleString()}</strong>
-                </div>
-                <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
-                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>
-                    {activeModView.source === 'nexusmods' ? 'Endorsements' : 'Likes'}
-                  </div>
-                  <strong>{(activeModView.likesOrEndorsements || 0).toLocaleString()}</strong>
-                </div>
-                <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
-                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Installed Version</div>
-                  <strong>{activeModView.installedVersion || 'unknown'}</strong>
-                </div>
-                <div className="mod-card mod-view-metric" style={{ padding: '0.7rem 0.8rem' }}>
-                  <div style={{ color: '#8ea5c4', fontSize: '0.75rem' }}>Latest Version</div>
-                  <strong>{activeModView.latestVersion || 'unknown'}</strong>
-                </div>
-              </div>
-
-              {(activeModView.tags || []).length > 0 && (
-                <div className="mod-view-tags" style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                  {(activeModView.tags || []).map((tag) => (
-                    <span className="mod-view-tag" key={`${activeModView.id}-${tag}`} style={{ padding: '0.2rem 0.45rem', borderRadius: '999px', backgroundColor: '#38537a33', border: '1px solid #38537a66', color: '#a9c1e6', fontSize: '0.72rem' }}>
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              <div className="mod-view-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                {activeModView.storageId && activeModView.securityScan && (
-                  <button
-                    className="btn btn-secondary btn-small"
-                    onClick={() => void openStoredSecurityReport(activeModView.storageId!, `Security Report - ${activeModView.name}`)}
-                  >
-                    <Icon name="fas fa-shield-alt" style={{ marginRight: '0.45rem' }} />
-                    Security Report
-                  </button>
-                )}
-                {activeModViewSourceUrl && (
-                  <a
-                    href={activeModViewSourceUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn btn-secondary btn-small"
-                    style={{ textDecoration: 'none' }}
-                  >
-                    <Icon name="fas fa-external-link-alt" style={{ marginRight: '0.45rem' }} />
-                    Open Source Page
-                  </a>
-                )}
-                <button className="btn btn-secondary btn-small" onClick={closeModView}>
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-    </>
-  );
-
-  void legacyLayout;
 
   return (
     <>
@@ -3910,29 +2298,40 @@ export function ModsOverlay({
         busy={securityActionBusy}
       />
       {pendingRuntimeSelection && (
-        <div className="modal-overlay modal-overlay-nested" onClick={handleRuntimeSelectionCancel}>
-          <div className="modal-content modal-content-nested" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '400px' }}>
-            <div className="modal-header">
-              <h2>Select Mod Runtime</h2>
-              <button className="modal-close" onClick={handleRuntimeSelectionCancel}>×</button>
-            </div>
-            <div style={{ padding: '1.5rem' }}>
-              <p style={{ marginBottom: '1rem', color: '#ccc' }}>
+        <Dialog open={!!pendingRuntimeSelection} onOpenChange={(open) => {
+          if (!open) {
+            handleRuntimeSelectionCancel();
+          }
+        }}>
+          <SimmDialogContent
+            nested
+            className="app-dialog app-dialog--message"
+            style={{ maxWidth: '400px' }}
+            showCloseButton={false}
+          >
+            <DialogHeader className="modal-header">
+              <DialogTitle>Select Mod Runtime</DialogTitle>
+              <SimmButton type="button" variant="ghost" size="icon-sm" className="modal-close" onClick={handleRuntimeSelectionCancel} aria-label="Close runtime selection dialog">×</SimmButton>
+            </DialogHeader>
+            <div className="app-dialog__body">
+              <DialogDescription style={{ marginBottom: '1rem', color: '#ccc' }}>
                 Could not determine the runtime for <strong>{pendingRuntimeSelection.fileName}</strong>.
-              </p>
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
-                <button className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('Mono')}>Mono</button>
-                <button className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}>IL2CPP</button>
-              </div>
+              </DialogDescription>
+              <DialogFooter className="app-dialog__footer" style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+                <SimmButton type="button" className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('Mono')}>Mono</SimmButton>
+                <SimmButton type="button" className="btn btn-primary" onClick={() => handleRuntimeSelectionConfirm('IL2CPP')}>IL2CPP</SimmButton>
+              </DialogFooter>
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
 
       <div className="mods-overlay mods-overlay--environment workspace-collection-shell">
-        <div className="modal-header">
-          <h2>Mods</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow={environment?.name || 'Environment'}
+          title="Mods"
+          description={`Manage installed mods, updates, source links, and local files for ${environment?.name || 'this environment'}.`}
+        />
 
         <div className="workspace-collection">
           <div className="workspace-collection__main">
@@ -3943,15 +2342,16 @@ export function ModsOverlay({
                     ['installed', 'Installed', 'fas fa-puzzle-piece'],
                     ['updates', 'Updates', 'fas fa-arrow-up'],
                   ] as Array<[ModsTab, string, string]>).map(([tab, label, icon]) => (
-                    <button
+                    <SimmButton
                       key={tab}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button ${modsTab === tab ? 'workspace-collection__rail-button--active' : ''}`}
                       onClick={() => setModsTab(tab)}
                     >
                       <Icon name={icon} />
                       <span>{label}</span>
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
 
@@ -3974,14 +2374,15 @@ export function ModsOverlay({
               {modsTab === 'installed' && (
                 <div className="workspace-collection__rail-group workspace-collection__rail-group--inline workspace-collection__filters-row">
                   {(['all', 'enabled', 'disabled'] as Array<'all' | 'enabled' | 'disabled'>).map((filter) => (
-                    <button
+                    <SimmButton
                       key={filter}
                       type="button"
+                      variant="ghost"
                       className={`workspace-collection__rail-button workspace-collection__rail-button--subtle ${modListFilter === filter ? 'workspace-collection__rail-button--active' : ''}`}
                       onClick={() => setModListFilter(filter)}
                     >
                       {filter === 'all' ? 'All' : filter === 'enabled' ? 'Enabled' : 'Disabled'}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               )}
@@ -3992,7 +2393,7 @@ export function ModsOverlay({
                   <span>{environment?.runtime || 'Unknown'} • {modsTab === 'updates' ? 'Update review' : 'Installed mods'}</span>
                 </div>
                 <div className="workspace-collection__toolbar-search">
-                  <input
+                  <Input
                     type="text"
                     value={installedSearchTerm}
                     onChange={(event) => setInstalledSearchTerm(event.target.value)}
@@ -4000,23 +2401,33 @@ export function ModsOverlay({
                   />
                 </div>
                 <div className="workspace-collection__toolbar-group">
-                  <button onClick={handleCheckModUpdates} className="btn btn-secondary btn-small" disabled={checkingModUpdates}>
+                  <SimmButton type="button" variant="secondary" onClick={handleCheckModUpdates} className="btn btn-secondary btn-small" disabled={checkingModUpdates}>
                     {checkingModUpdates ? 'Checking...' : 'Check Updates'}
-                  </button>
-                  <button
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
+                    onClick={() => void handleScanLocalInstalledMods()}
+                    className="btn btn-secondary btn-small"
+                    disabled={scanningLocalMods || mods.length === 0}
+                  >
+                    {scanningLocalMods ? 'Scanning...' : 'Scan Local Mods'}
+                  </SimmButton>
+                  <SimmButton
+                    type="button"
                     onClick={handleUploadClick}
                     className="btn btn-primary btn-small"
                     disabled={uploading}
-                    title="Add one or more mod files (.dll, .zip, or .rar)"
+                    title="Add one or more mod files (.dll, .zip, .rar, .7z, .tar.gz, or .tgz)"
                   >
                     {uploading ? uploadButtonBusyLabel : 'Add Mod'}
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
+                  </SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={handleOpenFolder}>
                     Open Folder
-                  </button>
-                  <button onClick={onOpenModLibrary} className="btn btn-secondary btn-small" disabled={!onOpenModLibrary}>
+                  </SimmButton>
+                  <SimmButton type="button" variant="secondary" onClick={onOpenModLibrary} className="btn btn-secondary btn-small" disabled={!onOpenModLibrary}>
                     Open Mod Library
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             </div>
@@ -4038,105 +2449,111 @@ export function ModsOverlay({
                   {uploadBatchSummary.message}
                 </div>
               )}
-              {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
+              {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
               {!loading && !error && filteredMods.length === 0 && (
-                <div className="workspace-collection__empty">
+                <CollectionEmpty>
                   {modsTab === 'updates' ? 'No installed mods currently need updates.' : 'No installed mods match this filter.'}
-                </div>
+                </CollectionEmpty>
               )}
               {!error && filteredMods.length > 0 && (
                 <div className="workspace-collection__list">
-                  {filteredMods.map((mod) => {
-                    const updateInfo = modUpdates.get(mod.fileName);
-                    const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
-                    const updateDisabledReason = getUpdateDisabledReason(mod, updateInfo?.updateAvailable);
-                    const securityBadge = getSecurityBadgeConfig(mod.securityScan);
-                    return (
-                      <div
-                        key={`${mod.fileName}-${mod.path}`}
-                        className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
-                        role="button"
-                        aria-label={`Open details for ${mod.name}`}
-                        tabIndex={0}
-                        onClick={() => openInstalledModView(mod)}
-                        onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
-                        onContextMenu={(event) => openContextMenu(event, [
-                          {
-                            key: mod.disabled ? 'enable' : 'disable',
-                            label: mod.disabled ? 'Enable' : 'Disable',
-                            icon: mod.disabled ? 'fas fa-check' : 'fas fa-ban',
-                            onSelect: () => void (mod.disabled ? handleEnableMod(mod) : handleDisableMod(mod)),
-                          },
-                          {
-                            key: 'update',
-                            label: 'Update',
-                            icon: 'fas fa-arrow-up',
-                            disabled: !!updateDisabledReason,
-                            onSelect: () => void handleUpdateMod(mod),
-                          },
-                          {
-                            key: 'config',
-                            label: 'Open Config',
-                            icon: 'fas fa-sliders-h',
-                            disabled: !onOpenConfig,
-                            onSelect: () => onOpenConfig?.(),
-                          },
-                          {
-                            key: 'library',
-                            label: 'Open in Mod Library',
-                            icon: 'fas fa-book-open',
-                            disabled: !onOpenModLibrary,
-                            onSelect: () => onOpenModLibrary?.(),
-                          },
-                          {
-                            key: 'source',
-                            label: 'Open Source Page',
-                            icon: 'fas fa-arrow-up-right-from-square',
-                            disabled: !safeExternalUrl(mod.sourceUrl),
-                            onSelect: () => openExternalSourceUrl(mod.sourceUrl),
-                          },
-                          {
-                            key: 'delete',
-                            label: 'Uninstall from Environment',
-                            icon: 'fas fa-trash',
-                            danger: true,
-                            onSelect: () => requestDeleteMod(mod),
-                          },
-                        ])}
-                      >
-                        {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'inline')}
-                        <div className="workspace-collection__row-body">
-                          <div className="workspace-collection__row-title">{mod.name}</div>
-                          <div className="workspace-collection__row-meta">
-                            {mod.disabled && <span className="workspace-pill workspace-pill--danger">Disabled</span>}
-                            {updateInfo?.updateAvailable && <span className="workspace-pill workspace-pill--warning">Update available</span>}
-                            {mod.source && <span className="workspace-pill workspace-pill--source">{getSourceLabel(mod.source)}</span>}
-                            {mod.version && <span className="workspace-pill">{mod.version}</span>}
-                            {securityBadge && (
-                              <span
-                                className="workspace-pill"
-                                style={{
-                                  border: `1px solid ${securityBadge.border}`,
-                                  background: securityBadge.background,
-                                  color: securityBadge.color,
-                                }}
-                              >
-                                {securityBadge.label}
-                              </span>
-                            )}
+                  <div className="workspace-collection__table-head workspace-collection__table-head--installed">
+                    <span>Name</span>
+                    <span>Source</span>
+                    <span>Version</span>
+                    <span>Status</span>
+                  </div>
+                  <div className="workspace-collection__list-body">
+                    {filteredMods.map((mod) => {
+                      const updateInfo = modUpdates.get(mod.fileName);
+                      const isSelected = activeModView?.kind === 'installed' && activeModView.id === `${mod.fileName}-${mod.path}`;
+                      const updateDisabledReason = getUpdateDisabledReason(mod, updateInfo?.updateAvailable);
+                      const securityBadge = getSecurityBadgeConfig(mod.securityScan);
+                      return (
+                        <div
+                          key={`${mod.fileName}-${mod.path}`}
+                          className={`workspace-collection__row ${isSelected ? 'workspace-collection__row--selected' : ''}`}
+                          role="button"
+                          aria-label={`Open details for ${mod.name}`}
+                          tabIndex={0}
+                          onClick={() => openInstalledModView(mod)}
+                          onKeyDown={(event) => handleCardActivationKeyDown(event, () => openInstalledModView(mod))}
+                          onContextMenu={(event) => openContextMenu(event, [
+                            {
+                              key: mod.disabled ? 'enable' : 'disable',
+                              label: mod.disabled ? 'Enable' : 'Disable',
+                              icon: mod.disabled ? 'fas fa-check' : 'fas fa-ban',
+                              onSelect: () => void (mod.disabled ? handleEnableMod(mod) : handleDisableMod(mod)),
+                            },
+                            {
+                              key: 'update',
+                              label: 'Update',
+                              icon: 'fas fa-arrow-up',
+                              disabled: !!updateDisabledReason,
+                              onSelect: () => void handleUpdateMod(mod),
+                            },
+                            {
+                              key: 'config',
+                              label: 'Open Config',
+                              icon: 'fas fa-sliders-h',
+                              disabled: !onOpenConfig,
+                              onSelect: () => onOpenConfig?.(),
+                            },
+                            {
+                              key: 'security',
+                              label: mod.securityScan ? 'Rescan Security' : 'Scan Security',
+                              icon: 'fas fa-shield-halved',
+                              disabled: scanningInstalledMod === `${mod.fileName}-${mod.path}`,
+                              onSelect: () => void handleScanInstalledMod(mod),
+                            },
+                            {
+                              key: 'library',
+                              label: 'Open in Mod Library',
+                              icon: 'fas fa-book-open',
+                              disabled: !onOpenModLibrary,
+                              onSelect: () => onOpenModLibrary?.(),
+                            },
+                            {
+                              key: 'source',
+                              label: 'Open Source Page',
+                              icon: 'fas fa-arrow-up-right-from-square',
+                              disabled: !safeExternalUrl(mod.sourceUrl),
+                              onSelect: () => openExternalSourceUrl(mod.sourceUrl),
+                            },
+                            {
+                              key: 'delete',
+                              label: 'Uninstall from Environment',
+                              icon: 'fas fa-trash',
+                              danger: true,
+                              onSelect: () => requestDeleteMod(mod),
+                            },
+                          ])}
+                        >
+                          {renderCardIcon(mod.name, mod.iconCachePath, mod.iconUrl, 'inline')}
+                          <div className="workspace-collection__row-body">
+                            <div className="workspace-collection__row-title">{mod.name}</div>
+                            <div className="workspace-collection__row-meta">
+                              {mod.disabled && <WorkspaceBadge tone="danger">Disabled</WorkspaceBadge>}
+                              {updateInfo?.updateAvailable && <WorkspaceBadge tone="warning">Update available</WorkspaceBadge>}
+                              {mod.source && <WorkspaceBadge tone="source">{getSourceLabel(mod.source)}</WorkspaceBadge>}
+                              {mod.version && <WorkspaceBadge>{mod.version}</WorkspaceBadge>}
+                              <SecurityScanBadge config={securityBadge} />
+                            </div>
+                            <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
                           </div>
-                          <p className="workspace-collection__row-summary">{mod.summary || mod.fileName}</p>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
           </div>
 
           <aside className="workspace-collection__inspector">
-            {!selectedInstalledMod && <div className="workspace-collection__inspector-empty">Select an installed mod to review details and actions.</div>}
+            {!selectedInstalledMod && (
+              <InspectorEmpty>Select an installed mod to review details and actions.</InspectorEmpty>
+            )}
             {selectedInstalledMod && localSourceLinkState && localSourceLinkState.modId === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` && (
               <div className="workspace-inspector-link-panel">
                 <div className="workspace-inspector-link-panel__header">
@@ -4144,7 +2561,7 @@ export function ModsOverlay({
                     <h3>Link Mod Source</h3>
                     <p>Connect this local install to a known source so SIMM can track updates and add it to Mod Library.</p>
                   </div>
-                  <span className="workspace-pill workspace-pill--source">Local</span>
+                  <WorkspaceBadge tone="source">Local</WorkspaceBadge>
                 </div>
                 <div className="workspace-inspector-link-panel__summary">
                   <strong>{selectedInstalledMod.name}</strong>
@@ -4165,7 +2582,9 @@ export function ModsOverlay({
                           <strong>{localSourceLinkState.existingSourceHint.displayName}</strong>.
                         </p>
                         <div className="workspace-inspector-link-panel__actions">
-                          <button
+                          <SimmButton
+                            type="button"
+                            variant="secondary"
                             className="btn btn-secondary"
                             onClick={() => {
                               setLocalSourceLinkState((current) => current ? {
@@ -4182,8 +2601,9 @@ export function ModsOverlay({
                             }}
                           >
                             Choose Different Source
-                          </button>
-                          <button
+                          </SimmButton>
+                          <SimmButton
+                            type="button"
                             className="btn btn-primary"
                             onClick={() => {
                               const preview = localSourceLinkState.existingSourceHint!;
@@ -4205,15 +2625,16 @@ export function ModsOverlay({
                             }}
                           >
                             Use Existing Source Family
-                          </button>
+                          </SimmButton>
                         </div>
                       </>
                     ) : (
                       <>
                         <p>No existing managed source family confidently matches this local file yet.</p>
                         <div className="workspace-inspector-link-panel__actions">
-                          <button className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</button>
-                          <button
+                          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={closeLocalSourceLink}>Cancel</SimmButton>
+                          <SimmButton
+                            type="button"
                             className="btn btn-primary"
                             onClick={() => {
                               setLocalSourceLinkState((current) => current ? {
@@ -4230,7 +2651,7 @@ export function ModsOverlay({
                             }}
                           >
                             Link Different Source
-                          </button>
+                          </SimmButton>
                         </div>
                       </>
                     )}
@@ -4240,7 +2661,7 @@ export function ModsOverlay({
                   <>
                     <div className="workspace-inspector-card__field">
                       <label htmlFor="local-source-url">Source URL</label>
-                      <input
+                      <Input
                         id="local-source-url"
                         className="workspace-inspector-link-panel__input"
                         type="url"
@@ -4294,12 +2715,13 @@ export function ModsOverlay({
                     </div>
                     <div className="workspace-inspector-card__field">
                       <label htmlFor="local-source-version">Which version do you currently have installed?</label>
-                      <select
-                        id="local-source-version"
-                        className="workspace-inspector-link-panel__input"
+                      <LocalSourceVersionSelect
                         value={localSourceLinkState.selectedVersion || ''}
-                        onChange={(event) => {
-                          const nextValue = event.target.value;
+                        preview={localSourceLinkState.preview}
+                        strategy={localSourceLinkState.strategy}
+                        runtime={environment?.runtime}
+                        loadingPreview={localSourceLinkState.loadingPreview}
+                        onValueChange={(nextValue) => {
                           setLocalSourceLinkState((current) => current ? {
                             ...current,
                             selectedVersion: nextValue || undefined,
@@ -4307,29 +2729,11 @@ export function ModsOverlay({
                             error: null,
                           } : current);
                         }}
-                        disabled={!localSourceLinkState.preview || localSourceLinkState.loadingPreview}
-                      >
-                        <option value="">Select installed version</option>
-                        {(localSourceLinkState.preview?.versions || [])
-                          .filter((version) => {
-                            if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
-                              return true;
-                            }
-                            return !version.runtime || version.runtime === environment.runtime;
-                          })
-                          .map((version) => (
-                          <option key={version.key} value={version.version}>
-                            {version.version}
-                            {version.runtime ? ` • ${version.runtime}` : ''}
-                            {version.isLatest ? ' • Latest' : ''}
-                            {version.updatedAt ? ` • ${new Date(version.updatedAt).toLocaleDateString()}` : ''}
-                          </option>
-                        ))}
-                      </select>
+                      />
                     </div>
                     <div className="workspace-inspector-card__field">
                       <label htmlFor="local-custom-version">Or enter a custom local version</label>
-                      <input
+                      <Input
                         id="local-custom-version"
                         className="workspace-inspector-link-panel__input"
                         type="text"
@@ -4357,14 +2761,14 @@ export function ModsOverlay({
                                 : 'Pick the remote version that matches this local install.'}
                             </p>
                           </div>
-                          <span className="workspace-inspector-card__subsection-count">
+                          <WorkspaceBadge className="workspace-inspector-card__subsection-count">
                             {(localSourceLinkState.preview.versions || []).filter((version) => {
                               if (localSourceLinkState.strategy !== 'existing' || !environment?.runtime) {
                                 return true;
                               }
                               return !version.runtime || version.runtime === environment.runtime;
                             }).length} available
-                          </span>
+                          </WorkspaceBadge>
                         </div>
                         <div className="workspace-version-list">
                           {(localSourceLinkState.preview.versions || [])
@@ -4375,10 +2779,11 @@ export function ModsOverlay({
                               return !version.runtime || version.runtime === environment.runtime;
                             })
                             .map((version) => (
-                            <button
+                            <SimmButton
                               key={version.key}
                               type="button"
-                              className={`workspace-version-row${localSourceLinkState.selectedVersion === version.version ? ' workspace-version-row--selected' : ''}`}
+                              variant="ghost"
+                              className={`workspace-version-row${localSourceLinkState.selectedVersion === version.version ? ' workspace-version-row--active' : ''}`}
                               onClick={() => {
                                 setLocalSourceLinkState((current) => current ? {
                                   ...current,
@@ -4391,21 +2796,23 @@ export function ModsOverlay({
                               <div className="workspace-version-row__topline">
                                 <strong>{version.version}</strong>
                                 <div className="workspace-version-row__badges">
-                                  {version.runtime && <span className="workspace-pill">{version.runtime}</span>}
-                                  {version.isLatest && <span className="workspace-pill workspace-pill--success">Latest</span>}
+                                  {version.runtime && <WorkspaceBadge>{version.runtime}</WorkspaceBadge>}
+                                  {version.isLatest && <WorkspaceBadge tone="success">Latest</WorkspaceBadge>}
                                 </div>
                               </div>
                               <div className="workspace-version-row__meta">
                                 <span>{version.updatedAt ? `Updated ${new Date(version.updatedAt).toLocaleDateString()}` : 'Updated unknown'}</span>
                                 {version.label && <span>{version.label}</span>}
                               </div>
-                            </button>
+                            </SimmButton>
                           ))}
                         </div>
                       </div>
                     )}
                     <div className="workspace-inspector-link-panel__actions">
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
                           if (localSourceLinkState.existingSourceHint) {
@@ -4420,8 +2827,9 @@ export function ModsOverlay({
                         }}
                       >
                         {localSourceLinkState.existingSourceHint ? 'Back' : 'Cancel'}
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() => void continueLocalSourceLink(selectedInstalledMod, localSourceLinkState)}
                         disabled={
@@ -4432,7 +2840,7 @@ export function ModsOverlay({
                         }
                       >
                         Continue
-                      </button>
+                      </SimmButton>
                     </div>
                   </>
                 )}
@@ -4444,7 +2852,9 @@ export function ModsOverlay({
                       <strong>{localSourceLinkState.preview.displayName}</strong>.
                     </p>
                     <div className="workspace-inspector-link-panel__actions">
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
                           setLocalSourceLinkState((current) => current ? {
@@ -4455,8 +2865,9 @@ export function ModsOverlay({
                         }}
                       >
                         Back
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() => void prepareLocalOwnershipStep(
                           selectedInstalledMod,
@@ -4465,7 +2876,7 @@ export function ModsOverlay({
                         )}
                       >
                         Confirm Link
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 )}
@@ -4478,11 +2889,10 @@ export function ModsOverlay({
                         const checked = localSourceLinkState.selectedOwnershipIds.includes(candidate.id);
                         return (
                           <label key={candidate.id} className="workspace-inspector-link-panel__candidate">
-                            <input
-                              type="checkbox"
+                            <Checkbox
+                              className="workspace-inspector-link-panel__candidate-checkbox"
                               checked={checked}
-                              onChange={(event) => {
-                                const isChecked = event.target.checked;
+                              onCheckedChange={(isChecked) => {
                                 setLocalSourceLinkState((current) => current ? {
                                   ...current,
                                   selectedOwnershipIds: isChecked
@@ -4500,7 +2910,9 @@ export function ModsOverlay({
                       })}
                     </div>
                     <div className="workspace-inspector-link-panel__actions">
-                      <button
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => {
                           setLocalSourceLinkState((current) => current ? {
@@ -4513,8 +2925,10 @@ export function ModsOverlay({
                         }}
                       >
                         Back
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
                         className="btn btn-secondary"
                         onClick={() => void promoteLocalSourceLink(
                           selectedInstalledMod,
@@ -4525,8 +2939,9 @@ export function ModsOverlay({
                         )}
                       >
                         Skip extra files
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         className="btn btn-primary"
                         onClick={() => void promoteLocalSourceLink(
                           selectedInstalledMod,
@@ -4537,7 +2952,7 @@ export function ModsOverlay({
                         )}
                       >
                         Promote Selected Files
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 )}
@@ -4560,51 +2975,47 @@ export function ModsOverlay({
                       {selectedInstalledMod.author ? ` • ${selectedInstalledMod.author}` : ''}
                       {selectedInstalledMod.version ? ` • ${selectedInstalledMod.version}` : ''}
                     </div>
-                    {selectedInstalledSecurityBadge && (
-                      <div style={{ marginTop: '0.55rem', display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
-                        <span
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '0.35rem',
-                            borderRadius: '999px',
-                            border: `1px solid ${selectedInstalledSecurityBadge.border}`,
-                            background: selectedInstalledSecurityBadge.background,
-                            color: selectedInstalledSecurityBadge.color,
-                            padding: '0.1rem 0.4rem',
-                            fontSize: '0.72rem',
-                            whiteSpace: 'nowrap',
-                            lineHeight: 1,
-                          }}
-                        >
-                          <Icon name={`fas ${selectedInstalledSecurityBadge.icon}`} style={{ fontSize: '0.7rem' }} />
-                          {selectedInstalledSecurityBadge.label}
-                        </span>
-                      </div>
-                    )}
+                    <InspectorSecurityScanBadge config={selectedInstalledSecurityBadge} />
                   </div>
                 </div>
                 <p className="workspace-inspector-card__summary">{selectedInstalledMod.summary || selectedInstalledMod.fileName}</p>
                 <div className="workspace-inspector-card__metrics">
                   <div><span>Status</span><strong>{selectedInstalledMod.disabled ? 'Disabled' : 'Enabled'}</strong></div>
                   <div><span>Installed</span><strong>{selectedInstalledMod.version || 'unknown'}</strong></div>
-                  <div><span>Latest</span><strong>{modUpdates.get(selectedInstalledMod.fileName)?.latestVersion || 'unknown'}</strong></div>
+                  <div><span>Latest</span><strong>{getInstalledModLatestVersion(selectedInstalledMod, modUpdates.get(selectedInstalledMod.fileName)) || 'unknown'}</strong></div>
                 </div>
                 <div className="workspace-inspector-card__actions">
                   {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
-                    <button
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
                       className="btn btn-secondary"
                       onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
                     >
                       Security Report
-                    </button>
+                    </SimmButton>
                   )}
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
+                    className="btn btn-secondary"
+                    onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
+                    disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
+                  >
+                    {scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
+                      ? 'Scanning...'
+                      : selectedInstalledMod.securityScan
+                        ? 'Rescan Security'
+                        : 'Scan Security'}
+                  </SimmButton>
                   {selectedInstalledMod.disabled ? (
-                    <button className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</button>
+                    <SimmButton type="button" className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</SimmButton>
                   ) : (
-                    <button className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</button>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</SimmButton>
                   )}
-                  <button
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
                     className="btn btn-secondary"
                     onClick={() => void handleUpdateMod(selectedInstalledMod)}
                     disabled={!!getUpdateDisabledReason(
@@ -4617,21 +3028,21 @@ export function ModsOverlay({
                     ) || undefined}
                   >
                     Update
-                  </button>
+                  </SimmButton>
                   {activeModViewSourceUrl && (
-                    <button className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
                       Open Source Page
-                    </button>
+                    </SimmButton>
                   )}
-                  <button className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</button>
-                  <button className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</button>
-                  <button className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</button>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</SimmButton>
                   {isLinkableLocalMod(selectedInstalledMod) && (
-                    <button className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
+                    <SimmButton type="button" className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
                       Link Source
-                    </button>
+                    </SimmButton>
                   )}
-                  <button className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</button>
+                  <SimmButton type="button" variant="destructive" className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</SimmButton>
                 </div>
               </div>
             )}

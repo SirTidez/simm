@@ -7,6 +7,7 @@ import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStar
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import { Icon } from './Icon';
+import { SimmButton } from './primitives';
 
 interface ModUpdatesEntry {
   count: number;
@@ -251,25 +252,27 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
                 &bull; Mods up to date
               </span>
             ) : totalModsNeedingUpdate === 1 ? (
-              <button
+              <SimmButton
                 type="button"
-                className="statusbar-stat statusbar-stat-warn"
+                variant="ghost"
+                className="statusbar-stat statusbar-stat-warn h-auto rounded-none px-0 py-0"
                 onClick={onOpenModUpdates}
                 disabled={!onOpenModUpdates}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: onOpenModUpdates ? 'pointer' : 'default' }}
               >
                 &bull; 1 Mod needs updating
-              </button>
+              </SimmButton>
             ) : (
-              <button
+              <SimmButton
                 type="button"
-                className="statusbar-stat statusbar-stat-warn"
+                variant="ghost"
+                className="statusbar-stat statusbar-stat-warn h-auto rounded-none px-0 py-0"
                 onClick={onOpenModUpdates}
                 disabled={!onOpenModUpdates}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: onOpenModUpdates ? 'pointer' : 'default' }}
               >
                 &bull; {totalModsNeedingUpdate} Mods need updating
-              </button>
+              </SimmButton>
             )}
           </>
         )}
@@ -288,16 +291,17 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
           </span>
         ) : null}
         {environments.length > 0 && (
-          <button
+          <SimmButton
             onClick={handleCheckAllUpdates}
+            variant="ghost"
+            size="icon-sm"
             className="btn btn-icon-small statusbar-refresh-btn"
             disabled={checkingAll}
             title={checkingAll ? 'Checking for updates...' : 'Check for updates'}
-            type="button"
             aria-label="Check for updates"
           >
             <Icon name="syncAlt" spin={checkingAll} />
-          </button>
+          </SimmButton>
         )}
         <span className={`statusbar-stat ${isOnline ? 'statusbar-stat-ok' : 'statusbar-stat-warn'}`}>
           &bull; {isOnline ? 'Online' : 'Offline'}
@@ -312,14 +316,15 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
       </div>
       <div className="statusbar-right">
         {appUpdateAvailable && (
-          <button
+          <SimmButton
             type="button"
+            variant="secondary"
             className="statusbar-app-update"
             onClick={onOpenAppUpdate}
             disabled={!onOpenAppUpdate}
           >
             SIMM Update Available
-          </button>
+          </SimmButton>
         )}
         <span className="statusbar-version">v{APP_VERSION}</span>
       </div>

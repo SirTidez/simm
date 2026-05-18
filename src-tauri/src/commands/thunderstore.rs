@@ -105,11 +105,36 @@ pub async fn download_thunderstore_package(
         .and_then(|value| value.as_str())
         .map(|name| format!("{}.zip", name))
         .unwrap_or_else(|| format!("{}.zip", package_uuid));
-    let tracked_download = crate::services::tracked_downloads::start_file_download(
+    let icon_url = package
+        .get("versions")
+        .and_then(|value| value.as_array())
+        .and_then(|versions| {
+            version_uuid
+                .as_deref()
+                .and_then(|selected_uuid| {
+                    versions.iter().find(|version| {
+                        version.get("uuid4").and_then(|value| value.as_str()) == Some(selected_uuid)
+                    })
+                })
+                .or_else(|| versions.first())
+        })
+        .and_then(|version| version.get("icon").and_then(|value| value.as_str()))
+        .or_else(|| {
+            package
+                .get("latest")
+                .and_then(|latest| latest.get("icon"))
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| package.get("icon").and_then(|value| value.as_str()))
+        .or_else(|| package.get("icon_url").and_then(|value| value.as_str()))
+        .map(|value| value.to_string());
+    let tracked_download = crate::services::tracked_downloads::start_file_download_with_icon(
         crate::services::tracked_downloads::new_download_id("thunderstore"),
         crate::types::TrackedDownloadKind::Mod,
         label,
         "Thunderstore",
+        icon_url,
+        None,
         Some("Downloading archive".to_string()),
     );
     let _ = crate::services::tracked_downloads::emit(&app, tracked_download.clone());
