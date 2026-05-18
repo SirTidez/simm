@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{copy, Read};
+use std::io::{copy, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +40,7 @@ const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
 const ICON_FETCH_TIMEOUT_SECONDS: u64 = 15;
+const IMAGE_FILE_DLL: u16 = 0x2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FomodDestinationKind {
@@ -92,7 +93,10 @@ fn archive_format_for_path(path: &Path) -> &'static str {
             if count >= 8 && signature[..8] == [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00] {
                 return "rar";
             }
-            if count >= 2 && signature[..2] == [0x4d, 0x5a] {
+            if count >= 2
+                && signature[..2] == [0x4d, 0x5a]
+                && pe_file_has_dll_characteristic(&mut file)
+            {
                 return "dll";
             }
         }
@@ -120,6 +124,25 @@ fn archive_format_for_path(path: &Path) -> &'static str {
         "dll" => "dll",
         _ => "zip",
     }
+}
+
+fn pe_file_has_dll_characteristic(file: &mut File) -> bool {
+    let mut offset_bytes = [0u8; 4];
+    if file.seek(SeekFrom::Start(0x3c)).is_err() || file.read_exact(&mut offset_bytes).is_err() {
+        return false;
+    }
+
+    let pe_header_offset = u32::from_le_bytes(offset_bytes) as u64;
+    let mut coff_header = [0u8; 24];
+    if file.seek(SeekFrom::Start(pe_header_offset)).is_err()
+        || file.read_exact(&mut coff_header).is_err()
+        || &coff_header[..4] != b"PE\0\0"
+    {
+        return false;
+    }
+
+    let characteristics = u16::from_le_bytes([coff_header[22], coff_header[23]]);
+    characteristics & IMAGE_FILE_DLL != 0
 }
 
 fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, String> {
@@ -9418,6 +9441,36 @@ mod tests {
             zip.write_all(contents)?;
         }
         zip.finish()?;
+        Ok(())
+    }
+
+    fn minimal_pe_fixture(is_dll: bool) -> Vec<u8> {
+        let pe_header_offset = 0x80usize;
+        let mut bytes = vec![0u8; pe_header_offset + 24];
+        bytes[0] = 0x4d;
+        bytes[1] = 0x5a;
+        bytes[0x3c..0x40].copy_from_slice(&(pe_header_offset as u32).to_le_bytes());
+        bytes[pe_header_offset..pe_header_offset + 4].copy_from_slice(b"PE\0\0");
+
+        let characteristics = if is_dll { IMAGE_FILE_DLL } else { 0x0002 };
+        let characteristics_offset = pe_header_offset + 4 + 18;
+        bytes[characteristics_offset..characteristics_offset + 2]
+            .copy_from_slice(&characteristics.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn archive_format_for_path_checks_pe_dll_characteristic() -> Result<()> {
+        let temp = tempdir()?;
+        let dll_path = temp.path().join("extensionless-dll");
+        let exe_path = temp.path().join("installer.exe");
+
+        std::fs::write(&dll_path, minimal_pe_fixture(true))?;
+        std::fs::write(&exe_path, minimal_pe_fixture(false))?;
+
+        assert_eq!(archive_format_for_path(&dll_path), "dll");
+        assert_eq!(archive_format_for_path(&exe_path), "zip");
+
         Ok(())
     }
 
