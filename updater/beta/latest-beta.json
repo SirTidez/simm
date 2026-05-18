@@ -1,11 +1,11 @@
 {
-  "version": "0.8.4",
-  "notes": "**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.3-beta...v0.8.4-beta",
-  "pub_date": "2026-04-23T05:58:31.0000000+00:00",
+  "version": "0.8.5",
+  "notes": "## What's Changed\n* 0.8.5 - UI Refactor by @SirTidez in https://github.com/SirTidez/simm/pull/19\n\n\n**Full Changelog**: https://github.com/SirTidez/simm/compare/v0.8.4-beta...v0.8.5-beta",
+  "pub_date": "2026-05-18T07:12:33.0000000+00:00",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.4-beta/SIMM_0.8.4_Setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cmNlN2JwK3M3RUdZMi9rYTBqWDh1alNpL3Z3Rm5vUE5LMnRHR0RMcGhQcWdLaHUxdmJpMy9NVVIyQzFldEtNMFZ0NG45R1JiOGR4TjBkcDJjMU5hZVFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc2OTIzODg5CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguNF94NjQtc2V0dXAuZXhlCksvUEJMWlZEdXBBWGJBdGtNK3JoV3pEa1hZdGxqRTRYVVRRS3B2Tldla1ZBc25QN1IzN2FsZmM5dTVRbjI1TlNVSTI1OFQ2THRVSTgrMGZkZmNOTUJBPT0K"
+      "url": "https://github.com/SirTidez/simm/releases/download/v0.8.5-beta/SIMM_0.8.5_Setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQTNQd2R4M1k5cldDaVZiblpDZmRUNWszbCtKUy9wbU1zc1NyZ2ZNL1NhZGdOZUkrdWJjKzBHU2RQR1NrUHFIOGk1TG9hWDM4RXdKOW1zbzNab3dYa2xpaVhCbFJDTlFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MDg4MzQ0CWZpbGU6U2NoZWR1bGUgSSBNb2QgTWFuYWdlcl8wLjguNV94NjQtc2V0dXAuZXhlCkpxWGQxSXpoTGNJSU8xaG03TEw5TnpTOGI0R1kxc1JrclJxb0dqWVJqU2ZOUEhNWTJlSVNQdlZyaFRGS1NVNTRUQm9sTHJhN0J2QkFVR0EzSU02OUJ3PT0K"
     }
   }
 }
