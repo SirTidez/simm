@@ -1,4 +1,12 @@
+import {
+  Dialog,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
 import type { Environment, ModLibraryEntry } from '../types';
+import { SimmButton, SimmDialogContent } from './primitives';
 
 interface Props {
   isOpen: boolean;
@@ -69,12 +77,20 @@ export function InstallTargetsDialog({
   };
 
   return (
-    <div className="modal-overlay modal-overlay-nested" onClick={onClose}>
-      <div className="modal-content modal-content-nested workspace-install-dialog" onClick={(event) => event.stopPropagation()}>
-        <div className="modal-header">
-          <h2>{title}</h2>
-          <button className="modal-close" onClick={onClose} aria-label="Close install target dialog">×</button>
-        </div>
+    <Dialog open={isOpen} onOpenChange={(open) => {
+      if (!open) {
+        onClose();
+      }
+    }}>
+      <SimmDialogContent
+        nested
+        className="workspace-install-dialog"
+        showCloseButton={false}
+      >
+        <DialogHeader className="modal-header">
+          <DialogTitle>{title}</DialogTitle>
+          <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close install target dialog">×</SimmButton>
+        </DialogHeader>
         <div className="workspace-install-dialog__body">
           <div className="workspace-install-dialog__summary">
             <strong>
@@ -101,18 +117,18 @@ export function InstallTargetsDialog({
           )}
 
           <div className="workspace-install-dialog__quick-actions">
-            <button type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible} disabled={mode === 'installed'}>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onSelectAllCompatible} disabled={mode === 'installed'}>
               All compatible
-            </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={mode === 'installed' || byRuntime.IL2CPP.length === 0}>
+            </SimmButton>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('IL2CPP')} disabled={mode === 'installed' || byRuntime.IL2CPP.length === 0}>
               All IL2CPP
-            </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={mode === 'installed' || byRuntime.Mono.length === 0}>
+            </SimmButton>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => onSelectRuntime('Mono')} disabled={mode === 'installed' || byRuntime.Mono.length === 0}>
               All Mono
-            </button>
-            <button type="button" className="btn btn-secondary btn-small" onClick={onClear} disabled={mode === 'installed'}>
+            </SimmButton>
+            <SimmButton type="button" className="btn btn-secondary btn-small" onClick={onClear} disabled={mode === 'installed'}>
               Clear
-            </button>
+            </SimmButton>
           </div>
 
           <div className="workspace-install-dialog__list">
@@ -125,11 +141,10 @@ export function InstallTargetsDialog({
                 className="workspace-install-dialog__row"
                 style={isLocked ? { opacity: 0.72, cursor: 'default' } : undefined}
               >
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selectedEnvironmentIds.has(environment.id)}
                   disabled={isLocked}
-                  onChange={() => onToggleEnvironment(environment.id)}
+                  onCheckedChange={() => onToggleEnvironment(environment.id)}
                 />
                 <span className="workspace-install-dialog__row-main">
                   <strong>{environment.name}</strong>
@@ -148,11 +163,11 @@ export function InstallTargetsDialog({
             </div>
           )}
         </div>
-        <div className="modal-actions">
-          <button type="button" className="btn btn-secondary" onClick={onClose}>
+        <DialogFooter className="modal-actions">
+          <SimmButton type="button" className="btn btn-secondary" onClick={onClose}>
             Cancel
-          </button>
-          <button
+          </SimmButton>
+          <SimmButton
             type="button"
             className="btn btn-primary"
             onClick={onConfirm}
@@ -163,9 +178,9 @@ export function InstallTargetsDialog({
               : installing
                 ? 'Installing...'
                 : `Install to selected (${selectedCount})`}
-          </button>
-        </div>
-      </div>
-    </div>
+          </SimmButton>
+        </DialogFooter>
+      </SimmDialogContent>
+    </Dialog>
   );
 }

@@ -54,7 +54,10 @@ impl GlobalLogger {
                     }
                     Err(e) => {
                         LOGGER_SERVICE_STARTED.store(false, Ordering::SeqCst);
-                        eprintln!("[GlobalLogger] Failed to initialize LoggerService: {}", e);
+                        eprintln!(
+                            "[GlobalLogger] Failed to initialize LoggerService: {}",
+                            e
+                        );
                         None
                     }
                 }

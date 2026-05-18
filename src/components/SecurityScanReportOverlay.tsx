@@ -6,8 +6,10 @@ import type {
   Severity,
   ThreatFamily,
 } from '../types';
+import { Dialog } from '@/components/ui/dialog';
 import { getSecurityDispositionBadgeConfig } from './securityScanHelpers';
 import { Icon } from './Icon';
+import { SimmBadge, SimmButton, SimmDialogContent } from './primitives';
 
 interface SecurityScanReportOverlayProps {
   isOpen: boolean;
@@ -36,6 +38,7 @@ export interface SecurityScanReportViewProps {
   confirmLabel?: string;
   busy?: boolean;
   presentation?: 'overlay' | 'page';
+  open?: boolean;
 }
 
 const severityOrder: Record<Severity, number> = {
@@ -167,6 +170,7 @@ export function SecurityScanReportView({
   confirmLabel = 'Continue Anyway',
   busy = false,
   presentation = 'overlay',
+  open = true,
 }: SecurityScanReportViewProps) {
   const normalizedReportOptions = useMemo<SecurityScanReportOption[]>(() => {
     if (Array.isArray(reportOptions) && reportOptions.length > 0) {
@@ -187,6 +191,15 @@ export function SecurityScanReportView({
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [activeSeverity, setActiveSeverity] = useState<Severity | 'All'>('All');
   const [selectedFindingKey, setSelectedFindingKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setActiveReportIndex(0);
+      setActiveFileIndex(0);
+      setActiveSeverity('All');
+      setSelectedFindingKey(null);
+    }
+  }, [open]);
 
   useEffect(() => {
     setActiveReportIndex(0);
@@ -250,6 +263,7 @@ export function SecurityScanReportView({
   const activeDispositionBadge = getSecurityDispositionBadgeConfig(activeDisposition);
 
   const showCloseActions = presentation === 'overlay' && !!onClose;
+  const showReturnActions = presentation === 'page' && !!onClose;
   const shellStyle: CSSProperties = presentation === 'overlay'
     ? {
         maxWidth: '1240px',
@@ -271,22 +285,19 @@ export function SecurityScanReportView({
         flexDirection: 'column',
         padding: 0,
         overflow: 'hidden',
-        border: '1px solid #324158',
-        borderRadius: '16px',
-        background: 'linear-gradient(180deg, rgba(18, 24, 36, 0.98) 0%, rgba(11, 16, 25, 0.98) 100%)',
-        boxShadow: '0 18px 44px rgba(0, 0, 0, 0.28)',
+        border: '0',
+        borderRadius: 0,
+        background: 'transparent',
+        boxShadow: 'none',
       };
 
-  const shell = (
-    <div
-      className={presentation === 'overlay' ? 'modal-content modal-content-nested' : 'security-report-view security-report-view--page'}
-      onClick={presentation === 'overlay' ? (event) => event.stopPropagation() : undefined}
-      style={shellStyle}
-    >
-        <div className="modal-header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
+  const shellContent = (
+    <>
+        <div className="modal-header security-report-view__header" style={{ borderBottom: '1px solid #2c3a50', padding: '1rem 1.25rem' }}>
           <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
             <span>{title}</span>
-            <span
+            <SimmBadge
+              variant="outline"
               style={{
                 fontSize: '0.74rem',
                 letterSpacing: '0.03em',
@@ -303,10 +314,23 @@ export function SecurityScanReportView({
             >
               <Icon name={`fas ${summaryStyle.icon}`} />
               {summaryStyle.label}
-            </span>
+            </SimmBadge>
           </h2>
+          {showReturnActions && (
+            <>
+              {onConfirm && (
+                <SimmButton className="btn btn-primary btn-small" onClick={onConfirm} disabled={busy}>
+                  {busy ? 'Working...' : confirmLabel}
+                </SimmButton>
+              )}
+              <SimmButton className="btn btn-secondary btn-small" onClick={onClose}>
+                <Icon name="fas fa-arrow-left" />
+                Back
+              </SimmButton>
+            </>
+          )}
           {showCloseActions && (
-            <button className="modal-close" onClick={onClose}>×</button>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose}>×</SimmButton>
           )}
         </div>
 
@@ -323,9 +347,12 @@ export function SecurityScanReportView({
           {files.length > 1 && (
             <div style={{ display: 'grid', gap: '0.55rem' }}>
               {files.map((file, index) => (
-                <button
+                <SimmButton
                   key={`${file.fileName}-${index}`}
                   type="button"
+                  variant="ghost"
+                  className={`security-report-selector h-auto ${index === activeFileIndex ? 'security-report-selector--active' : ''}`}
+                  aria-pressed={index === activeFileIndex}
                   onClick={() => setActiveFileIndex(index)}
                   style={{
                     width: '100%',
@@ -335,7 +362,6 @@ export function SecurityScanReportView({
                     background: index === activeFileIndex ? 'rgba(35, 74, 114, 0.45)' : 'rgba(23, 31, 46, 0.8)',
                     color: '#d7e4f6',
                     padding: '0.75rem 0.95rem',
-                    cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
                     gap: '0.7rem',
@@ -346,14 +372,14 @@ export function SecurityScanReportView({
                     <strong style={{ color: '#eef5ff', fontSize: '0.9rem' }}>{file.fileName}</strong>
                     <span style={{ color: '#8ea7c6', fontSize: '0.78rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.displayPath}</span>
                   </span>
-                </button>
+                </SimmButton>
               ))}
             </div>
           )}
 
           {normalizedReportOptions.length > 1 && (
             <section
-              className="mod-card"
+              className="mod-card security-report-panel"
               style={{
                 padding: '1rem',
                 display: 'grid',
@@ -371,9 +397,12 @@ export function SecurityScanReportView({
                   const optionStyle = getSummaryStyle(option.report.summary, option.report.policy.blocked);
                   const isActive = index === activeReportIndex;
                   return (
-                    <button
+                    <SimmButton
                       key={option.key}
                       type="button"
+                      variant="ghost"
+                      className={`security-report-selector h-auto ${isActive ? 'security-report-selector--active' : ''}`}
+                      aria-pressed={isActive}
                       onClick={() => setActiveReportIndex(index)}
                       style={{
                         width: '100%',
@@ -383,14 +412,14 @@ export function SecurityScanReportView({
                         background: isActive ? optionStyle.glow : 'rgba(18, 24, 36, 0.82)',
                         color: '#d7e4f6',
                         padding: '0.85rem 1rem',
-                        cursor: 'pointer',
                         display: 'grid',
                         gap: '0.35rem',
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
                         <strong style={{ color: '#eef5ff' }}>{option.label}</strong>
-                        <span
+                        <SimmBadge
+                          variant="outline"
                           style={{
                             fontSize: '0.72rem',
                             letterSpacing: '0.03em',
@@ -407,14 +436,14 @@ export function SecurityScanReportView({
                         >
                           <Icon name={`fas ${optionStyle.icon}`} />
                           {optionStyle.label}
-                        </span>
+                        </SimmBadge>
                       </div>
                       {option.description && (
                         <span style={{ color: '#8fa7c5', fontSize: '0.82rem', lineHeight: 1.45 }}>
                           {option.description}
                         </span>
                       )}
-                    </button>
+                    </SimmButton>
                   );
                 })}
               </div>
@@ -422,24 +451,25 @@ export function SecurityScanReportView({
           )}
 
           <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(320px, 0.95fr)' }}>
-            <section className="mod-card" style={{ padding: '1rem', border: `1px solid ${summaryStyle.border}`, background: `linear-gradient(180deg, ${summaryStyle.glow} 0%, rgba(17, 23, 34, 0.86) 100%)` }}>
+            <section className="mod-card security-report-panel security-report-panel--verdict" style={{ padding: '1rem', border: `1px solid ${summaryStyle.border}`, background: `linear-gradient(180deg, ${summaryStyle.glow} 0%, rgba(17, 23, 34, 0.86) 100%)` }}>
               <div style={{ display: 'grid', gap: '0.55rem' }}>
                 <h3 style={{ margin: 0, fontSize: '1.35rem', color: '#edf5ff' }}>{summaryStyle.label}</h3>
                 <p style={{ margin: 0, color: '#b9c9de', lineHeight: 1.55 }}>{activeReport.summary.statusMessage || 'MLVScan completed this scan.'}</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem' }}>
-                  <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
+                  <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
                     {activeReport.summary.totalFindings} finding{activeReport.summary.totalFindings === 1 ? '' : 's'}
-                  </span>
-                  <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
+                  </SimmBadge>
+                  <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: '1px solid #3a4a63', background: 'rgba(20, 29, 43, 0.8)', color: '#d0ddf0', fontSize: '0.74rem' }}>
                     {activeReport.summary.threatFamilyCount} threat match{activeReport.summary.threatFamilyCount === 1 ? '' : 'es'}
-                  </span>
+                  </SimmBadge>
                   {activeReport.summary.highestSeverity && (
-                    <span style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', fontSize: '0.74rem', ...severityBadgeStyles[activeReport.summary.highestSeverity] }}>
+                    <SimmBadge variant="outline" style={{ padding: '0.24rem 0.55rem', borderRadius: '999px', border: `1px solid ${severityBadgeStyles[activeReport.summary.highestSeverity].border}`, background: severityBadgeStyles[activeReport.summary.highestSeverity].bg, color: severityBadgeStyles[activeReport.summary.highestSeverity].color, fontSize: '0.74rem' }}>
                       Highest: {activeReport.summary.highestSeverity}
-                    </span>
+                    </SimmBadge>
                   )}
                   {summaryDispositionBadge && (
-                    <span
+                    <SimmBadge
+                      variant="outline"
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
@@ -456,7 +486,7 @@ export function SecurityScanReportView({
                       }}
                     >
                       {summaryDispositionBadge.label}
-                    </span>
+                    </SimmBadge>
                   )}
                 </div>
                 {summaryDisposition && (summaryDisposition.headline || summaryDisposition.summary) && (
@@ -478,7 +508,7 @@ export function SecurityScanReportView({
               </div>
             </section>
 
-            <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.7rem' }}>
+            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.7rem' }}>
               <div>
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>File details</h3>
                 <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Verify the exact file and scan metadata before installing.</p>
@@ -499,7 +529,8 @@ export function SecurityScanReportView({
                 {activeDispositionBadge && (
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
                     <span style={{ color: '#8ea7c6' }}>Disposition</span>
-                    <span
+                    <SimmBadge
+                      variant="outline"
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
@@ -514,7 +545,7 @@ export function SecurityScanReportView({
                       }}
                     >
                       {activeDispositionBadge.label}
-                    </span>
+                    </SimmBadge>
                   </div>
                 )}
                 <div style={{ display: 'grid', gap: '0.35rem' }}>
@@ -528,7 +559,7 @@ export function SecurityScanReportView({
           </div>
 
           <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1.3fr)' }}>
-            <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
+            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
               <div>
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>What it means</h3>
                 <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Key behaviors MLVScan detected in this download.</p>
@@ -565,14 +596,17 @@ export function SecurityScanReportView({
               </div>
             </section>
 
-            <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
+            <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
                 <h3 style={{ margin: 0, color: '#edf5ff' }}>Findings</h3>
                 <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
                   {filterOptions.map((option) => (
-                    <button
+                    <SimmButton
                       key={option}
                       type="button"
+                      variant="ghost"
+                      className={`security-report-filter h-auto ${activeSeverity === option ? 'security-report-filter--active' : ''}`}
+                      aria-pressed={activeSeverity === option}
                       onClick={() => setActiveSeverity(option)}
                       style={{
                         borderRadius: '8px',
@@ -581,11 +615,10 @@ export function SecurityScanReportView({
                         color: activeSeverity === option ? '#eef6ff' : '#9bb2ce',
                         padding: '0.28rem 0.62rem',
                         fontSize: '0.76rem',
-                        cursor: 'pointer',
                       }}
                     >
                       {option}
-                    </button>
+                    </SimmButton>
                   ))}
                 </div>
               </div>
@@ -601,9 +634,12 @@ export function SecurityScanReportView({
                     const isActive = selectedFinding ? getFindingKey(selectedFinding, filteredFindings.indexOf(selectedFinding)) === key : index === 0;
                     const badge = severityBadgeStyles[finding.severity];
                     return (
-                      <button
+                      <SimmButton
                         key={key}
                         type="button"
+                        variant="ghost"
+                        className={`security-report-finding h-auto ${isActive ? 'security-report-finding--active' : ''}`}
+                        aria-pressed={isActive}
                         onClick={() => setSelectedFindingKey(key)}
                         style={{
                           textAlign: 'left',
@@ -611,17 +647,16 @@ export function SecurityScanReportView({
                           border: isActive ? '1px solid #3db4a255' : '1px solid #324158',
                           background: isActive ? 'rgba(30, 73, 66, 0.5)' : 'rgba(18, 24, 36, 0.86)',
                           padding: '0.9rem',
-                          cursor: 'pointer',
                           display: 'grid',
                           gap: '0.45rem',
                         }}
                       >
-                        <span style={{ alignSelf: 'start', justifySelf: 'start', borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...badge }}>
+                        <SimmBadge variant="outline" style={{ alignSelf: 'start', justifySelf: 'start', borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...badge }}>
                           {finding.severity}
-                        </span>
+                        </SimmBadge>
                         <strong style={{ color: '#edf5ff', lineHeight: 1.45 }}>{finding.description}</strong>
                         <span style={{ color: '#8fa7c5', fontSize: '0.82rem' }}>{finding.location || activeFile?.displayPath}</span>
-                      </button>
+                      </SimmButton>
                     );
                   })
                 )}
@@ -629,7 +664,7 @@ export function SecurityScanReportView({
             </section>
           </div>
 
-          <section className="mod-card" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
+          <section className="mod-card security-report-panel" style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
             <div>
               <h3 style={{ margin: 0, color: '#edf5ff' }}>Evidence</h3>
               <p style={{ margin: '0.35rem 0 0', color: '#8fa7c5', lineHeight: 1.5 }}>Use this context to understand why MLVScan flagged the selected finding.</p>
@@ -639,9 +674,9 @@ export function SecurityScanReportView({
               <div style={{ display: 'grid', gap: '0.8rem', gridTemplateColumns: 'minmax(0, 1fr)' }}>
                 <div style={{ borderRadius: '12px', border: '1px solid #324158', background: 'rgba(21, 28, 42, 0.9)', padding: '0.95rem', display: 'grid', gap: '0.5rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap' }}>
-                    <span style={{ borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...severityBadgeStyles[selectedFinding.severity] }}>
+                    <SimmBadge variant="outline" style={{ borderRadius: '8px', padding: '0.18rem 0.45rem', fontSize: '0.73rem', ...severityBadgeStyles[selectedFinding.severity] }}>
                       {selectedFinding.severity}
-                    </span>
+                    </SimmBadge>
                     {selectedFinding.ruleId && (
                       <span style={{ color: '#9fb6d2', fontSize: '0.8rem' }}>Rule {selectedFinding.ruleId}</span>
                     )}
@@ -662,22 +697,6 @@ export function SecurityScanReportView({
                   </div>
                 )}
 
-                {selectedFinding.developerGuidance && (
-                  <div style={{ borderRadius: '12px', border: '1px solid #33506f', background: 'rgba(28, 46, 65, 0.45)', padding: '0.95rem', display: 'grid', gap: '0.45rem' }}>
-                    <div style={{ color: '#9fd4ff', fontSize: '0.74rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Developer guidance</div>
-                    <strong style={{ color: '#edf5ff' }}>{selectedFinding.developerGuidance.remediation}</strong>
-                    {selectedFinding.developerGuidance.documentationUrl && (
-                      <a href={selectedFinding.developerGuidance.documentationUrl} target="_blank" rel="noreferrer" style={{ color: '#87c8ff', textDecoration: 'none', fontSize: '0.85rem' }}>
-                        Open documentation
-                      </a>
-                    )}
-                    {selectedFinding.developerGuidance.alternativeApis && selectedFinding.developerGuidance.alternativeApis.length > 0 && (
-                      <div style={{ color: '#b6cce6', fontSize: '0.82rem' }}>
-                        Suggested APIs: {selectedFinding.developerGuidance.alternativeApis.join(', ')}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             ) : (
               <div style={{ borderRadius: '12px', border: '1px dashed #33445a', padding: '1rem', color: '#8fa7c5' }}>
@@ -687,7 +706,7 @@ export function SecurityScanReportView({
           </section>
         </div>
 
-        {(showCloseActions || onConfirm) && (
+        {(showCloseActions || (presentation === 'overlay' && onConfirm)) && (
           <div
             style={{
               flexShrink: 0,
@@ -700,29 +719,47 @@ export function SecurityScanReportView({
             }}
           >
             {showCloseActions && (
-              <button className="btn btn-secondary" onClick={onClose}>
+              <SimmButton className="btn btn-secondary" onClick={onClose}>
                 Close
-              </button>
+              </SimmButton>
             )}
             {onConfirm && (
-              <button className="btn btn-primary" onClick={onConfirm} disabled={busy}>
+              <SimmButton className="btn btn-primary" onClick={onConfirm} disabled={busy}>
                 {busy ? 'Working...' : confirmLabel}
-              </button>
+              </SimmButton>
             )}
           </div>
         )}
-      </div>
+    </>
   );
 
   if (presentation === 'overlay') {
     return (
-      <div className="modal-overlay modal-overlay-nested" onClick={onClose}>
-        {shell}
-      </div>
+      <Dialog open={open} onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onClose?.();
+        }
+      }}>
+        <SimmDialogContent
+          nested
+          showCloseButton={false}
+          className="security-report-view__dialog"
+          style={shellStyle}
+        >
+          {shellContent}
+        </SimmDialogContent>
+      </Dialog>
     );
   }
 
-  return shell;
+  return (
+    <div
+      className="security-report-view security-report-view--page"
+      style={shellStyle}
+    >
+      {shellContent}
+    </div>
+  );
 }
 
 export function SecurityScanReportOverlay({
@@ -735,10 +772,6 @@ export function SecurityScanReportOverlay({
   confirmLabel = 'Continue Anyway',
   busy = false,
 }: SecurityScanReportOverlayProps) {
-  if (!isOpen) {
-    return null;
-  }
-
   return (
     <SecurityScanReportView
       title={title}
@@ -749,6 +782,7 @@ export function SecurityScanReportOverlay({
       confirmLabel={confirmLabel}
       busy={busy}
       presentation="overlay"
+      open={isOpen}
     />
   );
 }

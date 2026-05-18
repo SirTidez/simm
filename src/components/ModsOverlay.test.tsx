@@ -13,8 +13,10 @@ const apiMocks = vi.hoisted(() => ({
   updateMod: vi.fn(),
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
+  scanInstalledModForSecurity: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   beginNexusManualDownloadSession: vi.fn(),
+  openExternalUrl: vi.fn(),
   searchThunderstore: vi.fn(),
   searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
@@ -64,8 +66,10 @@ describe('ModsOverlay', () => {
     apiMocks.updateMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
+    apiMocks.scanInstalledModForSecurity.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.beginNexusManualDownloadSession.mockReset();
+    apiMocks.openExternalUrl.mockReset();
     apiMocks.searchThunderstore.mockReset();
     apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
@@ -87,8 +91,25 @@ describe('ModsOverlay', () => {
     apiMocks.updateMod.mockResolvedValue({ success: true });
     apiMocks.installDownloadedMod.mockResolvedValue({ results: [] });
     apiMocks.getModSecurityScanReport.mockResolvedValue(null);
+    apiMocks.scanInstalledModForSecurity.mockResolvedValue({
+      summary: {
+        state: 'verified',
+        verified: true,
+        totalFindings: 0,
+        threatFamilyCount: 0,
+      },
+      policy: {
+        enabled: true,
+        requiresConfirmation: false,
+        blocked: false,
+        promptOnHighFindings: false,
+        blockCriticalFindings: false,
+      },
+      files: [],
+    });
     apiMocks.getNexusOAuthStatus.mockResolvedValue({ connected: false, account: { canDirectDownload: false, requiresSiteConfirmation: true } });
     apiMocks.beginNexusManualDownloadSession.mockResolvedValue({ success: true });
+    apiMocks.openExternalUrl.mockResolvedValue(undefined);
     apiMocks.searchThunderstore.mockResolvedValue({ packages: [] });
     apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
       packagesByRuntime: { IL2CPP: [], Mono: [] },
@@ -296,6 +317,94 @@ describe('ModsOverlay', () => {
           title: 'Security Report - Trusted Mod',
         }),
       );
+    });
+  });
+
+  it('scans a selected local installed mod and refreshes the installed list', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'UnityExplorer.ML.Mono',
+          fileName: 'UnityExplorer.ML.Mono.dll',
+          path: 'C:/env/Mods/UnityExplorer.ML.Mono.dll',
+          source: 'local',
+          managed: false,
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByText('UnityExplorer.ML.Mono'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan Security' }));
+
+    await waitFor(() => {
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith(
+        'env-1',
+        'UnityExplorer.ML.Mono.dll',
+      );
+      expect(apiMocks.getMods).toHaveBeenCalledWith('env-1', true);
+    });
+    expect(await screen.findByText('Security Report - UnityExplorer.ML.Mono')).toBeTruthy();
+  });
+
+  it('bulk scans local installed mods without rescanning managed library entries', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Local One',
+          fileName: 'LocalOne.dll',
+          path: 'C:/env/Mods/LocalOne.dll',
+          source: 'local',
+          managed: false,
+          disabled: false,
+        },
+        {
+          name: 'Local Two',
+          fileName: 'LocalTwo.dll',
+          path: 'C:/env/Mods/LocalTwo.dll',
+          source: 'local',
+          managed: false,
+          disabled: false,
+        },
+        {
+          name: 'Managed Mod',
+          fileName: 'Managed.dll',
+          path: 'C:/env/Mods/Managed.dll',
+          source: 'thunderstore',
+          managed: true,
+          modStorageId: 'managed-storage',
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 3,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan Local Mods' }));
+
+    await waitFor(() => {
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledTimes(2);
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith('env-1', 'LocalOne.dll');
+      expect(apiMocks.scanInstalledModForSecurity).toHaveBeenCalledWith('env-1', 'LocalTwo.dll');
+      expect(apiMocks.scanInstalledModForSecurity).not.toHaveBeenCalledWith('env-1', 'Managed.dll');
     });
   });
 
@@ -620,6 +729,75 @@ describe('ModsOverlay', () => {
     expect(within(inspector).getByRole('button', { name: 'Uninstall' })).toBeTruthy();
     expect(within(inspector).getByRole('button', { name: 'Open Folder' })).toBeTruthy();
   });
+
+  it('shows installed version as latest for managed remote mods without cached updates', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Current Mod',
+          fileName: 'Current.Mod.dll',
+          path: 'C:/env/Mods/Current.Mod.dll',
+          source: 'thunderstore',
+          sourceUrl: 'https://thunderstore.io/c/schedule-i/p/author/current-mod',
+          version: '3.3.0',
+          managed: true,
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({ count: 0, updates: [] });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details for Current Mod' }));
+
+    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    await waitFor(() => {
+      expect(within(inspector).getByText('Latest').nextElementSibling?.textContent).toBe('3.3.0');
+    });
+  });
+
+  it('opens installed mod source pages through the app external URL command', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [
+        {
+          name: 'Source Linked Mod',
+          fileName: 'Source.Linked.Mod.dll',
+          path: 'C:/env/Mods/Source.Linked.Mod.dll',
+          source: 'nexusmods',
+          sourceUrl: 'https://www.nexusmods.com/schedule1/mods/123',
+          version: '1.0.0',
+          managed: true,
+          disabled: false,
+        },
+      ],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details for Source Linked Mod' }));
+    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Open Source Page' }));
+
+    expect(apiMocks.openExternalUrl).toHaveBeenCalledWith('https://www.nexusmods.com/schedule1/mods/123');
+  });
+
   it('opens installed mod details via keyboard activation', async () => {
     apiMocks.getMods.mockResolvedValue({
       mods: [

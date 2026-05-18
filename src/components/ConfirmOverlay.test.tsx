@@ -27,7 +27,7 @@ describe('ConfirmOverlay', () => {
       />
     );
 
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
     expect(screen.getByText('Remove Environment')).toBeTruthy();
     expect(screen.getByText('Remove this environment from SIMM?')).toBeTruthy();
 
@@ -50,7 +50,7 @@ describe('ConfirmOverlay', () => {
       />
     );
 
-    const dialog = screen.getByRole('dialog');
+    const dialog = screen.getByRole('alertdialog');
     expect(dialog.className).toContain('app-dialog--nested');
     expect(dialog.className).toContain('app-dialog--danger');
   });

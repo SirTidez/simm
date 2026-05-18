@@ -6,7 +6,8 @@ use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_shell::ShellExt;
 use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -63,6 +64,19 @@ pub async fn open_path(path: String) -> Result<(), String> {
     let path = validate_directory_path(&path, None).map_err(|e| format!("Invalid path: {}", e))?;
     let fs_service = get_fs_service().await?;
     fs_service.open_path(&path).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("Invalid URL: {}", e))?;
+    if parsed.scheme() != "https" {
+        return Err("Only HTTPS URLs can be opened externally".to_string());
+    }
+
+    #[allow(deprecated)]
+    app.shell()
+        .open(parsed.to_string(), None)
+        .map_err(|e| format!("Failed to open URL: {}", e))
 }
 
 #[tauri::command]

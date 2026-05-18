@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
+import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Input } from '@/components/ui/input';
+
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
+import { SimmButton } from './primitives';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface PluginInfo {
   name: string;
@@ -41,6 +46,26 @@ function getPluginSourceLabel(source?: PluginInfo['source']): string {
     default:
       return 'Unknown';
   }
+}
+
+function CollectionEmpty({ children, tone }: { children: string; tone?: 'error' }) {
+  return (
+    <Empty className={`workspace-collection__empty${tone === 'error' ? ' workspace-collection__empty--error' : ''}`}>
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+function InspectorEmpty({ children }: { children: string }) {
+  return (
+    <Empty className="workspace-collection__inspector-empty">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
 }
 
 export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Props) {
@@ -319,9 +344,11 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
       />
 
       <div className="mods-overlay workspace-collection-shell">
-        <div className="modal-header">
-          <h2>Plugins</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow={environment?.name || 'Environment'}
+          title="Plugins"
+          description={`Manage plugin DLLs, disabled state, and the Plugins folder for ${environment?.name || 'this environment'}.`}
+        />
 
         <div className="workspace-collection">
           <div className="workspace-collection__main">
@@ -350,7 +377,7 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
 
               <div className="workspace-collection__toolbar">
                 <div className="workspace-collection__toolbar-search">
-                  <input
+                  <Input
                     type="text"
                     value={searchTerm}
                     onChange={(event) => setSearchTerm(event.target.value)}
@@ -358,15 +385,15 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
                   />
                 </div>
                 <div className="workspace-collection__toolbar-group">
-                  <button onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
+                  <SimmButton onClick={handleUploadClick} className="btn btn-primary btn-small" disabled={uploading}>
                     {uploading ? 'Uploading...' : 'Add Plugin'}
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
+                  </SimmButton>
+                  <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
                     Open Folder
-                  </button>
-                  <button type="button" className="btn btn-secondary btn-small" onClick={() => void loadPlugins()} disabled={loading}>
+                  </SimmButton>
+                  <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void loadPlugins()} disabled={loading}>
                     Reload
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
@@ -379,13 +406,13 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
             </div>
 
             <div className="workspace-collection__content">
-              {error && <div className="workspace-collection__empty workspace-collection__empty--error">{error}</div>}
-              {!error && loading && <div className="workspace-collection__empty">Loading plugins...</div>}
+              {error && <CollectionEmpty tone="error">{error}</CollectionEmpty>}
+              {!error && loading && <CollectionEmpty>Loading plugins...</CollectionEmpty>}
               {!error && !loading && plugins.length === 0 && (
-                <div className="workspace-collection__empty">No plugins detected for this environment.</div>
+                <CollectionEmpty>No plugins detected for this environment.</CollectionEmpty>
               )}
               {!error && !loading && plugins.length > 0 && filteredPlugins.length === 0 && (
-                <div className="workspace-collection__empty">No plugins match this search.</div>
+                <CollectionEmpty>No plugins match this search.</CollectionEmpty>
               )}
               {!error && !loading && filteredPlugins.length > 0 && (
                 <div className="workspace-collection__list">
@@ -434,9 +461,9 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
 
           <aside className="workspace-collection__inspector">
             {!selectedPlugin && (
-              <div className="workspace-collection__inspector-empty">
+              <InspectorEmpty>
                 Select a plugin to review file details and environment actions.
-              </div>
+              </InspectorEmpty>
             )}
             {selectedPlugin && (
               <div className="workspace-inspector-card">
@@ -476,22 +503,22 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
                 </div>
 
                 <div className="workspace-inspector-card__actions">
-                  <button
+                  <SimmButton
                     className={selectedPlugin.disabled ? 'btn btn-primary' : 'btn btn-secondary'}
                     onClick={() => void handleTogglePlugin(selectedPlugin)}
                     disabled={togglingPluginKey === getPluginKey(selectedPlugin)}
                   >
                     {selectedPlugin.disabled ? 'Enable' : 'Disable'}
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => setPendingDelete(selectedPlugin)} disabled={deletingPluginKey === getPluginKey(selectedPlugin)}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => setPendingDelete(selectedPlugin)} disabled={deletingPluginKey === getPluginKey(selectedPlugin)}>
                     Delete
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
                     Open Folder
-                  </button>
-                  <button className="btn btn-secondary" onClick={() => void loadPlugins()} disabled={loading}>
+                  </SimmButton>
+                  <SimmButton className="btn btn-secondary" onClick={() => void loadPlugins()} disabled={loading}>
                     Reload
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             )}

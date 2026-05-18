@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App } from './App';
 import type { ReactNode } from 'react';
 
@@ -14,6 +14,12 @@ const environmentStoreMocks = vi.hoisted(() => ({
 }));
 const settingsStoreMocks = vi.hoisted(() => ({
   useSettingsStore: vi.fn(),
+}));
+const downloadStatusStoreMocks = vi.hoisted(() => ({
+  useDownloadStatusStore: vi.fn(),
+}));
+const appRenderMocks = vi.hoisted(() => ({
+  footerRenderCount: 0,
 }));
 const modLibraryOverlayMocks = vi.hoisted(() => ({
   lastNavigationState: null as any,
@@ -84,6 +90,7 @@ vi.mock('../stores/environmentStore', () => ({
 
 vi.mock('../stores/downloadStatusStore', () => ({
   DownloadStatusStoreProvider: ({ children }: { children: ReactNode }) => children,
+  useDownloadStatusStore: downloadStatusStoreMocks.useDownloadStatusStore,
 }));
 
 vi.mock('../stores/settingsStore', () => ({
@@ -100,8 +107,23 @@ vi.mock('./ErrorBoundary', () => ({
 }));
 
 vi.mock('./EnvironmentList', () => ({
-  EnvironmentList: ({ onInitialDetectionComplete }: { onInitialDetectionComplete?: () => void }) => (
-    <button onClick={onInitialDetectionComplete}>Finish Detection</button>
+  EnvironmentList: ({
+    onInitialDetectionComplete,
+    onOpenWorkspace,
+    focusedEnvironmentId,
+    focusedEnvironmentRequestId,
+  }: {
+    onInitialDetectionComplete?: () => void;
+    onOpenWorkspace?: (workspace: { view: 'wizard' }) => void;
+    focusedEnvironmentId?: string | null;
+    focusedEnvironmentRequestId?: number;
+  }) => (
+    <div>
+      <span>Focused Environment: {focusedEnvironmentId ?? 'none'}</span>
+      <span>Focus Request: {focusedEnvironmentRequestId ?? 0}</span>
+      <button onClick={onInitialDetectionComplete}>Finish Detection</button>
+      <button onClick={() => onOpenWorkspace?.({ view: 'wizard' })}>Add Environment</button>
+    </div>
   ),
 }));
 
@@ -268,18 +290,28 @@ vi.mock('./Footer', () => ({
     onOpenModUpdates?: () => void;
     onOpenAppUpdate?: () => void;
     appUpdateAvailable?: boolean;
-  }) => (
-    <div>
-      <button onClick={onOpenModUpdates}>Open Mod Updates</button>
-      {appUpdateAvailable && (
-        <button onClick={onOpenAppUpdate}>Install App Update</button>
-      )}
-    </div>
-  ),
+  }) => {
+    appRenderMocks.footerRenderCount += 1;
+
+    return (
+      <div>
+        <button onClick={onOpenModUpdates}>Open Mod Updates</button>
+        {appUpdateAvailable && (
+          <button onClick={onOpenAppUpdate}>Install App Update</button>
+        )}
+      </div>
+    );
+  },
 }));
 
 vi.mock('./DownloadsPanel', () => ({
-  DownloadsPanel: () => <div>Downloads Panel</div>,
+  DownloadsPanel: ({ onClose, presentation }: { onClose?: () => void; presentation?: string }) => (
+    <div>
+      <span>Downloads Panel</span>
+      <span>{presentation}</span>
+      {onClose && <button onClick={onClose}>Close downloads</button>}
+    </div>
+  ),
 }));
 
 describe('App', () => {
@@ -299,13 +331,41 @@ describe('App', () => {
     processMocks.relaunch.mockReset();
     dialogMocks.confirm.mockResolvedValue(true);
     dialogMocks.message.mockResolvedValue(undefined);
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [],
+    });
     processMocks.relaunch.mockResolvedValue(undefined);
+    localStorage.clear();
+    sessionStorage.clear();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('/releases')) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              tag_name: 'v0.8.4',
+              name: 'SIMM 0.8.4',
+              body: '- Refined the desktop workspace.',
+              published_at: '2026-05-01T00:00:00Z',
+              html_url: 'https://github.com/SirTidez/simm/releases/tag/v0.8.4',
+              prerelease: false,
+            },
+          ],
+        };
+      }
+
+      return {
+        ok: true,
+        text: async () => '## [0.8.4]\n\n- Refined Home and desktop UI polish.\n\n## [0.8.3]\n\n- Fixed update checks.\n',
+      };
+    }));
 
     windowMocks.isMaximized.mockReset();
     windowMocks.onResized.mockReset();
     windowMocks.minimize.mockReset();
     windowMocks.toggleMaximize.mockReset();
     windowMocks.close.mockReset();
+    appRenderMocks.footerRenderCount = 0;
 
     windowMocks.isMaximized.mockResolvedValue(false);
     windowMocks.onResized.mockResolvedValue(() => {});
@@ -326,17 +386,265 @@ describe('App', () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
-  it('hides startup splash when initial detection completes', async () => {
+  it('hides startup splash after startup detection resolves', async () => {
     render(<App />);
-
-    expect(screen.getByText('Detecting game and MelonLoader versions')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
 
     await waitFor(() => {
       expect(screen.queryByText('Detecting game and MelonLoader versions')).toBeNull();
     });
+    expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
+  });
+
+  it('shows a release and changelog feed on the Home dashboard', async () => {
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'News & Changes' })).toBeTruthy();
+    expect(await screen.findAllByText('SIMM 0.8.4')).toHaveLength(2);
+    expect(await screen.findByText('Refined the desktop workspace.')).toBeTruthy();
+    expect(screen.getAllByText('Changelog').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Recommended next step')).toBeNull();
+    expect(screen.queryByText('App channel checked')).toBeNull();
+  });
+
+  it('opens Environments when the Home status environment is clicked', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-update',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Schedule I',
+          runtime: 'IL2CPP',
+          status: 'completed',
+          currentGameVersion: '0.4.5f1',
+          updateAvailable: true,
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const statusButton = await screen.findByRole('button', { name: 'Open Environments for Il2Cpp' });
+    fireEvent.click(statusButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('Finish Detection')).toBeTruthy();
+    });
+    expect(screen.getByText('Focused Environment: env-update')).toBeTruthy();
+  });
+
+  it('opens Home status for the currently selected environment and requests focus', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-update',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Schedule I',
+          runtime: 'IL2CPP',
+          status: 'completed',
+          currentGameVersion: '0.4.5f1',
+          updateAvailable: true,
+        },
+        {
+          id: 'steam-main',
+          name: 'Steam Installation',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Steam/Schedule I',
+          runtime: 'Mono',
+          status: 'completed',
+          currentGameVersion: '0.4.5f1',
+          environmentType: 'Steam',
+        },
+      ],
+    });
+    localStorage.setItem('simm:lastEnvId', 'steam-main');
+
+    render(<App />);
+
+    const statusButton = await screen.findByRole('button', { name: 'Open Environments for Steam Installation' });
+    fireEvent.click(statusButton);
+
+    expect(await screen.findByText('Focused Environment: steam-main')).toBeTruthy();
+    expect(screen.getByText('Focus Request: 1')).toBeTruthy();
+  });
+
+  it('changes the focused environment from the sidebar while Environments is open', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+        {
+          id: 'env-beta',
+          name: 'Beta',
+          appId: '3164500',
+          branch: 'beta',
+          outputDir: 'C:/Games/Beta',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByTitle('Environments'));
+    expect(await screen.findByText('Focused Environment: env-main')).toBeTruthy();
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    fireEvent.click(within(sidebar).getByRole('button', { name: /Beta/ }));
+
+    expect(await screen.findByText('Focused Environment: env-beta')).toBeTruthy();
+    expect(screen.getByText('Focus Request: 2')).toBeTruthy();
+  });
+
+  it('orders shell environments the same way as the environments page', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-alt',
+          name: 'Alternate Beta',
+          appId: '3164500',
+          branch: 'alternate',
+          outputDir: 'C:/Games/Alternate',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+        {
+          id: 'env-beta',
+          name: 'Beta',
+          appId: '3164500',
+          branch: 'beta',
+          outputDir: 'C:/Games/Beta',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+        {
+          id: 'env-il2cpp',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Il2Cpp',
+          runtime: 'IL2CPP',
+          status: 'completed',
+          updateAvailable: true,
+        },
+        {
+          id: 'steam-main',
+          name: 'Steam Installation',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Steam/Schedule I',
+          runtime: 'Mono',
+          status: 'completed',
+          environmentType: 'Steam',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('.app-shell-sidebar__environment-item')).toHaveLength(4);
+    });
+    const environmentButtons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.app-shell-sidebar__environment-item'),
+    );
+
+    expect(environmentButtons.map((button) => button.textContent)).toEqual([
+      'Steam InstallationReady',
+      'Alternate BetaReady',
+      'BetaReady',
+      'Il2CppUpdate',
+    ]);
+  });
+
+  it('hides expanded sidebar content at collapse start while the rail animates', async () => {
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main Environment',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    expect(screen.getByRole('button', { name: 'Collapse navigation sidebar' })).toBeTruthy();
+    expect(within(sidebar).getByText('Main Environment')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse navigation sidebar' }));
+
+    expect(sidebar.classList.contains('app-shell-sidebar--collapsed')).toBe(true);
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(true);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Expand navigation sidebar' })).toBeTruthy();
+    expect(within(sidebar).queryByText('Main Environment')).toBeNull();
+
+    fireEvent.transitionEnd(sidebar, { propertyName: 'width' });
+
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(false);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(false);
+    expect(within(sidebar).queryByText('Main Environment')).toBeNull();
+  });
+
+  it('restores expanded sidebar content before the expand transition finishes', async () => {
+    localStorage.setItem('simm:shellNavCollapsed', 'true');
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main Environment',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'Mono',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    expect(sidebar.classList.contains('app-shell-sidebar--collapsed')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Expand navigation sidebar' })).toBeTruthy();
+    expect(within(sidebar).queryByText('Main Environment')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand navigation sidebar' }));
+
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(true);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(true);
+    expect(within(sidebar).getByText('Main Environment')).toBeTruthy();
+
+    await waitFor(() => {
+      expect(sidebar.classList.contains('app-shell-sidebar--collapsed')).toBe(false);
+    });
+
+    fireEvent.transitionEnd(sidebar, { propertyName: 'width' });
+
+    expect(sidebar.classList.contains('app-shell-sidebar--animating')).toBe(false);
+    expect(sidebar.classList.contains('app-shell-sidebar--expanded-content-visible')).toBe(true);
   });
 
   it('opens and closes overlays from sidebar/header controls', async () => {
@@ -347,7 +655,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Mod Library' }));
     await waitFor(() => expect(screen.queryByText('Mod Library Overlay')).toBeNull());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Game' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add Environment' })[0]);
     expect(await screen.findByText('Wizard Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Wizard' }));
     await waitFor(() => expect(screen.queryByText('Wizard Overlay')).toBeNull());
@@ -361,6 +669,120 @@ describe('App', () => {
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Close Help' }));
     await waitFor(() => expect(screen.queryByText('Help Overlay')).toBeNull());
+  });
+
+  it('opens downloads as a bottom-docked sidebar popup', async () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'mod-1',
+          kind: 'mod',
+          label: 'ExampleMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'downloading',
+          progress: 0,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Downloads/ }));
+
+    const popup = await screen.findByRole('dialog', { name: 'Downloads' });
+    const downloadsButton = screen.getByRole('button', { name: /Downloads/ });
+    expect(popup.classList.contains('downloads-popover')).toBe(true);
+    await waitFor(() => expect(popup.classList.contains('downloads-popover--open')).toBe(true));
+    expect(downloadsButton.classList.contains('app-shell-sidebar__tool-item--active')).toBe(false);
+    expect(await within(popup).findByText('Downloads Panel')).toBeTruthy();
+    expect(within(popup).getByText('popup')).toBeTruthy();
+
+    fireEvent.click(downloadsButton);
+    expect(downloadsButton).toHaveAttribute('aria-expanded', 'false');
+    expect(popup.classList.contains('downloads-popover--closing')).toBe(true);
+    expect(screen.getByRole('dialog', { name: 'Downloads' })).toBeTruthy();
+
+    fireEvent.transitionEnd(popup, { propertyName: 'opacity' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Downloads' })).toBeNull());
+  });
+
+  it('counts recent completed downloads in the sidebar downloads badge', () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'mod-update-1',
+          kind: 'mod',
+          label: 'UpdatedMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'completed',
+          progress: 100,
+          downloadedFiles: 1,
+          totalFiles: 1,
+          startedAt: Date.now() - 1000,
+          finishedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    expect(screen.getByRole('button', { name: /Downloads\s*1/ })).toBeTruthy();
+  });
+
+  it('opens downloads without re-rendering the app shell', async () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'mod-1',
+          kind: 'mod',
+          label: 'ExampleMod.zip',
+          contextLabel: 'Thunderstore',
+          status: 'downloading',
+          progress: 0,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
+
+    const downloadsButton = screen.getByRole('button', { name: /Downloads/ });
+    const renderCountBeforeOpen = appRenderMocks.footerRenderCount;
+
+    fireEvent.click(downloadsButton);
+
+    expect(await screen.findByRole('dialog', { name: 'Downloads' })).toBeTruthy();
+    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeOpen);
+  });
+
+  it('collapses sidebar sections without re-rendering the app shell', async () => {
+    render(<App />);
+
+    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
+
+    const sidebar = screen.getByLabelText('Primary navigation');
+    const renderCountBeforeToggle = appRenderMocks.footerRenderCount;
+
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Tools' }));
+
+    expect(within(sidebar).queryByRole('button', { name: 'Home' })).toBeNull();
+    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeToggle);
+  });
+
+  it('updates window chrome state without re-rendering the app shell', async () => {
+    render(<App />);
+
+    await waitFor(() => expect(appRenderMocks.footerRenderCount).toBeGreaterThanOrEqual(3));
+
+    const renderCountBeforeMaximize = appRenderMocks.footerRenderCount;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }));
+
+    await waitFor(() => expect(windowMocks.toggleMaximize).toHaveBeenCalled());
+    expect(appRenderMocks.footerRenderCount).toBe(renderCountBeforeMaximize);
   });
 
   it('opens the setup guide on a fresh startup', async () => {
@@ -411,7 +833,7 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Mod Library' }));
 
     expect(await screen.findByText('Loading workspace panel...')).toBeTruthy();
-    expect(screen.getByText('Downloads Panel')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Downloads/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Home' })).toBeTruthy();
 
     modLibraryOverlayMocks.releaseSuspense();
@@ -472,24 +894,64 @@ describe('App', () => {
     const accountsButton = screen.getByRole('button', { name: 'Accounts' });
     const helpButton = screen.getByRole('button', { name: 'Help' });
 
-    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
-    expect(helpButton).toHaveAttribute('aria-pressed', 'false');
+    expect(libraryButton).not.toHaveAttribute('aria-current');
+    expect(accountsButton).not.toHaveAttribute('aria-current');
+    expect(helpButton).not.toHaveAttribute('aria-current');
 
     fireEvent.click(libraryButton);
     expect(await screen.findByText('Mod Library Overlay')).toBeTruthy();
-    expect(libraryButton).toHaveAttribute('aria-pressed', 'true');
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+    expect(libraryButton).toHaveAttribute('aria-current', 'page');
+    expect(accountsButton).not.toHaveAttribute('aria-current');
 
     fireEvent.click(accountsButton);
     expect(await screen.findByText('Steam Overlay')).toBeTruthy();
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'true');
-    expect(libraryButton).toHaveAttribute('aria-pressed', 'false');
+    expect(accountsButton).toHaveAttribute('aria-current', 'page');
+    expect(libraryButton).not.toHaveAttribute('aria-current');
 
     fireEvent.click(helpButton);
     expect(await screen.findByText('Help Overlay')).toBeTruthy();
-    expect(helpButton).toHaveAttribute('aria-pressed', 'true');
-    expect(accountsButton).toHaveAttribute('aria-pressed', 'false');
+    expect(helpButton).toHaveAttribute('aria-current', 'page');
+    expect(accountsButton).not.toHaveAttribute('aria-current');
+  });
+
+  it('switches directly between top-level panels without falling back to Home', async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    expect(await screen.findByText('Help Overlay')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Settings From Help' }));
+
+    expect(await screen.findByRole('button', { name: 'Run setup guide again' })).toBeTruthy();
+    expect(screen.queryByText('Help Overlay')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Welcome back to SIMM' })).toBeNull();
+  });
+
+  it('opens the downloads tray from another panel without navigating Home', async () => {
+    downloadStatusStoreMocks.useDownloadStatusStore.mockReturnValue({
+      downloads: [
+        {
+          id: 'download-1',
+          kind: 'mod',
+          label: 'Pack Rat.zip',
+          contextLabel: 'Mod download',
+          status: 'downloading',
+          progress: 50,
+          startedAt: Date.now(),
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    expect(await screen.findByText('Help Overlay')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Downloads/ }));
+
+    expect(await screen.findByText('Downloads Panel')).toBeTruthy();
+    expect(screen.getByText('Help Overlay')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Welcome back to SIMM' })).toBeNull();
   });
 
   it('uses window close for the custom close button', async () => {
@@ -531,8 +993,6 @@ describe('App', () => {
     });
 
     render(<App />);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
 
     const installButton = await screen.findByRole('button', { name: 'Install App Update' });
     fireEvent.click(installButton);
@@ -579,7 +1039,6 @@ describe('App', () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Finish Detection' }));
     await screen.findByRole('button', { name: 'Install App Update' });
 
     await waitFor(() => {
@@ -592,5 +1051,104 @@ describe('App', () => {
       invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
     ).toHaveLength(1);
     expect(secondUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it('does not reopen runtime selection after a failed manual Nexus callback is handled', async () => {
+    const nxmUrl = 'nxm://schedule1/mods/123/files/456?key=abc&expires=999&user_id=1';
+    deepLinkMocks.getCurrent.mockResolvedValue([nxmUrl]);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'complete_nexus_manual_download_session') {
+        const completeCalls = invokeMock.mock.calls.filter(
+          ([calledCommand]) => calledCommand === command,
+        );
+        const runtimeOverride =
+          completeCalls[completeCalls.length - 1]?.[1]?.runtimeOverride;
+
+        if (!runtimeOverride) {
+          return Promise.resolve({
+            success: false,
+            runtimeSelectionRequired: true,
+            kind: 'library',
+            modId: 123,
+            fileId: 456,
+            modName: 'Encoded FOMOD',
+            fileName: 'Encoded-FOMOD.zip',
+            version: '1.0.0',
+          });
+        }
+
+        return Promise.resolve({
+          success: false,
+          requestedKind: 'library',
+          error:
+            'Failed to store manually downloaded Nexus archive: Failed to read ModuleConfig.xml content',
+        });
+      }
+
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: 'Select Runtime' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use IL2CPP' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Select Runtime' })).toBeNull();
+    });
+
+    window.dispatchEvent(new Event('focus'));
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+    expect(screen.queryByRole('heading', { name: 'Select Runtime' })).toBeNull();
+    expect(
+      invokeMock.mock.calls.filter(
+        ([command]) => command === 'complete_nexus_manual_download_session',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('consumes a replayed successful Nexus OAuth callback when no pending flow remains', async () => {
+    const callbackUrl = 'simm://oauth/nexus/callback?code=abc&state=done';
+    const oauthResults: Array<{ success: boolean; error?: string }> = [];
+    const handleOAuthResult = ((event: Event) => {
+      oauthResults.push((event as CustomEvent<{ success: boolean; error?: string }>).detail);
+    }) as EventListener;
+    window.addEventListener('nexus-oauth-result', handleOAuthResult);
+    deepLinkMocks.getCurrent.mockResolvedValue([callbackUrl]);
+    invokeMock.mockImplementation((command: string) => {
+      switch (command) {
+        case 'complete_nexus_oauth_callback':
+          return Promise.reject(new Error('No pending Nexus OAuth login flow'));
+        case 'get_nexus_oauth_status':
+          return Promise.resolve({ connected: true, account: { name: 'Tester' } });
+        default:
+          return Promise.resolve(false);
+      }
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith('complete_nexus_oauth_callback', {
+          callbackUrl,
+        });
+        expect(invokeMock).toHaveBeenCalledWith('get_nexus_oauth_status');
+      });
+
+      expect(oauthResults).toContainEqual({ success: true });
+      expect(oauthResults.some((result) => result.success === false)).toBe(false);
+
+      window.dispatchEvent(new Event('focus'));
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === 'complete_nexus_oauth_callback'),
+      ).toHaveLength(1);
+    } finally {
+      window.removeEventListener('nexus-oauth-result', handleOAuthResult);
+    }
   });
 });

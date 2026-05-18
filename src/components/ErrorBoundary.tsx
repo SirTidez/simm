@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { logger } from '../utils/logger';
+import { SimmButton } from './primitives';
 
 interface Props {
   children: ReactNode;
@@ -64,7 +65,7 @@ export class ErrorBoundary extends Component<Props, State> {
               </pre>
             </details>
           )}
-          <button
+          <SimmButton
             onClick={() => window.location.reload()}
             style={{
               marginTop: '1rem',
@@ -77,7 +78,7 @@ export class ErrorBoundary extends Component<Props, State> {
             }}
           >
             Reload Application
-          </button>
+          </SimmButton>
         </div>
       );
     }

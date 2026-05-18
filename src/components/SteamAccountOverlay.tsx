@@ -3,6 +3,8 @@ import { useSettingsStore } from '../stores/settingsStore';
 import { AuthenticationModal } from './AuthenticationModal';
 import { ApiService } from '../services/api';
 import { Icon } from './Icon';
+import { SimmButton } from './primitives';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface NexusOAuthStatus {
   connected: boolean;
@@ -177,9 +179,11 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
         className="modal-content workspace-panel accounts-panel"
         aria-label="Account panel"
       >
-        <div className="modal-header">
-          <h2>Accounts</h2>
-        </div>
+        <WorkspacePageHeader
+          eyebrow="Workspace"
+          title="Accounts"
+          description="Manage Steam and Nexus access, account capabilities, and local credential storage."
+        />
 
         <div className="accounts-pane">
           <div className="accounts-overview">
@@ -226,10 +230,10 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
             )}
 
             <div className="account-service-card__actions">
-              <button onClick={() => setShowAuthModal(true)} className="btn btn-primary">
+              <SimmButton onClick={() => setShowAuthModal(true)} className="btn btn-primary">
                 <Icon name={steamConnected ? 'fas fa-sync-alt' : 'fas fa-sign-in-alt'} />
                 {steamConnected ? 'Refresh Steam Access' : 'Authenticate with Steam'}
-              </button>
+              </SimmButton>
               <span className="account-action-note">{steamActionNote}</span>
             </div>
           </section>
@@ -285,15 +289,15 @@ export function SteamAccountOverlay({ isOpen, onClose }: { isOpen: boolean; onCl
 
             <div className="account-service-card__actions">
               {nexusStatus.connected ? (
-                <button onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy}>
+                <SimmButton onClick={handleNexusLogout} className="btn btn-secondary" disabled={nexusBusy}>
                   <Icon name={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-out-alt'} spin={nexusBusy} />
                   {nexusBusy ? 'Working...' : 'Logout from Nexus'}
-                </button>
+                </SimmButton>
               ) : (
-                <button onClick={handleNexusLogin} className="btn btn-primary" disabled={nexusBusy}>
+                <SimmButton onClick={handleNexusLogin} className="btn btn-primary" disabled={nexusBusy}>
                   <Icon name={nexusBusy ? 'fas fa-spinner fa-spin' : 'fas fa-sign-in-alt'} spin={nexusBusy} />
                   {nexusBusy ? 'Waiting for Nexus authorization...' : 'Login with Nexus'}
-                </button>
+                </SimmButton>
               )}
               <span className="account-action-note">
                 Free accounts confirm each download on the website. Premium accounts can use direct manager downloads when available.

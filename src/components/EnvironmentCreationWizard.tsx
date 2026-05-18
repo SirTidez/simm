@@ -5,6 +5,22 @@ import { ApiService } from '../services/api';
 import type { AppConfig, BranchConfig } from '../types';
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from '../utils/uxSettings';
 import { Icon } from './Icon';
+import {
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { SimmButton, SimmDialogContent } from './primitives';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface Props {
   onClose: () => void;
@@ -13,6 +29,27 @@ interface Props {
 type WizardMode = 'landing' | 'download-select' | 'download-configure' | 'import-configure';
 type DirectoryPurpose = 'download' | 'import';
 type SteamInstallation = { path: string; executablePath: string; appId: string };
+
+type WizardEmptyCardProps = {
+  icon: string;
+  title: string;
+  description: string;
+  tone?: 'default' | 'info';
+};
+
+function WizardEmptyCard({ icon, title, description, tone = 'default' }: WizardEmptyCardProps) {
+  return (
+    <Empty className={`wizard-empty-card ${tone === 'info' ? 'wizard-empty-card--info' : ''}`}>
+      <EmptyMedia>
+        <Icon name={icon} />
+      </EmptyMedia>
+      <EmptyHeader>
+        <EmptyTitle>{title}</EmptyTitle>
+        <EmptyDescription>{description}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  );
+}
 
 function deriveBranchName(branch: BranchConfig): string {
   return branch.displayName.replace(/\s*\(IL2CPP\)|\s*\(Mono\)/gi, '').trim();
@@ -447,9 +484,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
       }}
       aria-label="Create environment panel"
     >
-      <div className="modal-header">
-        <h2>Add Game</h2>
-      </div>
+      <WorkspacePageHeader
+        eyebrow="Workspace"
+        title="Add Game"
+        description="Create or import a Schedule I environment and choose runtime, branch, and install settings."
+      />
 
       {error && <div className="settings-error-banner">{error}</div>}
 
@@ -502,15 +541,15 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
             </div>
           <div className="wizard-steam-card__actions">
-              <button type="button" className="btn btn-secondary" onClick={() => void handleDetectSteam()} disabled={detectingSteam}>
+              <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDetectSteam()} disabled={detectingSteam}>
                 <Icon name={detectingSteam ? 'fas fa-spinner fa-spin' : 'fab fa-steam'} />
                 {detectingSteam ? 'Detecting…' : steamDetected ? 'Refresh Detection' : 'Detect Steam Install'}
-              </button>
+              </SimmButton>
               {!hasSteamEnvironment && steamDetected && (
-                <button type="button" className="btn btn-secondary" onClick={() => setShowSteamInstallations((value) => !value)}>
+                <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => setShowSteamInstallations((value) => !value)}>
                   <Icon name="fas fa-list" />
                   {showSteamInstallations ? 'Hide Detected Installs' : 'Review Detected Installs'}
-                </button>
+                </SimmButton>
               )}
             </div>
           </div>
@@ -525,17 +564,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
 
               {steamInstallations.length === 0 ? (
-                <div className="wizard-empty-card">
-                  <Icon name="fab fa-steam" />
-                  <strong>No Steam installation found</strong>
-                  <p>Make sure Schedule I is installed through Steam, then refresh detection to try again.</p>
-                </div>
+                <WizardEmptyCard
+                  icon="fab fa-steam"
+                  title="No Steam installation found"
+                  description="Make sure Schedule I is installed through Steam, then refresh detection to try again."
+                />
               ) : (
                 <>
                   <div className="settings-field-grid">
                     <div className="settings-field-card">
                       <label htmlFor="wizard-steam-name">Display name</label>
-                      <input
+                      <Input
                         id="wizard-steam-name"
                         type="text"
                         value={name}
@@ -546,7 +585,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
                     <div className="settings-field-card settings-field-card--full">
                       <label htmlFor="wizard-steam-description">Description</label>
-                      <textarea
+                      <Textarea
                         id="wizard-steam-description"
                         className="wizard-textarea"
                         value={description}
@@ -560,9 +599,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   <div className="wizard-steam-card__list" role="list">
                     {steamInstallations.map((installation) => (
                       <div key={installation.path} role="listitem">
-                        <button
+                        <SimmButton
                           type="button"
-                          className="wizard-steam-install-row"
+                          variant="ghost"
+                          className="wizard-steam-install-row h-auto"
                           onClick={() => void handleCreateSteamEnvironment(installation.path)}
                           disabled={loading}
                         >
@@ -576,7 +616,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           <span className="wizard-inline-action">
                             {loading ? 'Linking…' : 'Add to SIMM'}
                           </span>
-                        </button>
+                        </SimmButton>
                       </div>
                     ))}
                   </div>
@@ -588,9 +628,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
         {wizardMode === 'landing' && (
           <section className="wizard-entry-grid" aria-label="Environment creation methods">
-            <button
+            <SimmButton
               type="button"
-              className="wizard-entry-card"
+              variant="ghost"
+              className="wizard-entry-card h-auto"
               onClick={() => {
                 setError(null);
                 setWizardMode('import-configure');
@@ -605,12 +646,13 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <p>Use this when automatic Steam detection misses your game, or when you keep a separate local copy on disk.</p>
               </div>
               <span className="wizard-inline-action">Select Folder</span>
-            </button>
+            </SimmButton>
 
             {canDownloadBranches && (
-              <button
+              <SimmButton
                 type="button"
-                className="wizard-entry-card"
+                variant="ghost"
+                className="wizard-entry-card h-auto"
                 onClick={() => {
                   setError(null);
                   setWizardMode('download-select');
@@ -625,7 +667,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   <p>Create a separate SIMM-managed Steam branch install for beta, alternate, or runtime-specific testing. SIMM handles updates for these installs.</p>
                 </div>
                 <span className="wizard-inline-action">Browse Branches</span>
-              </button>
+              </SimmButton>
             )}
           </section>
         )}
@@ -638,10 +680,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <h3>Select a branch to download</h3>
                 <p>Choose the Steam branch and runtime you need. SIMM will configure the install folder in the next step.</p>
               </div>
-              <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('landing')}>
+              <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => setWizardMode('landing')}>
                 <Icon name="fas fa-arrow-left" />
                 Back
-              </button>
+              </SimmButton>
             </div>
 
             {(depotDownloaderInstalled !== true || depotDownloaderDetectionError) && (
@@ -658,7 +700,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   {depotDownloaderPromptError && <div className="settings-error-banner">{depotDownloaderPromptError}</div>}
                 </div>
                 <div className="wizard-inline-actions">
-                  <button
+                  <SimmButton
                     type="button"
                     className="btn btn-primary"
                     onClick={() => {
@@ -689,11 +731,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       : installingDepotDownloader
                         ? 'Installing…'
                         : 'Install Automatically'}
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={handleOpenDepotDownloaderInstructions}>
+                  </SimmButton>
+                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenDepotDownloaderInstructions}>
                     <Icon name="fas fa-external-link-alt" />
                     Manual Instructions
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
             )}
@@ -707,9 +749,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
                   return (
                     <div key={branch.name} role="listitem">
-                      <button
+                      <SimmButton
                         type="button"
-                        className={`wizard-branch-card ${disabled ? 'wizard-branch-card--disabled' : ''}`}
+                        variant="ghost"
+                        className={`wizard-branch-card h-auto ${disabled ? 'wizard-branch-card--disabled' : ''}`}
                         onClick={() => {
                           if (!disabled) handleBranchSelect(branch);
                         }}
@@ -741,17 +784,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                         <div className="wizard-branch-card__footer">
                           <span>{authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
                         </div>
-                      </button>
+                      </SimmButton>
                     </div>
                   );
                 })}
               </div>
             ) : (
-              <div className="wizard-empty-card">
-                <Icon name="fas fa-spinner fa-spin" />
-                <strong>Loading branches</strong>
-                <p>SIMM is fetching the currently supported game branches.</p>
-              </div>
+              <WizardEmptyCard
+                icon="fas fa-spinner fa-spin"
+                title="Loading branches"
+                description="SIMM is fetching the currently supported game branches."
+              />
             )}
           </section>
         )}
@@ -764,10 +807,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <h3>Configure Environment</h3>
                 <p>Set the display details and confirm where the selected branch should be downloaded.</p>
               </div>
-              <button type="button" className="btn btn-secondary btn-small" onClick={() => setWizardMode('download-select')}>
+              <SimmButton type="button" variant="secondary" className="btn btn-secondary btn-small" onClick={() => setWizardMode('download-select')}>
                 <Icon name="fas fa-arrow-left" />
                 Back
-              </button>
+              </SimmButton>
             </div>
 
             <div className="settings-section">
@@ -780,7 +823,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="settings-field-grid">
                 <div className="settings-field-card">
                   <label htmlFor="wizard-download-name">Name</label>
-                  <input
+                  <Input
                     id="wizard-download-name"
                     type="text"
                     value={name}
@@ -791,7 +834,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
                 <div className="settings-field-card settings-field-card--full">
                   <label htmlFor="wizard-download-description">Description</label>
-                  <textarea
+                  <Textarea
                     id="wizard-download-description"
                     className="wizard-textarea"
                     value={description}
@@ -814,7 +857,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <div className="settings-field-card settings-field-card--full">
                   <label htmlFor="wizard-download-base-dir">Install folder</label>
                   <div className="settings-inline-field">
-                    <input
+                    <Input
                       id="wizard-download-base-dir"
                       type="text"
                       value={outputDir}
@@ -824,10 +867,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                       }}
                       placeholder="C:\\Games\\Schedule I Beta"
                     />
-                    <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('download')}>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void openDirectoryPicker('download')}>
                       <Icon name="fas fa-folder-open" />
                       Browse
-                    </button>
+                    </SimmButton>
                   </div>
                 </div>
               </div>
@@ -840,13 +883,13 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
             </div>
 
             <div className="wizard-panel__actions">
-              <button type="button" className="btn btn-secondary" onClick={() => setWizardMode('download-select')}>
+              <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => setWizardMode('download-select')}>
                 Back
-              </button>
-              <button type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir}>
+              </SimmButton>
+              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir}>
                 <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
                 {loading ? 'Creating…' : 'Create Environment'}
-              </button>
+              </SimmButton>
             </div>
           </section>
         )}
@@ -859,8 +902,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <h3>Import Existing Folder</h3>
                 <p>Select a local Schedule I folder and let SIMM detect the branch, runtime, and version details automatically.</p>
               </div>
-              <button
+              <SimmButton
                 type="button"
+                variant="secondary"
                 className="btn btn-secondary btn-small"
                 onClick={() => {
                   setWizardMode('landing');
@@ -869,7 +913,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               >
                 <Icon name="fas fa-arrow-left" />
                 Back
-              </button>
+              </SimmButton>
             </div>
 
             <div className="settings-section">
@@ -883,17 +927,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 <div className="settings-field-card settings-field-card--full">
                   <label htmlFor="wizard-import-path">Folder path</label>
                   <div className="settings-inline-field">
-                    <input
+                    <Input
                       id="wizard-import-path"
                       type="text"
                       value={importPath}
                       onChange={(e) => setImportPath(e.target.value)}
                       placeholder="C:\\Games\\Schedule I"
                     />
-                    <button type="button" className="btn btn-secondary" onClick={() => void openDirectoryPicker('import')}>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void openDirectoryPicker('import')}>
                       <Icon name="fas fa-folder-open" />
                       Browse
-                    </button>
+                    </SimmButton>
                   </div>
                 </div>
               </div>
@@ -915,7 +959,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="settings-field-grid">
                 <div className="settings-field-card">
                   <label htmlFor="wizard-import-name">Name</label>
-                  <input
+                  <Input
                     id="wizard-import-name"
                     type="text"
                     value={name}
@@ -926,7 +970,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
 
                 <div className="settings-field-card settings-field-card--full">
                   <label htmlFor="wizard-import-description">Description</label>
-                  <textarea
+                  <Textarea
                     id="wizard-import-description"
                     className="wizard-textarea"
                     value={description}
@@ -938,15 +982,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
             </div>
 
-            <div className="wizard-empty-card wizard-empty-card--info">
-              <Icon name="fas fa-circle-info" />
-              <strong>Runtime and branch are detected automatically</strong>
-              <p>Import is only asking for the folder and optional labels. SIMM will identify runtime, branch, version, and installed tooling from disk.</p>
-            </div>
+            <WizardEmptyCard
+              icon="fas fa-circle-info"
+              title="Runtime and branch are detected automatically"
+              description="Import is only asking for the folder and optional labels. SIMM will identify runtime, branch, version, and installed tooling from disk."
+              tone="info"
+            />
 
             <div className="wizard-panel__actions">
-              <button
+              <SimmButton
                 type="button"
+                variant="secondary"
                 className="btn btn-secondary"
                 onClick={() => {
                   setWizardMode('landing');
@@ -954,8 +1000,8 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 }}
               >
                 Back
-              </button>
-              <button
+              </SimmButton>
+              <SimmButton
                 type="button"
                 className="btn btn-primary"
                 onClick={() => void handleImportLocalEnvironment()}
@@ -963,19 +1009,27 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               >
                 <Icon name={importingLocal ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} />
                 {importingLocal ? 'Importing…' : 'Import Installation'}
-              </button>
+              </SimmButton>
             </div>
           </section>
         )}
       </div>
 
       {showDirectoryPicker && (
-        <div className="modal-overlay modal-overlay-nested" onClick={() => setShowDirectoryPicker(false)}>
-          <div className="modal-content modal-content-nested wizard-directory-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>{directoryPurpose === 'import' ? 'Select Game Folder' : 'Select Install Folder'}</h2>
-              <button className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">×</button>
-            </div>
+        <Dialog open={showDirectoryPicker} onOpenChange={(open) => {
+          if (!open) {
+            setShowDirectoryPicker(false);
+          }
+        }}>
+          <SimmDialogContent
+            nested
+            className="wizard-directory-dialog"
+            showCloseButton={false}
+          >
+            <DialogHeader className="modal-header">
+              <DialogTitle>{directoryPurpose === 'import' ? 'Select Game Folder' : 'Select Install Folder'}</DialogTitle>
+              <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setShowDirectoryPicker(false)} aria-label="Close directory picker">×</SimmButton>
+            </DialogHeader>
 
             <div className="wizard-directory-dialog__body">
               <div className="wizard-directory-dialog__overview">
@@ -987,7 +1041,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <div className="settings-field-card settings-field-card--full">
                 <label htmlFor="wizard-directory-path">Current path</label>
                 <div className="settings-inline-field">
-                  <input
+                  <Input
                     id="wizard-directory-path"
                     type="text"
                     value={directoryPath}
@@ -999,17 +1053,17 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     }}
                     placeholder="C:\\Users\\YourName"
                   />
-                  <button type="button" className="btn btn-secondary" onClick={() => void loadDirectory(directoryPath)} disabled={browsing}>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={() => void loadDirectory(directoryPath)} disabled={browsing}>
                     <Icon name={browsing ? 'fas fa-spinner fa-spin' : 'fas fa-location-crosshairs'} />
                     {browsing ? 'Loading…' : 'Go to Path'}
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
               <div className="settings-field-card settings-field-card--full">
                 <label htmlFor="wizard-new-folder">Create a folder in the current location</label>
                 <div className="settings-inline-field">
-                  <input
+                  <Input
                     id="wizard-new-folder"
                     type="text"
                     value={newFolderName}
@@ -1022,7 +1076,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                     placeholder="Folder name"
                     disabled={creatingFolder || !directoryPath}
                   />
-                  <button
+                  <SimmButton
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void handleCreateFolder()}
@@ -1030,49 +1084,51 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                   >
                     <Icon name={creatingFolder ? 'fas fa-spinner fa-spin' : 'fas fa-folder-plus'} />
                     {creatingFolder ? 'Creating…' : 'Create Folder'}
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
               <div className="wizard-directory-dialog__list" role="list">
                 {browsing ? (
-                  <div className="wizard-empty-card">
-                    <Icon name="fas fa-spinner fa-spin" />
-                    <strong>Loading directories</strong>
-                    <p>SIMM is reading the current folder contents.</p>
-                  </div>
+                  <WizardEmptyCard
+                    icon="fas fa-spinner fa-spin"
+                    title="Loading directories"
+                    description="SIMM is reading the current folder contents."
+                  />
                 ) : (
                   <>
                     {getParentPath(directoryPath) && (
                       <div role="listitem">
-                        <button
+                        <SimmButton
                           type="button"
-                          className="wizard-directory-row wizard-directory-row--parent"
+                          variant="ghost"
+                          className="wizard-directory-row wizard-directory-row--parent h-auto"
                           onClick={() => void loadDirectory(getParentPath(directoryPath) || '')}
                         >
                           <Icon name="fas fa-arrow-up" />
                           <span>Parent Directory</span>
-                        </button>
+                        </SimmButton>
                       </div>
                     )}
 
                     {directoryList.length === 0 ? (
-                      <div className="wizard-empty-card">
-                        <Icon name="fas fa-folder-open" />
-                        <strong>No subdirectories found</strong>
-                        <p>This location does not contain any folders that SIMM can browse into right now.</p>
-                      </div>
+                      <WizardEmptyCard
+                        icon="fas fa-folder-open"
+                        title="No subdirectories found"
+                        description="This location does not contain any folders that SIMM can browse into right now."
+                      />
                     ) : (
                       directoryList.map((dir) => (
                         <div key={dir.path} role="listitem">
-                          <button
+                          <SimmButton
                             type="button"
-                            className="wizard-directory-row"
+                            variant="ghost"
+                            className="wizard-directory-row h-auto"
                             onClick={() => void loadDirectory(dir.path)}
                           >
                             <Icon name="fas fa-folder" />
                             <span>{dir.name}</span>
-                          </button>
+                          </SimmButton>
                         </div>
                       ))
                     )}
@@ -1081,10 +1137,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               </div>
 
               <div className="wizard-panel__actions wizard-panel__actions--dialog">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowDirectoryPicker(false)}>
+                <SimmButton type="button" className="btn btn-secondary" onClick={() => setShowDirectoryPicker(false)}>
                   Cancel
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
                   type="button"
                   className="btn btn-primary"
                   onClick={() => handleDirectorySelection(directoryPath)}
@@ -1092,11 +1148,11 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 >
                   <Icon name="fas fa-check" />
                   Select Folder
-                </button>
+                </SimmButton>
               </div>
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
     </section>
   );

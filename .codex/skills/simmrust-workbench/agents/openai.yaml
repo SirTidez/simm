@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM Workbench"
+  short_description: "Route broad SIMM repo work"
+  default_prompt: "Use $simmrust-workbench to route and validate broad SIMM repo work."

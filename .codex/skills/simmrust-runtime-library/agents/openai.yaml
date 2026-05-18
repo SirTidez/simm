@@ -1,0 +1,4 @@
+interface:
+  display_name: "SIMM Runtime Library"
+  short_description: "Preserve runtime-aware library flows"
+  default_prompt: "Use $simmrust-runtime-library to work on SIMM mod, plugin, or UserLib runtime behavior."

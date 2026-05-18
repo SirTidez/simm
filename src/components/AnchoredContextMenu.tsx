@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuGroup,
+  ContextMenuItem,
+} from '@/components/ui/context-menu';
 import { Icon } from './Icon';
 
 export interface AnchoredContextMenuItem {
@@ -19,28 +25,12 @@ interface Props {
 
 export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState({ left: x, top: y });
-
-  useEffect(() => {
-    setPosition({ left: x, top: y });
-  }, [x, y]);
-
-  useLayoutEffect(() => {
-    const menu = menuRef.current;
-    if (!menu) return;
-
-    const margin = 10;
-    const rect = menu.getBoundingClientRect();
-    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
-    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
-
-    const nextLeft = Math.min(Math.max(x, margin), maxLeft);
-    const nextTop = Math.min(Math.max(y, margin), maxTop);
-
-    if (nextLeft !== position.left || nextTop !== position.top) {
-      setPosition({ left: nextLeft, top: nextTop });
-    }
-  }, [items.length, position.left, position.top, x, y]);
+  const anchor = useMemo(
+    () => ({
+      getBoundingClientRect: () => new DOMRect(x, y, 0, 0),
+    }),
+    [x, y],
+  );
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -50,47 +40,60 @@ export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
       }
     };
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+    const handleContextMenu = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (menuRef.current && target && !menuRef.current.contains(target)) {
         onClose();
       }
     };
 
-    document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('contextmenu', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handlePointerDown, true);
+    document.addEventListener('contextmenu', handleContextMenu, true);
 
     return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('contextmenu', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handlePointerDown, true);
+      document.removeEventListener('contextmenu', handleContextMenu, true);
     };
   }, [onClose]);
 
   return (
-    <div
-      ref={menuRef}
-      className="workspace-context-menu"
-      style={{ left: position.left, top: position.top }}
-      role="menu"
+    <ContextMenu
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
     >
-      {items.map((item) => (
-        <button
-          key={item.key}
-          type="button"
-          role="menuitem"
-          className={`workspace-context-menu__item ${item.danger ? 'workspace-context-menu__item--danger' : ''}`}
-          disabled={item.disabled}
-          onClick={() => {
-            if (item.disabled) return;
-            item.onSelect();
-            onClose();
-          }}
-        >
-          {item.icon ? <Icon name={item.icon} /> : <span className="workspace-context-menu__icon-placeholder" />}
-          <span>{item.label}</span>
-        </button>
-      ))}
-    </div>
+      <ContextMenuContent
+        anchor={anchor}
+        align="start"
+        collisionAvoidance={{ side: 'shift', align: 'shift', fallbackAxisSide: 'end' }}
+        collisionPadding={10}
+        className="workspace-context-menu"
+        positionMethod="fixed"
+        ref={menuRef}
+        side="bottom"
+        sideOffset={0}
+      >
+        <ContextMenuGroup>
+          {items.map((item) => (
+            <ContextMenuItem
+              key={item.key}
+              className={`workspace-context-menu__item ${item.danger ? 'workspace-context-menu__item--danger' : ''}`}
+              disabled={item.disabled}
+              onClick={() => {
+                if (item.disabled) return;
+                item.onSelect();
+              }}
+              variant={item.danger ? 'destructive' : 'default'}
+            >
+              {item.icon ? <Icon name={item.icon} /> : <span className="workspace-context-menu__icon-placeholder" />}
+              <span>{item.label}</span>
+            </ContextMenuItem>
+          ))}
+        </ContextMenuGroup>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

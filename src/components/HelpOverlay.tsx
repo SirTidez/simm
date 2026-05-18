@@ -1,6 +1,10 @@
 import { useEffect } from 'react';
 import { Icon } from './Icon';
 import type { IconName } from './icons';
+import { SimmBadge, SimmButton } from './primitives';
+import { Separator } from '@/components/ui/separator';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 interface HelpOverlayProps {
   isOpen: boolean;
@@ -147,99 +151,105 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
 
   return (
     <section className="modal-content help-overlay workspace-panel" aria-label="Help panel">
-      <div className="modal-header">
-        <h2>Help Center</h2>
-      </div>
+      <WorkspacePageHeader
+        eyebrow="Workspace"
+        title="Help Center"
+        description="Find setup guidance, account help, update diagnostics, and common recovery steps."
+      />
 
       <div className="help-pane">
         <div className="help-overview">
           <div className="help-overview__copy">
             <span className="help-eyebrow">Operator Guide</span>
-            <h3>Use SIMM as a desktop workspace for installs, updates, mods, accounts, and support tools.</h3>
-            <p>Start with environment creation, then move into account access, updates, mod management, and diagnostics as your install matures.</p>
+            <h3>Start with setup, then use the focused tabs for maintenance and recovery.</h3>
+            <p>Help is grouped around the work SIMM actually does: creating environments, managing mods and support files, and fixing account, update, or loader issues.</p>
           </div>
-          <div className="help-overview__stats">
-            <div className="help-stat-card">
-              <span>Quick start</span>
-              <strong>3 core steps</strong>
-            </div>
-            <div className="help-stat-card">
-              <span>Primary areas</span>
-              <strong>Installs, accounts, mods</strong>
-            </div>
-            <div className="help-stat-card">
-              <span>Support focus</span>
-              <strong>Auth, updates, logs</strong>
-            </div>
+          <div className="help-overview__badges">
+            <SimmBadge variant="outline" className="help-badge">3 setup steps</SimmBadge>
+            <SimmBadge variant="outline" className="help-badge">4 task guides</SimmBadge>
+            <SimmBadge variant="outline" className="help-badge">Focused reference</SimmBadge>
           </div>
         </div>
 
-        <section className="help-action-strip">
-          <div className="help-section-group__header">
-            <span className="help-eyebrow">Next Actions</span>
-            <h3>Jump directly to the workspace you need most often.</h3>
-          </div>
+        <div className="help-action-grid">
+          {quickActions.map((actionCard) => {
+            const handleClick = actionCard.action === 'wizard'
+              ? onOpenWizard
+              : actionCard.action === 'accounts'
+                ? onOpenAccounts
+                : onOpenSettings;
 
-          <div className="help-action-grid">
-            {quickActions.map((actionCard) => {
-              const handleClick = actionCard.action === 'wizard'
-                ? onOpenWizard
-                : actionCard.action === 'accounts'
-                  ? onOpenAccounts
-                  : onOpenSettings;
+            return (
+              <SimmButton
+                key={actionCard.title}
+                type="button"
+                variant="secondary"
+                className="help-action-card"
+                onClick={handleClick}
+              >
+                <Icon name={actionCard.icon} />
+                <span>{actionCard.title}</span>
+                <Icon name="arrowRight" className="help-action-card__chevron" />
+              </SimmButton>
+            );
+          })}
+        </div>
 
-              return (
-                <button
-                  key={actionCard.title}
-                  type="button"
-                  className="help-action-card"
-                  onClick={handleClick}
-                >
+        <Tabs defaultValue="start" className="help-tabs">
+          <TabsList className="help-tabs__list" variant="line" aria-label="Help topics">
+            <TabsTrigger value="start">Start</TabsTrigger>
+            <TabsTrigger value="tasks">Tasks</TabsTrigger>
+            <TabsTrigger value="reference">Reference</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="start" className="help-tabs__content">
+            <div className="help-layout help-layout--start">
+              <section className="help-panel">
+                <div className="help-card-header">
                   <div className="help-card-header__icon">
-                    <Icon name={actionCard.icon} />
+                    <Icon name="circleInfo" />
                   </div>
-                  <div className="help-action-card__content">
-                    <h4>{actionCard.title}</h4>
-                    <p>{actionCard.body}</p>
+                  <div>
+                    <span className="help-eyebrow">Quick Start</span>
+                    <h3>Get from first launch to a managed environment quickly.</h3>
+                    <p>These are the first decisions most users need. Everything else is supporting reference.</p>
                   </div>
-                  <Icon name="arrowRight" className="help-action-card__chevron" />
-                </button>
-              );
-            })}
-          </div>
-        </section>
-
-        <div className="help-layout">
-          <div className="help-layout__primary">
-            <section className="help-hero-card">
-              <div className="help-card-header">
-                <div className="help-card-header__icon">
-                  <Icon name="circleInfo" />
                 </div>
-                <div>
-                  <span className="help-eyebrow">Quick Start</span>
-                  <h3>Get from first launch to a managed environment quickly.</h3>
-                  <p>These are the actions most users need first. Everything else in this pane is supporting reference.</p>
-                </div>
-              </div>
 
-              <div className="help-step-list">
-                {quickStartSteps.map((step, index) => (
-                  <div key={step.title} className="help-step-card">
-                    <span className="help-step-card__index">{index + 1}</span>
-                    <div className="help-step-card__body">
-                      <h4>
-                        <Icon name={step.icon} />
-                        {step.title}
-                      </h4>
-                      <p>{step.body}</p>
+                <div className="help-step-list">
+                  {quickStartSteps.map((step, index) => (
+                    <div key={step.title} className="help-step-card">
+                      <span className="help-step-card__index">{index + 1}</span>
+                      <div className="help-step-card__body">
+                        <h4>
+                          <Icon name={step.icon} />
+                          {step.title}
+                        </h4>
+                        <p>{step.body}</p>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            </section>
+                  ))}
+                </div>
+              </section>
 
-            <section className="help-section-group">
+              <section className="help-panel help-panel--quiet">
+                <div className="help-reference-card__header">
+                  <Icon name="compass" />
+                  <h4>Where to Start</h4>
+                </div>
+                <ul className="help-list help-list--compact">
+                  <li>Let SIMM detect your Steam install first.</li>
+                  <li>Use Import only when detection does not find the folder.</li>
+                  <li>Let Steam update the Steam install; use SIMM updates for SIMM-managed installs.</li>
+                  <li>Use Accounts when Steam or Nexus sign-in becomes a blocker.</li>
+                  <li>Open Logs and Config together when deeper diagnostics are needed.</li>
+                </ul>
+              </section>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="tasks" className="help-tabs__content">
+            <div className="help-section-group">
               <div className="help-section-group__header">
                 <span className="help-eyebrow">Task Guides</span>
                 <h3>Find the right workspace for the job.</h3>
@@ -257,6 +267,7 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                         <p>{card.copy}</p>
                       </div>
                     </div>
+                    <Separator className="help-separator" />
                     <ul className="help-list">
                       {card.items.map((item) => (
                         <li key={item}>{item}</li>
@@ -265,30 +276,16 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   </article>
                 ))}
               </div>
-            </section>
-          </div>
+            </div>
+          </TabsContent>
 
-          <aside className="help-layout__secondary">
-            <section className="help-reference-card help-reference-card--summary">
-              <div className="help-reference-card__header">
-                <Icon name="compass" />
-                <h4>Where to Start</h4>
-              </div>
-              <ul className="help-list help-list--compact">
-                <li>Let SIMM detect your Steam install first.</li>
-                <li>Use Import only when detection does not find the folder.</li>
-                <li>Let Steam update the Steam install; use SIMM updates for SIMM-managed installs.</li>
-                <li>Use Accounts when Steam or Nexus sign-in becomes a blocker.</li>
-                <li>Open Logs and Config together when deeper diagnostics are needed.</li>
-              </ul>
-            </section>
+          <TabsContent value="reference" className="help-tabs__content">
+            <div className="help-section-group__header">
+              <span className="help-eyebrow">Reference</span>
+              <h3>Supporting details for common maintenance tasks.</h3>
+            </div>
 
-            <section className="help-section-group">
-              <div className="help-section-group__header">
-                <span className="help-eyebrow">Reference</span>
-                <h3>Supporting details for common maintenance tasks.</h3>
-              </div>
-
+            <div className="help-layout help-layout--reference">
               <div className="help-reference-grid">
                 {referenceCards.map((card) => (
                   <article key={card.title} className="help-reference-card">
@@ -304,23 +301,22 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   </article>
                 ))}
               </div>
-            </section>
-
-            <section className="help-callout-card">
-              <div className="help-card-header">
-                <div className="help-card-header__icon">
-                  <Icon name="wrench" />
+              <section className="help-callout-card">
+                <div className="help-card-header">
+                  <div className="help-card-header__icon">
+                    <Icon name="wrench" />
+                  </div>
+                  <div>
+                    <span className="help-eyebrow">Repair Hint</span>
+                    <h3>DepotDownloader powers advanced Steam branch installs.</h3>
+                    <p>If SIMM reports that DepotDownloader is missing, let SIMM install it automatically or repair prerequisites before retrying the branch install.</p>
+                  </div>
                 </div>
-                <div>
-                  <span className="help-eyebrow">Repair Hint</span>
-                  <h3>DepotDownloader powers advanced Steam branch installs.</h3>
-                  <p>If SIMM reports that DepotDownloader is missing, let SIMM install it automatically or repair prerequisites before retrying the branch install.</p>
-                </div>
-              </div>
-              <code>winget install --exact --id SteamRE.DepotDownloader</code>
-            </section>
-          </aside>
-        </div>
+                <code>winget install --exact --id SteamRE.DepotDownloader</code>
+              </section>
+            </div>
+          </TabsContent>
+        </Tabs>
       </div>
     </section>
   );

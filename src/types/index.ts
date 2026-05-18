@@ -33,6 +33,8 @@ export interface TrackedDownload {
   progress: number;
   downloadedFiles?: number;
   totalFiles?: number;
+  iconUrl?: string;
+  iconCachePath?: string;
   message?: string;
   error?: string;
   startedAt: number;

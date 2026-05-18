@@ -33,6 +33,7 @@ const apiMocks = vi.hoisted(() => ({
   beginNexusManualDownloadSession: vi.fn(),
   downloadNexusModToLibrary: vi.fn(),
   downloadThunderstoreToLibrary: vi.fn(),
+  deleteDownloadedMod: vi.fn(),
   uninstallDownloadedMod: vi.fn(),
   installDownloadedMod: vi.fn(),
   getModSecurityScanReport: vi.fn(),
@@ -172,6 +173,11 @@ function renderLibraryOverlay({
   );
 }
 
+async function chooseAvailableLibraryVersion(optionName: RegExp) {
+  fireEvent.click(await screen.findByRole("combobox", { name: "Available versions" }));
+  fireEvent.click(await screen.findByRole("option", { name: optionName }));
+}
+
 vi.mock("../services/events", () => ({
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
@@ -201,6 +207,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.beginNexusManualDownloadSession.mockReset();
     apiMocks.downloadNexusModToLibrary.mockReset();
     apiMocks.downloadThunderstoreToLibrary.mockReset();
+    apiMocks.deleteDownloadedMod.mockReset();
     apiMocks.uninstallDownloadedMod.mockReset();
     apiMocks.installDownloadedMod.mockReset();
     apiMocks.getModSecurityScanReport.mockReset();
@@ -213,6 +220,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
     apiMocks.getEnvironments.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
+    apiMocks.deleteDownloadedMod.mockResolvedValue({ deleted: true, removedFrom: [] });
     apiMocks.downloadMLVScanToLibrary.mockResolvedValue({ success: true });
     apiMocks.searchThunderstore.mockImplementation(
       async (_gameId, query, runtime) => {
@@ -349,6 +357,48 @@ describe("ModLibraryOverlay", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /S1API/i })).toHaveTextContent(
         "Update",
+      );
+    });
+  });
+
+  it("downloads SteamNetworkLib featured packages for both runtimes", async () => {
+    apiMocks.searchThunderstoreByRuntime.mockResolvedValue({
+      packagesByRuntime: {
+        IL2CPP: [
+          makeThunderstorePackage(
+            "SteamNetworkLib_Il2Cpp",
+            "1.2.4",
+            "IL2CPP",
+          ),
+        ],
+        Mono: [
+          makeThunderstorePackage("SteamNetworkLib_Mono", "1.2.4", "Mono"),
+        ],
+      },
+    });
+
+    renderLibraryOverlay({ libraryTab: "discover" });
+
+    const steamNetworkLibButtons = await screen.findAllByRole("button", {
+      name: /SteamNetworkLib/i,
+    });
+    await waitFor(() => {
+      expect(steamNetworkLibButtons[0]).not.toBeDisabled();
+    });
+    fireEvent.click(steamNetworkLibButtons[0]);
+
+    await waitFor(() => {
+      expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+        "SteamNetworkLib_Il2Cpp-IL2CPP-pkg",
+        "IL2CPP",
+        undefined,
+        "SteamNetworkLib_Il2Cpp-IL2CPP-ver",
+      );
+      expect(apiMocks.downloadThunderstoreToLibrary).toHaveBeenCalledWith(
+        "SteamNetworkLib_Mono-Mono-pkg",
+        "Mono",
+        undefined,
+        "SteamNetworkLib_Mono-Mono-ver",
       );
     });
   });
@@ -517,9 +567,8 @@ describe("ModLibraryOverlay", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
 
-    expect(await screen.findByText("Discover Results")).toBeTruthy();
     expect(await screen.findByText("MapTools")).toBeTruthy();
-    expect(screen.getByText("1 result(s)")).toBeTruthy();
+    expect(screen.getByText("Tester")).toBeTruthy();
     expect(
       screen.getByText("Select a mod to review details and actions."),
     ).toBeTruthy();
@@ -631,7 +680,7 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
-    expect(await screen.findByText("Nexus Results")).toBeTruthy();
+    expect((await screen.findAllByText("Pack Rat")).length).toBeGreaterThan(0);
     expect(
       screen.getByText("ActualUploader • Original creator: ExampleAuthor"),
     ).toBeTruthy();
@@ -766,7 +815,7 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
-    expect(await screen.findByText("Nexus Results")).toBeTruthy();
+    expect((await screen.findAllByText("Pack Rat")).length).toBeGreaterThan(0);
     await waitFor(() => {
       expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledTimes(1);
     });
@@ -2153,6 +2202,70 @@ describe("ModLibraryOverlay", () => {
     ).toBeTruthy();
   });
 
+  it("asks before deleting a library entry that is installed in environments", async () => {
+    apiMocks.getEnvironments.mockResolvedValue([
+      {
+        id: "env-1",
+        name: "Main Install",
+        appId: "3164500",
+        branch: "alternate",
+        outputDir: "C:/game",
+        runtime: "IL2CPP",
+        status: "completed",
+      },
+    ]);
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: "Installed Library Mod",
+          installedIn: ["env-1"],
+          installedInByRuntime: { IL2CPP: ["env-1"] },
+          availableRuntimes: ["IL2CPP"],
+          storageIdsByRuntime: { IL2CPP: "storage-1" },
+          filesByRuntime: { IL2CPP: ["Installed.Library.Mod.dll"] },
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: "library" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete downloaded files" }),
+    );
+
+    expect(await screen.findByText("Uninstall and Delete?")).toBeTruthy();
+    expect(
+      screen.getByText(/installed in 1 environment: Main Install/i),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Uninstall and Delete" }));
+
+    await waitFor(() => {
+      expect(apiMocks.deleteDownloadedMod).toHaveBeenCalledWith("storage-1");
+    });
+  });
+
+  it("shows a visible error when deleting a downloaded library entry fails", async () => {
+    apiMocks.deleteDownloadedMod.mockRejectedValueOnce(new Error("Access denied"));
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          displayName: "Locked Library Mod",
+        }),
+      ],
+    });
+
+    renderLibraryOverlay({ libraryTab: "library" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Delete downloaded files" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Delete Files" }));
+
+    expect(await screen.findByText("Delete Failed")).toBeTruthy();
+    expect(screen.getByText("Access denied")).toBeTruthy();
+  });
+
   it("does not render unsafe source links for downloaded inspector details", async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
@@ -2857,12 +2970,7 @@ describe("ModLibraryOverlay", () => {
     renderLibraryOverlay({ libraryTab: "library" });
 
     await screen.findByText("Sibling Block Mod");
-    fireEvent.change(
-      screen.getByRole("combobox", { name: "Available versions" }),
-      {
-        target: { value: "mono-v2-storage" },
-      },
-    );
+    await chooseAvailableLibraryVersion(/v1\.1\.0 - Mono/);
 
     const button = await screen.findByRole("button", {
       name: "Install to more…",
@@ -2919,9 +3027,7 @@ describe("ModLibraryOverlay", () => {
 
     renderLibraryOverlay({ libraryTab: "library" });
 
-    fireEvent.change(await screen.findByLabelText("Available versions"), {
-      target: { value: "storage-old" },
-    });
+    await chooseAvailableLibraryVersion(/v1\.0\.0 - Mono/);
     fireEvent.click(
       await screen.findByRole("button", { name: "Activate selected version" }),
     );

@@ -1,9 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 
 import { ApiService } from '../services/api';
 import { useSettingsStore } from '../stores/settingsStore';
+import {
+  Dialog,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Icon } from './Icon';
+import { SimmButton, SimmDialogContent } from './primitives';
 
 interface Props {
   isOpen: boolean;
@@ -89,34 +97,35 @@ export function AuthenticationModal({
 
   if (!isOpen) return null;
 
-  const overlayClass = nested ? 'modal-overlay modal-overlay-nested' : 'modal-overlay';
-  const contentClass = nested ? 'modal-content modal-content-nested auth-modal auth-modal--nested' : 'modal-content auth-modal';
+  const contentClass = nested ? 'auth-modal auth-modal--nested' : 'auth-modal';
 
-  const modalElement = (
-    <div className={overlayClass} onClick={required ? undefined : onClose}>
-      <div
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => {
+      if (!open && !required) {
+        onClose();
+      }
+    }}>
+      <SimmDialogContent
+        nested={nested}
         className={`${contentClass} ${required ? 'auth-modal--required' : ''}`}
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Steam authentication dialog"
+        showCloseButton={false}
       >
-        <div className="modal-header auth-modal__header">
+        <DialogHeader className="modal-header auth-modal__header">
           <div className="auth-modal__heading">
             <span className="settings-eyebrow">Steam Access</span>
-            <h2>{waitingForAuth ? 'Waiting for Steam Approval' : 'Authenticate with Steam'}</h2>
-            <p>
+            <DialogTitle>{waitingForAuth ? 'Waiting for Steam Approval' : 'Authenticate with Steam'}</DialogTitle>
+            <DialogDescription>
               {required
                 ? 'Authenticate with Steam to authorize SIMM to manage your Schedule I game install.'
                 : 'Connect Steam when SIMM needs authorization for advanced Schedule I installs.'}
-            </p>
+            </DialogDescription>
           </div>
           {!required && (
-            <button className="modal-close" onClick={onClose} aria-label="Close Steam authentication dialog">
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={onClose} aria-label="Close Steam authentication dialog">
               ×
-            </button>
+            </SimmButton>
           )}
-        </div>
+        </DialogHeader>
 
         <div className="auth-modal__status-strip" aria-hidden={waitingForAuth}>
           <div className="auth-modal__status-pill">
@@ -149,9 +158,9 @@ export function AuthenticationModal({
 
               {!required && (
                 <div className="auth-modal__actions auth-modal__actions--waiting">
-                  <button type="button" className="btn btn-secondary" onClick={onClose}>
+                  <SimmButton type="button" className="btn btn-secondary" onClick={onClose}>
                     Close
-                  </button>
+                  </SimmButton>
                 </div>
               )}
             </div>
@@ -194,7 +203,7 @@ export function AuthenticationModal({
               <div className="auth-modal__fields">
                 <div className="form-group">
                   <label htmlFor="auth-steam-username">Steam Username</label>
-                  <input
+                  <Input
                     id="auth-steam-username"
                     type="text"
                     value={username}
@@ -207,7 +216,7 @@ export function AuthenticationModal({
 
                 <div className="form-group">
                   <label htmlFor="auth-steam-password">Steam Password</label>
-                  <input
+                  <Input
                     id="auth-steam-password"
                     type="password"
                     value={password}
@@ -220,7 +229,7 @@ export function AuthenticationModal({
 
                 <div className="form-group">
                   <label htmlFor="auth-steam-guard">Steam Guard Code <span className="auth-modal__optional">Optional</span></label>
-                  <input
+                  <Input
                     id="auth-steam-guard"
                     type="text"
                     value={steamGuard}
@@ -233,42 +242,42 @@ export function AuthenticationModal({
                 </div>
 
                 <div className="settings-field auth-modal__preference">
-                  <label className="settings-toggle">
-                    <input
-                      type="checkbox"
+                  <div
+                    className="settings-toggle settings-toggle-button"
+                    onClick={(event) => {
+                      if ((event.target as HTMLElement).closest('[data-slot="switch"]')) return;
+                      setSaveCredentials((checked) => !checked);
+                    }}
+                  >
+                    <Switch
                       checked={saveCredentials}
-                      onChange={(event) => setSaveCredentials(event.target.checked)}
+                      onCheckedChange={setSaveCredentials}
+                      aria-label="Remember credentials securely"
+                      className="settings-toggle__switch"
                     />
-                    <span className="settings-toggle__control"></span>
-                    <span>
+                    <span className="settings-toggle__copy">
                       <strong>Remember credentials securely</strong>
                       <small>Store this Steam login locally in encrypted form for future Steam authorization.</small>
                     </span>
-                  </label>
+                  </div>
                 </div>
               </div>
 
               <div className="auth-modal__actions">
                 {!required && (
-                  <button type="button" onClick={onClose} className="btn btn-secondary">
+                  <SimmButton type="button" onClick={onClose} className="btn btn-secondary">
                     Cancel
-                  </button>
+                  </SimmButton>
                 )}
-                <button type="submit" className="btn btn-primary" disabled={loading || !username || !password}>
+                <SimmButton type="submit" className="btn btn-primary" disabled={loading || !username || !password}>
                   <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-right-to-bracket'} spin={loading} />
                   {loading ? 'Authenticating…' : 'Authenticate with Steam'}
-                </button>
+                </SimmButton>
               </div>
             </form>
           </div>
         )}
-      </div>
-    </div>
+      </SimmDialogContent>
+    </Dialog>
   );
-
-  if (typeof document === 'undefined' || !document.body) {
-    return modalElement;
-  }
-
-  return createPortal(modalElement, document.body);
 }

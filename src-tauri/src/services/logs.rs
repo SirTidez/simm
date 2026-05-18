@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
 use crate::services::logger::LoggerService;
+
+const LOG_READ_CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogFile {
@@ -36,6 +39,13 @@ pub enum LogCategory {
     MelonLoader,
     Mod,
     General,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
 }
 
 pub struct LogsService {
@@ -238,20 +248,11 @@ impl LogsService {
             return Err(anyhow::anyhow!("Log file does not exist: {}", log_path));
         }
 
-        let file_bytes = fs::read(path).await.context("Failed to read log file")?;
-        let content = Self::decode_log_content(&file_bytes);
-
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-        let start_line = if let Some(max) = max_lines {
-            total_lines.saturating_sub(max)
-        } else {
-            0
-        };
+        let (content, start_line) = Self::read_log_content(path, max_lines).await?;
 
         let mut log_lines = Vec::new();
-        for (idx, line) in lines.iter().enumerate().skip(start_line) {
-            let line_number = idx + 1;
+        for (idx, line) in content.lines().enumerate() {
+            let line_number = start_line + idx + 1;
             let raw_content = line.to_string();
 
             // Parse MelonLoader log format
@@ -274,6 +275,333 @@ impl LogsService {
         }
 
         Ok(log_lines)
+    }
+
+    async fn read_log_content(path: &Path, max_lines: Option<usize>) -> Result<(String, usize)> {
+        match max_lines {
+            Some(0) => Ok((String::new(), 0)),
+            Some(max) => Self::read_log_tail_content(path, max).await,
+            None => {
+                let file_bytes = fs::read(path).await.context("Failed to read log file")?;
+                Ok((Self::decode_log_content(&file_bytes), 0))
+            }
+        }
+    }
+
+    async fn read_log_tail_content(path: &Path, max_lines: usize) -> Result<(String, usize)> {
+        let mut file = fs::File::open(path)
+            .await
+            .context("Failed to open log file")?;
+        let file_size = file
+            .metadata()
+            .await
+            .context("Failed to inspect log file")?
+            .len();
+
+        if file_size == 0 {
+            return Ok((String::new(), 0));
+        }
+
+        let (encoding, data_start) = Self::detect_log_encoding(&mut file).await?;
+        let (start_offset, start_line) = if encoding == LogEncoding::Utf8 {
+            let start_offset =
+                Self::find_utf8_tail_start_offset(&mut file, file_size, data_start, max_lines)
+                    .await?;
+            let start_line =
+                Self::count_line_feeds(&mut file, start_offset, data_start, encoding).await?;
+            (start_offset, start_line)
+        } else {
+            let line_count = Self::count_lines(&mut file, file_size, data_start, encoding).await?;
+            let start_line = line_count.saturating_sub(max_lines);
+            let start_offset = Self::find_line_start_offset(
+                &mut file, file_size, data_start, encoding, start_line,
+            )
+            .await?;
+            (start_offset, start_line)
+        };
+
+        file.seek(SeekFrom::Start(start_offset))
+            .await
+            .context("Failed to seek log file")?;
+        let mut bytes = Vec::with_capacity(file_size.saturating_sub(start_offset) as usize);
+        file.read_to_end(&mut bytes)
+            .await
+            .context("Failed to read log file tail")?;
+
+        Ok((
+            Self::decode_log_content_with_encoding(&bytes, encoding),
+            start_line,
+        ))
+    }
+
+    async fn detect_log_encoding(file: &mut fs::File) -> Result<(LogEncoding, u64)> {
+        file.seek(SeekFrom::Start(0))
+            .await
+            .context("Failed to seek log file")?;
+
+        let mut bom = [0u8; 2];
+        let bytes_read = file
+            .read(&mut bom)
+            .await
+            .context("Failed to read log file encoding")?;
+
+        if bytes_read >= 2 && bom == [0xFF, 0xFE] {
+            return Ok((LogEncoding::Utf16Le, 2));
+        }
+        if bytes_read >= 2 && bom == [0xFE, 0xFF] {
+            return Ok((LogEncoding::Utf16Be, 2));
+        }
+
+        Ok((LogEncoding::Utf8, 0))
+    }
+
+    async fn count_lines(
+        file: &mut fs::File,
+        file_size: u64,
+        data_start: u64,
+        encoding: LogEncoding,
+    ) -> Result<usize> {
+        if file_size <= data_start {
+            return Ok(0);
+        }
+
+        let newline_count = Self::count_line_feeds(file, file_size, data_start, encoding).await?;
+        let ends_with_newline =
+            Self::ends_with_newline(file, file_size, data_start, encoding).await?;
+
+        Ok(if ends_with_newline {
+            newline_count
+        } else {
+            newline_count + 1
+        })
+    }
+
+    async fn count_line_feeds(
+        file: &mut fs::File,
+        file_size: u64,
+        data_start: u64,
+        encoding: LogEncoding,
+    ) -> Result<usize> {
+        let mut count = 0usize;
+        let mut offset = data_start;
+        let mut carry: Option<u8> = None;
+        let mut buffer = vec![0u8; LOG_READ_CHUNK_SIZE];
+
+        while offset < file_size {
+            let chunk_len = (file_size - offset).min(LOG_READ_CHUNK_SIZE as u64) as usize;
+            file.seek(SeekFrom::Start(offset))
+                .await
+                .context("Failed to seek log file")?;
+            let read_len = file
+                .read(&mut buffer[..chunk_len])
+                .await
+                .context("Failed to read log file")?;
+            if read_len == 0 {
+                break;
+            }
+
+            count += Self::count_newlines_in_chunk(&buffer[..read_len], encoding, &mut carry);
+            offset += read_len as u64;
+        }
+
+        Ok(count)
+    }
+
+    async fn find_utf8_tail_start_offset(
+        file: &mut fs::File,
+        file_size: u64,
+        data_start: u64,
+        max_lines: usize,
+    ) -> Result<u64> {
+        let ends_with_newline =
+            Self::ends_with_newline(file, file_size, data_start, LogEncoding::Utf8).await?;
+        let target_line_feeds = if ends_with_newline {
+            max_lines.saturating_add(1)
+        } else {
+            max_lines
+        };
+
+        let mut seen_line_feeds = 0usize;
+        let mut chunk_end = file_size;
+        let mut buffer = vec![0u8; LOG_READ_CHUNK_SIZE];
+
+        while chunk_end > data_start {
+            let chunk_start = chunk_end
+                .saturating_sub(LOG_READ_CHUNK_SIZE as u64)
+                .max(data_start);
+            let chunk_len = (chunk_end - chunk_start) as usize;
+
+            file.seek(SeekFrom::Start(chunk_start))
+                .await
+                .context("Failed to seek log file")?;
+            file.read_exact(&mut buffer[..chunk_len])
+                .await
+                .context("Failed to read log file")?;
+
+            for index in (0..chunk_len).rev() {
+                if buffer[index] == b'\n' {
+                    seen_line_feeds += 1;
+                    if seen_line_feeds == target_line_feeds {
+                        return Ok(chunk_start + index as u64 + 1);
+                    }
+                }
+            }
+
+            chunk_end = chunk_start;
+        }
+
+        Ok(data_start)
+    }
+
+    async fn find_line_start_offset(
+        file: &mut fs::File,
+        file_size: u64,
+        data_start: u64,
+        encoding: LogEncoding,
+        start_line: usize,
+    ) -> Result<u64> {
+        if start_line == 0 {
+            return Ok(data_start);
+        }
+
+        let mut seen_line_feeds = 0usize;
+        let mut offset = data_start;
+        let mut carry: Option<u8> = None;
+        let mut buffer = vec![0u8; LOG_READ_CHUNK_SIZE];
+
+        while offset < file_size {
+            let chunk_len = (file_size - offset).min(LOG_READ_CHUNK_SIZE as u64) as usize;
+            file.seek(SeekFrom::Start(offset))
+                .await
+                .context("Failed to seek log file")?;
+            let read_len = file
+                .read(&mut buffer[..chunk_len])
+                .await
+                .context("Failed to read log file")?;
+            if read_len == 0 {
+                break;
+            }
+
+            let (chunk_line_feeds, line_start_offset) = Self::scan_newlines_in_chunk(
+                &buffer[..read_len],
+                encoding,
+                &mut carry,
+                start_line - seen_line_feeds,
+            );
+            if let Some(relative_offset) = line_start_offset {
+                return Ok(offset + relative_offset as u64);
+            }
+
+            seen_line_feeds += chunk_line_feeds;
+            offset += read_len as u64;
+        }
+
+        Ok(file_size)
+    }
+
+    fn count_newlines_in_chunk(
+        chunk: &[u8],
+        encoding: LogEncoding,
+        carry: &mut Option<u8>,
+    ) -> usize {
+        Self::scan_newlines_in_chunk(chunk, encoding, carry, usize::MAX).0
+    }
+
+    fn scan_newlines_in_chunk(
+        chunk: &[u8],
+        encoding: LogEncoding,
+        carry: &mut Option<u8>,
+        target_count: usize,
+    ) -> (usize, Option<usize>) {
+        if encoding == LogEncoding::Utf8 {
+            let mut count = 0usize;
+            for (index, byte) in chunk.iter().enumerate() {
+                if *byte == b'\n' {
+                    count += 1;
+                    if count == target_count {
+                        return (count, Some(index + 1));
+                    }
+                }
+            }
+            return (count, None);
+        }
+
+        let mut count = 0usize;
+        let mut index = 0usize;
+        while index < chunk.len() {
+            let first = if let Some(previous) = carry.take() {
+                previous
+            } else {
+                let byte = chunk[index];
+                index += 1;
+                byte
+            };
+
+            if index >= chunk.len() {
+                *carry = Some(first);
+                break;
+            }
+
+            let second = chunk[index];
+            index += 1;
+            let is_newline = match encoding {
+                LogEncoding::Utf16Le => first == 0x0A && second == 0x00,
+                LogEncoding::Utf16Be => first == 0x00 && second == 0x0A,
+                LogEncoding::Utf8 => false,
+            };
+
+            if is_newline {
+                count += 1;
+                if count == target_count {
+                    return (count, Some(index));
+                }
+            }
+        }
+
+        (count, None)
+    }
+
+    async fn ends_with_newline(
+        file: &mut fs::File,
+        file_size: u64,
+        data_start: u64,
+        encoding: LogEncoding,
+    ) -> Result<bool> {
+        if file_size <= data_start {
+            return Ok(false);
+        }
+
+        match encoding {
+            LogEncoding::Utf8 => {
+                file.seek(SeekFrom::Start(file_size - 1))
+                    .await
+                    .context("Failed to seek log file")?;
+                let mut byte = [0u8; 1];
+                file.read_exact(&mut byte)
+                    .await
+                    .context("Failed to read log file ending")?;
+                Ok(byte[0] == b'\n')
+            }
+            LogEncoding::Utf16Le | LogEncoding::Utf16Be => {
+                if file_size.saturating_sub(data_start) < 2 {
+                    return Ok(false);
+                }
+
+                file.seek(SeekFrom::Start(file_size - 2))
+                    .await
+                    .context("Failed to seek log file")?;
+                let mut bytes = [0u8; 2];
+                file.read_exact(&mut bytes)
+                    .await
+                    .context("Failed to read log file ending")?;
+
+                Ok(match encoding {
+                    LogEncoding::Utf16Le => bytes == [0x0A, 0x00],
+                    LogEncoding::Utf16Be => bytes == [0x00, 0x0A],
+                    LogEncoding::Utf8 => false,
+                })
+            }
+        }
     }
 
     fn decode_log_content(bytes: &[u8]) -> String {
@@ -299,6 +627,52 @@ impl LogsService {
         match std::str::from_utf8(bytes) {
             Ok(text) => text.to_string(),
             Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+        }
+    }
+
+    fn decode_log_content_with_encoding(bytes: &[u8], encoding: LogEncoding) -> String {
+        match encoding {
+            LogEncoding::Utf8 => Self::decode_log_content(bytes),
+            LogEncoding::Utf16Le => {
+                let utf16: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                String::from_utf16_lossy(&utf16)
+            }
+            LogEncoding::Utf16Be => {
+                let utf16: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                String::from_utf16_lossy(&utf16)
+            }
+        }
+    }
+
+    fn split_complete_log_bytes(bytes: &[u8], encoding: LogEncoding) -> (Vec<u8>, Vec<u8>) {
+        let newline_end = match encoding {
+            LogEncoding::Utf8 => bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map(|index| index + 1),
+            LogEncoding::Utf16Le | LogEncoding::Utf16Be => bytes
+                .chunks_exact(2)
+                .enumerate()
+                .filter_map(|(index, chunk)| {
+                    let is_newline = match encoding {
+                        LogEncoding::Utf16Le => chunk == [0x0A, 0x00],
+                        LogEncoding::Utf16Be => chunk == [0x00, 0x0A],
+                        LogEncoding::Utf8 => false,
+                    };
+                    is_newline.then_some((index + 1) * 2)
+                })
+                .last(),
+        };
+
+        match newline_end {
+            Some(split_at) => (bytes[..split_at].to_vec(), bytes[split_at..].to_vec()),
+            None => (Vec::new(), bytes.to_vec()),
         }
     }
 
@@ -642,17 +1016,18 @@ impl LogsService {
             *session
         };
 
-        // Get initial file size and line count
-        let metadata = fs::metadata(&path).await?;
+        let mut watched_file = fs::File::open(&path).await?;
+        let metadata = watched_file.metadata().await?;
+        let (mut encoding, mut data_start) = Self::detect_log_encoding(&mut watched_file).await?;
         *self.last_position.write().await = metadata.len();
-        let initial_bytes = fs::read(&path).await.unwrap_or_default();
-        let initial_content = Self::decode_log_content(&initial_bytes);
-        *self.last_line_count.write().await = initial_content.lines().count();
+        *self.last_line_count.write().await =
+            Self::count_lines(&mut watched_file, metadata.len(), data_start, encoding).await?;
 
         let watching = Arc::clone(&self.watching);
         let last_position = Arc::clone(&self.last_position);
         let last_line_count = Arc::clone(&self.last_line_count);
         let watch_session_id = Arc::clone(&self.watch_session_id);
+        let mut pending_bytes = Vec::new();
 
         // Watch loop
         while *watching.read().await && *watch_session_id.read().await == current_session {
@@ -668,54 +1043,103 @@ impl LogsService {
 
             // Check if file has new content
             if current_size > last_pos {
-                if let Ok(file_bytes) = fs::read(&path).await {
-                    let file_content = Self::decode_log_content(&file_bytes);
-                    let lines: Vec<&str> = file_content.lines().collect();
-                    let previous_line_count = *last_line_count.read().await;
-                    let new_lines: Vec<_> = lines.iter().skip(previous_line_count).collect();
+                if let Ok(mut file) = fs::File::open(&path).await {
+                    let read_start = if last_pos == 0 { data_start } else { last_pos };
+                    let mut file_bytes =
+                        Vec::with_capacity(current_size.saturating_sub(read_start) as usize);
 
-                    if !new_lines.is_empty() {
-                        let mut log_lines = Vec::new();
-                        for (idx, line) in new_lines.iter().enumerate() {
-                            let line_number = previous_line_count + idx + 1;
-                            let raw_content = line.to_string();
-
-                            let timestamp = Self::extract_melonloader_timestamp(&raw_content);
-                            let mod_tag = Self::extract_mod_tag(&raw_content);
-                            let level = Self::extract_log_level(&raw_content);
-                            let category = Self::categorize_log(&raw_content, &mod_tag);
-
-                            // Strip timestamp and mod tag from content
-                            let content =
-                                Self::strip_timestamp_and_tag(&raw_content, &timestamp, &mod_tag);
-
-                            log_lines.push(LogLine {
-                                line_number,
-                                content,
-                                level,
-                                timestamp,
-                                mod_tag,
-                                category,
-                            });
+                    if file.seek(SeekFrom::Start(read_start)).await.is_ok()
+                        && file.read_to_end(&mut file_bytes).await.is_ok()
+                    {
+                        if !pending_bytes.is_empty() {
+                            let mut combined =
+                                Vec::with_capacity(pending_bytes.len() + file_bytes.len());
+                            combined.extend_from_slice(&pending_bytes);
+                            combined.extend_from_slice(&file_bytes);
+                            file_bytes = combined;
                         }
 
-                        // Emit event with new log lines
-                        let _ = app_handle.emit(
-                            "log-update",
-                            serde_json::json!({
-                                "lines": log_lines,
-                            }),
-                        );
+                        let (complete_bytes, next_pending_bytes) =
+                            Self::split_complete_log_bytes(&file_bytes, encoding);
+                        pending_bytes = next_pending_bytes;
+
+                        if complete_bytes.is_empty() {
+                            *last_position.write().await = current_size;
+                            continue;
+                        }
+
+                        let file_content =
+                            Self::decode_log_content_with_encoding(&complete_bytes, encoding);
+                        let lines: Vec<&str> = file_content.lines().collect();
+                        let previous_line_count = *last_line_count.read().await;
+
+                        if !lines.is_empty() {
+                            let mut log_lines = Vec::new();
+                            for (idx, line) in lines.iter().enumerate() {
+                                let line_number = previous_line_count + idx + 1;
+                                let raw_content = line.to_string();
+
+                                let timestamp = Self::extract_melonloader_timestamp(&raw_content);
+                                let mod_tag = Self::extract_mod_tag(&raw_content);
+                                let level = Self::extract_log_level(&raw_content);
+                                let category = Self::categorize_log(&raw_content, &mod_tag);
+
+                                // Strip timestamp and mod tag from content
+                                let content = Self::strip_timestamp_and_tag(
+                                    &raw_content,
+                                    &timestamp,
+                                    &mod_tag,
+                                );
+
+                                log_lines.push(LogLine {
+                                    line_number,
+                                    content,
+                                    level,
+                                    timestamp,
+                                    mod_tag,
+                                    category,
+                                });
+                            }
+
+                            // Emit event with new log lines
+                            let _ = app_handle.emit(
+                                "log-update",
+                                serde_json::json!({
+                                    "lines": log_lines,
+                                }),
+                            );
+                        }
+
+                        *last_line_count.write().await = previous_line_count + lines.len();
+                        *last_position.write().await = current_size;
                     }
-
-                    *last_line_count.write().await = lines.len();
                 }
-
-                *last_position.write().await = current_size;
             } else if current_size < last_pos {
-                // File was truncated or replaced, reset position and line counter
-                *last_position.write().await = 0;
-                *last_line_count.write().await = 0;
+                // File was truncated or replaced; re-detect BOM/encoding before reading new bytes.
+                pending_bytes.clear();
+                if let Ok(mut refreshed_file) = fs::File::open(&path).await {
+                    if let Ok((next_encoding, next_data_start)) =
+                        Self::detect_log_encoding(&mut refreshed_file).await
+                    {
+                        encoding = next_encoding;
+                        data_start = next_data_start;
+                        *last_position.write().await = data_start;
+                        *last_line_count.write().await = Self::count_lines(
+                            &mut refreshed_file,
+                            data_start,
+                            data_start,
+                            encoding,
+                        )
+                        .await
+                        .unwrap_or(0);
+                    } else {
+                        *last_position.write().await = 0;
+                        *last_line_count.write().await = 0;
+                    }
+                } else {
+                    *last_position.write().await = 0;
+                    *last_line_count.write().await = 0;
+                }
             }
         }
 
@@ -733,5 +1157,90 @@ impl LogsService {
 impl Default for LogsService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_log_file_limits_to_tail_with_original_line_numbers() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let log_path = temp_dir.path().join("Latest.log");
+        let content = (1..=8)
+            .map(|line| format!("[12:00:0{line}.000] [Mod{line}] line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        fs::write(&log_path, content).await.expect("write log file");
+
+        let service = LogsService::new();
+        let lines = service
+            .read_log_file(log_path.to_str().expect("utf8 path"), Some(3))
+            .await
+            .expect("read log file");
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].line_number, 6);
+        assert_eq!(lines[0].content, "line 6");
+        assert_eq!(lines[0].timestamp.as_deref(), Some("12:00:06.000"));
+        assert_eq!(lines[0].mod_tag.as_deref(), Some("Mod6"));
+        assert_eq!(lines[2].line_number, 8);
+        assert_eq!(lines[2].content, "line 8");
+    }
+
+    #[tokio::test]
+    async fn read_log_file_tails_utf16_le_logs() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let log_path = temp_dir.path().join("Latest.log");
+        let content = "[12:00:01.000] first\n[12:00:02.000] second\n[12:00:03.000] third";
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(content.encode_utf16().flat_map(u16::to_le_bytes));
+
+        fs::write(&log_path, bytes)
+            .await
+            .expect("write utf16 log file");
+
+        let service = LogsService::new();
+        let lines = service
+            .read_log_file(log_path.to_str().expect("utf8 path"), Some(2))
+            .await
+            .expect("read log file");
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].line_number, 2);
+        assert_eq!(lines[0].timestamp.as_deref(), Some("12:00:02.000"));
+        assert_eq!(lines[0].content, "second");
+        assert_eq!(lines[1].line_number, 3);
+        assert_eq!(lines[1].content, "third");
+    }
+
+    #[test]
+    fn split_complete_log_bytes_buffers_partial_lines_and_code_units() {
+        let (complete, pending) =
+            LogsService::split_complete_log_bytes(b"first\nsecond", LogEncoding::Utf8);
+        assert_eq!(complete, b"first\n");
+        assert_eq!(pending, b"second");
+
+        let utf16_bytes = "one\ntw"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .chain([0x00])
+            .collect::<Vec<_>>();
+        let (complete, pending) =
+            LogsService::split_complete_log_bytes(&utf16_bytes, LogEncoding::Utf16Le);
+        assert_eq!(
+            LogsService::decode_log_content_with_encoding(&complete, LogEncoding::Utf16Le),
+            "one\n"
+        );
+        assert_eq!(
+            LogsService::decode_log_content_with_encoding(
+                &pending[..pending.len() - 1],
+                LogEncoding::Utf16Le
+            ),
+            "tw"
+        );
+        assert_eq!(pending.last(), Some(&0x00));
     }
 }

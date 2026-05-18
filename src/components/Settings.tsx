@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useId, useRef } from "react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useEnvironmentStore } from "../stores/environmentStore";
 import { ApiService } from "../services/api";
@@ -12,6 +12,23 @@ import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
 import { Icon } from './Icon';
+import {
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { SimmButton, SimmDialogContent } from './primitives';
+import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 type SettingsProps = {
   isOpen: boolean;
@@ -187,22 +204,88 @@ function SettingsToggle({
   onChange,
   disabled = false,
 }: SettingsToggleProps) {
+  const id = useId();
+
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
+    <div
       className="settings-toggle settings-toggle-button"
-      onClick={() => onChange(!checked)}
-      disabled={disabled}
+      data-disabled={disabled ? "true" : undefined}
+      onClick={(event) => {
+        if (disabled) return;
+        if ((event.target as HTMLElement).closest('[data-slot="switch"]')) return;
+        onChange(!checked);
+      }}
     >
-      <span className="settings-toggle__control" aria-hidden="true"></span>
-      <span>
+      <Switch
+        id={id}
+        checked={checked}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        aria-label={label}
+        className="settings-toggle__switch"
+      />
+      <span className="settings-toggle__copy">
         <strong>{label}</strong>
         <small>{description}</small>
       </span>
-    </button>
+    </div>
+  );
+}
+
+type SettingsSelectOption = {
+  value: string;
+  label: string;
+  disabled?: boolean;
+};
+
+type SettingsSelectProps = {
+  ariaLabel: string;
+  value: string;
+  options: SettingsSelectOption[];
+  onValueChange: (value: string) => void;
+  disabled?: boolean;
+};
+
+function SettingsSelect({
+  ariaLabel,
+  value,
+  options,
+  onValueChange,
+  disabled = false,
+}: SettingsSelectProps) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(nextValue) => {
+        if (typeof nextValue === "string") {
+          onValueChange(nextValue);
+        }
+      }}
+      disabled={disabled}
+    >
+      <SelectTrigger className="settings-select" aria-label={ariaLabel}>
+        <SelectValue>
+          {(selectedValue) =>
+            options.find((option) => option.value === selectedValue)?.label ||
+            options.find((option) => option.value === value)?.label ||
+            ariaLabel
+          }
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent className="settings-select-content" align="start">
+        <SelectGroup>
+          {options.map((option) => (
+            <SelectItem
+              key={option.value}
+              value={option.value}
+              disabled={option.disabled}
+            >
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -661,9 +744,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
           className="modal-content workspace-panel settings-panel"
           aria-label="Settings panel"
         >
-          <div className="modal-header">
-            <h2>Settings</h2>
-          </div>
+          <WorkspacePageHeader
+            eyebrow="Workspace"
+            title="Settings"
+            description="Adjust appearance, download locations, update checks, diagnostics, and setup defaults."
+          />
 
           {error && <div className="settings-error-banner">{error}</div>}
 
@@ -718,19 +803,18 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                   <div className="settings-field-grid">
                     <div className="settings-field">
                       <label>Theme preset</label>
-                      <select
+                      <SettingsSelect
+                        ariaLabel="Theme preset"
                         value={selectedBuiltInTheme}
-                        onChange={(e) =>
-                          setFormData({ ...formData, theme: e.target.value })
+                        onValueChange={(value) =>
+                          setFormData({ ...formData, theme: value })
                         }
                         disabled={loading}
-                      >
-                        {BUILT_IN_THEME_OPTIONS.map((theme) => (
-                          <option key={theme.id} value={theme.id}>
-                            {theme.label}
-                          </option>
-                        ))}
-                      </select>
+                        options={BUILT_IN_THEME_OPTIONS.map((theme) => ({
+                          value: theme.id,
+                          label: theme.label,
+                        }))}
+                      />
                       <small>
                         Choosing a built-in preset clears any active custom
                         theme override.
@@ -739,23 +823,24 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field">
                       <label>Custom theme</label>
-                      <select
+                      <SettingsSelect
+                        ariaLabel="Custom theme"
                         value={selectedCustomThemeId}
-                        onChange={(e) =>
+                        onValueChange={(value) =>
                           setFormData({
                             ...formData,
-                            theme: e.target.value || selectedBuiltInTheme,
+                            theme: value || selectedBuiltInTheme,
                           })
                         }
                         disabled={loading}
-                      >
-                        <option value="">None</option>
-                        {customThemes.map((theme) => (
-                          <option key={theme.id} value={theme.id}>
-                            {theme.name}
-                          </option>
-                        ))}
-                      </select>
+                        options={[
+                          { value: "", label: "None" },
+                          ...customThemes.map((theme) => ({
+                            value: theme.id,
+                            label: theme.name,
+                          })),
+                        ]}
+                      />
                       <small>
                         JSON files inside the themes folder appear here after
                         reload and apply on top of the <code>baseTheme</code>{" "}
@@ -765,20 +850,22 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field">
                       <label>Log level</label>
-                      <select
+                      <SettingsSelect
+                        ariaLabel="Log level"
                         value={formData.logLevel || "info"}
-                        onChange={(e) =>
+                        onValueChange={(value) =>
                           setFormData({
                             ...formData,
-                            logLevel: e.target.value as any,
+                            logLevel: value as SettingsFormData["logLevel"],
                           })
                         }
-                      >
-                        <option value="debug">Debug</option>
-                        <option value="info">Info</option>
-                        <option value="warn">Warning</option>
-                        <option value="error">Error</option>
-                      </select>
+                        options={[
+                          { value: "debug", label: "Debug" },
+                          { value: "info", label: "Info" },
+                          { value: "warn", label: "Warning" },
+                          { value: "error", label: "Error" },
+                        ]}
+                      />
                       <small>
                         Minimum log detail written to disk for SIMM
                         troubleshooting.
@@ -787,10 +874,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field">
                       <label>App mode</label>
-                      <select
+                      <SettingsSelect
+                        ariaLabel="App mode"
                         value={formData.experienceMode}
-                        onChange={(e) => {
-                          const nextMode = e.target.value as ExperienceMode;
+                        onValueChange={(value) => {
+                          const nextMode = value as ExperienceMode;
                           setFormData({
                             ...formData,
                             experienceMode: nextMode,
@@ -801,10 +889,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           });
                         }}
                         disabled={loading}
-                      >
-                        <option value="player">Player</option>
-                        <option value="powerUser">Power User</option>
-                      </select>
+                        options={[
+                          { value: "player", label: "Player" },
+                          { value: "powerUser", label: "Power User" },
+                        ]}
+                      />
                       <small>
                         Player keeps common mod-management actions prominent.
                         Power User keeps separate branch installs and tooling visible.
@@ -829,14 +918,14 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     {onRunSetupGuide && (
                       <div className="settings-field settings-field--span">
                         <label>Setup guide</label>
-                        <button
+                        <SimmButton
                           type="button"
                           className="btn btn-secondary"
                           onClick={onRunSetupGuide}
                         >
                           <Icon name="sliders" />
                           Run setup guide again
-                        </button>
+                        </SimmButton>
                         <small>
                           Revisit Player and Power User choices without changing
                           installed mods or environments.
@@ -896,7 +985,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         rescan the directory without restarting SIMM.
                       </small>
                       <div className="settings-backup-panel__actions">
-                        <button
+                        <SimmButton
                           type="button"
                           onClick={() => void handleOpenThemesFolder()}
                           disabled={openingThemesFolder || !themesDirectory}
@@ -905,15 +994,15 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           {openingThemesFolder
                             ? "Opening..."
                             : "Open Themes Folder"}
-                        </button>
-                        <button
+                        </SimmButton>
+                        <SimmButton
                           type="button"
                           onClick={() => void handleReloadThemes()}
                           disabled={reloadingThemes}
                           className="btn btn-secondary btn-small"
                         >
                           {reloadingThemes ? "Reloading..." : "Reload Theme Files"}
-                        </button>
+                        </SimmButton>
                       </div>
                     </div>
                   </div>
@@ -952,7 +1041,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     <div className="settings-field settings-field--span">
                       <label>Default download directory</label>
                       <div className="settings-inline-row">
-                        <input
+                        <Input
                           type="text"
                           value={formData.defaultDownloadDir}
                           onChange={(e) =>
@@ -963,13 +1052,13 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           }
                           placeholder="C:\DevEnvironments"
                         />
-                        <button
+                        <SimmButton
                           type="button"
                           onClick={() => void openDirectoryPicker()}
                           className="btn btn-secondary"
                         >
                           Browse
-                        </button>
+                        </SimmButton>
                       </div>
                       <small>
                         New downloads and extracted install payloads default to
@@ -979,7 +1068,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>Max concurrent downloads</label>
-                      <input
+                      <Input
                         type="number"
                         value={formData.maxConcurrentDownloads}
                         onChange={(e) =>
@@ -1000,27 +1089,35 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field">
                       <label>Preferred MelonLoader version</label>
-                      <select
+                      <SettingsSelect
+                        ariaLabel="Preferred MelonLoader version"
                         value={formData.melonLoaderVersion || ""}
-                        onChange={(e) =>
+                        onValueChange={(value) =>
                           setFormData({
                             ...formData,
-                            melonLoaderVersion: e.target.value,
+                            melonLoaderVersion: value,
                           })
                         }
                         disabled={loadingVersions}
-                      >
-                        <option value="">None (Manual Installation)</option>
-                        {loadingVersions ? (
-                          <option disabled>Loading versions...</option>
-                        ) : (
-                          melonLoaderVersions.map((version) => (
-                            <option key={version.tag} value={version.tag}>
-                              {version.name}
-                            </option>
-                          ))
-                        )}
-                      </select>
+                        options={[
+                          {
+                            value: "",
+                            label: "None (Manual Installation)",
+                          },
+                          ...(loadingVersions
+                            ? [
+                                {
+                                  value: "__loading",
+                                  label: "Loading versions...",
+                                  disabled: true,
+                                },
+                              ]
+                            : melonLoaderVersions.map((version) => ({
+                                value: version.tag,
+                                label: version.name,
+                              }))),
+                        ]}
+                      />
                       <small>
                         Use this version when creating new managed environments.
                       </small>
@@ -1057,12 +1154,12 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     )}
                     <div className="settings-inline-status settings-inline-status--action">
                       <span>Tooling Check</span>
-                      <button
+                      <SimmButton
                         onClick={refreshDepotDownloader}
                         className="btn btn-secondary btn-small"
                       >
                         Refresh
-                      </button>
+                      </SimmButton>
                     </div>
                   </div>
                 </div>
@@ -1103,7 +1200,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>Check interval (minutes)</label>
-                      <input
+                      <Input
                         type="number"
                         value={formData.updateCheckInterval || 60}
                         onChange={(e) =>
@@ -1120,18 +1217,20 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>App update channel</label>
-                      <select
+                      <SettingsSelect
+                        ariaLabel="App update channel"
                         value={formData.appUpdateChannel}
-                        onChange={(e) =>
+                        onValueChange={(value) =>
                           setFormData({
                             ...formData,
-                            appUpdateChannel: e.target.value as "stable" | "beta",
+                            appUpdateChannel: value as "stable" | "beta",
                           })
                         }
-                      >
-                        <option value="stable">Stable</option>
-                        <option value="beta">Beta</option>
-                      </select>
+                        options={[
+                          { value: "stable", label: "Stable" },
+                          { value: "beta", label: "Beta" },
+                        ]}
+                      />
                       <small>
                         Stable uses production releases. Beta opts this app into prerelease updater manifests.
                       </small>
@@ -1139,7 +1238,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>Mod icon cache limit (MB)</label>
-                      <input
+                      <Input
                         type="number"
                         value={formData.modIconCacheLimitMb ?? 500}
                         onChange={(e) =>
@@ -1160,7 +1259,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>Database backups to keep</label>
-                      <input
+                      <Input
                         type="number"
                         value={formData.databaseBackupCount ?? 10}
                         onChange={(e) =>
@@ -1182,7 +1281,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                     <div className="settings-field settings-field--compact">
                       <label>Manual batch actions</label>
-                      <button
+                      <SimmButton
                         type="button"
                         onClick={() => void runCheckAllUpdates()}
                         disabled={checkingAllUpdates}
@@ -1191,7 +1290,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         {checkingAllUpdates
                           ? "Checking..."
                           : "Check All Updates"}
-                      </button>
+                      </SimmButton>
                       <small>
                         Run an immediate check across all completed
                         environments.
@@ -1258,7 +1357,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     </div>
 
                     <div className="settings-backup-panel__actions">
-                      <button
+                      <SimmButton
                         type="button"
                         onClick={() => void handleBackupDatabase()}
                         disabled={backingUpDatabase}
@@ -1267,8 +1366,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         {backingUpDatabase
                           ? "Backing Up..."
                           : "Back Up Database"}
-                      </button>
-                      <button
+                      </SimmButton>
+                      <SimmButton
                         type="button"
                         onClick={() => void handleOpenBackupsFolder()}
                         disabled={openingBackupsFolder}
@@ -1277,7 +1376,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         {openingBackupsFolder
                           ? "Opening..."
                           : "Open Backups Folder"}
-                      </button>
+                      </SimmButton>
                     </div>
 
                     {databaseBackupFeedback && (
@@ -1420,7 +1519,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                         scanner is still missing.
                       </small>
                       <div className="settings-backup-panel__actions">
-                        <button
+                        <SimmButton
                           type="button"
                           className="btn btn-secondary btn-small"
                           disabled={
@@ -1446,9 +1545,9 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                           {loadingSecurityScannerStatus
                             ? "Refreshing..."
                             : "Refresh"}
-                        </button>
+                        </SimmButton>
                         {!securityScannerStatus?.installed && (
-                          <button
+                          <SimmButton
                             type="button"
                             className="btn btn-secondary btn-small"
                             disabled={installingSecurityScanner || loadingSecurityScannerStatus}
@@ -1472,7 +1571,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                             {installingSecurityScanner
                               ? "Installing..."
                               : "Fallback Install"}
-                          </button>
+                          </SimmButton>
                         )}
                       </div>
                     </div>
@@ -1495,24 +1594,28 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
       {/* Directory Picker Modal */}
       {showDirectoryPicker && (
-        <div
-          className="modal-overlay modal-overlay-nested"
-          onClick={() => setShowDirectoryPicker(false)}
-        >
-          <div
-            className="modal-content modal-content-nested wizard-directory-dialog settings-directory-dialog"
-            onClick={(e) => e.stopPropagation()}
+        <Dialog open={showDirectoryPicker} onOpenChange={(open) => {
+          if (!open) {
+            setShowDirectoryPicker(false);
+          }
+        }}>
+          <SimmDialogContent
+            nested
+            className="wizard-directory-dialog settings-directory-dialog"
+            showCloseButton={false}
           >
-            <div className="modal-header">
-              <h2>Select Download Directory</h2>
-              <button
+            <DialogHeader className="modal-header">
+              <DialogTitle>Select Download Directory</DialogTitle>
+              <SimmButton
+                variant="ghost"
+                size="icon-sm"
                 className="modal-close"
                 onClick={() => setShowDirectoryPicker(false)}
                 aria-label="Close directory picker"
               >
                 ×
-              </button>
-            </div>
+              </SimmButton>
+            </DialogHeader>
 
             <div className="wizard-directory-dialog__body">
               <div className="wizard-directory-dialog__overview">
@@ -1527,7 +1630,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
               <div className="settings-field-card settings-field-card--full">
                 <label htmlFor="settings-directory-path">Current path</label>
                 <div className="settings-inline-field">
-                  <input
+                  <Input
                     id="settings-directory-path"
                     type="text"
                     value={directoryPath}
@@ -1539,7 +1642,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     }}
                     placeholder="C:\\Users\\YourName"
                   />
-                  <button
+                  <SimmButton
                     type="button"
                     onClick={() => void loadDirectory(directoryPath)}
                     className="btn btn-secondary"
@@ -1553,7 +1656,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       aria-hidden="true"
                      />
                     {browsing ? "Loading…" : "Go to Path"}
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
@@ -1562,7 +1665,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                   Create a folder in the current location
                 </label>
                 <div className="settings-inline-field">
-                  <input
+                  <Input
                     id="settings-new-folder"
                     type="text"
                     value={newFolderName}
@@ -1575,7 +1678,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     placeholder="Folder name"
                     disabled={creatingFolder || !directoryPath}
                   />
-                  <button
+                  <SimmButton
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void handleCreateFolder()}
@@ -1591,7 +1694,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       aria-hidden="true"
                      />
                     {creatingFolder ? "Creating…" : "Create Folder"}
-                  </button>
+                  </SimmButton>
                 </div>
               </div>
 
@@ -1605,16 +1708,17 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                 ) : (
                   <>
                     {getParentPath(directoryPath) && (
-                      <button
+                      <SimmButton
                         type="button"
-                        className="wizard-directory-row wizard-directory-row--parent"
+                        variant="ghost"
+                        className="wizard-directory-row wizard-directory-row--parent h-auto"
                         onClick={() =>
                           void loadDirectory(getParentPath(directoryPath) || "")
                         }
                       >
                         <Icon name="fas fa-arrow-up" />
                         <span>Parent Directory</span>
-                      </button>
+                      </SimmButton>
                     )}
                     {directoryList.length === 0 ? (
                       <div className="wizard-empty-card">
@@ -1627,15 +1731,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </div>
                     ) : (
                       directoryList.map((dir) => (
-                        <button
+                        <SimmButton
                           key={dir.path}
                           type="button"
-                          className="wizard-directory-row"
+                          variant="ghost"
+                          className="wizard-directory-row h-auto"
                           onClick={() => void loadDirectory(dir.path)}
                         >
                           <Icon name="fas fa-folder" />
                           <span>{dir.name}</span>
-                        </button>
+                        </SimmButton>
                       ))
                     )}
                   </>
@@ -1643,25 +1748,25 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
               </div>
 
               <div className="wizard-panel__actions wizard-panel__actions--dialog">
-                <button
+                <SimmButton
                   type="button"
                   onClick={() => setShowDirectoryPicker(false)}
                   className="btn btn-secondary"
                 >
                   Cancel
-                </button>
-                <button
+                </SimmButton>
+                <SimmButton
                   type="button"
                   onClick={() => handleDirectorySelect(directoryPath)}
                   className="btn btn-primary"
                   disabled={!directoryPath}
                 >
                   Select This Directory
-                </button>
+                </SimmButton>
               </div>
             </div>
-          </div>
-        </div>
+          </SimmDialogContent>
+        </Dialog>
       )}
     </>
   );
