@@ -30,7 +30,7 @@ jobs:
           npm install --no-audit --prefer-offline
 
       - name: Build Windows setup wizard
-        run: npm run tauri build -- --bundles nsis
+        run: bun run tauri build --bundles nsis
 
       - name: Resolve build version
         id: version
