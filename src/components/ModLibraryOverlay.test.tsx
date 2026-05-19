@@ -1202,6 +1202,10 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
+    expect(
+      await screen.findByRole("button", { name: "Install library version" }),
+    ).toBeTruthy();
+
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Download selected file" }),

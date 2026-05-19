@@ -695,6 +695,7 @@ pub async fn check_mod_installed(
             &source_id,
             &source_version,
             requested_runtime,
+            None,
         )
         .await
     {

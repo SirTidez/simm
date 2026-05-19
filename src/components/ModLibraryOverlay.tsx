@@ -645,7 +645,7 @@ const getNexusFileRowTitle = (
   file: Pick<NexusModFile, "file_name" | "name">,
   modName: string,
 ): string => {
-  const title = stripFileExtension(file.name || file.file_name || "").trim();
+  const title = stripFileExtension(file.file_name || file.name || "").trim();
   return title || modName;
 };
 
@@ -6085,18 +6085,26 @@ export function ModLibraryOverlay({
       const groups = buildDownloadedGroups(
         sourceLibrary?.downloaded ?? library?.downloaded ?? [],
       );
+      const nexusGroups = groups.filter((group) =>
+        group.entries.some(
+          (entry) =>
+            entry.source === "nexusmods" &&
+            Number(entry.sourceId || "0") === modId,
+        ),
+      );
       const requestedFileId =
         typeof fileId === "number" ? String(fileId) : null;
+      if (!requestedFileId) {
+        return nexusGroups[0] || null;
+      }
+
       return (
-        groups.find((group) =>
+        nexusGroups.find((group) =>
           group.entries.some(
-            (entry) =>
-              entry.source === "nexusmods" &&
-              Number(entry.sourceId || "0") === modId &&
-              (!requestedFileId ||
-                getNexusFileIdFromTags(entry.tags) === requestedFileId),
+            (entry) => getNexusFileIdFromTags(entry.tags) === requestedFileId,
           ),
-        ) || null
+        ) ||
+        (nexusGroups.length === 1 ? nexusGroups[0] : null)
       );
     },
     [library],

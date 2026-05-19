@@ -469,6 +469,10 @@ impl ModsService {
             })
     }
 
+    fn nexus_file_id_from_mod_metadata(metadata: &ModMetadata) -> Option<String> {
+        Self::nexus_file_id_from_tags(metadata.tags.as_ref())
+    }
+
     fn metadata_value_is_valid(value: &serde_json::Value) -> bool {
         match value {
             serde_json::Value::Null => false,
@@ -3018,6 +3022,7 @@ impl ModsService {
         source_id: &Option<String>,
         source_version: &Option<String>,
         runtime: Option<crate::types::Runtime>,
+        source_file_id: Option<&str>,
     ) -> Result<Option<String>> {
         if source_id.is_none() || source_version.is_none() {
             // Can't match without source_id and source_version
@@ -3041,6 +3046,14 @@ impl ModsService {
                 if existing_source_id == source_id.as_ref().unwrap()
                     && existing_source_version == source_version.as_ref().unwrap()
                 {
+                    if let Some(source_file_id) = source_file_id {
+                        if Self::nexus_file_id_from_mod_metadata(meta).as_deref()
+                            != Some(source_file_id)
+                        {
+                            continue;
+                        }
+                    }
+
                     let supports_runtime = self
                         .storage_supports_runtime(
                             &storage_root,
@@ -3050,10 +3063,11 @@ impl ModsService {
                         )
                         .await?;
                     log::debug!(
-                        "Found installed source/version candidate: storage_id={}, source_id={}, source_version={}, requested_runtime={:?}, detected_runtime={:?}, supports_runtime={}",
+                        "Found installed source/version candidate: storage_id={}, source_id={}, source_version={}, source_file_id={:?}, requested_runtime={:?}, detected_runtime={:?}, supports_runtime={}",
                         existing_storage_id,
                         existing_source_id,
                         existing_source_version,
+                        source_file_id,
                         runtime,
                         meta.detected_runtime,
                         supports_runtime
@@ -6665,6 +6679,7 @@ exit 1
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
         });
+        let source_file_id = Self::nexus_file_id_from_metadata_json(effective_metadata.as_ref());
 
         // Check if we already have this mod/version installed (canonical runtime)
         let existing_mod_id = self
@@ -6673,6 +6688,7 @@ exit 1
                 &source_id,
                 &source_version,
                 Some(normalized_runtime.clone()),
+                source_file_id.as_deref(),
             )
             .await?;
 
@@ -8770,6 +8786,7 @@ exit 1
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
         });
+        let source_file_id = Self::nexus_file_id_from_metadata_json(metadata.as_ref());
 
         // Check if we already have this mod/version installed
         let requested_runtime = match runtime {
@@ -8783,6 +8800,7 @@ exit 1
                 &source_id,
                 &source_version,
                 requested_runtime.clone(),
+                source_file_id.as_deref(),
             )
             .await?;
 
@@ -11327,6 +11345,119 @@ mod tests {
             .join(mono_storage_id)
             .join("Mods")
             .join("Example.Mono.dll")
+            .exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn install_zip_mod_keeps_distinct_storage_for_same_nexus_version_file_ids() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _home_guard =
+            EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-nexus-file-collision");
+        let _env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let remote_inventory_zip = temp.path().join("BetterDealerRemoteInventory.zip");
+        write_zip_fixture(
+            &remote_inventory_zip,
+            &[("BetterDealerRemoteInventory.dll", b"remote-inventory")],
+        )?;
+        let walk_zip = temp.path().join("BetterDealerWalk.zip");
+        write_zip_fixture(&walk_zip, &[("BetterDealerWalk.dll", b"walk")])?;
+
+        let remote_inventory_result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                remote_inventory_zip.to_string_lossy().as_ref(),
+                "BetterDealerRemoteInventory.zip",
+                "IL2CPP",
+                "main",
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "1984",
+                    "sourceVersion": "1.0.0",
+                    "nexusFileId": "1778698736",
+                    "tags": [
+                        "nexus-file-id:1778698736",
+                        "nexus-file-name:BetterDealerRemoteInventory"
+                    ]
+                })),
+            )
+            .await?;
+
+        let walk_result = service
+            .install_zip_mod(
+                output_dir.to_string_lossy().as_ref(),
+                walk_zip.to_string_lossy().as_ref(),
+                "BetterDealerWalk.zip",
+                "IL2CPP",
+                "main",
+                Some(serde_json::json!({
+                    "source": "nexusmods",
+                    "sourceId": "1984",
+                    "sourceVersion": "1.0.0",
+                    "nexusFileId": "1778698776",
+                    "tags": [
+                        "nexus-file-id:1778698776",
+                        "nexus-file-name:BetterDealerWalk"
+                    ]
+                })),
+            )
+            .await?;
+
+        let remote_inventory_storage_id = remote_inventory_result
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("remote inventory storage id");
+        let walk_storage_id = walk_result
+            .get("storageId")
+            .and_then(|value| value.as_str())
+            .expect("walk storage id");
+
+        assert_ne!(remote_inventory_storage_id, walk_storage_id);
+        assert_ne!(
+            walk_result
+                .get("alreadyInstalled")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(download_dir
+            .join("Mods")
+            .join(remote_inventory_storage_id)
+            .join("Mods")
+            .join("BetterDealerRemoteInventory.dll")
+            .exists());
+        assert!(download_dir
+            .join("Mods")
+            .join(walk_storage_id)
+            .join("Mods")
+            .join("BetterDealerWalk.dll")
             .exists());
 
         Ok(())
