@@ -36,6 +36,7 @@ macro_rules! eprintln {
 const STORAGE_METADATA_FILE: &str = ".storage-metadata.json";
 const STORAGE_SECURITY_SCAN_FILE: &str = ".security-scan.json";
 const COPY_FALLBACK_MARKER_FILE: &str = ".simm-copy-fallback.json";
+const NEXUS_FILE_ID_TAG_PREFIX: &str = "nexus-file-id:";
 const RUNTIME_IL2CPP: &str = "IL2CPP";
 const RUNTIME_MONO: &str = "Mono";
 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
@@ -437,6 +438,35 @@ impl ModsService {
         } else {
             Some(tags)
         }
+    }
+
+    fn nexus_file_id_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
+        tags.and_then(|values| {
+            values.iter().find_map(|tag| {
+                tag.strip_prefix(NEXUS_FILE_ID_TAG_PREFIX)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            })
+        })
+    }
+
+    fn nexus_file_id_from_metadata_json(metadata: Option<&serde_json::Value>) -> Option<String> {
+        metadata
+            .and_then(|m| {
+                m.get("nexusFileId")
+                    .or_else(|| m.get("nexus_file_id"))
+                    .and_then(|value| {
+                        value
+                            .as_str()
+                            .map(ToString::to_string)
+                            .or_else(|| value.as_u64().map(|number| number.to_string()))
+                    })
+            })
+            .or_else(|| {
+                let tags = Self::metadata_tags(metadata);
+                Self::nexus_file_id_from_tags(tags.as_ref())
+            })
     }
 
     fn metadata_value_is_valid(value: &serde_json::Value) -> bool {
@@ -3049,11 +3079,13 @@ impl ModsService {
         source_id: &str,
         source_version: &str,
         runtime: Option<crate::types::Runtime>,
+        source_file_id: Option<&str>,
     ) -> Result<Option<String>> {
         log::debug!(
-            "Checking existing mod storage by source/version: source_id={}, source_version={}, requested_runtime={:?}",
+            "Checking existing mod storage by source/version: source_id={}, source_version={}, source_file_id={:?}, requested_runtime={:?}",
             source_id,
             source_version,
+            source_file_id,
             runtime
         );
         let rows = sqlx::query_as::<_, (String, String)>(
@@ -3138,6 +3170,14 @@ impl ModsService {
                 continue;
             }
 
+            if let Some(source_file_id) = source_file_id {
+                if Self::nexus_file_id_from_tags(template_meta.tags.as_ref()).as_deref()
+                    != Some(source_file_id)
+                {
+                    continue;
+                }
+            }
+
             let payload_summary = self.collect_storage_payload_summary(&entry_path).await?;
             let available_runtimes = self.detect_available_runtimes(
                 self.runtime_detection_files(&payload_summary),
@@ -3177,9 +3217,10 @@ impl ModsService {
         }
 
         log::debug!(
-            "No existing storage found for source/version/runtime: source_id={}, source_version={}, requested_runtime={:?}",
+            "No existing storage found for source/version/runtime: source_id={}, source_version={}, source_file_id={:?}, requested_runtime={:?}",
             source_id,
             source_version,
+            source_file_id,
             runtime
         );
         Ok(None)
@@ -5155,6 +5196,7 @@ impl ModsService {
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
         });
+        let source_file_id = Self::nexus_file_id_from_metadata_json(metadata.as_ref());
 
         if let (Some(ref source_id), Some(ref source_version)) =
             (source_id.as_ref(), source_version.as_ref())
@@ -5172,6 +5214,7 @@ impl ModsService {
                     source_id,
                     source_version,
                     runtime.clone(),
+                    source_file_id.as_deref(),
                 )
                 .await
             {
@@ -10566,9 +10609,76 @@ mod tests {
         fs::write(storage_mods_dir.join("Example.dll"), b"data").await?;
 
         let found = service
-            .find_existing_mod_storage_by_source_version("source-id", "1.0.0", None)
+            .find_existing_mod_storage_by_source_version("source-id", "1.0.0", None, None)
             .await?;
         assert_eq!(found.as_deref(), Some("storage-1"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn find_existing_mod_storage_by_source_version_respects_nexus_file_identity() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        let output_dir = temp.path().join("envs").join("env-nexus-files");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        for (storage_id, file_id, file_name) in [
+            (
+                "remote-inventory-storage",
+                "1778698736",
+                "BetterDealerRemoteInventory.dll",
+            ),
+            ("walk-storage", "1778698776", "BetterDealerWalk.dll"),
+        ] {
+            let mut metadata = sample_metadata(Some(storage_id), Some("1984"), Some("1.0.0"));
+            metadata.source = Some(ModSource::Nexusmods);
+            metadata.tags = Some(vec![
+                format!("nexus-file-id:{}", file_id),
+                format!("nexus-file-name:{}", file_name.trim_end_matches(".dll")),
+            ]);
+            sqlx::query(
+                "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?)",
+            )
+            .bind(&env.id)
+            .bind(file_name)
+            .bind(serde_json::to_string(&metadata)?)
+            .execute(&*pool)
+            .await?;
+
+            let storage_mods_dir = download_dir.join("Mods").join(storage_id).join("Mods");
+            fs::create_dir_all(&storage_mods_dir).await?;
+            fs::write(storage_mods_dir.join(file_name), b"data").await?;
+        }
+
+        let found = service
+            .find_existing_mod_storage_by_source_version("1984", "1.0.0", None, Some("1778698776"))
+            .await?;
+
+        assert_eq!(found.as_deref(), Some("walk-storage"));
 
         Ok(())
     }
@@ -10626,13 +10736,19 @@ mod tests {
         fs::write(storage_mods_dir.join("Example.Mono.dll"), b"data").await?;
 
         let mono_match = service
-            .find_existing_mod_storage_by_source_version("source-id", "1.0.0", Some(Runtime::Mono))
+            .find_existing_mod_storage_by_source_version(
+                "source-id",
+                "1.0.0",
+                Some(Runtime::Mono),
+                None,
+            )
             .await?;
         let il2cpp_match = service
             .find_existing_mod_storage_by_source_version(
                 "source-id",
                 "1.0.0",
                 Some(Runtime::Il2cpp),
+                None,
             )
             .await?;
 

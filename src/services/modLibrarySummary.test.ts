@@ -231,6 +231,31 @@ describe('modLibrarySummary', () => {
     expect(groups[0]?.entries).toHaveLength(2);
   });
 
+  it('keeps independent Nexus main files from the same mod in separate groups', () => {
+    const groups = buildDownloadedGroups([
+      makeEntry({
+        storageId: 'better-dealer-remote-inventory',
+        displayName: 'BetterDealerRemoteInventory',
+        sourceId: '1984',
+        sourceVersion: '1.0.0',
+        tags: ['nexus-file-id:1778698736', 'nexus-file-name:BetterDealerRemoteInventory'],
+      }),
+      makeEntry({
+        storageId: 'better-dealer-walk',
+        displayName: 'BetterDealerWalk',
+        sourceId: '1984',
+        sourceVersion: '1.0.0',
+        tags: ['nexus-file-id:1778698776', 'nexus-file-name:BetterDealerWalk'],
+      }),
+    ]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.key).sort()).toEqual([
+      'nexusmods::1984::file::1778698736',
+      'nexusmods::1984::file::1778698776',
+    ]);
+  });
+
   it('uses S1API-aware equality for alias source ids', () => {
     expect(
       areVersionsEquivalentForSource('ifBars/S1API_Forked', '3.0.22', '3.0.3'),

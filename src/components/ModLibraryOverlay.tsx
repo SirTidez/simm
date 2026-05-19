@@ -54,6 +54,7 @@ import {
   buildDownloadedGroups,
   compareVersionTokensDescForSource,
   compareVersionTokensDesc,
+  getNexusFileIdFromTags,
   normalizeThunderstoreName,
   normalizeVersionToken,
   parseThunderstoreSourceId,
@@ -539,6 +540,7 @@ const buildOptimisticDownloadedEntry = ({
   downloads,
   likesOrEndorsements,
   updatedAt,
+  tags,
 }: {
   storageId: string;
   displayName: string;
@@ -553,6 +555,7 @@ const buildOptimisticDownloadedEntry = ({
   downloads?: number;
   likesOrEndorsements?: number;
   updatedAt?: string;
+  tags?: string[];
 }): ModLibraryEntry => ({
   storageId,
   displayName,
@@ -567,6 +570,7 @@ const buildOptimisticDownloadedEntry = ({
   downloads,
   likesOrEndorsements,
   updatedAt,
+  tags,
   installedVersion: version,
   managed: true,
   installedIn: [],
@@ -635,6 +639,34 @@ const getNexusVersionRowSummary = (
     modName,
     versionLabel,
   );
+};
+
+const getNexusFileRowTitle = (
+  file: Pick<NexusModFile, "file_name" | "name">,
+  modName: string,
+): string => {
+  const title = stripFileExtension(file.name || file.file_name || "").trim();
+  return title || modName;
+};
+
+const formatFileSizeShort = (bytes?: number): string | null => {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
+    return null;
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 };
 
 const detectRuntimeFromFileName = (
@@ -953,6 +985,15 @@ const getNexusFileDisplayKind = (
     return "All-in-One";
   }
   return inferNexusFileRuntime(file);
+};
+
+const getNexusFileTags = (file: Pick<NexusModFile, "file_id" | "file_name" | "name">): string[] => {
+  const tags = [`nexus-file-id:${file.file_id}`];
+  const fileName = stripFileExtension(file.file_name || file.name || "").trim();
+  if (fileName) {
+    tags.push(`nexus-file-name:${fileName}`);
+  }
+  return tags;
 };
 
 const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
@@ -5317,6 +5358,7 @@ export function ModLibraryOverlay({
                 const refreshedGroup = findDownloadedGroupForNexusMod(
                   modId,
                   nextLibrary,
+                  fileId,
                 );
                 await promptDownloadedInstallTargets(
                   refreshedGroup?.entries.filter((entry) =>
@@ -5406,6 +5448,7 @@ export function ModLibraryOverlay({
                 const refreshedGroup = findDownloadedGroupForNexusMod(
                   modId,
                   nextLibrary,
+                  selectedFile.file_id,
                 );
                 await promptDownloadedInstallTargets(
                   refreshedGroup?.entries.filter((entry) =>
@@ -5444,6 +5487,7 @@ export function ModLibraryOverlay({
               const refreshedGroup = findDownloadedGroupForNexusMod(
                 modId,
                 nextLibrary,
+                targetFile.file_id,
               );
               await promptDownloadedInstallTargets(
                 refreshedGroup?.entries.filter((entry) =>
@@ -5495,6 +5539,7 @@ export function ModLibraryOverlay({
                       likesOrEndorsements:
                         selectedNexusResult?.endorsement_count,
                       updatedAt: selectedNexusResult?.updated_time,
+                      tags: getNexusFileTags(selectedFile),
                     })
                   : undefined,
             });
@@ -5545,6 +5590,7 @@ export function ModLibraryOverlay({
                         likesOrEndorsements:
                           selectedNexusResult?.endorsement_count,
                         updatedAt: selectedNexusResult?.updated_time,
+                        tags: getNexusFileTags(il2cppFile),
                       })
                     : undefined,
                 });
@@ -5600,6 +5646,7 @@ export function ModLibraryOverlay({
                         likesOrEndorsements:
                           selectedNexusResult?.endorsement_count,
                         updatedAt: selectedNexusResult?.updated_time,
+                        tags: getNexusFileTags(monoFile),
                       })
                     : undefined,
                 });
@@ -5657,6 +5704,7 @@ export function ModLibraryOverlay({
                       likesOrEndorsements:
                         selectedNexusResult?.endorsement_count,
                       updatedAt: selectedNexusResult?.updated_time,
+                      tags: getNexusFileTags(targetFile),
                     })
                   : undefined,
               });
@@ -5702,6 +5750,7 @@ export function ModLibraryOverlay({
             const refreshedGroup = findDownloadedGroupForNexusMod(
               modId,
               nextLibrary,
+              selectedFile?.file_id ?? undefined,
             );
             if (!refreshedGroup) {
               return [];
@@ -5743,6 +5792,7 @@ export function ModLibraryOverlay({
               const refreshedGroup = findDownloadedGroupForNexusMod(
                 modId,
                 nextLibrary,
+                file.file_id,
               );
               await promptDownloadedInstallTargets(
                 refreshedGroup?.entries.filter((entry) =>
@@ -5776,6 +5826,7 @@ export function ModLibraryOverlay({
             const refreshedGroup = findDownloadedGroupForNexusMod(
               modId,
               nextLibrary,
+              file.file_id,
             );
             return (
               refreshedGroup?.entries.filter((entry) =>
@@ -6026,16 +6077,24 @@ export function ModLibraryOverlay({
   );
 
   const findDownloadedGroupForNexusMod = useCallback(
-    (modId: number, sourceLibrary?: ModLibraryResult | null) => {
+    (
+      modId: number,
+      sourceLibrary?: ModLibraryResult | null,
+      fileId?: number | null,
+    ) => {
       const groups = buildDownloadedGroups(
         sourceLibrary?.downloaded ?? library?.downloaded ?? [],
       );
+      const requestedFileId =
+        typeof fileId === "number" ? String(fileId) : null;
       return (
         groups.find((group) =>
           group.entries.some(
             (entry) =>
               entry.source === "nexusmods" &&
-              Number(entry.sourceId || "0") === modId,
+              Number(entry.sourceId || "0") === modId &&
+              (!requestedFileId ||
+                getNexusFileIdFromTags(entry.tags) === requestedFileId),
           ),
         ) || null
       );
@@ -6201,8 +6260,12 @@ export function ModLibraryOverlay({
     if (!selectedNexusResult) {
       return null;
     }
-    return findDownloadedGroupForNexusMod(selectedNexusResult.mod_id);
-  }, [findDownloadedGroupForNexusMod, selectedNexusResult]);
+    return findDownloadedGroupForNexusMod(
+      selectedNexusResult.mod_id,
+      undefined,
+      selectedNexusFile?.file_id ?? undefined,
+    );
+  }, [findDownloadedGroupForNexusMod, selectedNexusFile, selectedNexusResult]);
 
   const selectedThunderstoreDownloadedEntry = useMemo(() => {
     if (!downloadedGroupForSelectedThunderstore) {
@@ -7770,7 +7833,7 @@ export function ModLibraryOverlay({
                     }
                     disabled={selectedNexusFiles.length === 0}
                   >
-                    Download selected version
+                    Download selected file
                   </SimmButton>
                   {downloadedGroupForSelectedNexus &&
                     selectedNexusDownloadedEntry &&
@@ -7837,7 +7900,7 @@ export function ModLibraryOverlay({
                 >
                   <div className="workspace-inspector-card__subsection-header">
                     <div>
-                      <h4 id="nexus-inspector-versions">Available versions</h4>
+                      <h4 id="nexus-inspector-versions">Available files</h4>
                       <p>
                         Pick the file you want to add to the library before
                         downloading.
@@ -7851,12 +7914,18 @@ export function ModLibraryOverlay({
                     <div
                       className="workspace-version-list"
                       role="listbox"
-                      aria-label="Nexus available versions"
+                      aria-label="Nexus available files"
                     >
                       {selectedNexusFiles.map((file) => {
                         const displayKind = getNexusFileDisplayKind(file);
                         const versionLabel =
                           file.version || file.mod_version || "unknown";
+                        const versionTag = formatVersionTag(versionLabel);
+                        const fileTitle = getNexusFileRowTitle(
+                          file,
+                          selectedNexusResult.name,
+                        );
+                        const fileSizeLabel = formatFileSizeShort(file.size);
                         const isActive =
                           selectedNexusFile?.file_id === file.file_id;
                         const detailLabel = getNexusVersionRowDetail(
@@ -7869,6 +7938,12 @@ export function ModLibraryOverlay({
                           selectedNexusResult.name,
                           versionLabel,
                         );
+                        const effectiveSummaryLabel =
+                          summaryLabel &&
+                          normalizeNexusVersionRowLabel(summaryLabel) !==
+                            normalizeNexusVersionRowLabel(fileTitle)
+                            ? summaryLabel
+                            : null;
                         return (
                           <SimmButton
                             key={file.file_id}
@@ -7876,7 +7951,7 @@ export function ModLibraryOverlay({
                             variant="ghost"
                             role="option"
                             aria-selected={isActive}
-                            className={`workspace-version-row${isActive ? " workspace-version-row--active" : ""}`}
+                            className={`workspace-version-row workspace-version-row--nexus-file${isActive ? " workspace-version-row--active" : ""}`}
                             onClick={() =>
                               setSelectedNexusFileByModId((prev) => ({
                                 ...prev,
@@ -7884,14 +7959,16 @@ export function ModLibraryOverlay({
                               }))
                             }
                           >
-                            <div className="workspace-version-row__header">
-                              <div className="workspace-version-row__title">
-                                {formatVersionTag(versionLabel)}
+                            <div className="workspace-version-row__header workspace-version-row__header--nexus-file">
+                              <div
+                                className="workspace-version-row__file-title"
+                                title={fileTitle}
+                              >
+                                {fileTitle}
                               </div>
-                              <div className="workspace-version-row__badges">
-                                <WorkspaceBadge>
-                                  {displayKind}
-                                </WorkspaceBadge>
+                              <div className="workspace-version-row__badges workspace-version-row__badges--nexus-file">
+                                <WorkspaceBadge>{versionTag}</WorkspaceBadge>
+                                <WorkspaceBadge>{displayKind}</WorkspaceBadge>
                                 {file.is_primary && (
                                   <WorkspaceBadge tone="success">
                                     Primary
@@ -7909,14 +7986,19 @@ export function ModLibraryOverlay({
                                 Uploaded{" "}
                                 {formatInspectorDate(
                                   getNexusFileUpdatedAt(file) ||
-                                    getNexusModUpdatedAt(selectedNexusResult),
+                                  getNexusModUpdatedAt(selectedNexusResult),
                                 )}
                               </span>
-                              {detailLabel && <span>{detailLabel}</span>}
+                              {fileSizeLabel && <span>{fileSizeLabel}</span>}
+                              {detailLabel &&
+                                normalizeNexusVersionRowLabel(detailLabel) !==
+                                  normalizeNexusVersionRowLabel(fileTitle) && (
+                                  <span>{detailLabel}</span>
+                                )}
                             </div>
-                            {summaryLabel && (
+                            {effectiveSummaryLabel && (
                               <p className="workspace-version-row__summary">
-                                {summaryLabel}
+                                {effectiveSummaryLabel}
                               </p>
                             )}
                           </SimmButton>
