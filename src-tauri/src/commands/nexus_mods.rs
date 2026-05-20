@@ -1151,19 +1151,44 @@ pub(crate) async fn cleanup_stale_nxm_runtime_registration(
     cleanup_nxm_runtime_registration(db).await
 }
 
-fn build_nexus_mod_metadata(mod_info: &Value, game_id: &str, mod_id: u32, version: &str) -> Value {
+fn build_nexus_mod_metadata(
+    mod_info: &Value,
+    file_info: Option<&Value>,
+    game_id: &str,
+    mod_id: u32,
+    file_id: u32,
+    version: &str,
+) -> Value {
     let source_url = format!("https://www.nexusmods.com/{}/mods/{}", game_id, mod_id);
+    let mod_name = mod_info
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("Unknown Mod");
+    let file_display_name = file_info
+        .and_then(|file| {
+            file.get("name")
+                .or_else(|| file.get("file_name"))
+                .and_then(|value| value.as_str())
+        })
+        .map(|value| {
+            value
+                .trim()
+                .trim_end_matches(".zip")
+                .trim_end_matches(".rar")
+                .trim_end_matches(".7z")
+                .trim_end_matches(".dll")
+                .to_string()
+        })
+        .filter(|value| !value.is_empty());
     let mut metadata_obj = serde_json::Map::new();
     metadata_obj.insert("source".to_string(), json!("nexusmods"));
     metadata_obj.insert("sourceId".to_string(), json!(mod_id.to_string()));
     metadata_obj.insert("sourceVersion".to_string(), json!(version));
     metadata_obj.insert("sourceUrl".to_string(), json!(source_url));
+    metadata_obj.insert("nexusFileId".to_string(), json!(file_id.to_string()));
     metadata_obj.insert(
         "modName".to_string(),
-        json!(mod_info
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("Unknown Mod")),
+        json!(file_display_name.as_deref().unwrap_or(mod_name)),
     );
     metadata_obj.insert(
         "author".to_string(),
@@ -1214,6 +1239,12 @@ fn build_nexus_mod_metadata(mod_info: &Value, game_id: &str, mod_id: u32, versio
     {
         metadata_obj.insert("likesOrEndorsements".to_string(), json!(endorsements));
     }
+
+    let mut tags = vec![format!("nexus-file-id:{}", file_id)];
+    if let Some(file_name) = file_display_name {
+        tags.push(format!("nexus-file-name:{}", file_name));
+    }
+    metadata_obj.insert("tags".to_string(), json!(tags));
 
     Value::Object(metadata_obj)
 }
@@ -1298,11 +1329,13 @@ async fn complete_pending_nxm_download(
     }
 
     if install_target.is_some() {
+        let nxm_file_id = nxm.file_id.to_string();
         if let Some(existing_mod_id) = mods_service
             .find_existing_mod_storage_by_source_version(
                 &nxm.mod_id.to_string(),
                 &version,
                 runtime.clone(),
+                Some(nxm_file_id.as_str()),
             )
             .await
             .map_err(|e| {
@@ -1473,8 +1506,10 @@ async fn complete_pending_nxm_download(
             runtime.clone(),
             Some(build_nexus_mod_metadata(
                 &mod_info,
+                Some(file_info),
                 &nxm.game_id,
                 nxm.mod_id,
+                nxm.file_id,
                 &version,
             )),
             None,
@@ -2319,7 +2354,14 @@ pub async fn download_nexus_mod_to_library(
     );
 
     let zip_path_str = archive_path.to_string_lossy().to_string();
-    let metadata = build_nexus_mod_metadata(&mod_info, &game_id, mod_id, &version);
+    let metadata = build_nexus_mod_metadata(
+        &mod_info,
+        Some(file_info),
+        &game_id,
+        mod_id,
+        file_id,
+        &version,
+    );
     let security_scan = match crate::commands::mods::prepare_security_scan(
         db_pool.clone(),
         &zip_path_str,
@@ -2564,7 +2606,25 @@ pub async fn install_nexus_mods_mod(
     metadata_obj.insert("sourceId".to_string(), json!(mod_id.to_string()));
     metadata_obj.insert("sourceVersion".to_string(), json!(version));
     metadata_obj.insert("sourceUrl".to_string(), json!(source_url));
-    metadata_obj.insert("modName".to_string(), json!(mod_name));
+    metadata_obj.insert("nexusFileId".to_string(), json!(file_id.to_string()));
+    let file_display_name = file_info
+        .get("name")
+        .or_else(|| file_info.get("file_name"))
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            value
+                .trim()
+                .trim_end_matches(".zip")
+                .trim_end_matches(".rar")
+                .trim_end_matches(".7z")
+                .trim_end_matches(".dll")
+                .to_string()
+        })
+        .filter(|value| !value.is_empty());
+    metadata_obj.insert(
+        "modName".to_string(),
+        json!(file_display_name.as_deref().unwrap_or(&mod_name)),
+    );
     metadata_obj.insert("author".to_string(), json!(author));
     metadata_obj.insert(
         "summary".to_string(),
@@ -2608,6 +2668,12 @@ pub async fn install_nexus_mods_mod(
     {
         metadata_obj.insert("likesOrEndorsements".to_string(), json!(endorsements));
     }
+
+    let mut tags = vec![format!("nexus-file-id:{}", file_id)];
+    if let Some(file_name) = file_display_name {
+        tags.push(format!("nexus-file-name:{}", file_name));
+    }
+    metadata_obj.insert("tags".to_string(), json!(tags));
 
     let metadata = Value::Object(metadata_obj);
 

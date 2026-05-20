@@ -9254,6 +9254,7 @@ body {
   align-items: stretch !important;
   justify-content: stretch !important;
   width: 100%;
+  box-sizing: border-box;
   height: auto !important;
   min-height: 4.6rem;
   padding: 0.78rem 0.82rem;
@@ -9263,6 +9264,7 @@ body {
   color: var(--workspace-title-color);
   text-align: left;
   white-space: normal !important;
+  overflow: hidden;
   cursor: pointer;
   transition:
     border-color 140ms ease,
@@ -9310,6 +9312,25 @@ body {
   text-overflow: ellipsis;
 }
 
+.workspace-version-row__header--nexus-file {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.45rem;
+}
+
+.workspace-version-row__file-title {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--workspace-title-color);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.22;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .workspace-version-row__badges {
   display: flex;
   flex-wrap: nowrap;
@@ -9318,6 +9339,12 @@ body {
   gap: 0.28rem;
   max-width: min(58%, 12rem);
   min-width: 0;
+}
+
+.workspace-version-row__badges--nexus-file {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  max-width: 100%;
 }
 
 .workspace-version-row__badges > * {

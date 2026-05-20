@@ -22,6 +22,17 @@ const s1ApiRevisionSourceIds = new Set([
   'ifbars/s1api_forked',
 ]);
 
+const nexusFileIdTagPrefix = 'nexus-file-id:';
+
+export function getNexusFileIdFromTags(tags?: string[]): string {
+  return (tags || [])
+    .map((tag) => tag.trim())
+    .find((tag) => tag.toLowerCase().startsWith(nexusFileIdTagPrefix))
+    ?.slice(nexusFileIdTagPrefix.length)
+    .trim()
+    .toLowerCase() || '';
+}
+
 function canonicalizeGithubSourceId(sourceId?: string): string {
   const normalized = (sourceId || '').trim().toLowerCase();
   if (s1ApiRevisionSourceIds.has(normalized)) {
@@ -264,7 +275,12 @@ export function buildDownloadedGroups(downloaded: ModLibraryEntry[]): Downloaded
       const normalizedSourceId = entry.source === 'github'
         ? canonicalizeGithubSourceId(entry.sourceId)
         : entry.sourceId.toLowerCase();
-      key = `${entry.source}::${normalizedSourceId}`;
+      const nexusFileId = entry.source === 'nexusmods'
+        ? getNexusFileIdFromTags(entry.tags)
+        : '';
+      key = nexusFileId
+        ? `${entry.source}::${normalizedSourceId}::file::${nexusFileId}`
+        : `${entry.source}::${normalizedSourceId}`;
     } else if ((entry.source === 'nexusmods' || entry.source === 'github') && !entry.sourceId) {
       key = `${entry.source}::${normalizedDisplayName}`;
     } else if (entry.managed) {

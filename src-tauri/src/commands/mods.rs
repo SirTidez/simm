@@ -695,6 +695,7 @@ pub async fn check_mod_installed(
             &source_id,
             &source_version,
             requested_runtime,
+            None,
         )
         .await
     {
@@ -726,7 +727,12 @@ pub async fn find_existing_mod_storage(
                 _ => None,
             });
     match mods_service
-        .find_existing_mod_storage_by_source_version(&source_id, &source_version, runtime_parsed)
+        .find_existing_mod_storage_by_source_version(
+            &source_id,
+            &source_version,
+            runtime_parsed,
+            None,
+        )
         .await
     {
         Ok(Some(storage_id)) => Ok(serde_json::json!({
@@ -902,6 +908,7 @@ pub async fn install_s1api(
             &source_id,
             &version_tag,
             Some(env.runtime.clone()),
+            None,
         )
         .await
     {

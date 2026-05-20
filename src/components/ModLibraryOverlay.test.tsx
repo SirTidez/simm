@@ -995,7 +995,7 @@ describe("ModLibraryOverlay", () => {
     });
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Download selected version" }),
+      await screen.findByRole("button", { name: "Download selected file" }),
     );
 
     expect(screen.getByText("Updated Jan 2, 2025")).toBeTruthy();
@@ -1202,14 +1202,18 @@ describe("ModLibraryOverlay", () => {
       },
     });
 
+    expect(
+      await screen.findByRole("button", { name: "Install library version" }),
+    ).toBeTruthy();
+
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Download selected version" }),
+        screen.getByRole("button", { name: "Download selected file" }),
       ).not.toBeDisabled();
     });
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Download selected version" }),
+      screen.getByRole("button", { name: "Download selected file" }),
     );
 
     expect(
@@ -1324,7 +1328,7 @@ describe("ModLibraryOverlay", () => {
 
     fireEvent.click(await screen.findByRole("option", { name: /v1\.0\.0/i }));
     fireEvent.click(
-      screen.getByRole("button", { name: "Download selected version" }),
+      screen.getByRole("button", { name: "Download selected file" }),
     );
 
     await waitFor(() => {
@@ -1601,7 +1605,7 @@ describe("ModLibraryOverlay", () => {
 
     fireEvent.click(await screen.findByRole("option", { name: /v1\.0\.0/i }));
     fireEvent.click(
-      screen.getByRole("button", { name: "Download selected version" }),
+      screen.getByRole("button", { name: "Download selected file" }),
     );
 
     await screen.findByText("Nexus Download Failed");
@@ -1739,7 +1743,7 @@ describe("ModLibraryOverlay", () => {
 
     expect(await screen.findByText("All-in-One")).toBeTruthy();
     fireEvent.click(
-      screen.getByRole("button", { name: "Download selected version" }),
+      screen.getByRole("button", { name: "Download selected file" }),
     );
 
     await waitFor(() => {
@@ -1807,7 +1811,7 @@ describe("ModLibraryOverlay", () => {
 
     fireEvent.click(await screen.findByRole("option", { name: /v1\.0\.7r2/i }));
     fireEvent.click(
-      screen.getByRole("button", { name: "Download selected version" }),
+      screen.getByRole("button", { name: "Download selected file" }),
     );
 
     await waitFor(() => {
