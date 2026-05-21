@@ -2112,6 +2112,7 @@ body::before {
   display: flex;
   gap: 0.9rem;
   align-items: flex-start;
+  min-width: 0;
 }
 
 .wizard-steam-card__icon,
@@ -2133,6 +2134,7 @@ body::before {
   margin: 0.3rem 0 0;
   color: #9eb3cf;
   line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .wizard-steam-card__actions,
@@ -2161,6 +2163,7 @@ body::before {
 .wizard-branch-card,
 .wizard-directory-row {
   width: 100%;
+  min-width: 0;
   border: 1px solid rgba(97, 129, 170, 0.24);
   background: rgba(10, 18, 29, 0.68);
   border-radius: 0.82rem;
@@ -2189,6 +2192,7 @@ body::before {
   align-items: center;
   gap: 0.85rem;
   padding: 0.85rem 0.95rem;
+  white-space: normal;
 }
 
 .wizard-steam-install-row__content {
@@ -2213,6 +2217,10 @@ body::before {
 .wizard-empty-card p,
 .wizard-empty-card [data-slot="empty-description"] {
   color: #9fb5d2;
+  overflow-wrap: anywhere;
+}
+
+.wizard-path-preview strong {
   overflow-wrap: anywhere;
 }
 
@@ -2444,7 +2452,7 @@ body::before {
 }
 
 .wizard-entry-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr));
 }
 
 .wizard-entry-card {
@@ -2452,6 +2460,8 @@ body::before {
   gap: 0.95rem;
   align-items: flex-start;
   padding: 1.05rem;
+  overflow: hidden;
+  white-space: normal;
 }
 
 .wizard-entry-card__icon--success {
@@ -2465,6 +2475,7 @@ body::before {
   gap: 0.35rem;
   min-width: 0;
   flex: 1;
+  white-space: normal;
 }
 
 .wizard-entry-card__content p,
@@ -2474,18 +2485,27 @@ body::before {
   margin: 0;
   color: #9db3cf;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .wizard-inline-action {
   align-self: center;
+  flex: 0 1 auto;
+  max-width: 10rem;
   color: #8bb5ff;
   font-size: 0.82rem;
   font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  text-align: right;
+  white-space: normal;
 }
 
 .wizard-prerequisite-card {
   padding: 0.95rem 1rem;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
@@ -2494,6 +2514,7 @@ body::before {
 .wizard-prerequisite-card__copy {
   display: grid;
   gap: 0.35rem;
+  min-width: 0;
 }
 
 .wizard-branch-grid {
@@ -2504,6 +2525,7 @@ body::before {
   padding: 0.95rem 1rem;
   display: grid;
   gap: 0.8rem;
+  white-space: normal;
 }
 
 .wizard-branch-card--disabled,
@@ -2525,6 +2547,10 @@ body::before {
   justify-content: space-between;
   gap: 0.85rem;
   align-items: flex-start;
+}
+
+.wizard-branch-card__header > div:first-child {
+  min-width: 0;
 }
 
 .wizard-branch-card__header h4 {
