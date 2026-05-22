@@ -29,6 +29,8 @@ type SecurityGateResponse = {
   error?: string;
 };
 
+let modLibraryRequest: Promise<import('../types').ModLibraryResult> | null = null;
+
 export class ApiService {
   // DepotDownloader
   static async detectDepotDownloader(): Promise<DepotDownloaderInfo> {
@@ -309,7 +311,14 @@ export class ApiService {
   }
 
   static async getModLibrary(): Promise<import('../types').ModLibraryResult> {
-    return invoke('get_mod_library');
+    if (!modLibraryRequest) {
+      modLibraryRequest = invoke<import('../types').ModLibraryResult>('get_mod_library')
+        .finally(() => {
+          modLibraryRequest = null;
+        });
+    }
+
+    return modLibraryRequest;
   }
 
   static async previewLocalModSourceLink(

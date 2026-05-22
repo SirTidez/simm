@@ -6,7 +6,7 @@ import {
   batchUpdateCheckRef,
   lastUpdateCheckTimeRef,
   notifyBatchUpdateCheckStarted,
-} from "./EnvironmentList";
+} from "../services/updateCheckCoordinator";
 import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
 import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";

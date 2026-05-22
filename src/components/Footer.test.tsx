@@ -300,6 +300,33 @@ describe('Footer', () => {
     });
   });
 
+  it('coalesces duplicate mod summary refreshes while the library request is pending', async () => {
+    mockStores([completedEnv]);
+    let resolveLibrary: (value: { downloaded: unknown[] }) => void = () => {};
+    apiMocks.getModLibrary.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLibrary = resolve;
+    }));
+
+    render(<Footer />);
+
+    await waitFor(() => {
+      expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(1);
+      expect(modUpdatesCheckedHandler).toBeTruthy();
+    });
+
+    await act(async () => {
+      void modUpdatesCheckedHandler?.();
+    });
+
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(1);
+
+    resolveLibrary({ downloaded: [] });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Mods up to date/i)).toBeTruthy();
+    });
+  });
+
   it('shows checking mod status while metadata refresh is active until updates are found', async () => {
     mockStores([completedEnv]);
     apiMocks.getModLibrary

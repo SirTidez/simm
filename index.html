@@ -129,6 +129,8 @@
     </style>
     <script>
       (function() {
+        window.__SIMM_BOOT_TIMINGS__ = window.__SIMM_BOOT_TIMINGS__ || {};
+        window.__SIMM_BOOT_TIMINGS__.inlineScriptAt = performance.now();
         try {
           var theme = localStorage.getItem('simm-theme') || 'modern-blue';
           var root = document.documentElement;
@@ -183,6 +185,15 @@
         </div>
       </div>
     </div>
+    <script>
+      (function() {
+        var timings = window.__SIMM_BOOT_TIMINGS__ = window.__SIMM_BOOT_TIMINGS__ || {};
+        timings.appElementReadyAt = performance.now();
+        requestAnimationFrame(function() {
+          timings.bootFrameAt = performance.now();
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -47,7 +47,7 @@ vi.mock("../services/api", () => ({
   ApiService: apiMocks,
 }));
 
-vi.mock("./EnvironmentList", () => ({
+vi.mock("../services/updateCheckCoordinator", () => ({
   batchUpdateCheckRef: { current: false },
   lastUpdateCheckTimeRef: { current: 0 },
   notifyBatchUpdateCheckStarted: vi.fn(),

@@ -3,11 +3,14 @@ use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
-use crate::types::{LocalModOwnershipCandidate, LocalModSourcePreview, SecurityScanReport};
+use crate::types::{
+    LocalModOwnershipCandidate, LocalModSourcePreview, ModLibraryResult, SecurityScanReport,
+};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -19,6 +22,15 @@ macro_rules! eprintln {
 
 static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+static MOD_LIBRARY_CACHE: Lazy<AsyncMutex<Option<ModLibraryCacheEntry>>> =
+    Lazy::new(|| AsyncMutex::new(None));
+
+const MOD_LIBRARY_CACHE_TTL: Duration = Duration::from_millis(750);
+
+struct ModLibraryCacheEntry {
+    loaded_at: Instant,
+    library: ModLibraryResult,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadKind {
@@ -420,11 +432,24 @@ pub async fn get_mods_count(
 
 #[tauri::command]
 pub async fn get_mod_library(db: State<'_, Arc<SqlitePool>>) -> Result<serde_json::Value, String> {
+    let mut cache = MOD_LIBRARY_CACHE.lock().await;
+    if let Some(entry) = cache.as_ref() {
+        if entry.loaded_at.elapsed() <= MOD_LIBRARY_CACHE_TTL {
+            return serde_json::to_value(entry.library.clone()).map_err(|e| e.to_string());
+        }
+    }
+
     let mods_service = ModsService::new(db.inner().clone());
     let library = mods_service
         .get_mod_library()
         .await
         .map_err(|e| e.to_string())?;
+
+    *cache = Some(ModLibraryCacheEntry {
+        loaded_at: Instant::now(),
+        library: library.clone(),
+    });
+
     serde_json::to_value(library).map_err(|e| e.to_string())
 }
 

@@ -34,6 +34,31 @@ describe('ApiService', () => {
     });
   });
 
+  it('coalesces concurrent mod library requests', async () => {
+    let resolveLibrary: (value: { downloaded: [] }) => void = () => {};
+    invokeMock.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLibrary = resolve;
+    }));
+
+    const firstRequest = ApiService.getModLibrary();
+    const secondRequest = ApiService.getModLibrary();
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('get_mod_library');
+
+    resolveLibrary({ downloaded: [] });
+
+    await expect(Promise.all([firstRequest, secondRequest])).resolves.toEqual([
+      { downloaded: [] },
+      { downloaded: [] },
+    ]);
+
+    invokeMock.mockResolvedValueOnce({ downloaded: [] });
+    await ApiService.getModLibrary();
+
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
   it('checkAppUpdate forwards the selected channel to the backend', async () => {
     invokeMock.mockResolvedValueOnce({
       currentVersion: '0.7.8',

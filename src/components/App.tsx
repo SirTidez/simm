@@ -13,7 +13,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { confirm, message } from '@tauri-apps/plugin-dialog';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { EnvironmentList, type WorkspaceRoute } from './EnvironmentList';
+import type { WorkspaceRoute } from './EnvironmentList';
 import { useDiscordPresence } from '../hooks/useDiscordPresence';
 import appIcon256 from '../assets/app-icon-256.png';
 import { AppUpdateToast } from './AppUpdateToast';
@@ -123,6 +123,10 @@ const lazyNamed = <T,>(
   default: select(await loader()),
 }));
 
+const EnvironmentList = lazyNamed(
+  () => import('./EnvironmentList'),
+  (module) => module.EnvironmentList,
+);
 const EnvironmentCreationWizard = lazyNamed(
   () => import('./EnvironmentCreationWizard'),
   (module) => module.EnvironmentCreationWizard,

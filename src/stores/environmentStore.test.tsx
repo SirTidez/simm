@@ -1,3 +1,4 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 import { EnvironmentStoreProvider, useEnvironmentStore } from './environmentStore';
@@ -122,6 +123,32 @@ describe('EnvironmentStore', () => {
     });
 
     expect(screen.getByTestId('env-status').textContent).toBe('completed');
+    expect(screen.getByTestId('env-version').textContent).toBe('1.0.0');
+  });
+
+  it('coalesces duplicate initial environment refreshes while one request is pending', async () => {
+    let resolveEnvironments: (value: Environment[]) => void = () => {};
+    apiMocks.getEnvironments.mockReturnValueOnce(new Promise<Environment[]>((resolve) => {
+      resolveEnvironments = resolve;
+    }));
+
+    render(
+      <React.StrictMode>
+        <EnvironmentStoreProvider>
+          <Consumer />
+        </EnvironmentStoreProvider>
+      </React.StrictMode>
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
+    });
+
+    resolveEnvironments([{ ...baseEnv, currentGameVersion: '1.0.0' }]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
     expect(screen.getByTestId('env-version').textContent).toBe('1.0.0');
   });
 

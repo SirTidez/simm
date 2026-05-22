@@ -11,6 +11,12 @@ import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import { logger } from '../services/logger';
+import {
+  batchUpdateCheckEventName,
+  batchUpdateCheckRef,
+  lastUpdateCheckTimeRef,
+  notifyBatchUpdateCheckStarted,
+} from '../services/updateCheckCoordinator';
 import { isSteamEnvironment, sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { Icon } from './Icon';
@@ -166,11 +172,6 @@ async function buildEnvironmentCardModSnapshot(
   }
 }
 
-// Shared ref to track last update check time (accessible across components)
-// This is exported so Footer can update it when doing manual checks
-export const lastUpdateCheckTimeRef = { current: null as number | null };
-export const batchUpdateCheckRef = { current: false };
-export const batchUpdateCheckEventName = 'simm:batch-update-check-started';
 const LAST_ENV_KEY = 'simm:lastEnvId';
 
 const environmentCountCache = {
@@ -186,12 +187,6 @@ type MapStateUpdater<T> = Map<string, T> | ((previous: Map<string, T>) => Map<st
 
 function resolveMapState<T>(previous: Map<string, T>, updater: MapStateUpdater<T>) {
   return typeof updater === 'function' ? updater(previous) : updater;
-}
-
-export function notifyBatchUpdateCheckStarted(environmentIds: string[]) {
-  window.dispatchEvent(new CustomEvent(batchUpdateCheckEventName, {
-    detail: { environmentIds }
-  }));
 }
 
 interface EnvironmentListProps {

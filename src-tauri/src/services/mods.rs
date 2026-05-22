@@ -5068,7 +5068,7 @@ impl ModsService {
             });
 
             if merged_into_existing {
-                log::debug!(
+                log::trace!(
                     "Merging storage into existing library entry: key={}, storage_id={}, display_name={}, source_id={:?}, source_version={:?}, available_runtimes={:?}, storage_ids_by_runtime={:?}",
                     key_for_debug.as_deref().unwrap_or_default(),
                     storage_id,

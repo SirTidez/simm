@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.6]
+
+- Improved responsive layout and text wrapping across wizard and setup UI surfaces so long labels, paths, and card content no longer clip or overflow awkwardly.
+- Updated wizard selection grids and related cards to size more flexibly across desktop viewports, keeping installation/setup flows readable in denser or narrower layouts.
+- Contributors:
+  - `SirTidez`: responsive CSS cleanup for wizard/setup cards, path previews, branch/install selection rows, and flexible grid sizing that keeps long content readable without clipping. Timestamps: `2026-05-21 11:07:00 PDT`
+
 ## [0.8.5]
 
 - Began the next UI redesign pass while refining release flow behavior, frontend contract sync, featured Thunderstore library curation, and related commit message handling.

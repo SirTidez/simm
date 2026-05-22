@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type { Environment, DownloadProgress, ExtractGameVersionResult } from '../types';
 
 function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partial<Environment> {
@@ -56,9 +56,14 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Map<string, DownloadProgress>>(new Map());
+  const refreshEnvironmentsInFlightRef = useRef<Promise<void> | null>(null);
 
   const refreshEnvironments = useCallback(async () => {
-    try {
+    if (refreshEnvironmentsInFlightRef.current) {
+      return refreshEnvironmentsInFlightRef.current;
+    }
+
+    const request = (async () => {
       setLoading(true);
       setError(null);
       const envs = await ApiService.getEnvironments();
@@ -97,11 +102,19 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           }));
         }
       }
-    } catch (err) {
+    })();
+
+    const operation = request.catch((err) => {
       setError(err instanceof Error ? err.message : 'Failed to load environments');
-    } finally {
+    }).finally(() => {
+      if (refreshEnvironmentsInFlightRef.current === operation) {
+        refreshEnvironmentsInFlightRef.current = null;
+      }
       setLoading(false);
-    }
+    });
+
+    refreshEnvironmentsInFlightRef.current = operation;
+    return operation;
   }, []);
 
   const createEnvironment = useCallback(async (data: { appId: string; branch: string; outputDir: string; name?: string; description?: string }) => {
