@@ -2151,6 +2151,29 @@ body::before {
   gap: 0.95rem;
 }
 
+.wizard-configuration-shell .settings-section {
+  display: grid;
+  gap: 0.78rem;
+  padding: 0.9rem 1rem 1rem;
+}
+
+.wizard-configuration-shell .settings-section__heading h4 {
+  margin-top: 0.18rem;
+}
+
+.wizard-configuration-shell .settings-field-grid {
+  gap: 0.78rem;
+}
+
+.wizard-configuration-shell .settings-field-card {
+  padding: 0.8rem 0.85rem;
+}
+
+.wizard-configuration-shell .wizard-path-preview,
+.wizard-configuration-shell .wizard-empty-card {
+  padding: 0.95rem 1rem;
+}
+
 .wizard-steam-card__list,
 .wizard-branch-grid,
 .wizard-entry-grid {
@@ -2613,12 +2636,31 @@ body::before {
 .wizard-directory-dialog {
   width: min(760px, calc(100vw - 2rem));
   max-width: none;
+  color: var(--workspace-title-color);
+}
+
+.wizard-directory-dialog .modal-header h2,
+.wizard-directory-dialog [data-slot="dialog-title"] {
+  color: #eef5ff;
 }
 
 .wizard-directory-dialog__body {
   display: grid;
   gap: 0.95rem;
   padding: 0.95rem 1.05rem 1.05rem;
+}
+
+.wizard-directory-dialog .settings-field-card label,
+.wizard-directory-dialog__overview h3 {
+  color: #eef5ff;
+}
+
+.wizard-directory-dialog__overview p {
+  color: #abc1dc;
+}
+
+.wizard-directory-dialog .btn:disabled {
+  color: #93a8c4;
 }
 
 .wizard-directory-dialog__list {
@@ -2634,6 +2676,11 @@ body::before {
   align-items: center;
   gap: 0.75rem;
   padding: 0.8rem 0.9rem;
+  color: #dce8f8;
+}
+
+.wizard-directory-row span {
+  color: inherit;
 }
 
 .wizard-directory-row i,
