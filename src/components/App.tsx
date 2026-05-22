@@ -2177,7 +2177,10 @@ function AppContent() {
           try {
             const retryResult = await ApiService.launchGame(currentEnvironmentId, 'steam_restart');
             if (!retryResult.success) {
-              throw new Error('Launch request was not accepted.');
+              await message('Launch request was not accepted.', {
+                title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
+                kind: 'error',
+              });
             }
           } catch (retryError) {
             await message(
