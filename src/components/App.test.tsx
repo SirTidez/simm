@@ -511,6 +511,120 @@ describe('App', () => {
     expect(screen.getByText('Focus Request: 2')).toBeTruthy();
   });
 
+  it('launches the selected non-Steam environment through Steam from the shell action', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('launch_game', {
+        environmentId: 'env-main',
+        launchMethod: 'steam',
+      });
+    });
+  });
+
+  it('launches the selected Steam-managed environment through Steam from the shell action', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'steam-main',
+          name: 'Steam Installation',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Steam/Schedule I',
+          runtime: 'Mono',
+          status: 'completed',
+          environmentType: 'Steam',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('launch_game', {
+        environmentId: 'steam-main',
+        launchMethod: 'steam',
+      });
+    });
+  });
+
+  it('offers to restart Steam from the shell action when a shortcut reload is required', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        const lastCall = invokeMock.mock.calls.filter(([name]) => name === 'launch_game').length;
+        if (lastCall === 1) {
+          return Promise.reject("Steam needs to reload SIMM's shortcut for C:/Games/Schedule I Custom before it can launch through Steam.");
+        }
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Il2Cpp',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Il2Cpp',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(dialogMocks.confirm).toHaveBeenCalledWith(
+        expect.stringContaining("Steam needs to reload SIMM's shortcut"),
+        {
+          title: 'Restart Steam: Il2Cpp',
+          kind: 'warning',
+        },
+      );
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('launch_game', {
+        environmentId: 'env-main',
+        launchMethod: 'steam_restart',
+      });
+    });
+  });
+
   it('orders shell environments the same way as the environments page', async () => {
     environmentStoreMocks.useEnvironmentStore.mockReturnValue({
       environments: [

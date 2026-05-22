@@ -36,6 +36,17 @@ fn command_error(message: impl Into<String>) -> String {
     message
 }
 
+fn resolve_launch_method<'a>(
+    requested_method: Option<&'a str>,
+    is_steam_environment: bool,
+) -> &'a str {
+    match requested_method {
+        Some(method) => method,
+        None if is_steam_environment => "steam",
+        None => "direct",
+    }
+}
+
 #[tauri::command]
 pub async fn open_folder(
     db: State<'_, Arc<SqlitePool>>,
@@ -126,16 +137,8 @@ pub async fn launch_game(
 
     let fs_service = get_fs_service().await?;
 
-    // Determine launch method based on environment type or provided method
-    let method_str = if let Some(ref m) = launch_method {
-        m.as_str()
-    } else if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
-        "steam" // Steam environments should launch via Steam
-    } else {
-        "direct" // DepotDownloader environments should launch directly
-    };
-
     let is_steam_environment = env.environment_type == Some(crate::types::EnvironmentType::Steam);
+    let method_str = resolve_launch_method(launch_method.as_deref(), is_steam_environment);
     let game_dir_for_launch = if method_str == "steam" && is_steam_environment {
         None
     } else {
@@ -146,10 +149,12 @@ pub async fn launch_game(
         .launch_game(game_dir_for_launch, Some(method_str))
         .await
         .map_err(|e| {
+            let launch_error = e.to_string();
             command_error(format!(
                 "Launch command failed for environment {} via {}: {}",
-                environment_id, method_str, e
-            ))
+                environment_id, method_str, launch_error
+            ));
+            launch_error
         })?;
 
     Ok(serde_json::json!({
@@ -260,6 +265,36 @@ pub async fn create_directory(path: String) -> Result<serde_json::Value, String>
             "path": dir_path.to_string_lossy().to_string()
         })),
         Err(e) => Err(format!("Failed to create directory: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_launch_method;
+
+    #[test]
+    fn launch_method_defaults_to_steam_for_steam_environments() {
+        assert_eq!(resolve_launch_method(None, true), "steam");
+    }
+
+    #[test]
+    fn launch_method_defaults_to_direct_for_non_steam_environments() {
+        assert_eq!(resolve_launch_method(None, false), "direct");
+    }
+
+    #[test]
+    fn launch_method_preserves_explicit_steam_for_non_steam_environments() {
+        assert_eq!(resolve_launch_method(Some("steam"), false), "steam");
+    }
+
+    #[test]
+    fn launch_method_preserves_known_and_unknown_explicit_methods_for_steam_environments() {
+        assert_eq!(resolve_launch_method(Some("direct"), true), "direct");
+        assert_eq!(
+            resolve_launch_method(Some("steam_restart"), false),
+            "steam_restart"
+        );
+        assert_eq!(resolve_launch_method(Some("mystery"), true), "mystery");
     }
 }
 

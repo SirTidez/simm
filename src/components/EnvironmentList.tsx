@@ -12,6 +12,7 @@ import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import { logger } from '../services/logger';
 import { isSteamEnvironment, sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
+import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { Icon } from './Icon';
 import {
   Dialog,
@@ -42,6 +43,7 @@ import {
 
 type InstalledModsResponse = Awaited<ReturnType<typeof ApiService.getMods>>;
 type ModLibraryResponse = Awaited<ReturnType<typeof ApiService.getModLibrary>>;
+type LaunchMethod = 'steam' | 'steam_restart' | 'direct';
 
 function safeExternalUrl(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
@@ -328,7 +330,7 @@ export function EnvironmentList({
   const [selectedMelonLoaderVersion, setSelectedMelonLoaderVersion] = useState<Map<string, string>>(new Map());
   const [installingMelonLoader, setInstallingMelonLoader] = useState<Set<string>>(new Set());
   const [messageOverlay, setMessageOverlay] = useState<{ isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info' }>({ isOpen: false, title: '', message: '', type: 'info' });
-  const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
+  const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; confirmText?: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
   const [environmentMenu, setEnvironmentMenu] = useState<{ envId: string; x: number; y: number } | null>(null);
   const [preferredLaunchMethod, setPreferredLaunchMethod] = useState<Map<string, 'steam' | 'direct'>>(() => {
@@ -1046,7 +1048,7 @@ export function EnvironmentList({
     }
   };
 
-  const handleLaunchGame = async (env: Environment, method: 'steam' | 'direct' = 'steam') => {
+  const handleLaunchGame = async (env: Environment, method: LaunchMethod = 'steam') => {
     try {
       const result = await ApiService.launchGame(env.id, method);
       if (!result.success) {
@@ -1059,7 +1061,22 @@ export function EnvironmentList({
         );
       }
     } catch (err) {
-      showMessage('Launch Failed', `Failed to launch game: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+      const errorMessage = getErrorMessage(err, 'Unknown error');
+      if (method === 'steam' && isSteamShortcutReloadError(errorMessage)) {
+        setConfirmOverlay({
+          isOpen: true,
+          title: 'Restart Steam?',
+          message: `${errorMessage} SIMM can restart Steam now and retry the launch.`,
+          confirmText: 'Restart Steam',
+          onConfirm: () => {
+            setConfirmOverlay({ isOpen: false, title: '', message: '', onConfirm: () => {} });
+            void handleLaunchGame(env, 'steam_restart');
+          },
+        });
+        return;
+      }
+
+      showMessage('Launch Failed', `Failed to launch game: ${errorMessage}`, 'error');
     }
   };
 
@@ -1587,8 +1604,8 @@ export function EnvironmentList({
   };
 
   const buildEnvironmentMenuItems = (env: Environment): AnchoredContextMenuItem[] => {
-    const currentMethod = preferredLaunchMethod.get(env.id) || 'steam';
     const isSteam = isSteamEnvironment(env);
+    const currentMethod: LaunchMethod = preferredLaunchMethod.get(env.id) || 'steam';
 
     return [
       {
@@ -1647,7 +1664,10 @@ export function EnvironmentList({
     const isCheckingUpdate = checkingEnvironments.has(env.id);
     const isCompleted = env.status === 'completed';
     const status = getDominantStatus(env);
-    const launchMethod = preferredLaunchMethod.get(env.id) || 'steam';
+    const launchMethod: LaunchMethod = preferredLaunchMethod.get(env.id) || 'steam';
+    const launchTitle = launchMethod === 'steam'
+      ? 'Launch through Steam'
+      : 'Launch this local install directly';
     const modCount = modsCounts.get(env.id) ?? 0;
     const featuredDownloadCount = featuredDownloadCounts.get(env.id) ?? 0;
     const totalModCount = modCount + featuredDownloadCount;
@@ -1859,7 +1879,7 @@ export function EnvironmentList({
                 <SimmButton
                   onClick={() => handleLaunchGame(env, launchMethod)}
                   className="btn btn-primary environment-card__hero-action"
-                  title={`Launch the game via ${launchMethod === 'direct' ? 'Local Install' : 'Steam'}`}
+                  title={launchTitle}
                 >
                   <Icon name="fas fa-play" />
                   <span>Launch</span>
@@ -2100,6 +2120,7 @@ export function EnvironmentList({
         onConfirm={confirmOverlay.onConfirm}
         title={confirmOverlay.title}
         message={confirmOverlay.message}
+        confirmText={confirmOverlay.confirmText}
       />
 
       <ConfirmOverlay

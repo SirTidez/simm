@@ -267,7 +267,7 @@ export class ApiService {
 
   static async launchGame(
     environmentId: string,
-    launchMethod?: 'steam' | 'direct'
+    launchMethod?: 'steam' | 'steam_restart' | 'direct'
   ): Promise<{
     success: boolean;
     executablePath?: string;

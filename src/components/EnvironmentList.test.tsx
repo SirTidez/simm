@@ -112,6 +112,7 @@ describe('EnvironmentList', () => {
     unlistenFns.length = 0;
     modsChangedHandler = null;
     completeHandler = null;
+    localStorage.clear();
 
     const mkUnlisten = () => {
       const fn = vi.fn();
@@ -312,6 +313,64 @@ describe('EnvironmentList', () => {
       expect(screen.queryByTitle('1 SIMM-managed mod, 1 user mod')).toBeNull();
       expect(screen.queryByTitle('1 user mods, 1 SIMM-managed core tool')).toBeNull();
       expect(screen.queryByText('1 (+1 Featured)')).toBeNull();
+    });
+  });
+
+  it('launches non-Steam environments through Steam by default', async () => {
+    render(<EnvironmentList />);
+
+    expect(await screen.findByText('Steam launch')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Launch' }));
+
+    await waitFor(() => {
+      expect(apiMocks.launchGame).toHaveBeenCalledWith('env-1', 'steam');
+    });
+  });
+
+  it('launches Steam-managed environments through Steam by default', async () => {
+    const steamEnv: Environment = {
+      ...completedEnv,
+      id: 'steam-env-1',
+      environmentType: 'Steam',
+    };
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [steamEnv],
+      loading: false,
+      error: null,
+      progress: new Map(),
+      startDownload: vi.fn().mockResolvedValue(undefined),
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<EnvironmentList />);
+
+    expect(await screen.findByText('Steam launch')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Launch' }));
+
+    await waitFor(() => {
+      expect(apiMocks.launchGame).toHaveBeenCalledWith('steam-env-1', 'steam');
+    });
+  });
+
+  it('offers to restart Steam when a shortcut reload is required', async () => {
+    apiMocks.launchGame
+      .mockRejectedValueOnce("Steam needs to reload SIMM's shortcut for C:/Games/Schedule I Custom before it can launch through Steam.")
+      .mockResolvedValueOnce({ success: true });
+
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch' }));
+
+    expect(await screen.findByTestId('confirm-overlay')).toHaveTextContent('Restart Steam?');
+    fireEvent.click(screen.getByRole('button', { name: 'Restart Steam' }));
+
+    await waitFor(() => {
+      expect(apiMocks.launchGame).toHaveBeenLastCalledWith('env-1', 'steam_restart');
     });
   });
 

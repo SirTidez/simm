@@ -29,6 +29,7 @@ import {
   resolveExperienceMode,
   settingsNeedUpgradeSetupPrompt,
 } from '../utils/uxSettings';
+import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import type {
   Environment,
@@ -2162,8 +2163,37 @@ function AppContent() {
         throw new Error('Launch request was not accepted.');
       }
     } catch (error) {
+      const errorMessage = getErrorMessage(error, 'Failed to launch the selected environment.');
+      if (isSteamShortcutReloadError(errorMessage)) {
+        const shouldRestartSteam = await confirm(
+          `${errorMessage}\n\nRestart Steam now and retry the launch?`,
+          {
+            title: currentEnvironment ? `Restart Steam: ${currentEnvironment.name}` : 'Restart Steam',
+            kind: 'warning',
+          },
+        );
+
+        if (shouldRestartSteam) {
+          try {
+            const retryResult = await ApiService.launchGame(currentEnvironmentId, 'steam_restart');
+            if (!retryResult.success) {
+              throw new Error('Launch request was not accepted.');
+            }
+          } catch (retryError) {
+            await message(
+              getErrorMessage(retryError, 'Failed to restart Steam and launch the selected environment.'),
+              {
+                title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
+                kind: 'error',
+              },
+            );
+          }
+        }
+        return;
+      }
+
       await message(
-        error instanceof Error ? error.message : 'Failed to launch the selected environment.',
+        errorMessage,
         {
           title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
           kind: 'error',
