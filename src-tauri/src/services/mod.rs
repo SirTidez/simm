@@ -11,6 +11,7 @@ pub mod github_releases;
 pub mod logger;
 pub mod logs;
 pub mod melon_loader;
+pub mod mod_profiles;
 pub mod mod_update;
 pub mod mods;
 pub mod mods_snapshot_cache;

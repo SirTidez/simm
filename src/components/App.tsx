@@ -179,6 +179,10 @@ const DownloadsPanel = lazyNamed(
   () => import('./DownloadsPanel'),
   (module) => module.DownloadsPanel,
 );
+const ProfileImportWorkspace = lazyNamed(
+  () => import('./ProfileImportWorkspace'),
+  (module) => module.ProfileImportWorkspace,
+);
 
 function WorkspacePanelFallback() {
   return (
@@ -401,6 +405,7 @@ function HomeDashboard({
   onOpenModUpdates,
   onOpenWizard,
   onOpenSettings,
+  onOpenProfileImport,
 }: {
   environments: Environment[];
   environmentsLoading: boolean;
@@ -414,6 +419,7 @@ function HomeDashboard({
   onOpenModUpdates: () => void;
   onOpenWizard: () => void;
   onOpenSettings: () => void;
+  onOpenProfileImport: () => void;
 }) {
   const completed = environments.filter((env) => env.status === 'completed');
   const updateCount = completed.filter((env) => env.updateAvailable).length;
@@ -480,6 +486,10 @@ function HomeDashboard({
           <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenWizard}>
             <Icon name="plus" />
             Add Environment
+          </SimmButton>
+          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenProfileImport}>
+            <Icon name="upload" />
+            Import Profile
           </SimmButton>
         </div>
       </div>
@@ -593,6 +603,10 @@ function HomeDashboard({
             <SimmButton type="button" variant="ghost" onClick={onOpenSettings}>
               <Icon name="sliders" />
               Preferences
+            </SimmButton>
+            <SimmButton type="button" variant="ghost" onClick={onOpenProfileImport}>
+              <Icon name="upload" />
+              Import Profile
             </SimmButton>
           </div>
         </section>
@@ -1980,6 +1994,12 @@ function AppContent() {
             onRunSetupGuide={() => pushWorkspace({ view: 'welcome' }, { welcomeMode: 'setup' })}
           />
         );
+      case 'profileImport':
+        return (
+          <ProfileImportWorkspace
+            onClose={onCloseHandler}
+          />
+        );
       case 'welcome':
         return (
           <WelcomeOverlay
@@ -2307,6 +2327,7 @@ function AppContent() {
                     })}
                     onOpenWizard={() => openWorkspace({ view: 'wizard' })}
                     onOpenSettings={() => openWorkspace({ view: 'settings' })}
+                    onOpenProfileImport={() => openWorkspace({ view: 'profileImport' })}
                   />
                 </main>
               </div>

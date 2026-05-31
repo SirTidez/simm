@@ -24,6 +24,12 @@ const apiMocks = vi.hoisted(() => ({
   launchGame: vi.fn(),
   getMelonLoaderReleases: vi.fn(),
   installMelonLoader: vi.fn(),
+  exportEnvironmentProfile: vi.fn(),
+  saveModProfileFile: vi.fn(),
+}));
+
+const dialogMocks = vi.hoisted(() => ({
+  save: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -54,6 +60,8 @@ vi.mock('../stores/settingsStore', () => ({
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
 }));
+
+vi.mock('@tauri-apps/plugin-dialog', () => dialogMocks);
 
 vi.mock('../services/events', () => eventMocks);
 
@@ -185,6 +193,32 @@ describe('EnvironmentList', () => {
     apiMocks.launchGame.mockResolvedValue({ success: true });
     apiMocks.getMelonLoaderReleases.mockResolvedValue([]);
     apiMocks.installMelonLoader.mockResolvedValue({ success: true });
+    apiMocks.saveModProfileFile.mockResolvedValue(undefined);
+    dialogMocks.save.mockResolvedValue('C:\\Profiles\\steam-installation.json');
+    apiMocks.exportEnvironmentProfile.mockResolvedValue({
+      schemaVersion: 1,
+      kind: 'simm.profile',
+      profile: {
+        name: 'Env One',
+        game: 'schedule-i',
+        runtime: 'IL2CPP',
+        branch: 'main',
+        exportedAt: '2026-05-31T00:00:00Z',
+      },
+      items: [
+        {
+          itemType: 'mod',
+          name: 'CustomTV',
+          fileName: 'CustomTV.dll',
+          required: true,
+          enabled: true,
+          source: 'thunderstore',
+          sourceId: 'CustomTV/CustomTV',
+          sourceVersion: '1.6.4',
+          runtime: 'IL2CPP',
+        },
+      ],
+    });
 
     storeMocks.useEnvironmentStore.mockReturnValue({
       environments: [completedEnv],
@@ -314,6 +348,53 @@ describe('EnvironmentList', () => {
       expect(screen.queryByTitle('1 user mods, 1 SIMM-managed core tool')).toBeNull();
       expect(screen.queryByText('1 (+1 Featured)')).toBeNull();
     });
+  });
+
+  it('exports a share profile from an environment card', async () => {
+    render(<EnvironmentList />);
+
+    const shareButton = await screen.findByRole('button', { name: /share/i });
+    fireEvent.click(shareButton);
+
+    await waitFor(() => {
+      expect(apiMocks.exportEnvironmentProfile).toHaveBeenCalledWith('env-1');
+    });
+    expect(await screen.findByText('Export Profile')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Env One')).toBeInTheDocument();
+    expect(screen.getByText('CustomTV')).toBeInTheDocument();
+  });
+
+  it('saves an adjusted share profile to a json file', async () => {
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /share/i }));
+    await screen.findByText('Export Profile');
+    fireEvent.change(screen.getByLabelText(/profile name/i), {
+      target: { value: 'Friday Co-op' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /export json/i }));
+
+    await waitFor(() => {
+      expect(dialogMocks.save).toHaveBeenCalledWith({
+        defaultPath: 'friday-co-op.json',
+        filters: [{ name: 'SIMM Profile', extensions: ['json'] }],
+      });
+      expect(apiMocks.saveModProfileFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profile: expect.objectContaining({ name: 'Friday Co-op' }),
+        }),
+        'C:\\Profiles\\steam-installation.json',
+      );
+    });
+  });
+
+  it('opens the profile import workspace from the environments toolbar', async () => {
+    const onOpenWorkspace = vi.fn();
+    render(<EnvironmentList onOpenWorkspace={onOpenWorkspace} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /import profile/i }));
+
+    expect(onOpenWorkspace).toHaveBeenCalledWith({ view: 'profileImport' });
   });
 
   it('launches non-Steam environments through Steam by default', async () => {

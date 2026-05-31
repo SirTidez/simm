@@ -248,6 +248,11 @@ fn main() {
             commands::mods::store_mod_archive,
             commands::mods::download_s1api_to_library,
             commands::mods::download_mlvscan_to_library,
+            commands::mod_profiles::export_environment_profile,
+            commands::mod_profiles::save_mod_profile_file,
+            commands::mod_profiles::read_mod_profile_file,
+            commands::mod_profiles::preview_mod_profile_import,
+            commands::mod_profiles::apply_mod_profile_import,
             // Plugins
             commands::plugins::get_plugins,
             commands::plugins::get_plugins_count,

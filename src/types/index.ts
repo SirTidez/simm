@@ -305,6 +305,86 @@ export interface ModLibraryResult {
   downloaded: ModLibraryEntry[];
 }
 
+export interface ModProfileManifest {
+  schemaVersion: number;
+  kind: 'simm.profile' | string;
+  profile: ModProfileInfo;
+  items: ModProfileItem[];
+}
+
+export interface ModProfileInfo {
+  name: string;
+  game: string;
+  environmentId?: string | null;
+  runtime: 'IL2CPP' | 'Mono';
+  branch: string;
+  gameVersion?: string | null;
+  exportedAt: string;
+}
+
+export type ModProfileItemType = 'mod' | 'plugin' | 'userlib';
+
+export interface ModProfileItem {
+  itemType: ModProfileItemType;
+  name: string;
+  fileName?: string | null;
+  required: boolean;
+  enabled: boolean;
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown' | null;
+  sourceId?: string | null;
+  sourceVersion?: string | null;
+  sourceUrl?: string | null;
+  runtime?: 'IL2CPP' | 'Mono' | null;
+  storageId?: string | null;
+  nexusFileId?: string | null;
+  manualReason?: string | null;
+}
+
+export type ModProfileImportStatus =
+  | 'alreadyInstalled'
+  | 'readyToInstall'
+  | 'needsDownload'
+  | 'manualRequired'
+  | 'runtimeMismatch'
+  | 'unsupported';
+
+export interface ModProfileImportPlanItem {
+  item: ModProfileItem;
+  status: ModProfileImportStatus;
+  resolvedStorageId?: string | null;
+  message: string;
+}
+
+export interface ModProfileImportSummary {
+  total: number;
+  alreadyInstalled: number;
+  readyToInstall: number;
+  needsDownload: number;
+  manualRequired: number;
+  runtimeMismatches: number;
+  unsupported: number;
+}
+
+export interface ModProfileImportPlan {
+  profile: ModProfileInfo;
+  targetEnvironmentId?: string | null;
+  items: ModProfileImportPlanItem[];
+  summary: ModProfileImportSummary;
+}
+
+export interface ModProfileApplyRequest {
+  manifest: ModProfileManifest;
+  targetEnvironmentId: string;
+}
+
+export interface ModProfileApplyResult {
+  plan: ModProfileImportPlan;
+  installed: number;
+  skipped: number;
+  unresolved: number;
+  messages: string[];
+}
+
 export interface LocalModSourceVersionOption {
   key: string;
   version: string;

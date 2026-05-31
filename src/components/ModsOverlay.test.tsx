@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ModsOverlay } from './ModsOverlay';
 import type { Environment } from '../types';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 const apiMocks = vi.hoisted(() => ({
   getEnvironment: vi.fn(),
@@ -21,6 +21,8 @@ const apiMocks = vi.hoisted(() => ({
   searchThunderstoreByRuntime: vi.fn(),
   searchNexusMods: vi.fn(),
   uploadMod: vi.fn(),
+  exportEnvironmentProfile: vi.fn(),
+  saveModProfileFile: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -41,9 +43,11 @@ vi.mock('../services/events', () => ({
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
+  save: vi.fn(),
 }));
 
 const openMock = vi.mocked(open);
+const saveMock = vi.mocked(save);
 
 const baseEnvironment: Environment = {
   id: 'env-1',
@@ -74,10 +78,13 @@ describe('ModsOverlay', () => {
     apiMocks.searchThunderstoreByRuntime.mockReset();
     apiMocks.searchNexusMods.mockReset();
     apiMocks.uploadMod.mockReset();
+    apiMocks.exportEnvironmentProfile.mockReset();
+    apiMocks.saveModProfileFile.mockReset();
     eventMocks.onModsChanged.mockReset();
     eventMocks.onModsSnapshotUpdated.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
     openMock.mockReset();
+    saveMock.mockReset();
 
     apiMocks.getEnvironment.mockResolvedValue(baseEnvironment);
     apiMocks.getMods.mockResolvedValue({
@@ -116,6 +123,32 @@ describe('ModsOverlay', () => {
     });
     apiMocks.searchNexusMods.mockResolvedValue({ mods: [] });
     apiMocks.uploadMod.mockResolvedValue({ success: false, error: 'test' });
+    apiMocks.exportEnvironmentProfile.mockResolvedValue({
+      schemaVersion: 1,
+      kind: 'simm.profile',
+      profile: {
+        name: 'Test Env',
+        game: 'schedule-i',
+        runtime: 'IL2CPP',
+        branch: 'main',
+        exportedAt: '2026-05-31T00:00:00Z',
+      },
+      items: [
+        {
+          itemType: 'mod',
+          name: 'CustomTV',
+          fileName: 'CustomTV.dll',
+          required: true,
+          enabled: true,
+          source: 'thunderstore',
+          sourceId: 'CustomTV/CustomTV',
+          sourceVersion: '1.6.4',
+          runtime: 'IL2CPP',
+        },
+      ],
+    });
+    apiMocks.saveModProfileFile.mockResolvedValue(undefined);
+    saveMock.mockResolvedValue('C:\\Profiles\\test-env.json');
     eventMocks.onModsChanged.mockResolvedValue(() => {});
     eventMocks.onModsSnapshotUpdated.mockResolvedValue(() => {});
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
@@ -796,6 +829,40 @@ describe('ModsOverlay', () => {
     fireEvent.click(within(inspector).getByRole('button', { name: 'Open Source Page' }));
 
     expect(apiMocks.openExternalUrl).toHaveBeenCalledWith('https://www.nexusmods.com/schedule1/mods/123');
+  });
+
+  it('opens the profile export review from the installed mods toolbar', async () => {
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share Profile' }));
+
+    await waitFor(() => {
+      expect(apiMocks.exportEnvironmentProfile).toHaveBeenCalledWith('env-1');
+    });
+    expect(await screen.findByText('Export Profile')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Test Env')).toBeInTheDocument();
+    expect(screen.getByText('CustomTV')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /export json/i }));
+
+    await waitFor(() => {
+      expect(saveMock).toHaveBeenCalledWith({
+        defaultPath: 'test-env.json',
+        filters: [{ name: 'SIMM Profile', extensions: ['json'] }],
+      });
+      expect(apiMocks.saveModProfileFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profile: expect.objectContaining({ name: 'Test Env' }),
+        }),
+        'C:\\Profiles\\test-env.json',
+      );
+    });
   });
 
   it('opens installed mod details via keyboard activation', async () => {

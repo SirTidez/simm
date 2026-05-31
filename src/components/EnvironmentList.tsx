@@ -1,8 +1,9 @@
 import { Suspense, lazy, useState, useEffect, useRef, useCallback } from 'react';
 import type { ComponentType } from 'react';
+import { save } from '@tauri-apps/plugin-dialog';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
-import type { Environment } from '../types';
+import type { Environment, ModProfileManifest, ModProfileItem } from '../types';
 import { AuthenticationModal } from './AuthenticationModal';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
@@ -22,6 +23,7 @@ import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { Icon } from './Icon';
 import {
   Dialog,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
@@ -50,6 +52,25 @@ import {
 type InstalledModsResponse = Awaited<ReturnType<typeof ApiService.getMods>>;
 type ModLibraryResponse = Awaited<ReturnType<typeof ApiService.getModLibrary>>;
 type LaunchMethod = 'steam' | 'steam_restart' | 'direct';
+type ProfileExportState = {
+  isOpen: boolean;
+  environmentId: string | null;
+  manifest: ModProfileManifest | null;
+  selectedItemKeys: Set<string>;
+  profileName: string;
+  loading: boolean;
+  saving: boolean;
+};
+
+const emptyProfileExportState: ProfileExportState = {
+  isOpen: false,
+  environmentId: null,
+  manifest: null,
+  selectedItemKeys: new Set(),
+  profileName: '',
+  loading: false,
+  saving: false,
+};
 
 function safeExternalUrl(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
@@ -66,6 +87,32 @@ function getLatestStableMelonLoaderTag(
   releases: Array<{ tag_name: string; prerelease: boolean; isNightly?: boolean }>
 ): string | undefined {
   return releases.find((release) => !release.isNightly && !release.prerelease)?.tag_name ?? releases[0]?.tag_name;
+}
+
+function profileItemKey(item: ModProfileItem, index: number): string {
+  return [
+    item.itemType,
+    item.name,
+    item.fileName ?? '',
+    item.sourceId ?? '',
+    item.sourceVersion ?? '',
+    index,
+  ].join('|');
+}
+
+function profileFileName(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return `${slug || 'simm-profile'}.json`;
+}
+
+function profileItemTypeLabel(item: ModProfileItem): string {
+  if (item.itemType === 'userlib') return 'UserLib';
+  return item.itemType.charAt(0).toUpperCase() + item.itemType.slice(1);
 }
 
 const lazyNamed = <T,>(
@@ -202,6 +249,7 @@ interface EnvironmentListProps {
 export type WorkspaceRoute =
   | { view: 'home' }
   | { view: 'environments' }
+  | { view: 'profileImport' }
   | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
   | { view: 'securityReport' }
   | { view: 'mods'; environmentId: string; initialTab?: 'installed' | 'updates' }
@@ -241,6 +289,7 @@ export function EnvironmentList({
   const [userLibsOverlay, setUserLibsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
+  const [profileExport, setProfileExport] = useState<ProfileExportState>(emptyProfileExportState);
   const [modsCounts, setModsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.mods));
   const [featuredDownloadCounts, setFeaturedDownloadCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.featuredDownloads));
   const [modUpdatesCounts, setModUpdatesCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.modUpdates));
@@ -248,6 +297,30 @@ export function EnvironmentList({
   const [userLibsCounts, setUserLibsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.userLibs));
   const [melonLoaderStatus, setMelonLoaderStatusState] = useState<Map<string, { installed: boolean; version?: string }>>(() => new Map(environmentCountCache.melonLoader));
   const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
+  const adjustedProfileManifest = profileExport.manifest ? {
+    ...profileExport.manifest,
+    profile: {
+      ...profileExport.manifest.profile,
+      name: profileExport.profileName.trim() || profileExport.manifest.profile.name,
+    },
+    items: profileExport.manifest.items.filter((item, index) =>
+      profileExport.selectedItemKeys.has(profileItemKey(item, index))
+    ),
+  } : null;
+  const profileExportCounts = profileExport.manifest ? profileExport.manifest.items.reduce(
+    (counts, item, index) => {
+      counts.total += 1;
+      if (profileExport.selectedItemKeys.has(profileItemKey(item, index))) {
+        counts.selected += 1;
+      }
+      if (item.itemType === 'mod') counts.mods += 1;
+      if (item.itemType === 'plugin') counts.plugins += 1;
+      if (item.itemType === 'userlib') counts.userlibs += 1;
+      if (item.manualReason) counts.manual += 1;
+      return counts;
+    },
+    { total: 0, selected: 0, mods: 0, plugins: 0, userlibs: 0, manual: 0 },
+  ) : { total: 0, selected: 0, mods: 0, plugins: 0, userlibs: 0, manual: 0 };
 
   const setModsCounts = useCallback((updater: MapStateUpdater<number>) => {
     setModsCountsState((previous) => {
@@ -1298,6 +1371,73 @@ export function EnvironmentList({
     setConfigOverlay({ isOpen: true, envId });
   };
 
+  const handleOpenProfileImport = () => {
+    onOpenWorkspace?.({ view: 'profileImport' });
+  };
+
+  const handleShareProfile = async (env: Environment) => {
+    setProfileExport({
+      isOpen: true,
+      environmentId: env.id,
+      manifest: null,
+      selectedItemKeys: new Set(),
+      profileName: env.name,
+      loading: true,
+      saving: false,
+    });
+    try {
+      const manifest = await ApiService.exportEnvironmentProfile(env.id);
+      setProfileExport({
+        isOpen: true,
+        environmentId: env.id,
+        manifest,
+        selectedItemKeys: new Set(manifest.items.map((item, index) => profileItemKey(item, index))),
+        profileName: manifest.profile.name,
+        loading: false,
+        saving: false,
+      });
+    } catch (err) {
+      setProfileExport(emptyProfileExportState);
+      showMessage('Share Profile Failed', getErrorMessage(err, 'Failed to export profile.'), 'error');
+    }
+  };
+
+  const handleToggleProfileItem = (item: ModProfileItem, index: number, checked: boolean) => {
+    const key = profileItemKey(item, index);
+    setProfileExport((previous) => {
+      const nextKeys = new Set(previous.selectedItemKeys);
+      if (checked) {
+        nextKeys.add(key);
+      } else {
+        nextKeys.delete(key);
+      }
+      return {
+        ...previous,
+        selectedItemKeys: nextKeys,
+      };
+    });
+  };
+
+  const handleSaveProfile = async () => {
+    if (!adjustedProfileManifest) return;
+    try {
+      setProfileExport((previous) => ({ ...previous, saving: true }));
+      const destination = await save({
+        defaultPath: profileFileName(adjustedProfileManifest.profile.name),
+        filters: [{ name: 'SIMM Profile', extensions: ['json'] }],
+      });
+      if (!destination) return;
+
+      await ApiService.saveModProfileFile(adjustedProfileManifest, destination);
+      setProfileExport(emptyProfileExportState);
+      showMessage('Profile Exported', `Profile JSON was saved to ${destination}.`, 'success');
+    } catch (err) {
+      showMessage('Export Failed', getErrorMessage(err, 'Failed to save profile.'), 'error');
+    } finally {
+      setProfileExport((previous) => previous.isOpen ? { ...previous, saving: false } : previous);
+    }
+  };
+
   const handleCloseConfigOverlay = () => {
     setConfigOverlay({ isOpen: false, envId: null });
   };
@@ -1642,6 +1782,15 @@ export function EnvironmentList({
         },
       },
       {
+        key: 'share-profile',
+        label: 'Share Profile',
+        icon: 'fas fa-upload',
+        disabled: env.status !== 'completed',
+        onSelect: () => {
+          void handleShareProfile(env);
+        },
+      },
+      {
         key: 'delete',
         label: isSteam ? 'Clear Environment Records' : 'Delete Environment',
         icon: 'fas fa-trash',
@@ -1906,6 +2055,10 @@ export function EnvironmentList({
                 <SimmButton variant="secondary" onClick={() => handleOpenUserLibsOverlay(env.id)} className="btn btn-secondary environment-card__command-btn" title="View UserLibs">
                   <Icon name="fas fa-book" />
                   <span>UserLibs</span>
+                </SimmButton>
+                <SimmButton variant="secondary" onClick={() => void handleShareProfile(env)} className="btn btn-secondary environment-card__command-btn" title="Export a shareable environment profile">
+                  <Icon name="upload" />
+                  <span>Share</span>
                 </SimmButton>
                 <SimmButton variant="secondary" onClick={() => handleOpenFolder(env)} className="btn btn-secondary environment-card__command-btn" title="Open folder in file explorer">
                   <Icon name="fas fa-folder-open" />
@@ -2317,6 +2470,120 @@ export function EnvironmentList({
           </SimmDialogContent>
         </Dialog>
       )}
+
+      <Dialog open={profileExport.isOpen} onOpenChange={(open) => {
+        if (!open) {
+          setProfileExport(emptyProfileExportState);
+        }
+      }}>
+        <SimmDialogContent
+          className="app-dialog profile-export-dialog"
+          showCloseButton={false}
+        >
+          <DialogHeader className="modal-header">
+            <DialogTitle>Export Profile</DialogTitle>
+            <SimmButton
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="modal-close"
+              onClick={() => setProfileExport(emptyProfileExportState)}
+              aria-label="Close profile export"
+            >
+              <Icon name="times" />
+            </SimmButton>
+          </DialogHeader>
+          <div className="app-dialog__body profile-export-dialog__body">
+            <DialogDescription>
+              Review what will be included, adjust the exported profile, then save a JSON file you can share.
+            </DialogDescription>
+            {profileExport.loading || !profileExport.manifest ? (
+              <div className="profile-export-dialog__loading" role="status">
+                <Icon name="spinner" />
+                Preparing profile...
+              </div>
+            ) : (
+              <>
+                <div className="profile-export-dialog__field">
+                  <label htmlFor="profile-export-name">Profile name</label>
+                  <Input
+                    id="profile-export-name"
+                    value={profileExport.profileName}
+                    onChange={(event) => setProfileExport((previous) => ({
+                      ...previous,
+                      profileName: event.target.value,
+                    }))}
+                  />
+                </div>
+                <div className="profile-export-dialog__summary-grid">
+                  <div><span>Selected</span><strong>{profileExportCounts.selected}</strong></div>
+                  <div><span>Mods</span><strong>{profileExportCounts.mods}</strong></div>
+                  <div><span>Plugins</span><strong>{profileExportCounts.plugins}</strong></div>
+                  <div><span>Manual</span><strong>{profileExportCounts.manual}</strong></div>
+                </div>
+                <div className="profile-export-dialog__items" role="list" aria-label="Profile items">
+                  {profileExport.manifest.items.map((item, index) => {
+                    const key = profileItemKey(item, index);
+                    const checked = profileExport.selectedItemKeys.has(key);
+                    return (
+                      <label key={key} className="profile-export-dialog__item" role="listitem">
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(value) => handleToggleProfileItem(item, index, Boolean(value))}
+                        />
+                        <span className="profile-export-dialog__item-main">
+                          <strong>{item.name}</strong>
+                          <span>
+                            {profileItemTypeLabel(item)}
+                            {item.source ? ` - ${item.source}` : ''}
+                            {item.sourceVersion ? ` - ${item.sourceVersion}` : ''}
+                          </span>
+                          {item.manualReason && <em>{item.manualReason}</em>}
+                        </span>
+                        <span className="profile-export-dialog__item-state">
+                          {item.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            <div className="app-dialog__footer">
+              <SimmButton
+                type="button"
+                variant="secondary"
+                className="btn btn-secondary"
+                onClick={() => setProfileExport(emptyProfileExportState)}
+              >
+                Cancel
+              </SimmButton>
+              <SimmButton
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void handleSaveProfile()}
+                disabled={profileExport.loading || profileExport.saving || !adjustedProfileManifest || adjustedProfileManifest.items.length === 0}
+              >
+                <Icon name={profileExport.saving ? 'spinner' : 'download'} />
+                Export JSON
+              </SimmButton>
+            </div>
+          </div>
+        </SimmDialogContent>
+      </Dialog>
+
+      <div className="environment-list__toolbar">
+        <SimmButton
+          type="button"
+          variant="secondary"
+          className="btn btn-secondary"
+          onClick={handleOpenProfileImport}
+          disabled={!onOpenWorkspace}
+        >
+          <Icon name="upload" />
+          Import Profile
+        </SimmButton>
+      </div>
 
       <div className="environments-grid">
         {sortEnvironmentsForDisplay(environments).map(renderEnvironmentCard)}
