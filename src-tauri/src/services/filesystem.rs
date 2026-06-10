@@ -241,10 +241,7 @@ impl FileSystemService {
         ));
         self.restart_steam_client().await?;
 
-        if let Err(error) = self
-            .launch_via_steam_url(&registration.shortcut_url)
-            .await
-        {
+        if let Err(error) = self.launch_via_steam_url(&registration.shortcut_url).await {
             warn_with_location(format!(
                 "Steam shortcut protocol launch failed after Steam restart for {}. Falling back to Steam executable URL launch: {}",
                 crate::services::logger::LoggerService::sanitize_log_text(game_dir),

@@ -2984,65 +2984,104 @@ export function ModsOverlay({
                   <div><span>Installed</span><strong>{selectedInstalledMod.version || 'unknown'}</strong></div>
                   <div><span>Latest</span><strong>{getInstalledModLatestVersion(selectedInstalledMod, modUpdates.get(selectedInstalledMod.fileName)) || 'unknown'}</strong></div>
                 </div>
-                <div className="workspace-inspector-card__actions">
-                  {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
+                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
+                    {selectedInstalledMod.disabled ? (
+                      <SimmButton type="button" className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>
+                        <Icon name="fas fa-check" />
+                        <span>Enable</span>
+                      </SimmButton>
+                    ) : (
+                      <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>
+                        <Icon name="fas fa-ban" />
+                        <span>Disable</span>
+                      </SimmButton>
+                    )}
                     <SimmButton
                       type="button"
                       variant="secondary"
                       className="btn btn-secondary"
-                      onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
+                      onClick={() => void handleUpdateMod(selectedInstalledMod)}
+                      disabled={!!getUpdateDisabledReason(
+                        selectedInstalledMod,
+                        modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                      )}
+                      title={getUpdateDisabledReason(
+                        selectedInstalledMod,
+                        modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                      ) || undefined}
                     >
-                      Security Report
+                      <Icon name="fas fa-arrow-up" />
+                      <span>Update</span>
                     </SimmButton>
-                  )}
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
-                    disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
-                  >
-                    {scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
-                      ? 'Scanning...'
-                      : selectedInstalledMod.securityScan
-                        ? 'Rescan Security'
-                        : 'Scan Security'}
-                  </SimmButton>
-                  {selectedInstalledMod.disabled ? (
-                    <SimmButton type="button" className="btn btn-primary" onClick={() => void handleEnableMod(selectedInstalledMod)}>Enable</SimmButton>
-                  ) : (
-                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => void handleDisableMod(selectedInstalledMod)}>Disable</SimmButton>
-                  )}
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() => void handleUpdateMod(selectedInstalledMod)}
-                    disabled={!!getUpdateDisabledReason(
-                      selectedInstalledMod,
-                      modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
+                    {isLinkableLocalMod(selectedInstalledMod) && (
+                      <SimmButton type="button" className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
+                        <Icon name="fas fa-plug" />
+                        <span>Link Source</span>
+                      </SimmButton>
                     )}
-                    title={getUpdateDisabledReason(
-                      selectedInstalledMod,
-                      modUpdates.get(selectedInstalledMod.fileName)?.updateAvailable,
-                    ) || undefined}
-                  >
-                    Update
-                  </SimmButton>
-                  {activeModViewSourceUrl && (
-                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
-                      Open Source Page
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
+                    {selectedInstalledMod.modStorageId && selectedInstalledMod.securityScan && (
+                      <SimmButton
+                        type="button"
+                        variant="secondary"
+                        className="btn btn-secondary"
+                        aria-label="Security Report"
+                        onClick={() => void openStoredSecurityReport(selectedInstalledMod.modStorageId!, `Security Report - ${selectedInstalledMod.name}`)}
+                      >
+                        <Icon name="fas fa-shield-halved" />
+                        <span>Report</span>
+                      </SimmButton>
+                    )}
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      className="btn btn-secondary"
+                      aria-label={
+                        scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
+                          ? 'Scanning...'
+                          : selectedInstalledMod.securityScan
+                            ? 'Rescan Security'
+                            : 'Scan Security'
+                      }
+                      onClick={() => void handleScanInstalledMod(selectedInstalledMod)}
+                      disabled={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`}
+                    >
+                      <Icon name={scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}` ? 'fas fa-spinner fa-spin' : 'fas fa-shield-alt'} />
+                      <span>
+                        {scanningInstalledMod === `${selectedInstalledMod.fileName}-${selectedInstalledMod.path}`
+                          ? 'Scanning...'
+                          : selectedInstalledMod.securityScan
+                            ? 'Rescan'
+                            : 'Scan'}
+                      </span>
                     </SimmButton>
-                  )}
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={handleOpenFolder}>Open Folder</SimmButton>
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>Open Config</SimmButton>
-                  <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>Open in Mod Library</SimmButton>
-                  {isLinkableLocalMod(selectedInstalledMod) && (
-                    <SimmButton type="button" className="btn btn-primary" onClick={() => openLocalSourceLink(selectedInstalledMod)}>
-                      Link Source
+                    {activeModViewSourceUrl && (
+                      <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open Source Page" onClick={() => openExternalSourceUrl(activeModViewSourceUrl)}>
+                        <Icon name="fas fa-arrow-up-right-from-square" />
+                        <span>Source</span>
+                      </SimmButton>
+                    )}
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open Folder" onClick={handleOpenFolder}>
+                      <Icon name="fas fa-folder-open" />
+                      <span>Folder</span>
                     </SimmButton>
-                  )}
-                  <SimmButton type="button" variant="destructive" className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>Uninstall from Environment</SimmButton>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open Config" onClick={() => onOpenConfig?.()} disabled={!onOpenConfig}>
+                      <Icon name="fas fa-file-lines" />
+                      <span>Config</span>
+                    </SimmButton>
+                    <SimmButton type="button" variant="secondary" className="btn btn-secondary" aria-label="Open in Mod Library" onClick={() => onOpenModLibrary?.()} disabled={!onOpenModLibrary}>
+                      <Icon name="fas fa-box-archive" />
+                      <span>Library</span>
+                    </SimmButton>
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--danger">
+                    <SimmButton type="button" variant="destructive" className="btn btn-danger" aria-label="Uninstall" onClick={() => requestDeleteMod(selectedInstalledMod)}>
+                      <Icon name="fas fa-trash" />
+                      <span>Uninstall from Environment</span>
+                    </SimmButton>
+                  </div>
                 </div>
               </div>
             )}

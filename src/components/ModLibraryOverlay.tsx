@@ -7379,109 +7379,124 @@ export function ModLibraryOverlay({
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="workspace-inspector-card__actions">
-                  {selectedDownloadedEntry.storageId &&
-                    selectedDownloadedEntry.securityScan && (
-                      <SimmButton
-                        type="button"
-                        variant="secondary"
-                        className="btn btn-secondary"
-                        onClick={() =>
-                          void openStoredSecurityReport(
-                            selectedDownloadedEntry.storageId,
-                            `Security Findings - ${selectedDownloadedEntry.displayName}`,
-                          )
-                        }
-                      >
-                        Security Report
-                      </SimmButton>
-                    )}
-                  {(() => {
-                    const installMoreOnly =
-                      selectedDownloadedGroup.installedIn.length > 0;
-                    const {
-                      installable,
-                      runtimeIncompatible,
-                      blockedBySiblingVersion,
-                      alreadyInstalled,
-                    } = getCompatibleInstallSummary(
-                      selectedDownloadedEntry,
-                      installMoreOnly,
-                    );
-                    const installDisabled = installable.length === 0;
-                    const installTitle = installDisabled
-                      ? buildInstallNoOpNotice(
-                          {
-                            installEntry: selectedDownloadedEntry,
-                            runtimeIncompatible,
-                            blockedBySiblingVersion,
-                            alreadyInstalled,
-                            installable,
-                            compatible: installable,
-                            excluded: runtimeIncompatible,
-                          },
-                          installMoreOnly,
-                        ).message
-                      : undefined;
-                    return (
-                      <SimmButton
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={() =>
-                          void promptInstallTargets(
-                            selectedDownloadedEntry,
-                            `Install ${selectedDownloadedEntry.displayName}`,
+                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
+                    {(() => {
+                      const installMoreOnly =
+                        selectedDownloadedGroup.installedIn.length > 0;
+                      const {
+                        installable,
+                        runtimeIncompatible,
+                        blockedBySiblingVersion,
+                        alreadyInstalled,
+                      } = getCompatibleInstallSummary(
+                        selectedDownloadedEntry,
+                        installMoreOnly,
+                      );
+                      const installDisabled = installable.length === 0;
+                      const installTitle = installDisabled
+                        ? buildInstallNoOpNotice(
+                            {
+                              installEntry: selectedDownloadedEntry,
+                              runtimeIncompatible,
+                              blockedBySiblingVersion,
+                              alreadyInstalled,
+                              installable,
+                              compatible: installable,
+                              excluded: runtimeIncompatible,
+                            },
                             installMoreOnly,
-                          )
-                        }
-                        disabled={installDisabled}
-                        title={installTitle}
-                      >
-                        {installMoreOnly ? "Install to more…" : "Install…"}
-                      </SimmButton>
-                    );
-                  })()}
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() =>
-                      void handleSelectVersion(
-                        selectedDownloadedGroup,
-                        selectedDownloadedEntry.storageId,
-                      )
-                    }
-                    disabled={
-                      selectedDownloadedGroup.installedIn.length === 0 ||
-                      selectedDownloadedGroupEntries.length < 2 ||
-                      activatingGroup === selectedDownloadedGroup.key
-                    }
-                  >
-                    {activatingGroup === selectedDownloadedGroup.key
-                      ? "Activating…"
-                      : "Activate selected version"}
-                  </SimmButton>
-                  <SimmButton
-                    type="button"
-                    variant="secondary"
-                    className="btn btn-secondary"
-                    onClick={() =>
-                      void handleUpdateAndActivateGroup(selectedDownloadedGroup)
-                    }
-                    disabled={!isGroupUpdateAvailable(selectedDownloadedGroup)}
-                  >
-                    Update and activate
-                  </SimmButton>
-                  <SimmButton
-                    type="button"
-                    variant="destructive"
-                    className="btn btn-danger"
-                    onClick={() =>
-                      void handleDeleteDownloadedGroup(selectedDownloadedGroup)
-                    }
-                  >
-                    Delete downloaded files
-                  </SimmButton>
+                          ).message
+                        : undefined;
+                      return (
+                        <SimmButton
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() =>
+                            void promptInstallTargets(
+                              selectedDownloadedEntry,
+                              `Install ${selectedDownloadedEntry.displayName}`,
+                              installMoreOnly,
+                            )
+                          }
+                          disabled={installDisabled}
+                          title={installTitle}
+                        >
+                          <Icon name="fas fa-download" />
+                          <span>{installMoreOnly ? "Install to more…" : "Install…"}</span>
+                        </SimmButton>
+                      );
+                    })()}
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      className="btn btn-secondary"
+                      onClick={() =>
+                        void handleUpdateAndActivateGroup(selectedDownloadedGroup)
+                      }
+                      disabled={!isGroupUpdateAvailable(selectedDownloadedGroup)}
+                    >
+                      <Icon name="fas fa-arrow-up" />
+                      <span>Update and activate</span>
+                    </SimmButton>
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
+                    {selectedDownloadedEntry.storageId &&
+                      selectedDownloadedEntry.securityScan && (
+                        <SimmButton
+                          type="button"
+                          variant="secondary"
+                          className="btn btn-secondary"
+                          aria-label="Security Report"
+                          onClick={() =>
+                            void openStoredSecurityReport(
+                              selectedDownloadedEntry.storageId,
+                              `Security Findings - ${selectedDownloadedEntry.displayName}`,
+                            )
+                          }
+                        >
+                          <Icon name="fas fa-shield-halved" />
+                          <span>Report</span>
+                        </SimmButton>
+                      )}
+                    <SimmButton
+                      type="button"
+                      variant="secondary"
+                      className="btn btn-secondary"
+                      aria-label="Activate selected version"
+                      onClick={() =>
+                        void handleSelectVersion(
+                          selectedDownloadedGroup,
+                          selectedDownloadedEntry.storageId,
+                        )
+                      }
+                      disabled={
+                        selectedDownloadedGroup.installedIn.length === 0 ||
+                        selectedDownloadedGroupEntries.length < 2 ||
+                        activatingGroup === selectedDownloadedGroup.key
+                      }
+                    >
+                      <Icon name={activatingGroup === selectedDownloadedGroup.key ? "fas fa-spinner fa-spin" : "fas fa-check"} />
+                      <span>
+                        {activatingGroup === selectedDownloadedGroup.key
+                          ? "Activating…"
+                          : "Activate"}
+                      </span>
+                    </SimmButton>
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--danger">
+                    <SimmButton
+                      type="button"
+                      variant="destructive"
+                      className="btn btn-danger"
+                      onClick={() =>
+                        void handleDeleteDownloadedGroup(selectedDownloadedGroup)
+                      }
+                    >
+                      <Icon name="fas fa-trash" />
+                      <span>Delete downloaded files</span>
+                    </SimmButton>
+                  </div>
                 </div>
               </div>
             )}
@@ -7616,51 +7631,61 @@ export function ModLibraryOverlay({
                     </>
                   );
                 })()}
-                <div className="workspace-inspector-card__actions">
-                  <SimmButton
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() =>
-                      void handleDownloadThunderstore(
-                        selectedThunderstorePackage,
-                        selectedThunderstoreVersion,
-                      )
-                    }
-                  >
-                    Download selected version
-                  </SimmButton>
-                  {downloadedGroupForSelectedThunderstore &&
-                    selectedThunderstoreDownloadedEntry && (
-                      <SimmButton
-                        type="button"
-                        variant="secondary"
-                        className="btn btn-secondary"
-                        onClick={() =>
-                          void promptInstallTargets(
-                            selectedThunderstoreDownloadedEntry,
-                            `Install ${selectedThunderstoreDownloadedEntry.displayName}`,
-                            downloadedGroupForSelectedThunderstore.installedIn
-                              .length > 0,
-                          )
-                        }
-                      >
-                        {downloadedGroupForSelectedThunderstore.installedIn
-                          .length > 0
-                          ? "Install library version…"
-                          : "Install library version"}
-                      </SimmButton>
-                    )}
-                  {safeExternalUrl(selectedThunderstorePackage.packageUrl) && (
-                    <a
-                      className="btn btn-secondary"
-                      href={
-                        safeExternalUrl(selectedThunderstorePackage.packageUrl)!
+                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
+                    <SimmButton
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() =>
+                        void handleDownloadThunderstore(
+                          selectedThunderstorePackage,
+                          selectedThunderstoreVersion,
+                        )
                       }
-                      target="_blank"
-                      rel="noopener noreferrer"
                     >
-                      Open source page
-                    </a>
+                      <Icon name="fas fa-download" />
+                      <span>Download selected version</span>
+                    </SimmButton>
+                    {downloadedGroupForSelectedThunderstore &&
+                      selectedThunderstoreDownloadedEntry && (
+                        <SimmButton
+                          type="button"
+                          variant="secondary"
+                          className="btn btn-secondary"
+                          onClick={() =>
+                            void promptInstallTargets(
+                              selectedThunderstoreDownloadedEntry,
+                              `Install ${selectedThunderstoreDownloadedEntry.displayName}`,
+                              downloadedGroupForSelectedThunderstore.installedIn
+                                .length > 0,
+                            )
+                          }
+                        >
+                          <Icon name="fas fa-box-archive" />
+                          <span>
+                            {downloadedGroupForSelectedThunderstore.installedIn
+                              .length > 0
+                              ? "Install library version…"
+                              : "Install library version"}
+                          </span>
+                        </SimmButton>
+                      )}
+                  </div>
+                  {safeExternalUrl(selectedThunderstorePackage.packageUrl) && (
+                    <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
+                      <a
+                        className="btn btn-secondary"
+                        aria-label="Open Source Page"
+                        href={
+                          safeExternalUrl(selectedThunderstorePackage.packageUrl)!
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        <Icon name="fas fa-arrow-up-right-from-square" />
+                        <span>Source</span>
+                      </a>
+                    </div>
                   )}
                 </div>
                 <section
@@ -7829,78 +7854,88 @@ export function ModLibraryOverlay({
                     )}
                   </div>
                 </div>
-                <div className="workspace-inspector-card__actions">
-                  <SimmButton
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() =>
-                      void handleDownloadNexusMod(
-                        selectedNexusResult.mod_id,
-                        selectedNexusFile,
-                      )
-                    }
-                    disabled={selectedNexusFiles.length === 0}
-                  >
-                    Download selected file
-                  </SimmButton>
-                  {downloadedGroupForSelectedNexus &&
-                    selectedNexusDownloadedEntry &&
-                    (() => {
-                      const installMoreOnly =
-                        downloadedGroupForSelectedNexus.installedIn.length > 0;
-                      const {
-                        installable,
-                        runtimeIncompatible,
-                        blockedBySiblingVersion,
-                        alreadyInstalled,
-                      } = getCompatibleInstallSummary(
-                        selectedNexusDownloadedEntry,
-                        installMoreOnly,
-                      );
-                      const installDisabled = installable.length === 0;
-                      const installTitle = installDisabled
-                        ? buildInstallNoOpNotice(
-                            {
-                              installEntry: selectedNexusDownloadedEntry,
-                              runtimeIncompatible,
-                              blockedBySiblingVersion,
-                              alreadyInstalled,
-                              installable,
-                              compatible: installable,
-                              excluded: runtimeIncompatible,
-                            },
-                            installMoreOnly,
-                          ).message
-                        : undefined;
-                      return (
-                        <SimmButton
-                          type="button"
-                          variant="secondary"
-                          className="btn btn-secondary"
-                          onClick={() =>
-                            void promptInstallTargets(
-                              selectedNexusDownloadedEntry,
-                              `Install ${selectedNexusDownloadedEntry.displayName}`,
+                <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
+                    <SimmButton
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() =>
+                        void handleDownloadNexusMod(
+                          selectedNexusResult.mod_id,
+                          selectedNexusFile,
+                        )
+                      }
+                      disabled={selectedNexusFiles.length === 0}
+                    >
+                      <Icon name="fas fa-download" />
+                      <span>Download selected file</span>
+                    </SimmButton>
+                    {downloadedGroupForSelectedNexus &&
+                      selectedNexusDownloadedEntry &&
+                      (() => {
+                        const installMoreOnly =
+                          downloadedGroupForSelectedNexus.installedIn.length > 0;
+                        const {
+                          installable,
+                          runtimeIncompatible,
+                          blockedBySiblingVersion,
+                          alreadyInstalled,
+                        } = getCompatibleInstallSummary(
+                          selectedNexusDownloadedEntry,
+                          installMoreOnly,
+                        );
+                        const installDisabled = installable.length === 0;
+                        const installTitle = installDisabled
+                          ? buildInstallNoOpNotice(
+                              {
+                                installEntry: selectedNexusDownloadedEntry,
+                                runtimeIncompatible,
+                                blockedBySiblingVersion,
+                                alreadyInstalled,
+                                installable,
+                                compatible: installable,
+                                excluded: runtimeIncompatible,
+                              },
                               installMoreOnly,
-                            )
-                          }
-                          disabled={installDisabled}
-                          title={installTitle}
-                        >
-                          {installMoreOnly
-                            ? "Install library version…"
-                            : "Install library version"}
-                        </SimmButton>
-                      );
-                    })()}
-                  <a
-                    className="btn btn-secondary"
-                    href={`https://www.nexusmods.com/schedule1/mods/${selectedNexusResult.mod_id}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    Open source page
-                  </a>
+                            ).message
+                          : undefined;
+                        return (
+                          <SimmButton
+                            type="button"
+                            variant="secondary"
+                            className="btn btn-secondary"
+                            onClick={() =>
+                              void promptInstallTargets(
+                                selectedNexusDownloadedEntry,
+                                `Install ${selectedNexusDownloadedEntry.displayName}`,
+                                installMoreOnly,
+                              )
+                            }
+                            disabled={installDisabled}
+                            title={installTitle}
+                          >
+                            <Icon name="fas fa-box-archive" />
+                            <span>
+                              {installMoreOnly
+                                ? "Install library version…"
+                                : "Install library version"}
+                            </span>
+                          </SimmButton>
+                        );
+                      })()}
+                  </div>
+                  <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--secondary">
+                    <a
+                      className="btn btn-secondary"
+                      aria-label="Open Source Page"
+                      href={`https://www.nexusmods.com/schedule1/mods/${selectedNexusResult.mod_id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <Icon name="fas fa-arrow-up-right-from-square" />
+                      <span>Source</span>
+                    </a>
+                  </div>
                 </div>
                 <section
                   className="workspace-inspector-card__subsection"
