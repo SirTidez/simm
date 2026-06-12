@@ -7,7 +7,7 @@ import {
   useCallback,
   useRef,
 } from 'react';
-import type { ComponentType, TransitionEvent } from 'react';
+import type { ComponentType, ReactNode, TransitionEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrent as getCurrentDeepLink, onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -189,6 +189,136 @@ function WorkspacePanelFallback() {
       </div>
     </div>
   );
+}
+
+type StartupPhase = 'directories' | 'database' | 'services' | 'ready';
+
+const startupSteps: ReadonlyArray<{ phase: StartupPhase; label: string }> = [
+  { phase: 'directories', label: 'Preparing SIMM folders' },
+  { phase: 'database', label: 'Checking database, backups, and migrations' },
+  { phase: 'services', label: 'Starting workspace services' },
+  { phase: 'ready', label: 'Opening workspace' },
+];
+
+function waitForStartupFrame() {
+  return new Promise<void>((resolve) => {
+    if (typeof window.requestAnimationFrame !== 'function') {
+      window.setTimeout(resolve, 0);
+      return;
+    }
+
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+function StartupLoadingScreen({
+  phase,
+  error,
+  onRetry,
+}: {
+  phase: StartupPhase;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  const activeIndex = startupSteps.findIndex((step) => step.phase === phase);
+
+  return (
+    <div className="boot-screen" role={error ? 'alert' : 'status'} aria-live={error ? 'assertive' : 'polite'}>
+      <div className="boot-card">
+        <div className="boot-title">Schedule I</div>
+        <div className="boot-subtitle">
+          {error ? 'Startup needs your attention' : 'Preparing the dev environment'}
+        </div>
+        {!error && (
+          <div className="boot-loader" aria-hidden="true">
+            <span className="boot-dot" />
+            <span className="boot-dot" />
+            <span className="boot-dot" />
+          </div>
+        )}
+        <div className="boot-startup-steps">
+          {startupSteps.map((step, index) => {
+            const isActive = index === activeIndex;
+            const isComplete = activeIndex > index;
+            return (
+              <div
+                key={step.phase}
+                className={`boot-startup-step${isActive ? ' boot-startup-step--active' : ''}${isComplete ? ' boot-startup-step--complete' : ''}`}
+              >
+                <span className="boot-startup-step__marker" aria-hidden="true" />
+                <span>{step.label}</span>
+              </div>
+            );
+          })}
+        </div>
+        {error ? (
+          <>
+            <p className="boot-error">{error}</p>
+            <button className="btn btn-primary" type="button" onClick={onRetry}>
+              Retry startup
+            </button>
+          </>
+        ) : (
+          <div className="boot-bar" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StartupGate({ children }: { children: ReactNode }) {
+  const [ready, setReady] = useState(false);
+  const [phase, setPhase] = useState<StartupPhase>('directories');
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const prepare = async () => {
+      setReady(false);
+      setError(null);
+      setPhase('directories');
+
+      await waitForStartupFrame();
+      if (cancelled) return;
+
+      setPhase('database');
+      await waitForStartupFrame();
+      if (cancelled) return;
+
+      try {
+        await ApiService.prepareApp();
+        if (cancelled) return;
+        setPhase('services');
+        await waitForStartupFrame();
+        if (cancelled) return;
+        setPhase('ready');
+        setReady(true);
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to prepare SIMM startup');
+      }
+    };
+
+    void prepare();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt]);
+
+  if (!ready) {
+    return (
+      <StartupLoadingScreen
+        phase={phase}
+        error={error}
+        onRetry={() => setAttempt((value) => value + 1)}
+      />
+    );
+  }
+
+  return <>{children}</>;
 }
 
 const normalizeVersionCore = (value: string) => {
@@ -2421,15 +2551,23 @@ function AppContent() {
 }
 
 export function App() {
+  const appContent = (
+    <SettingsStoreProvider>
+      <EnvironmentStoreProvider>
+        <DownloadStatusStoreProvider>
+          <AppContent />
+        </DownloadStatusStoreProvider>
+      </EnvironmentStoreProvider>
+    </SettingsStoreProvider>
+  );
+
   return (
     <ErrorBoundary>
-      <SettingsStoreProvider>
-        <EnvironmentStoreProvider>
-          <DownloadStatusStoreProvider>
-            <AppContent />
-          </DownloadStatusStoreProvider>
-        </EnvironmentStoreProvider>
-      </SettingsStoreProvider>
+      {import.meta.env.MODE === 'test' ? appContent : (
+        <StartupGate>
+          {appContent}
+        </StartupGate>
+      )}
     </ErrorBoundary>
   );
 }

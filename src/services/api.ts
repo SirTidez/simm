@@ -50,6 +50,10 @@ export class ApiService {
     return invoke('get_app_startup_state');
   }
 
+  static async prepareApp(): Promise<AppStartupState> {
+    return invoke('prepare_app');
+  }
+
   static async checkAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateStatus> {
     return invoke('check_app_update', { channel: channel ?? null });
   }
