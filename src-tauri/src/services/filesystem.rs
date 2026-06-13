@@ -1,6 +1,7 @@
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 const STEAM_SHORTCUT_TAG: &str = "SIMM";
@@ -16,6 +17,7 @@ enum BinaryVdfValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SteamShortcutRegistration {
     shortcut_url: String,
+    shortcut_app_id: u32,
     shortcuts_file: PathBuf,
     status: SteamShortcutStatus,
 }
@@ -25,6 +27,43 @@ enum SteamShortcutStatus {
     Inserted,
     Updated,
     Unchanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SteamLaunchCommand {
+    program: PathBuf,
+    prefix_args: Vec<String>,
+}
+
+impl SteamLaunchCommand {
+    fn new(program: impl Into<PathBuf>, prefix_args: Vec<String>) -> Self {
+        Self {
+            program: program.into(),
+            prefix_args,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.prefix_args);
+        command
+    }
+
+    fn display(&self) -> String {
+        let mut parts = vec![self.program.to_string_lossy().to_string()];
+        parts.extend(self.prefix_args.iter().cloned());
+        parts.join(" ")
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteamShortcutSetup {
+    pub shortcut_url: String,
+    pub shortcut_app_id: u32,
+    pub shortcuts_file: String,
+    pub status: String,
+    pub requires_client_reload: bool,
 }
 
 #[derive(Clone)]
@@ -201,7 +240,10 @@ impl FileSystemService {
             ));
         }
 
-        if Self::steam_shortcut_requires_client_reload(&registration.shortcuts_file) {
+        if Self::steam_shortcut_status_requires_client_reload(
+            registration.status,
+            &registration.shortcuts_file,
+        ) {
             let message = Self::steam_shortcut_reload_message(game_dir);
             warn_with_location(&message);
             return Err(anyhow::anyhow!(message));
@@ -269,7 +311,12 @@ impl FileSystemService {
         self.ensure_steam_appid_file(game_dir, app_id).await?;
 
         let shortcut_name = Self::steam_shortcut_name_for_dir(game_dir);
-        let shortcut = SteamShortcut::new(shortcut_name, executable_path, PathBuf::from(game_dir));
+        let shortcut = SteamShortcut::new(
+            shortcut_name,
+            executable_path,
+            PathBuf::from(game_dir),
+            Self::steam_shortcut_launch_options(),
+        );
         let shortcut_app_id = shortcut.app_id();
         let shortcut_url = format!(
             "steam://rungameid/{}",
@@ -280,9 +327,47 @@ impl FileSystemService {
 
         Ok(SteamShortcutRegistration {
             shortcut_url,
+            shortcut_app_id,
             shortcuts_file,
             status,
         })
+    }
+
+    pub async fn ensure_schedule_i_steam_shortcut(
+        &self,
+        game_dir: &str,
+    ) -> Result<SteamShortcutSetup> {
+        let app_id = crate::services::steam::SteamService::get_steam_app_id();
+        let registration = self
+            .prepare_steam_shortcut_registration(&app_id, game_dir)
+            .await?;
+
+        Ok(SteamShortcutSetup {
+            shortcut_url: registration.shortcut_url,
+            shortcut_app_id: registration.shortcut_app_id,
+            shortcuts_file: registration.shortcuts_file.to_string_lossy().to_string(),
+            status: match registration.status {
+                SteamShortcutStatus::Inserted => "inserted",
+                SteamShortcutStatus::Updated => "updated",
+                SteamShortcutStatus::Unchanged => "unchanged",
+            }
+            .to_string(),
+            requires_client_reload: Self::steam_shortcut_status_requires_client_reload(
+                registration.status,
+                &registration.shortcuts_file,
+            ),
+        })
+    }
+
+    pub(crate) fn schedule_i_shortcut_app_id_for_dir(&self, game_dir: &str) -> Result<u32> {
+        let executable_path = self.resolve_game_executable(game_dir)?;
+        let shortcut = SteamShortcut::new(
+            Self::steam_shortcut_name_for_dir(game_dir),
+            executable_path,
+            PathBuf::from(game_dir),
+            Self::steam_shortcut_launch_options(),
+        );
+        Ok(shortcut.app_id())
     }
 
     async fn launch_via_steam_protocol(&self, app_id: &str) -> Result<()> {
@@ -339,21 +424,21 @@ impl FileSystemService {
     }
 
     async fn launch_via_steam_executable_url(&self, url: &str) -> Result<()> {
-        let steam_exe = Self::steam_executable_path()?;
+        let steam_command = Self::steam_launch_command()?;
 
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new(&steam_exe)
-                .arg(url)
-                .creation_flags(0x08000000)
+            let mut command = steam_command.command();
+            command.arg(url).creation_flags(0x08000000);
+            command
                 .spawn()
                 .context("Failed to launch Steam shortcut URL")
                 .map_err(|error| {
                     error_with_location(format!(
-                        "Failed to spawn Steam executable {} for shortcut URL: {}",
+                        "Failed to spawn Steam command {} for shortcut URL: {}",
                         crate::services::logger::LoggerService::sanitize_log_text(
-                            &steam_exe.to_string_lossy()
+                            &steam_command.display()
                         ),
                         error
                     ));
@@ -363,15 +448,16 @@ impl FileSystemService {
 
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new(&steam_exe)
+            let mut command = steam_command.command();
+            command
                 .arg(url)
                 .spawn()
                 .context("Failed to launch Steam shortcut URL")
                 .map_err(|error| {
                     error_with_location(format!(
-                        "Failed to spawn Steam executable {} for shortcut URL: {}",
+                        "Failed to spawn Steam command {} for shortcut URL: {}",
                         crate::services::logger::LoggerService::sanitize_log_text(
-                            &steam_exe.to_string_lossy()
+                            &steam_command.display()
                         ),
                         error
                     ));
@@ -383,15 +469,7 @@ impl FileSystemService {
     }
 
     fn resolve_game_executable(&self, game_dir: &str) -> Result<PathBuf> {
-        let executable_name = if cfg!(target_os = "windows") {
-            "Schedule I.exe"
-        } else if cfg!(target_os = "macos") {
-            "Schedule I.app"
-        } else {
-            "Schedule I"
-        };
-
-        let executable_path = Path::new(game_dir).join(executable_name);
+        let executable_path = Path::new(game_dir).join(Self::schedule_i_executable_name());
         if executable_path.exists() {
             return Ok(executable_path);
         }
@@ -441,11 +519,28 @@ impl FileSystemService {
         )
     }
 
+    fn schedule_i_executable_name() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "Schedule I.app"
+        } else {
+            "Schedule I.exe"
+        }
+    }
+
+    fn steam_shortcut_launch_options() -> String {
+        if cfg!(target_os = "linux") {
+            crate::services::melon_loader::MelonLoaderService::linux_melonloader_launch_options()
+                .to_string()
+        } else {
+            String::new()
+        }
+    }
+
     fn steam_shortcut_long_id(app_id: u32) -> u64 {
         ((app_id as u64) << 32) | 0x0200_0000
     }
 
-    fn steam_executable_path() -> Result<PathBuf> {
+    fn steam_launch_command() -> Result<SteamLaunchCommand> {
         let steam_path =
             crate::services::steam::SteamService::get_steam_path().ok_or_else(|| {
                 let message = "Steam installation not found";
@@ -453,30 +548,94 @@ impl FileSystemService {
                 anyhow::anyhow!(message)
             })?;
 
-        let steam_exe = if cfg!(target_os = "windows") {
-            steam_path.join("steam.exe")
-        } else if cfg!(target_os = "macos") {
-            steam_path
-                .join("Steam.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("steam.sh")
-        } else {
-            steam_path.join("steam")
-        };
-
-        if steam_exe.exists() {
-            Ok(steam_exe)
-        } else {
+        Self::steam_launch_command_from_root(&steam_path).ok_or_else(|| {
             let message = format!(
-                "Steam executable not found at {}",
+                "Steam launch command not found for Steam root {}",
                 crate::services::logger::LoggerService::sanitize_log_text(
-                    &steam_exe.to_string_lossy()
+                    &steam_path.to_string_lossy()
                 )
             );
             error_with_location(&message);
-            Err(anyhow::anyhow!(message))
+            anyhow::anyhow!(message)
+        })
+    }
+
+    fn steam_launch_command_from_root(steam_path: &Path) -> Option<SteamLaunchCommand> {
+        #[cfg(target_os = "windows")]
+        {
+            let steam_exe = steam_path.join("steam.exe");
+            return Self::launchable_file_command(&steam_exe);
         }
+
+        #[cfg(target_os = "macos")]
+        {
+            let steam_sh = steam_path
+                .join("Steam.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("steam.sh");
+            return Self::launchable_file_command(&steam_sh);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if Self::is_flatpak_steam_root(steam_path) {
+                if let Some(command) = Self::flatpak_steam_command() {
+                    return Some(command);
+                }
+            }
+
+            for candidate in [steam_path.join("steam"), steam_path.join("steam.sh")] {
+                if let Some(command) = Self::launchable_file_command(&candidate) {
+                    return Some(command);
+                }
+            }
+
+            if let Some(command) = Self::path_command_candidate("steam") {
+                return Some(SteamLaunchCommand::new(command, Vec::new()));
+            }
+
+            Self::flatpak_steam_command()
+        }
+    }
+
+    fn launchable_file_command(path: &Path) -> Option<SteamLaunchCommand> {
+        if path.is_file() {
+            Some(SteamLaunchCommand::new(path.to_path_buf(), Vec::new()))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_flatpak_steam_root(path: &Path) -> bool {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        normalized.contains("/.var/app/com.valvesoftware.Steam/.local/share/Steam")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn flatpak_steam_command() -> Option<SteamLaunchCommand> {
+        let flatpak = Self::path_command_candidate("flatpak")?;
+        let status = Command::new(&flatpak)
+            .args(["info", "com.valvesoftware.Steam"])
+            .status()
+            .ok()?;
+        if status.success() {
+            Some(SteamLaunchCommand::new(
+                flatpak,
+                vec!["run".to_string(), "com.valvesoftware.Steam".to_string()],
+            ))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn path_command_candidate(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
     }
 
     fn upsert_steam_shortcut(
@@ -576,18 +735,33 @@ impl FileSystemService {
     }
 
     fn steam_shortcut_requires_client_reload(shortcuts_file: &Path) -> bool {
-        let Ok(modified_at) = shortcuts_file
+        let modified_at = shortcuts_file
             .metadata()
             .and_then(|metadata| metadata.modified())
-        else {
-            return false;
-        };
+            .ok();
 
-        let Some(steam_started_at) = Self::steam_process_started_at() else {
-            return false;
-        };
+        Self::steam_shortcut_requires_client_reload_for_times(
+            modified_at,
+            Self::steam_process_started_at(),
+        )
+    }
 
-        modified_at > steam_started_at
+    fn steam_shortcut_status_requires_client_reload(
+        status: SteamShortcutStatus,
+        shortcuts_file: &Path,
+    ) -> bool {
+        status != SteamShortcutStatus::Unchanged
+            || Self::steam_shortcut_requires_client_reload(shortcuts_file)
+    }
+
+    fn steam_shortcut_requires_client_reload_for_times(
+        shortcut_modified_at: Option<SystemTime>,
+        steam_started_at: Option<SystemTime>,
+    ) -> bool {
+        match (shortcut_modified_at, steam_started_at) {
+            (Some(modified_at), Some(started_at)) => modified_at > started_at,
+            _ => false,
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -620,7 +794,61 @@ impl FileSystemService {
         Some(SystemTime::UNIX_EPOCH + Duration::from_millis(millis as u64))
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    fn steam_process_started_at() -> Option<SystemTime> {
+        let pid = Self::linux_steam_process_id()?;
+        let output = std::process::Command::new("ps")
+            .args(["-o", "etimes=", "-p", &pid])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        Self::linux_process_started_at_from_etimes(&stdout, SystemTime::now())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_steam_process_id() -> Option<String> {
+        let candidates: &[&[&str]] = &[
+            &["-xo", "steam"],
+            &["-fo", r"(^|/)steam( |$)"],
+            &["-fo", "steam"],
+        ];
+
+        candidates.iter().find_map(|args| {
+            let output = std::process::Command::new("pgrep")
+                .args(*args)
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+
+            String::from_utf8(output.stdout)
+                .ok()?
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && line.chars().all(|ch| ch.is_ascii_digit()))
+                .map(ToOwned::to_owned)
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_process_started_at_from_etimes(output: &str, now: SystemTime) -> Option<SystemTime> {
+        let elapsed_seconds = output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?
+            .parse::<u64>()
+            .ok()?;
+
+        now.checked_sub(Duration::from_secs(elapsed_seconds))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     fn steam_process_started_at() -> Option<SystemTime> {
         None
     }
@@ -637,15 +865,7 @@ impl FileSystemService {
             self.ensure_steam_running().await?;
 
             // Launch the game executable directly - Steam will inject its API if running
-            let executable_name = if cfg!(target_os = "windows") {
-                "Schedule I.exe"
-            } else if cfg!(target_os = "macos") {
-                "Schedule I.app"
-            } else {
-                "Schedule I"
-            };
-
-            let executable_path = Path::new(dir).join(executable_name);
+            let executable_path = Path::new(dir).join(Self::schedule_i_executable_name());
             if !executable_path.exists() {
                 let message = format!(
                     "Game executable not found at {}",
@@ -686,22 +906,24 @@ impl FileSystemService {
         }
 
         // For Steam's own installations, use standard Steam launch
-        let steam_exe = Self::steam_executable_path()?;
+        let steam_command = Self::steam_launch_command()?;
 
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new(&steam_exe)
+            let mut command = steam_command.command();
+            command
                 .arg("-applaunch")
                 .arg(app_id)
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .creation_flags(0x08000000);
+            command
                 .spawn()
                 .context("Failed to launch game via Steam")
                 .map_err(|error| {
                     error_with_location(format!(
-                        "Failed to spawn Steam executable {} for app {}: {}",
+                        "Failed to spawn Steam command {} for app {}: {}",
                         crate::services::logger::LoggerService::sanitize_log_text(
-                            &steam_exe.to_string_lossy()
+                            &steam_command.display()
                         ),
                         app_id,
                         error
@@ -712,16 +934,17 @@ impl FileSystemService {
 
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new(&steam_exe)
+            let mut command = steam_command.command();
+            command
                 .arg("-applaunch")
                 .arg(app_id)
                 .spawn()
                 .context("Failed to launch game via Steam")
                 .map_err(|error| {
                     error_with_location(format!(
-                        "Failed to spawn Steam executable {} for app {}: {}",
+                        "Failed to spawn Steam command {} for app {}: {}",
                         crate::services::logger::LoggerService::sanitize_log_text(
-                            &steam_exe.to_string_lossy()
+                            &steam_command.display()
                         ),
                         app_id,
                         error
@@ -734,9 +957,9 @@ impl FileSystemService {
     }
 
     async fn ensure_steam_running(&self) -> Result<()> {
-        let steam_exe = Self::steam_executable_path()?;
+        let steam_command = Self::steam_launch_command()?;
 
-        if Self::is_steam_running(&steam_exe) {
+        if Self::is_steam_running(&steam_command.program) {
             return Ok(());
         }
 
@@ -744,15 +967,16 @@ impl FileSystemService {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new(&steam_exe)
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+            let mut command = steam_command.command();
+            command.creation_flags(0x08000000);
+            command
                 .spawn()
                 .context("Failed to start Steam")
                 .map_err(|error| {
                     error_with_location(format!(
-                        "Failed to start Steam executable {}: {}",
+                        "Failed to start Steam command {}: {}",
                         crate::services::logger::LoggerService::sanitize_log_text(
-                            &steam_exe.to_string_lossy()
+                            &steam_command.display()
                         ),
                         error
                     ));
@@ -762,14 +986,15 @@ impl FileSystemService {
 
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new(&steam_exe)
+            steam_command
+                .command()
                 .spawn()
                 .context("Failed to start Steam")
                 .map_err(|error| {
                     error_with_location(format!(
-                        "Failed to start Steam executable {}: {}",
+                        "Failed to start Steam command {}: {}",
                         crate::services::logger::LoggerService::sanitize_log_text(
-                            &steam_exe.to_string_lossy()
+                            &steam_command.display()
                         ),
                         error
                     ));
@@ -783,30 +1008,31 @@ impl FileSystemService {
         Ok(())
     }
 
-    async fn restart_steam_client(&self) -> Result<()> {
-        let steam_exe = Self::steam_executable_path()?;
+    pub(crate) async fn restart_steam_client(&self) -> Result<()> {
+        let steam_command = Self::steam_launch_command()?;
 
-        if Self::is_steam_running(&steam_exe) {
+        if Self::is_steam_running(&steam_command.program) {
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
-                std::process::Command::new(&steam_exe)
-                    .arg("-shutdown")
-                    .creation_flags(0x08000000)
+                let mut command = steam_command.command();
+                command.arg("-shutdown").creation_flags(0x08000000);
+                command
                     .spawn()
                     .context("Failed to request Steam shutdown")?;
             }
 
             #[cfg(not(target_os = "windows"))]
             {
-                std::process::Command::new(&steam_exe)
+                let mut command = steam_command.command();
+                command
                     .arg("-shutdown")
                     .spawn()
                     .context("Failed to request Steam shutdown")?;
             }
 
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            while Self::is_steam_running(&steam_exe) {
+            while Self::is_steam_running(&steam_command.program) {
                 if std::time::Instant::now() >= deadline {
                     return Err(anyhow::anyhow!(
                         "Steam did not exit after SIMM requested shutdown. Close Steam manually, then click Launch again."
@@ -819,21 +1045,21 @@ impl FileSystemService {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new(&steam_exe)
-                .creation_flags(0x08000000)
-                .spawn()
-                .context("Failed to restart Steam")?;
+            let mut command = steam_command.command();
+            command.creation_flags(0x08000000);
+            command.spawn().context("Failed to restart Steam")?;
         }
 
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new(&steam_exe)
+            steam_command
+                .command()
                 .spawn()
                 .context("Failed to restart Steam")?;
         }
 
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
-        while !Self::is_steam_running(&steam_exe) {
+        while !Self::is_steam_running(&steam_command.program) {
             if std::time::Instant::now() >= deadline {
                 return Err(anyhow::anyhow!(
                     "Steam did not start after SIMM requested restart. Start Steam manually, then click Launch again."
@@ -846,11 +1072,11 @@ impl FileSystemService {
         Ok(())
     }
 
-    fn is_steam_running(steam_exe: &Path) -> bool {
+    fn is_steam_running(_steam_exe: &Path) -> bool {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            let steam_exe_name = steam_exe
+            let steam_exe_name = _steam_exe
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| "steam.exe".to_string());
@@ -878,16 +1104,14 @@ impl FileSystemService {
     }
 
     async fn launch_directly(&self, game_dir: &str) -> Result<String> {
-        // Find the game executable
-        let executable_name = if cfg!(target_os = "windows") {
-            "Schedule I.exe"
-        } else if cfg!(target_os = "macos") {
-            "Schedule I.app"
-        } else {
-            "Schedule I"
-        };
+        if cfg!(target_os = "linux") {
+            let message = "Direct local launch is not supported on Linux because Schedule I runs through Steam Proton. Use Steam launch instead.";
+            warn_with_location(message);
+            return Err(anyhow::anyhow!(message));
+        }
 
-        let executable_path = Path::new(game_dir).join(executable_name);
+        // Find the game executable
+        let executable_path = Path::new(game_dir).join(Self::schedule_i_executable_name());
 
         if !executable_path.exists() {
             let message = format!(
@@ -972,10 +1196,16 @@ struct SteamShortcut {
     exe: String,
     start_dir: String,
     icon: String,
+    launch_options: String,
 }
 
 impl SteamShortcut {
-    fn new(app_name: String, executable_path: PathBuf, start_dir: PathBuf) -> Self {
+    fn new(
+        app_name: String,
+        executable_path: PathBuf,
+        start_dir: PathBuf,
+        launch_options: String,
+    ) -> Self {
         let exe = quote_steam_shortcut_path(&executable_path);
         let start_dir = quote_steam_shortcut_path(&start_dir);
 
@@ -984,6 +1214,7 @@ impl SteamShortcut {
             icon: executable_path.to_string_lossy().to_string(),
             exe,
             start_dir,
+            launch_options,
         }
     }
 
@@ -1016,7 +1247,7 @@ impl SteamShortcut {
             ),
             (
                 "LaunchOptions".to_string(),
-                BinaryVdfValue::String(String::new()),
+                BinaryVdfValue::String(self.launch_options.clone()),
             ),
             ("IsHidden".to_string(), BinaryVdfValue::Int32(0)),
             ("AllowDesktopConfig".to_string(), BinaryVdfValue::Int32(1)),
@@ -1275,7 +1506,7 @@ fn crc32_ieee(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     #[tokio::test]
     async fn launch_game_rejects_unknown_method() {
@@ -1295,6 +1526,11 @@ mod tests {
             .launch_game(Some(temp.path().to_string_lossy().as_ref()), Some("direct"))
             .await
             .expect_err("expected missing executable error");
+        #[cfg(target_os = "linux")]
+        assert!(err
+            .to_string()
+            .contains("Direct local launch is not supported on Linux"));
+        #[cfg(not(target_os = "linux"))]
         assert!(err.to_string().contains("Game executable not found"));
     }
 
@@ -1329,6 +1565,7 @@ mod tests {
             exe: "\"C:\\Games\\Schedule I Custom\\Schedule I.exe\"".to_string(),
             start_dir: "\"C:\\Games\\Schedule I Custom\"".to_string(),
             icon: "C:\\Games\\Schedule I Custom\\Schedule I.exe".to_string(),
+            launch_options: String::new(),
         };
 
         let app_id = shortcut.app_id();
@@ -1350,12 +1587,129 @@ mod tests {
     }
 
     #[test]
+    fn steam_shortcut_reload_check_requires_known_modified_and_started_times() {
+        let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let modified_after = SystemTime::UNIX_EPOCH + Duration::from_secs(101);
+        let modified_before = SystemTime::UNIX_EPOCH + Duration::from_secs(99);
+
+        assert!(
+            FileSystemService::steam_shortcut_requires_client_reload_for_times(
+                Some(modified_after),
+                Some(started_at)
+            )
+        );
+        assert!(
+            !FileSystemService::steam_shortcut_requires_client_reload_for_times(
+                Some(modified_before),
+                Some(started_at)
+            )
+        );
+        assert!(
+            !FileSystemService::steam_shortcut_requires_client_reload_for_times(
+                None,
+                Some(started_at)
+            )
+        );
+        assert!(
+            !FileSystemService::steam_shortcut_requires_client_reload_for_times(
+                Some(modified_after),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn steam_shortcut_reload_check_requires_reload_after_insert_or_update() {
+        let temp = TempDir::new().expect("temp dir");
+        let shortcuts_file = temp.path().join("shortcuts.vdf");
+        std::fs::write(&shortcuts_file, b"shortcuts").expect("write shortcuts");
+
+        assert!(
+            FileSystemService::steam_shortcut_status_requires_client_reload(
+                SteamShortcutStatus::Inserted,
+                &shortcuts_file
+            )
+        );
+        assert!(
+            FileSystemService::steam_shortcut_status_requires_client_reload(
+                SteamShortcutStatus::Updated,
+                &shortcuts_file
+            )
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_process_started_at_from_etimes_uses_elapsed_seconds() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let started_at = FileSystemService::linux_process_started_at_from_etimes("  42\n", now)
+            .expect("started time");
+
+        assert_eq!(
+            started_at,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(958)
+        );
+        assert!(
+            FileSystemService::linux_process_started_at_from_etimes("not-a-number\n", now)
+                .is_none()
+        );
+        assert!(FileSystemService::linux_process_started_at_from_etimes("", now).is_none());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn schedule_i_executable_name_uses_windows_binary_for_proton_builds() {
+        assert_eq!(
+            FileSystemService::schedule_i_executable_name(),
+            "Schedule I.exe"
+        );
+    }
+
+    #[test]
+    fn steam_shortcut_launch_options_are_platform_specific() {
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                FileSystemService::steam_shortcut_launch_options(),
+                "WINEDLLOVERRIDES=\"version=n,b\" %command%"
+            );
+        } else {
+            assert!(FileSystemService::steam_shortcut_launch_options().is_empty());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_launch_command_detects_flatpak_steam_root_shape() {
+        let root = Path::new("/home/example/.var/app/com.valvesoftware.Steam/.local/share/Steam");
+
+        assert!(FileSystemService::is_flatpak_steam_root(root));
+        assert!(!FileSystemService::is_flatpak_steam_root(Path::new(
+            "/home/example/.local/share/Steam"
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn steam_launch_command_from_root_uses_root_steam_sh_candidate() {
+        let temp = tempdir().expect("temp dir");
+        let steam_sh = temp.path().join("steam.sh");
+        std::fs::write(&steam_sh, "#!/bin/sh\n").expect("create steam.sh");
+
+        let command = FileSystemService::steam_launch_command_from_root(temp.path())
+            .expect("steam launch command");
+
+        assert_eq!(command.program, steam_sh);
+        assert!(command.prefix_args.is_empty());
+    }
+
+    #[test]
     fn binary_vdf_round_trips_shortcuts() {
         let shortcut = SteamShortcut {
             app_name: "SIMM - Schedule I Custom".to_string(),
             exe: "\"C:\\Games\\Schedule I Custom\\Schedule I.exe\"".to_string(),
             start_dir: "\"C:\\Games\\Schedule I Custom\"".to_string(),
             icon: "C:\\Games\\Schedule I Custom\\Schedule I.exe".to_string(),
+            launch_options: String::new(),
         };
         let root = vec![(
             "shortcuts".to_string(),
@@ -1377,12 +1731,14 @@ mod tests {
             exe: "\"C:\\Games\\Schedule I\\Schedule I.exe\"".to_string(),
             start_dir: "\"C:\\Games\\Schedule I\"".to_string(),
             icon: "C:\\Games\\Schedule I\\Schedule I.exe".to_string(),
+            launch_options: String::new(),
         };
         let updated = SteamShortcut {
             app_name: "SIMM - Schedule I".to_string(),
             exe: original.exe.clone(),
             start_dir: original.start_dir.clone(),
             icon: original.icon.clone(),
+            launch_options: String::new(),
         };
         let mut shortcuts = vec![(
             "0".to_string(),
@@ -1406,6 +1762,7 @@ mod tests {
             exe: "\"C:\\Games\\Schedule I\\Schedule I.exe\"".to_string(),
             start_dir: "\"C:\\Games\\Schedule I\"".to_string(),
             icon: "C:\\Games\\Schedule I\\Schedule I.exe".to_string(),
+            launch_options: String::new(),
         };
         let mut shortcuts = vec![(
             "0".to_string(),
@@ -1425,6 +1782,7 @@ mod tests {
             exe: "\"C:\\Games\\Schedule I\\Schedule I.exe\"".to_string(),
             start_dir: "\"C:\\Games\\Schedule I\"".to_string(),
             icon: "C:\\Games\\Schedule I\\Schedule I.exe".to_string(),
+            launch_options: "WINEDLLOVERRIDES=\"version=n,b\" %command%".to_string(),
         };
         let mut shortcuts = Vec::new();
 
@@ -1432,6 +1790,13 @@ mod tests {
 
         assert_eq!(status, SteamShortcutStatus::Inserted);
         assert_eq!(shortcuts.len(), 1);
+        let BinaryVdfValue::Object(entry) = &shortcuts[0].1 else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            get_vdf_string(entry, "LaunchOptions"),
+            Some("WINEDLLOVERRIDES=\"version=n,b\" %command%")
+        );
     }
 
     #[test]

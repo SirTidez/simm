@@ -5656,6 +5656,95 @@ body::before {
   gap: 0.2rem;
 }
 
+.auth-modal__mode-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.5rem;
+}
+
+.auth-modal__mode-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 2.4rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(101, 132, 172, 0.26);
+  background: rgba(12, 20, 32, 0.68);
+  color: #b8c9df;
+  font-size: 0.84rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-modal__mode-button:hover:not(:disabled) {
+  border-color: rgba(119, 158, 212, 0.54);
+  color: #eef5ff;
+}
+
+.auth-modal__mode-button--active {
+  border-color: rgba(110, 161, 244, 0.76);
+  background: rgba(58, 103, 171, 0.34);
+  color: #eef5ff;
+}
+
+.auth-modal__mode-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.auth-modal__qr-panel {
+  display: grid;
+  gap: 0.7rem;
+  margin-bottom: 0.2rem;
+}
+
+.auth-modal__qr-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.7rem;
+  align-items: start;
+  padding: 0.75rem;
+  border-radius: 0.68rem;
+  border: 1px solid rgba(97, 128, 168, 0.2);
+  background: rgba(14, 23, 35, 0.62);
+}
+
+.auth-modal__qr-header strong,
+.auth-modal__qr-header small {
+  display: block;
+}
+
+.auth-modal__qr-header strong {
+  color: #eef5ff;
+  margin-bottom: 0.2rem;
+}
+
+.auth-modal__qr-header small {
+  color: #91a6c1;
+  line-height: 1.42;
+}
+
+.auth-modal__qr-output {
+  box-sizing: border-box;
+  min-height: 15rem;
+  max-height: 20rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.55rem 0.55rem 0.55rem 0.3rem;
+  border-radius: 0.68rem;
+  border: 1px solid rgba(97, 128, 168, 0.2);
+  background: #07101c;
+  color: #dceaff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+  line-height: 1.02;
+  white-space: pre;
+}
+
 .auth-modal__optional {
   color: #92a9c7;
   font-weight: 500;
@@ -6030,14 +6119,21 @@ body {
 
 .app-body {
   flex: 1;
+  display: flex;
+  flex-direction: row;
   min-height: 0;
+  min-width: 0;
   position: relative;
   background: linear-gradient(180deg, color-mix(in srgb, var(--card-bg-color, #1a2433) 88%, transparent), color-mix(in srgb, var(--app-bg-color, #0f141d) 88%, transparent));
 }
 
 .app-content {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--app-bg-color, #0f141d) 88%, transparent), color-mix(in srgb, var(--card-bg-color, #1a2433) 72%, transparent));
 }
@@ -9883,24 +9979,6 @@ body {
     0 1px 0 color-mix(in srgb, var(--app-text-color, #eef5ff) 12%, transparent) inset;
 }
 
-@media (max-width: 900px) {
-  .app-window {
-    border-radius: 0;
-    border-left: none;
-    border-right: none;
-  }
-
-  .window-brand-text span {
-    display: none;
-  }
-
-  .window-toolbar-actions .btn {
-    font-size: 0.68rem;
-    padding-left: 0.45rem;
-    padding-right: 0.45rem;
-  }
-}
-
 .window-toolbar-actions {
   display: inline-flex;
   align-items: center;
@@ -10306,6 +10384,8 @@ body {
 .environment-card__footer-meta {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 0.5rem;
   flex-shrink: 0;
 }
@@ -10321,6 +10401,13 @@ body {
   color: var(--workspace-title-color);
   font-size: 0.75rem;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.environment-footer-chip--warning {
+  color: color-mix(in srgb, #8b5f11 82%, white);
+  border-color: color-mix(in srgb, #ffbb54 42%, transparent);
+  background: color-mix(in srgb, #ffbb54 14%, var(--card-bg-color, #1a2433));
 }
 
 .environment-state-pill {
@@ -10393,49 +10480,6 @@ body {
 }
 
 @media (max-width: 900px) {
-  .window-chrome {
-    height: auto;
-    min-height: 52px;
-    flex-wrap: wrap;
-    padding-top: 0.5rem;
-    padding-bottom: 0.5rem;
-  }
-
-  .window-drag-region {
-    min-width: 0;
-    order: 3;
-    flex-basis: 100%;
-    height: 0.25rem;
-  }
-
-  .window-toolbar-actions--shell {
-    order: 2;
-    width: 100%;
-    overflow-x: auto;
-    padding-bottom: 0.15rem;
-  }
-
-  .window-controls {
-    margin-left: auto;
-  }
-
-  .app-body {
-    flex-direction: column;
-  }
-
-  .app-shell-sidebar {
-    width: 100%;
-    min-width: 0;
-    border-right: none;
-    border-bottom: 1px solid var(--workspace-stroke-soft);
-  }
-
-  .app-shell-sidebar--collapsed {
-    width: 100%;
-    min-width: 0;
-    align-items: stretch;
-  }
-
   .workspace-layout {
     flex-direction: column;
   }

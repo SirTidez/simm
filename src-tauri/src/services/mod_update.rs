@@ -165,7 +165,7 @@ impl ModUpdateService {
                 },
                 runtime_match: None,
                 mod_storage_id: Some(storage_id.clone()),
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: entry.security_scan.clone(),
             };
 
@@ -258,7 +258,7 @@ impl ModUpdateService {
                             },
                             runtime_match: None,
                             mod_storage_id: Some(storage_id.clone()),
-                            symlink_paths: None,
+                            managed_paths: None,
                             security_scan: entry.security_scan.clone(),
                         });
                     let Some(source) = storage_metadata.source.clone() else {
@@ -339,7 +339,7 @@ impl ModUpdateService {
                         },
                         runtime_match: None,
                         mod_storage_id: Some(storage_id.clone()),
-                        symlink_paths: storage_metadata.symlink_paths.clone(),
+                        managed_paths: storage_metadata.managed_paths.clone(),
                         security_scan: storage_metadata
                             .security_scan
                             .clone()
@@ -907,7 +907,7 @@ impl ModUpdateService {
                 detected_runtime: None,
                 runtime_match: None,
                 mod_storage_id: Some(entry.storage_id.clone()),
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: None,
             };
 
@@ -2563,7 +2563,7 @@ mod tests {
                 detected_runtime: None,
                 runtime_match: None,
                 mod_storage_id: None,
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: None,
             },
         );

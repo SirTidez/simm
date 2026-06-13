@@ -49,9 +49,20 @@ fn main() {
 
             app.manage(crate::commands::app_init::AppPreparationState::default());
 
+            #[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(error) = app.deep_link().register_all() {
+                    log::warn!("Failed to register desktop deep links: {}", error);
+                }
+            }
+
             // Explicitly set window icon (taskbar + title bar) from bundle icon
             if let Some(window) = app.get_webview_window("main") {
                 log::info!("Main window found");
+                if let Err(e) = window.set_decorations(false) {
+                    log::warn!("Failed to disable native window decorations: {}", e);
+                }
                 if let Some(icon) = app.default_window_icon() {
                     if let Err(e) = window.set_icon(icon.clone()) {
                         log::warn!("Failed to set window icon: {}", e);
@@ -73,6 +84,8 @@ fn main() {
             commands::app_init::prepare_app,
             commands::app_init::was_simm_directory_just_created,
             commands::app_init::get_app_startup_state,
+            commands::app_init::get_linux_readiness_status,
+            commands::app_init::repair_linux_desktop_integration,
             commands::app_init::get_home_directory,
             // DepotDownloader
             commands::depotdownloader::detect_depot_downloader,
@@ -109,6 +122,7 @@ fn main() {
             commands::downloads::get_download_progress,
             // Auth
             commands::auth::authenticate,
+            commands::auth::authenticate_qr,
             // Filesystem
             commands::filesystem::open_folder,
             commands::filesystem::open_path,
@@ -150,9 +164,11 @@ fn main() {
             // UserLibs
             commands::userlibs::get_userlibs,
             commands::userlibs::get_userlibs_count,
+            commands::userlibs::delete_user_lib,
             commands::userlibs::enable_user_lib,
             commands::userlibs::disable_user_lib,
             commands::userlibs::open_user_libs_folder,
+            commands::userlibs::upload_user_lib,
             // Update checks
             commands::update_check::check_update,
             commands::update_check::check_all_updates,
@@ -160,6 +176,8 @@ fn main() {
             // MelonLoader
             commands::melon_loader::get_melon_loader_status,
             commands::melon_loader::install_melon_loader,
+            commands::melon_loader::repair_melonloader_launch_options,
+            commands::melon_loader::verify_melonloader_launch,
             commands::melon_loader::uninstall_melon_loader,
             commands::melon_loader::get_available_melonloader_versions,
             // GitHub Releases

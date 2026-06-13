@@ -4,7 +4,7 @@ use crate::utils::logging::error_with_location;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
 static AUTH_SERVICE: Lazy<AsyncMutex<Option<Arc<AuthService>>>> =
@@ -73,6 +73,57 @@ pub async fn authenticate(
         Ok(serde_json::json!({
             "success": true,
             "message": "Authentication successful. Session stored for future downloads."
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "success": false,
+            "error": result.error,
+            "requiresSteamGuard": result.requires_steam_guard
+        }))
+    }
+}
+
+#[tauri::command]
+pub async fn authenticate_qr(
+    db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
+    save_credentials: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let auth_service = get_auth_service().await?;
+    let result = auth_service.authenticate_qr(app).await.map_err(|e| {
+        error_with_location(format!("Steam QR auth command failed: {}", e));
+        e.to_string()
+    })?;
+
+    if result.success {
+        let username = result.username.clone().ok_or_else(|| {
+            "QR login succeeded, but SIMM could not detect the Steam account name.".to_string()
+        })?;
+
+        if save_credentials.unwrap_or(true) {
+            let mut settings_service =
+                SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+            let mut updates = serde_json::Map::new();
+            updates.insert(
+                "steamUsername".to_string(),
+                serde_json::json!(username.clone()),
+            );
+            settings_service
+                .save_settings(serde_json::Value::Object(updates))
+                .await
+                .map_err(|e| {
+                    error_with_location(format!(
+                        "Steam QR auth succeeded but persisting steamUsername failed: {}",
+                        e
+                    ));
+                    e.to_string()
+                })?;
+        }
+
+        Ok(serde_json::json!({
+            "success": true,
+            "message": "QR authentication successful. DepotDownloader session stored for future downloads.",
+            "username": username
         }))
     } else {
         Ok(serde_json::json!({

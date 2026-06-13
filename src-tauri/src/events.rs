@@ -71,6 +71,13 @@ pub fn emit_auth_error<R: Runtime>(
     )
 }
 
+pub fn emit_steam_auth_qr_line<R: Runtime>(
+    app: &AppHandle<R>,
+    line: String,
+) -> Result<(), tauri::Error> {
+    app.emit("steam_auth_qr_line", serde_json::json!({ "line": line }))
+}
+
 pub fn emit_melonloader_installing<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,

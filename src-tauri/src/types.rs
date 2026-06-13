@@ -17,7 +17,7 @@ pub struct DepotDownloadOptions {
     pub max_downloads: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     Windows,
@@ -185,6 +185,46 @@ pub enum ExperienceMode {
 pub struct AppStartupState {
     pub simm_directory_created: bool,
     pub database_created: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinuxReadinessCheckStatus {
+    Ready,
+    Warning,
+    Missing,
+    Unknown,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxReadinessCheck {
+    pub id: String,
+    pub label: String,
+    pub status: LinuxReadinessCheckStatus,
+    pub detail: String,
+    pub command: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxDesktopSchemeStatus {
+    pub scheme: String,
+    pub handler: Option<String>,
+    pub ready: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxReadinessStatus {
+    pub platform: Platform,
+    pub available: bool,
+    pub summary: LinuxReadinessCheckStatus,
+    pub checks: Vec<LinuxReadinessCheck>,
+    pub scheme_handlers: Vec<LinuxDesktopSchemeStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,7 +546,14 @@ pub struct ModMetadata {
     pub detected_runtime: Option<Runtime>,
     pub runtime_match: Option<bool>,
     pub mod_storage_id: Option<String>,
-    pub symlink_paths: Option<Vec<String>>,
+    #[serde(
+        default,
+        rename = "managedPaths",
+        alias = "symlinkPaths",
+        alias = "symlink_paths",
+        alias = "managed_paths"
+    )]
+    pub managed_paths: Option<Vec<String>>,
     pub security_scan: Option<SecurityScanSummary>,
 }
 
@@ -597,6 +644,9 @@ pub struct DepotDownloaderInfo {
     pub path: Option<String>,
     pub version: Option<String>,
     pub method: Option<DetectionMethod>,
+    pub can_auto_install: bool,
+    pub install_help_url: String,
+    pub install_hint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

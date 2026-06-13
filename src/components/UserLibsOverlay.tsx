@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 
 import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
 import { Input } from '@/components/ui/input';
@@ -6,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { ApiService } from '../services/api';
 import type { Environment } from '../types';
 import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredContextMenu';
+import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
 import { SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
@@ -66,6 +68,9 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedUserLibKey, setSelectedUserLibKey] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: AnchoredContextMenuItem[] } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [deletingUserLibKey, setDeletingUserLibKey] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<UserLibInfo | null>(null);
   const [togglingUserLibKey, setTogglingUserLibKey] = useState<string | null>(null);
   const loadRequestTokenRef = useRef(0);
 
@@ -110,6 +115,7 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
       setSearchTerm('');
       setSelectedUserLibKey(null);
       setContextMenu(null);
+      setPendingDelete(null);
       return;
     }
 
@@ -181,6 +187,73 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
     }
   }, [environmentId, loadUserLibs, onUserLibsChanged]);
 
+  const handleDeleteUserLib = useCallback(async (userLib: UserLibInfo) => {
+    const userLibKey = getUserLibKey(userLib);
+    setDeletingUserLibKey(userLibKey);
+    setError(null);
+
+    try {
+      await ApiService.deleteUserLib(environmentId, userLib.path);
+      await loadUserLibs();
+      onUserLibsChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete UserLib');
+    } finally {
+      setDeletingUserLibKey(null);
+      setPendingDelete(null);
+    }
+  }, [environmentId, loadUserLibs, onUserLibsChanged]);
+
+  const handleUploadClick = useCallback(async () => {
+    if (!environment) {
+      setError('Environment not loaded');
+      return;
+    }
+
+    setUploading(true);
+    setError(null);
+
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'UserLib Files',
+          extensions: ['dll', 'zip'],
+        }],
+        title: 'Select UserLib File',
+      }) as string | { path: string; name?: string } | null;
+
+      if (!selected) {
+        setUploading(false);
+        return;
+      }
+
+      const filePath = typeof selected === 'string' ? selected : selected.path;
+      const fileName = typeof selected === 'string'
+        ? selected.split(/[/\\]/).pop() || 'unknown'
+        : selected.name || selected.path.split(/[/\\]/).pop() || 'unknown';
+
+      const result = await ApiService.uploadUserLib(
+        environmentId,
+        filePath,
+        fileName,
+        environment.runtime
+      );
+
+      if (!result.success) {
+        setError(result.error || 'Failed to upload UserLib');
+        return;
+      }
+
+      await loadUserLibs();
+      onUserLibsChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload UserLib');
+    } finally {
+      setUploading(false);
+    }
+  }, [environment, environmentId, loadUserLibs, onUserLibsChanged]);
+
   const openContextMenu = (event: ReactMouseEvent, userLib: UserLibInfo) => {
     event.preventDefault();
     setSelectedUserLibKey(getUserLibKey(userLib));
@@ -206,6 +279,13 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
           icon: 'rotate',
           onSelect: () => void loadUserLibs(),
         },
+        {
+          key: 'delete',
+          label: 'Delete',
+          icon: 'trash',
+          danger: true,
+          onSelect: () => setPendingDelete(userLib),
+        },
       ],
     });
   };
@@ -213,7 +293,22 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
   if (!isOpen) return null;
 
   return (
-    <div className="mods-overlay workspace-collection-shell">
+    <>
+      <ConfirmOverlay
+        isOpen={!!pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) {
+            void handleDeleteUserLib(pendingDelete);
+          }
+        }}
+        title="Delete UserLib"
+        message={pendingDelete ? `Delete "${pendingDelete.name}" from this environment?` : ''}
+        confirmText="Delete UserLib"
+        cancelText="Cancel"
+      />
+
+      <div className="mods-overlay workspace-collection-shell">
       <WorkspacePageHeader
         eyebrow={environment?.name || 'Environment'}
         title="UserLibs"
@@ -255,6 +350,9 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
                 />
               </div>
               <div className="workspace-collection__toolbar-group">
+                <SimmButton onClick={() => void handleUploadClick()} className="btn btn-primary btn-small" disabled={uploading}>
+                  {uploading ? 'Uploading...' : 'Add UserLib'}
+                </SimmButton>
                 <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenFolder()}>
                   Open Folder
                 </SimmButton>
@@ -369,6 +467,9 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
                 >
                   {selectedUserLib.disabled ? 'Enable' : 'Disable'}
                 </SimmButton>
+                <SimmButton className="btn btn-secondary" onClick={() => setPendingDelete(selectedUserLib)} disabled={deletingUserLibKey === getUserLibKey(selectedUserLib)}>
+                  Delete
+                </SimmButton>
                 <SimmButton className="btn btn-secondary" onClick={() => void handleOpenFolder()}>
                   Open Folder
                 </SimmButton>
@@ -389,6 +490,7 @@ export function UserLibsOverlay({ isOpen, environmentId, onUserLibsChanged }: Pr
           onClose={() => setContextMenu(null)}
         />
       )}
-    </div>
+      </div>
+    </>
   );
 }

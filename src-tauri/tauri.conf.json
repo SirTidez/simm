@@ -41,7 +41,9 @@
   "bundle": {
     "active": true,
     "targets": [
-      "nsis"
+      "nsis",
+      "deb",
+      "appimage"
     ],
     "publisher": "LockWire Labs",
     "windows": {
@@ -49,6 +51,14 @@
         "template": "windows/installer.nsi",
         "headerImage": "windows/assets/installer-header.bmp",
         "sidebarImage": "windows/assets/installer-sidebar.bmp"
+      }
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      },
+      "deb": {
+        "files": {}
       }
     },
     "icon": [

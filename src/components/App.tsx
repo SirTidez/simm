@@ -1140,6 +1140,28 @@ function AppWindowChrome({ utilityActions }: { utilityActions: readonly ShellUti
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
+    let disposed = false;
+
+    const enforceCustomChrome = async () => {
+      try {
+        await appWindow.setDecorations(false);
+      } catch (error) {
+        if (!disposed) {
+          console.error('Failed to disable native window decorations:', error);
+        }
+      }
+    };
+
+    void enforceCustomChrome();
+    window.addEventListener('focus', enforceCustomChrome);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('focus', enforceCustomChrome);
+    };
+  }, [appWindow]);
+
+  useEffect(() => {
     let unlisten: (() => void) | null = null;
 
     const bindWindowState = async () => {
@@ -2284,6 +2306,36 @@ function AppContent() {
         return;
     }
   }, [activeWorkspace, openEnvironmentsWorkspace, openWorkspace, selectEnvironmentForShell]);
+
+  const verifyShellMelonLoaderLaunch = useCallback(async (
+    environmentId: string,
+    launchStartedAt: number | undefined,
+  ) => {
+    if (!launchStartedAt) {
+      return;
+    }
+
+    try {
+      const verification = await ApiService.verifyMelonLoaderLaunch(environmentId, launchStartedAt, 20000);
+      if (verification.confirmed || verification.status === 'notInstalled') {
+        return;
+      }
+
+      await message(
+        `${verification.message}\n\nLog checked: ${verification.logPath}`,
+        {
+          title: currentEnvironment ? `MelonLoader Launch Not Confirmed: ${currentEnvironment.name}` : 'MelonLoader Launch Not Confirmed',
+          kind: 'warning',
+        },
+      );
+    } catch (error) {
+      logger.warn('Failed to verify MelonLoader launch after starting game', {
+        environmentId,
+        error: getErrorMessage(error, 'verification failed'),
+      });
+    }
+  }, [currentEnvironment]);
+
   const handleShellLaunchGame = useCallback(async () => {
     if (!currentEnvironmentId) {
       openWorkspace({ view: 'wizard' });
@@ -2296,6 +2348,7 @@ function AppContent() {
       if (!result.success) {
         throw new Error('Launch request was not accepted.');
       }
+      await verifyShellMelonLoaderLaunch(currentEnvironmentId, result.launchStartedAt);
     } catch (error) {
       const errorMessage = getErrorMessage(error, 'Failed to launch the selected environment.');
       if (isSteamShortcutReloadError(errorMessage)) {
@@ -2315,6 +2368,8 @@ function AppContent() {
                 title: currentEnvironment ? `Launch Failed: ${currentEnvironment.name}` : 'Launch Failed',
                 kind: 'error',
               });
+            } else {
+              await verifyShellMelonLoaderLaunch(currentEnvironmentId, retryResult.launchStartedAt);
             }
           } catch (retryError) {
             await message(
@@ -2339,7 +2394,7 @@ function AppContent() {
     } finally {
       setLaunchingEnvironmentId(null);
     }
-  }, [currentEnvironment, currentEnvironmentId, openWorkspace]);
+  }, [currentEnvironment, currentEnvironmentId, openWorkspace, verifyShellMelonLoaderLaunch]);
   const utilityActions = [
     {
       key: 'launch',

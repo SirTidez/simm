@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use tauri_plugin_shell::ShellExt;
 use tokio::fs;
@@ -36,12 +37,21 @@ fn command_error(message: impl Into<String>) -> String {
     message
 }
 
+fn now_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn resolve_launch_method<'a>(
     requested_method: Option<&'a str>,
     is_steam_environment: bool,
 ) -> &'a str {
     match requested_method {
         Some(method) => method,
+        None if cfg!(target_os = "linux") => "steam",
         None if is_steam_environment => "steam",
         None => "direct",
     }
@@ -139,12 +149,18 @@ pub async fn launch_game(
 
     let is_steam_environment = env.environment_type == Some(crate::types::EnvironmentType::Steam);
     let method_str = resolve_launch_method(launch_method.as_deref(), is_steam_environment);
+    if cfg!(target_os = "linux") && method_str == "direct" {
+        return Err(command_warn(
+            "Direct local launch is not supported on Linux because Schedule I runs through Steam Proton. Use Steam launch instead.",
+        ));
+    }
     let game_dir_for_launch = if method_str == "steam" && is_steam_environment {
         None
     } else {
         Some(env.output_dir.as_str())
     };
 
+    let launch_started_at = now_epoch_millis();
     let result = fs_service
         .launch_game(game_dir_for_launch, Some(method_str))
         .await
@@ -159,7 +175,10 @@ pub async fn launch_game(
 
     Ok(serde_json::json!({
         "success": true,
-        "executablePath": result
+        "executablePath": result,
+        "launchStartedAt": launch_started_at,
+        "launchMethod": method_str,
+        "environmentId": environment_id
     }))
 }
 
@@ -278,7 +297,10 @@ mod tests {
     }
 
     #[test]
-    fn launch_method_defaults_to_direct_for_non_steam_environments() {
+    fn launch_method_defaults_for_non_steam_environments() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(resolve_launch_method(None, false), "steam");
+        #[cfg(not(target_os = "linux"))]
         assert_eq!(resolve_launch_method(None, false), "direct");
     }
 

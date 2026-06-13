@@ -48,6 +48,9 @@ pub async fn start_download(
         .or_else(|| settings.steam_username.clone())
         .ok_or_else(|| "Steam authentication required. Please authenticate first.".to_string())?;
 
+    let depot_platform =
+        DepotDownloaderService::resolve_depot_platform(&env.app_id, settings.platform.clone());
+
     let options = DepotDownloadOptions {
         app_id: env.app_id,
         branch: env.branch,
@@ -56,7 +59,7 @@ pub async fn start_download(
         password: None, // Don't pass password - let -remember-password handle it
         steam_guard: None,
         validate: None,
-        os: Some(settings.platform),
+        os: Some(depot_platform),
         language: Some(settings.language),
         max_downloads: Some(settings.max_concurrent_downloads),
     };

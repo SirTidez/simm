@@ -71,12 +71,12 @@ Typical flow examples:
 Add mod (zip/rar/dll)
     -> store/copy into shared storage
     -> write metadata
-    -> symlink into environment Mods/Plugins/UserLibs
+    -> copy managed files into environment Mods/Plugins/UserLibs
     -> emit mods/plugins/userlibs changed event
     -> overlay refreshes list and badges
 ```
 
-The same storage item can be installed into multiple environments without copying binaries repeatedly.
+The same storage item can be installed into multiple environments while each environment owns real materialized files for enable, disable, and delete operations.
 
 ### Update Workflow
 
@@ -128,7 +128,7 @@ Core command groups:
 Services in `src-tauri/src/services/` own domain workflows:
 
 - `environment.rs`: environment CRUD and branch/runtime behavior
-- `mods.rs`: shared mod storage, metadata, symlink orchestration, library projections
+- `mods.rs`: shared mod storage, metadata, managed copy orchestration, library projections
 - `plugins.rs` / `userlibs.rs`: runtime folder management and enable/disable logic
 - `update_check.rs`: game update checks (manifest and version)
 - `mod_update.rs`: mod source update checks and summaries

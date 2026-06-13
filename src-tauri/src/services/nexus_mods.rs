@@ -1165,3 +1165,85 @@ impl Default for NexusModsService {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_u32(key: &str) -> Result<Option<u32>> {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|error| anyhow::anyhow!("Invalid {key}: {error}"))
+            })
+            .transpose()
+    }
+
+    fn looks_like_archive(bytes: &[u8]) -> bool {
+        bytes.starts_with(b"PK\x03\x04")
+            || bytes.starts_with(b"PK\x05\x06")
+            || bytes.starts_with(b"PK\x07\x08")
+            || bytes.starts_with(b"Rar!\x1a\x07")
+            || bytes.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])
+    }
+
+    #[tokio::test]
+    #[ignore = "Queries live Nexus Mods Schedule I metadata"]
+    async fn live_schedule_i_metadata_query_returns_files() -> Result<()> {
+        let service = NexusModsService::new();
+        let mods = service.get_latest_updated_mods("schedule1").await?;
+        assert!(!mods.is_empty(), "Expected Nexus Schedule I mods");
+
+        let mod_id = mods
+            .iter()
+            .find_map(|entry| entry.get("mod_id").and_then(|value| value.as_u64()))
+            .ok_or_else(|| anyhow::anyhow!("No Nexus Schedule I mod id returned"))?
+            as u32;
+        let files = service.get_mod_files("schedule1", mod_id).await?;
+
+        assert!(
+            files.iter().any(|file| file
+                .get("file_id")
+                .and_then(|value| value.as_u64())
+                .is_some()),
+            "Expected Nexus Schedule I file metadata for mod {mod_id}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires SIMM_NEXUS_LIVE_ACCESS_TOKEN, SIMM_NEXUS_LIVE_MOD_ID, and SIMM_NEXUS_LIVE_FILE_ID"]
+    async fn live_oauth_downloads_configured_schedule_i_file() -> Result<()> {
+        let Some(access_token) = std::env::var("SIMM_NEXUS_LIVE_ACCESS_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("Skipping Nexus download smoke: SIMM_NEXUS_LIVE_ACCESS_TOKEN is not set.");
+            return Ok(());
+        };
+        let Some(mod_id) = env_u32("SIMM_NEXUS_LIVE_MOD_ID")? else {
+            eprintln!("Skipping Nexus download smoke: SIMM_NEXUS_LIVE_MOD_ID is not set.");
+            return Ok(());
+        };
+        let Some(file_id) = env_u32("SIMM_NEXUS_LIVE_FILE_ID")? else {
+            eprintln!("Skipping Nexus download smoke: SIMM_NEXUS_LIVE_FILE_ID is not set.");
+            return Ok(());
+        };
+
+        let service = NexusModsService::new();
+        let bytes = service
+            .download_mod_file(&access_token, "schedule1", mod_id, file_id)
+            .await?;
+
+        assert!(bytes.len() > 128, "Expected Nexus download bytes");
+        assert!(
+            looks_like_archive(&bytes),
+            "Expected Nexus download to have a known archive signature"
+        );
+        Ok(())
+    }
+}

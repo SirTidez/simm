@@ -354,6 +354,8 @@ describe('ApiService', () => {
 
   it.each([
     ['getReleaseApiHealth', () => ApiService.getReleaseApiHealth(), 'get_release_api_health', undefined],
+    ['getLinuxReadinessStatus', () => ApiService.getLinuxReadinessStatus(), 'get_linux_readiness_status', undefined],
+    ['repairLinuxDesktopIntegration', () => ApiService.repairLinuxDesktopIntegration(), 'repair_linux_desktop_integration', undefined],
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
     ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],

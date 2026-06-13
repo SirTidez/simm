@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { AuthenticationModal } from './AuthenticationModal';
 
 const apiMocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
+  authenticateQr: vi.fn(),
   saveCredentials: vi.fn(),
+}));
+
+const eventMocks = vi.hoisted(() => ({
+  onSteamAuthQrLine: vi.fn(),
 }));
 
 const settingsStoreMocks = vi.hoisted(() => ({
@@ -14,6 +19,10 @@ const settingsStoreMocks = vi.hoisted(() => ({
 
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
+}));
+
+vi.mock('../services/events', () => ({
+  onSteamAuthQrLine: eventMocks.onSteamAuthQrLine,
 }));
 
 vi.mock('../stores/settingsStore', () => ({
@@ -25,7 +34,10 @@ describe('AuthenticationModal', () => {
 
   beforeEach(() => {
     apiMocks.authenticate.mockReset();
+    apiMocks.authenticateQr.mockReset();
     apiMocks.saveCredentials.mockReset();
+    eventMocks.onSteamAuthQrLine.mockReset();
+    eventMocks.onSteamAuthQrLine.mockResolvedValue(vi.fn());
     updateSettings.mockReset();
     settingsStoreMocks.useSettingsStore.mockReturnValue({
       updateSettings,
@@ -51,6 +63,7 @@ describe('AuthenticationModal', () => {
       />
     );
 
+    fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
     fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
     fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
     fireEvent.change(screen.getByLabelText(/Steam Guard Code/), { target: { value: 'ABCDE' } });
@@ -66,6 +79,68 @@ describe('AuthenticationModal', () => {
       steamGuard: 'ABCDE',
       saveCredentials: true,
     });
+  });
+
+  it('submits QR auth and stores only the returned account name', async () => {
+    const onAuthenticated = vi.fn();
+    apiMocks.authenticateQr.mockResolvedValue({ success: true, username: 'qr-user' });
+    updateSettings.mockResolvedValue(undefined);
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={onAuthenticated}
+        required={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start QR Login' }));
+
+    await waitFor(() => {
+      expect(apiMocks.authenticateQr).toHaveBeenCalledWith(true);
+    });
+
+    expect(apiMocks.saveCredentials).not.toHaveBeenCalled();
+    expect(updateSettings).toHaveBeenCalledWith({ steamUsername: 'qr-user' });
+    expect(onAuthenticated).toHaveBeenCalledWith({
+      username: 'qr-user',
+      password: '',
+      steamGuard: '',
+      saveCredentials: true,
+    });
+  });
+
+  it('renders only QR rows from the DepotDownloader QR stream', async () => {
+    let qrLineHandler: ((data: { line: string }) => void) | null = null;
+    eventMocks.onSteamAuthQrLine.mockImplementation(async (handler) => {
+      qrLineHandler = handler;
+      return vi.fn();
+    });
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={() => {}}
+        required={false}
+      />
+    );
+
+    await waitFor(() => expect(qrLineHandler).not.toBeNull());
+
+    act(() => {
+      qrLineHandler?.({ line: 'Use the Steam Mobile App to sign in via QR code:' });
+      qrLineHandler?.({ line: '' });
+      qrLineHandler?.({ line: '      ████ QR ROW 1 ████    ' });
+      qrLineHandler?.({ line: '        ██ QR ROW 2 ████    ' });
+    });
+
+    const output = screen.getByTestId('steam-auth-qr-output');
+    expect(output.textContent).not.toContain('Use the Steam Mobile App');
+    expect(output.textContent?.startsWith('████ QR ROW 1 ████')).toBe(true);
+    expect(output.textContent).toContain('  ██ QR ROW 2 ████');
+    expect(output.textContent).not.toContain('    \n');
   });
 
   it('renders the waiting approval state with the new copy', () => {
@@ -100,6 +175,7 @@ describe('AuthenticationModal', () => {
       />
     );
 
+    fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
     fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
     fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
     fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
