@@ -81,6 +81,32 @@ describe('AuthenticationModal', () => {
     });
   });
 
+  it('omits a blank Steam Guard code for password auth', async () => {
+    const onAuthenticated = vi.fn();
+    apiMocks.authenticate.mockResolvedValue({ success: true });
+    apiMocks.saveCredentials.mockResolvedValue(undefined);
+    updateSettings.mockResolvedValue(undefined);
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={onAuthenticated}
+        required={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
+    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
+    fireEvent.change(screen.getByLabelText(/Steam Guard Code/), { target: { value: '   ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
+
+    await waitFor(() => {
+      expect(apiMocks.authenticate).toHaveBeenCalledWith('steam-user', 'secret-pass', undefined, true);
+    });
+  });
+
   it('submits QR auth and stores only the returned account name', async () => {
     const onAuthenticated = vi.fn();
     apiMocks.authenticateQr.mockResolvedValue({ success: true, username: 'qr-user' });
@@ -95,7 +121,7 @@ describe('AuthenticationModal', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Start QR Login' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Start QR Login' }));
 
     await waitFor(() => {
       expect(apiMocks.authenticateQr).toHaveBeenCalledWith(true);
@@ -132,15 +158,58 @@ describe('AuthenticationModal', () => {
     act(() => {
       qrLineHandler?.({ line: 'Use the Steam Mobile App to sign in via QR code:' });
       qrLineHandler?.({ line: '' });
-      qrLineHandler?.({ line: '      ████ QR ROW 1 ████    ' });
-      qrLineHandler?.({ line: '        ██ QR ROW 2 ████    ' });
+      qrLineHandler?.({ line: '      \u2588\u2588\u2588\u2588 QR ROW 1 \u2588\u2588\u2588\u2588    ' });
+      qrLineHandler?.({ line: '        \u2588\u2588 QR ROW 2 \u2588\u2588\u2588\u2588    ' });
     });
 
     const output = screen.getByTestId('steam-auth-qr-output');
     expect(output.textContent).not.toContain('Use the Steam Mobile App');
-    expect(output.textContent?.startsWith('████ QR ROW 1 ████')).toBe(true);
-    expect(output.textContent).toContain('  ██ QR ROW 2 ████');
+    expect(output.textContent?.startsWith('\u2588\u2588\u2588\u2588 QR ROW 1 \u2588\u2588\u2588\u2588')).toBe(true);
+    expect(output.textContent).toContain('  \u2588\u2588 QR ROW 2 \u2588\u2588\u2588\u2588');
     expect(output.textContent).not.toContain('    \n');
+  });
+
+  it('waits for the QR event listener before starting QR auth', async () => {
+    let resolveListener: ((cleanup: () => void) => void) | null = null;
+    eventMocks.onSteamAuthQrLine.mockImplementation(() => new Promise((resolve) => {
+      resolveListener = resolve;
+    }));
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={() => {}}
+        required={false}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'Preparing QR Login' })).toBeDisabled();
+
+    act(() => {
+      resolveListener?.(vi.fn());
+    });
+
+    expect(await screen.findByRole('button', { name: 'Start QR Login' })).not.toBeDisabled();
+  });
+
+  it('uses the compact QR output sizing on Windows', async () => {
+    const userAgentSpy = vi.spyOn(window.navigator, 'userAgent', 'get')
+      .mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={() => {}}
+        required={false}
+      />
+    );
+
+    await screen.findByRole('button', { name: 'Start QR Login' });
+    expect(screen.getByTestId('steam-auth-qr-output').className).toContain('auth-modal__qr-output--windows');
+
+    userAgentSpy.mockRestore();
   });
 
   it('renders the waiting approval state with the new copy', () => {

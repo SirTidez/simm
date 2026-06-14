@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Runtime};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -36,25 +37,55 @@ impl AuthService {
             .unwrap_or_else(|| "main".to_string())
     }
 
-    fn build_auth_args(username: String, steam_guard: Option<String>) -> Vec<String> {
+    fn trimmed_optional(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn login_id() -> String {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| {
+                let bounded = (duration.as_millis() % u128::from(u32::MAX)) as u32;
+                bounded.max(1).to_string()
+            })
+            .unwrap_or_else(|_| "1".to_string())
+    }
+
+    fn build_auth_args(
+        username: String,
+        password: Option<String>,
+        steam_guard: Option<String>,
+    ) -> Vec<String> {
         let config = crate::types::schedule_i_config();
         let auth_branch = Self::auth_branch();
+        let password = Self::trimmed_optional(password);
+        let steam_guard = Self::trimmed_optional(steam_guard);
 
         let mut args = vec![
             "-app".to_string(),
             config.app_id,
             "-username".to_string(),
             username,
+        ];
+
+        if let Some(password) = password {
+            args.push("-password".to_string());
+            args.push(password);
+        }
+
+        args.extend([
+            "-remember-password".to_string(),
+            "-loginid".to_string(),
+            Self::login_id(),
             "-manifest-only".to_string(),
             "-branch".to_string(),
             auth_branch,
-        ];
+        ]);
 
-        args.push("-remember-password".to_string());
-
-        if let Some(sg) = steam_guard {
-            args.push("-steamguard".to_string());
-            args.push(sg);
+        if steam_guard.is_some() {
+            args.push("-no-mobile".to_string());
         }
 
         args
@@ -67,6 +98,8 @@ impl AuthService {
             config.app_id,
             "-qr".to_string(),
             "-remember-password".to_string(),
+            "-loginid".to_string(),
+            Self::login_id(),
             "-manifest-only".to_string(),
             "-branch".to_string(),
             Self::auth_branch(),
@@ -99,6 +132,72 @@ impl AuthService {
             .map(|account| account.as_str().to_string())
     }
 
+    fn decode_depotdownloader_output(bytes: &[u8]) -> String {
+        if let Ok(output) = std::str::from_utf8(bytes) {
+            return output.to_string();
+        }
+
+        bytes
+            .iter()
+            .map(|byte| match byte {
+                0x00..=0x7f => char::from(*byte),
+                0xdb => '\u{2588}',
+                0xdc => '\u{2584}',
+                0xdf => '\u{2580}',
+                _ => '\u{fffd}',
+            })
+            .collect()
+    }
+
+    async fn emit_qr_output_line<R: Runtime>(
+        app: &AppHandle<R>,
+        output: &Arc<Mutex<String>>,
+        line: String,
+    ) {
+        output.lock().await.push_str(&format!("{}\n", line));
+        let _ = crate::events::emit_steam_auth_qr_line(app, line);
+    }
+
+    async fn pump_qr_output<R, S>(app: AppHandle<R>, mut stream: S, output: Arc<Mutex<String>>)
+    where
+        R: Runtime,
+        S: AsyncRead + Unpin,
+    {
+        let mut buffer = [0_u8; 4096];
+        let mut pending = String::new();
+
+        loop {
+            let read = match stream.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) => {
+                    warn_with_location(format!(
+                        "Steam QR auth output stream read failed: {}",
+                        error
+                    ));
+                    break;
+                }
+            };
+
+            let decoded = Self::decode_depotdownloader_output(&buffer[..read])
+                .replace("\r\n", "\n")
+                .replace('\r', "\n");
+            pending.push_str(&decoded);
+
+            while let Some(newline_index) = pending.find('\n') {
+                let mut line = pending.drain(..=newline_index).collect::<String>();
+                if line.ends_with('\n') {
+                    line.pop();
+                }
+                Self::emit_qr_output_line(&app, &output, line).await;
+            }
+        }
+
+        if !pending.is_empty() {
+            Self::emit_qr_output_line(&app, &output, pending).await;
+        }
+    }
+
     pub async fn authenticate(
         &self,
         username: String,
@@ -115,7 +214,8 @@ impl AuthService {
         }
 
         let executable_path = detector_info.path.unwrap();
-        let args = Self::build_auth_args(username, steam_guard);
+        let steam_guard = Self::trimmed_optional(steam_guard);
+        let args = Self::build_auth_args(username, password, steam_guard.clone());
 
         // Get depots directory from SIMM folder
         let depots_dir = crate::utils::directory_init::get_depots_dir()
@@ -167,14 +267,14 @@ impl AuthService {
                 error
             })?;
 
-        // Handle password if provided
-        if let Some(pwd) = password {
+        if let Some(steam_guard) = steam_guard {
             if let Some(mut stdin) = child.stdin.take() {
                 tokio::spawn(async move {
-                    // Wait a bit for password prompt
                     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
                     use tokio::io::AsyncWriteExt;
-                    let _ = stdin.write_all(format!("{}\n", pwd).as_bytes()).await;
+                    let _ = stdin
+                        .write_all(format!("{}\n", steam_guard).as_bytes())
+                        .await;
                 });
             }
         }
@@ -195,6 +295,8 @@ impl AuthService {
         if output.status.success()
             || lower_output.contains("logged in")
             || lower_output.contains("authentication successful")
+            || lower_output.contains("login successful")
+            || lower_output.contains("authenticated")
         {
             Ok(Self::success(None))
         } else if lower_output.contains("steam guard") || lower_output.contains("two-factor") {
@@ -292,12 +394,7 @@ impl AuthService {
             let app = app.clone();
             let output = output.clone();
             stdout_task = Some(tokio::spawn(async move {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    output.lock().await.push_str(&format!("{}\n", line));
-                    let _ = crate::events::emit_steam_auth_qr_line(&app, line);
-                }
+                Self::pump_qr_output(app, stdout, output).await;
             }));
         }
 
@@ -306,12 +403,7 @@ impl AuthService {
             let app = app.clone();
             let output = output.clone();
             stderr_task = Some(tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    output.lock().await.push_str(&format!("{}\n", line));
-                    let _ = crate::events::emit_steam_auth_qr_line(&app, line);
-                }
+                Self::pump_qr_output(app, stderr, output).await;
             }));
         }
 
@@ -333,7 +425,12 @@ impl AuthService {
         let all_output = output.lock().await.clone();
         let lower_output = all_output.to_lowercase();
 
-        if status.success() || lower_output.contains("logged in") {
+        if status.success()
+            || lower_output.contains("logged in")
+            || lower_output.contains("authentication successful")
+            || lower_output.contains("login successful")
+            || lower_output.contains("authenticated")
+        {
             if let Some(username) = Self::parse_qr_account_name(&all_output) {
                 Ok(Self::success(Some(username)))
             } else {
@@ -350,6 +447,13 @@ impl AuthService {
                 "Steam QR auth failed with DepotDownloader output: {}",
                 sanitized_output
             ));
+            if lower_output.contains("asyncjobfailed") || lower_output.contains("async job failed")
+            {
+                return Ok(Self::failure(
+                    "Steam rejected the QR login session before it completed. Start a new QR login and scan the fresh code in the Steam Mobile App.".to_string(),
+                    None,
+                ));
+            }
             Ok(Self::failure(
                 format!("QR authentication failed: {}", sanitized_output),
                 None,
@@ -425,6 +529,12 @@ mod tests {
         }
     }
 
+    fn login_id_arg(args: &[String]) -> Option<&str> {
+        args.windows(2)
+            .find(|window| window[0] == "-loginid")
+            .map(|window| window[1].as_str())
+    }
+
     #[tokio::test]
     #[serial]
     #[cfg(target_os = "windows")]
@@ -454,23 +564,47 @@ mod tests {
 
     #[test]
     fn build_auth_args_uses_a_configured_schedule_i_branch() {
-        let args =
-            AuthService::build_auth_args("steam-user".to_string(), Some("guard".to_string()));
+        let args = AuthService::build_auth_args(
+            "steam-user".to_string(),
+            Some("secret-pass".to_string()),
+            Some("guard".to_string()),
+        );
 
         assert!(args.windows(2).any(|window| {
             window[0] == "-branch"
                 && window[1] == crate::types::schedule_i_config().branches[0].name
         }));
+        assert!(args
+            .windows(2)
+            .any(|window| window[0] == "-password" && window[1] == "secret-pass"));
+        let login_id = login_id_arg(&args).expect("auth args should include -loginid");
+        assert!(login_id.parse::<u32>().is_ok());
         assert!(args.iter().any(|arg| arg == "-remember-password"));
+        assert!(args.iter().any(|arg| arg == "-no-mobile"));
+        assert!(!args.iter().any(|arg| arg == "-steamguard"));
         assert!(!args.iter().any(|arg| arg == "public"));
     }
 
     #[test]
-    fn build_qr_auth_args_omits_username_and_uses_qr() {
+    fn build_auth_args_omits_blank_steam_guard() {
+        let args = AuthService::build_auth_args(
+            "steam-user".to_string(),
+            Some("secret-pass".to_string()),
+            Some("   ".to_string()),
+        );
+
+        assert!(!args.iter().any(|arg| arg == "-no-mobile"));
+        assert!(!args.iter().any(|arg| arg == "-steamguard"));
+    }
+
+    #[test]
+    fn build_qr_auth_args_omits_username_uses_qr_and_unique_login_id() {
         let args = AuthService::build_qr_auth_args();
 
         assert!(args.iter().any(|arg| arg == "-qr"));
         assert!(args.iter().any(|arg| arg == "-remember-password"));
+        let login_id = login_id_arg(&args).expect("QR auth args should include -loginid");
+        assert!(login_id.parse::<u32>().is_ok());
         assert!(args.iter().any(|arg| arg == "-manifest-only"));
         assert!(!args.iter().any(|arg| arg == "-username"));
         assert!(!args.iter().any(|arg| arg == "-password"));
@@ -484,6 +618,18 @@ mod tests {
         assert_eq!(
             AuthService::parse_qr_account_name(output).as_deref(),
             Some("schedule_user")
+        );
+    }
+
+    #[test]
+    fn decode_depotdownloader_output_preserves_utf8_and_oem_qr_blocks() {
+        assert_eq!(
+            AuthService::decode_depotdownloader_output("Use the Steam Mobile App\n".as_bytes()),
+            "Use the Steam Mobile App\n"
+        );
+        assert_eq!(
+            AuthService::decode_depotdownloader_output(&[0xdb, 0xdb, b' ', 0xdb, b'\r', b'\n']),
+            "\u{2588}\u{2588} \u{2588}\r\n"
         );
     }
 }

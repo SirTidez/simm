@@ -273,6 +273,51 @@ bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/deb/
 bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/appimage/*.AppImage
 ```
 
+### Build Linux Packages With Docker
+
+The repo includes an Ubuntu-based builder image for creating Linux `.deb` and `.AppImage` artifacts from Windows or any Docker host. It uses Ubuntu 22.04 as the build baseline so Tauri's WebKitGTK 4.1 dependency is available while keeping the generated binaries compatible with older glibc versions than a newer Ubuntu image would require.
+
+From PowerShell:
+
+```powershell
+.\scripts\build-linux-container.ps1
+```
+
+The wrapper builds the `simm-linux-builder:ubuntu22.04` image, bind-mounts the repository at `/workspace`, reuses named Docker volumes for Bun and Cargo caches, and runs:
+
+```bash
+bun install
+bunx tsc --noEmit
+bun run lint
+bun run test
+bun run build
+bun run tauri:build:linux
+bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/appimage/*.AppImage
+```
+
+Useful variants:
+
+```powershell
+.\scripts\build-linux-container.ps1 -Command check
+.\scripts\build-linux-container.ps1 -Command shell
+.\scripts\build-linux-container.ps1 -BunVersion 1.3.3
+.\scripts\build-linux-container.ps1 -SkipImageBuild
+```
+
+Raw Docker:
+
+```bash
+docker build -f docker/linux/Dockerfile -t simm-linux-builder:ubuntu22.04 .
+docker run --rm -it \
+  --mount type=bind,source="$PWD",target=/workspace \
+  --mount type=volume,source=simm-linux-cargo-registry,target=/usr/local/cargo/registry \
+  --mount type=volume,source=simm-linux-cargo-git,target=/usr/local/cargo/git \
+  --mount type=volume,source=simm-linux-bun-cache,target=/root/.bun/install/cache \
+  --workdir /workspace \
+  simm-linux-builder:ubuntu22.04 build
+```
+
 ### Type Check
 
 ```bash

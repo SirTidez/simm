@@ -37,7 +37,7 @@ function appendQrDisplayLine(currentLines: string[], line: string): string[] {
     return [];
   }
 
-  if (line.trim().length === 0 && currentLines.length === 0) {
+  if (line.trim().length === 0) {
     return currentLines;
   }
 
@@ -73,6 +73,7 @@ export function AuthenticationModal({
   const [error, setError] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>(initialMode);
   const [qrLines, setQrLines] = useState<string[]>([]);
+  const [qrListenerReady, setQrListenerReady] = useState(false);
   const [saveCredentials, setSaveCredentials] = useState(true);
   const isMountedRef = useRef(true);
 
@@ -94,10 +95,14 @@ export function AuthenticationModal({
   }, [initialMode, isOpen]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setQrListenerReady(false);
+      return;
+    }
 
     let disposed = false;
     let cleanupListener: (() => void) | null = null;
+    setQrListenerReady(false);
 
     onSteamAuthQrLine((data) => {
       if (!isMountedRef.current) return;
@@ -109,6 +114,11 @@ export function AuthenticationModal({
         cleanup();
       } else {
         cleanupListener = cleanup;
+        setQrListenerReady(true);
+      }
+    }).catch((err) => {
+      if (!disposed && isMountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to prepare Steam QR listener');
       }
     });
 
@@ -137,7 +147,7 @@ export function AuthenticationModal({
     try {
       const result = authMode === 'qr'
         ? await ApiService.authenticateQr(saveCredentials)
-        : await ApiService.authenticate(username, password, steamGuard, saveCredentials);
+        : await ApiService.authenticate(username, password, steamGuard.trim() || undefined, saveCredentials);
 
       if (result.success) {
         const authenticatedUsername = authMode === 'qr' ? result.username || '' : username;
@@ -185,8 +195,13 @@ export function AuthenticationModal({
   if (!isOpen) return null;
 
   const contentClass = nested ? 'auth-modal auth-modal--nested' : 'auth-modal';
-  const submitDisabled = loading || (authMode === 'password' && (!username || !password));
+  const submitDisabled = loading
+    || (authMode === 'password' && (!username || !password))
+    || (authMode === 'qr' && !qrListenerReady);
   const qrDisplayLines = normalizeQrDisplayLines(qrLines);
+  const qrOutputClassName = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
+    ? 'auth-modal__qr-output auth-modal__qr-output--windows'
+    : 'auth-modal__qr-output';
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => {
@@ -326,7 +341,7 @@ export function AuthenticationModal({
                         <small>Start the QR session, then scan the code shown here with the Steam Mobile App.</small>
                       </div>
                     </div>
-                    <pre className="auth-modal__qr-output" aria-live="polite" data-testid="steam-auth-qr-output">
+                    <pre className={qrOutputClassName} aria-live="polite" data-testid="steam-auth-qr-output">
                       {qrDisplayLines.length > 0
                         ? qrDisplayLines.join('\n')
                         : 'QR code will appear here after the session starts.'}
@@ -410,7 +425,7 @@ export function AuthenticationModal({
                 )}
                 <SimmButton type="submit" className="btn btn-primary" disabled={submitDisabled}>
                   <Icon name={loading ? 'fas fa-spinner fa-spin' : authMode === 'qr' ? 'fas fa-mobile-screen-button' : 'fas fa-right-to-bracket'} spin={loading} />
-                  {loading ? 'Authenticating…' : authMode === 'qr' ? 'Start QR Login' : 'Authenticate with Steam'}
+                  {loading ? 'Authenticating…' : authMode === 'qr' ? (qrListenerReady ? 'Start QR Login' : 'Preparing QR Login') : 'Authenticate with Steam'}
                 </SimmButton>
               </div>
             </form>

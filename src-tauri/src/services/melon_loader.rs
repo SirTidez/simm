@@ -1004,7 +1004,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     use chrono::Utc;
     use std::io::Write;
-    #[cfg(target_os = "linux")]
     use std::path::Path;
     use tempfile::tempdir;
     use zip::write::FileOptions;
