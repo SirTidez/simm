@@ -261,7 +261,7 @@ bun run tauri:build:linux:deb
 bun run tauri:build:linux:appimage
 ```
 
-The Linux bundle outputs are written under `src-tauri/target/release/bundle/`:
+The Linux bundle outputs are written under `target/release/bundle/`:
 
 - `deb/*.deb`
 - `appimage/*.AppImage`
@@ -269,15 +269,23 @@ The Linux bundle outputs are written under `src-tauri/target/release/bundle/`:
 After building, validate that the packaged desktop entry declares the `simm://` and `nxm://` handlers:
 
 ```bash
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/deb/*.deb
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/appimage/*.AppImage
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/appimage/*.AppImage
 ```
 
 ### Build Linux Packages With Docker
 
 The repo includes an Ubuntu-based builder image for creating Linux `.deb` and `.AppImage` artifacts from Windows or any Docker host. It uses Ubuntu 22.04 as the build baseline so Tauri's WebKitGTK 4.1 dependency is available while keeping the generated binaries compatible with older glibc versions than a newer Ubuntu image would require.
 
-From PowerShell:
+From Windows, use the `.cmd` wrapper so PowerShell execution policy does not block the build script:
+
+```powershell
+.\scripts\build-linux-container.cmd
+```
+
+If the build is launched from a transient Command Prompt window and fails, the wrapper pauses so the error remains visible. Running the same command from an existing terminal is still recommended because it preserves the full Docker log.
+
+From PowerShell directly:
 
 ```powershell
 .\scripts\build-linux-container.ps1
@@ -292,17 +300,17 @@ bun run lint
 bun run test
 bun run build
 bun run tauri:build:linux
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/deb/*.deb
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/appimage/*.AppImage
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/appimage/*.AppImage
 ```
 
 Useful variants:
 
 ```powershell
-.\scripts\build-linux-container.ps1 -Command check
-.\scripts\build-linux-container.ps1 -Command shell
-.\scripts\build-linux-container.ps1 -BunVersion 1.3.3
-.\scripts\build-linux-container.ps1 -SkipImageBuild
+.\scripts\build-linux-container.cmd -Command check
+.\scripts\build-linux-container.cmd -Command shell
+.\scripts\build-linux-container.cmd -BunVersion 1.3.3
+.\scripts\build-linux-container.cmd -SkipImageBuild
 ```
 
 Raw Docker:

@@ -67,27 +67,27 @@ cargo test --manifest-path src-tauri/Cargo.toml
 Linux package or desktop integration:
 
 ```powershell
-.\scripts\build-linux-container.ps1
+.\scripts\build-linux-container.cmd
 ```
 
 Linux iteration without full package build:
 
 ```powershell
-.\scripts\build-linux-container.ps1 -Command check
+.\scripts\build-linux-container.cmd -Command check
 ```
 
 Linux artifacts after a full Docker build:
 
 ```text
-E:\CLionProjects\simmrust\src-tauri\target\release\bundle\deb\*.deb
-E:\CLionProjects\simmrust\src-tauri\target\release\bundle\appimage\*.AppImage
+E:\CLionProjects\simmrust\target\release\bundle\deb\*.deb
+E:\CLionProjects\simmrust\target\release\bundle\appimage\*.AppImage
 ```
 
 Linux package handler validation:
 
 ```bash
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/deb/*.deb
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/appimage/*.AppImage
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/appimage/*.AppImage
 ```
 
 Windows release or updater work:

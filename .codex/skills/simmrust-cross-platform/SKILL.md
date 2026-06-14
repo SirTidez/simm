@@ -50,21 +50,21 @@ cargo test --manifest-path src-tauri/Cargo.toml
 For Linux packaging or Linux-native behavior, use the Docker builder:
 
 ```powershell
-.\scripts\build-linux-container.ps1
+.\scripts\build-linux-container.cmd
 ```
 
 Linux artifacts are expected at:
 
 ```text
-src-tauri/target/release/bundle/deb/*.deb
-src-tauri/target/release/bundle/appimage/*.AppImage
+target/release/bundle/deb/*.deb
+target/release/bundle/appimage/*.AppImage
 ```
 
 After Linux package builds, validate desktop scheme handlers:
 
 ```bash
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/deb/*.deb
-bash scripts/validate-linux-desktop-mime.sh src-tauri/target/release/bundle/appimage/*.AppImage
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/deb/*.deb
+bash scripts/validate-linux-desktop-mime.sh target/release/bundle/appimage/*.AppImage
 ```
 
 For Windows packaging or updater work, use `$simmrust-release-updater` and inspect the NSIS/updater artifact expectations before changing release scripts.

@@ -35,6 +35,7 @@ RUN apt-get update \
       tar \
       unzip \
       wget \
+      xdg-utils \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
 

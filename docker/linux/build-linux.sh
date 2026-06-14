@@ -25,6 +25,7 @@ run_install() {
     return
   fi
 
+  echo "==> Installing frontend dependencies"
   # shellcheck disable=SC2206
   local install_args=(${SIMM_BUN_INSTALL_ARGS:-})
   bun install "${install_args[@]}"
@@ -36,9 +37,13 @@ run_frontend_validation() {
     return
   fi
 
+  echo "==> Type-checking frontend"
   bunx tsc --noEmit
+  echo "==> Linting frontend"
   bun run lint
+  echo "==> Running frontend tests"
   bun run test
+  echo "==> Building frontend"
   bun run build
 }
 
@@ -50,8 +55,8 @@ run_linux_bundle_validation() {
 
   shopt -s nullglob
   local artifacts=(
-    src-tauri/target/release/bundle/deb/*.deb
-    src-tauri/target/release/bundle/appimage/*.AppImage
+    target/release/bundle/deb/*.deb
+    target/release/bundle/appimage/*.AppImage
   )
   shopt -u nullglob
 
@@ -61,6 +66,7 @@ run_linux_bundle_validation() {
   fi
 
   for artifact in "${artifacts[@]}"; do
+    echo "==> Validating Linux desktop handlers in ${artifact}"
     bash scripts/validate-linux-desktop-mime.sh "$artifact"
   done
 }
@@ -68,8 +74,12 @@ run_linux_bundle_validation() {
 run_build() {
   run_install
   run_frontend_validation
+  echo "==> Building Linux Tauri bundles"
   bun run tauri:build:linux
   run_linux_bundle_validation
+
+  echo "==> Linux artifacts:"
+  find target/release/bundle -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' \) -print 2>/dev/null || true
 }
 
 cd /workspace
