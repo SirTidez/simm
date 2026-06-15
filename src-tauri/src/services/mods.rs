@@ -9626,6 +9626,15 @@ mod tests {
         }
     }
 
+    async fn set_test_download_dir(pool: Arc<SqlitePool>, download_dir: &Path) -> Result<()> {
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await
+    }
+
     #[test]
     fn parse_storage_metadata_compat_uses_alias_when_primary_is_invalid() {
         let raw = serde_json::json!({
@@ -10740,6 +10749,8 @@ mod tests {
         let pool = initialize_pool().await?;
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        set_test_download_dir(pool.clone(), &download_dir).await?;
 
         let output_dir = temp.path().join("envs").join("env-managed-toggle");
         let _env = env_service
@@ -10875,6 +10886,8 @@ mod tests {
         let pool = initialize_pool().await?;
         let env_service = EnvironmentService::new(pool.clone())?;
         let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        set_test_download_dir(pool.clone(), &download_dir).await?;
 
         let output_dir = temp.path().join("envs").join("env-legacy-symlinks");
         let env = env_service
