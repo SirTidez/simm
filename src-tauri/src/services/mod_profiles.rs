@@ -597,6 +597,12 @@ fn installed_storage_id(
         return Some(storage_id);
     }
 
+    if installed_profile_file_present(installed_mods, item) {
+        if let Some(storage_id) = resolve_library_storage_id(library, item) {
+            return Some(storage_id);
+        }
+    }
+
     if let Some(environment) = target_environment {
         if let Some(storage_id) = installed_library_storage_id(library, environment, item) {
             return Some(storage_id);
@@ -604,6 +610,33 @@ fn installed_storage_id(
     }
 
     None
+}
+
+fn installed_profile_file_present(installed_mods: &Value, item: &ModProfileItem) -> bool {
+    let collection = match item.item_type {
+        ModProfileItemType::Mod => "mods",
+        ModProfileItemType::Plugin => "plugins",
+        ModProfileItemType::Userlib => "userLibs",
+    };
+    let Some(item_file) = item.file_name.as_deref().or(Some(item.name.as_str())) else {
+        return false;
+    };
+    let item_file = normalize_file_identity(item_file);
+    if item_file.is_empty() {
+        return false;
+    }
+
+    installed_mods
+        .get(collection)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| {
+            read_string(value, "fileName")
+                .or_else(|| read_string(value, "name"))
+                .map(|file_name| normalize_file_identity(&file_name) == item_file)
+                .unwrap_or(false)
+        })
 }
 
 fn resolve_library_storage_id(
@@ -1025,6 +1058,74 @@ mod tests {
             planned.resolved_storage_id.as_deref(),
             Some("meshvault-storage")
         );
+    }
+
+    #[test]
+    fn plan_item_marks_plugin_installed_when_target_file_exists_without_library_install_flag() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.item_type = ModProfileItemType::Plugin;
+        item.name = "MeshVault.Mono".to_string();
+        item.file_name = Some("MeshVault.Mono.dll".to_string());
+        item.source = Some(ModSource::Thunderstore);
+        item.source_id = None;
+        item.source_version = Some("1.0.9".to_string());
+        item.storage_id = None;
+
+        let mut entry = library_entry("meshvault-storage", "hdlmrell/MeshVault", Runtime::Mono);
+        entry.display_name = "MeshVault".to_string();
+        entry.files = vec!["MeshVault.Mono.dll".to_string()];
+        entry.source_version = Some("1.0.9".to_string());
+        entry.installed_in.clear();
+        let installed = serde_json::json!({
+            "plugins": [{
+                "name": "MeshVault.Mono",
+                "fileName": "MeshVault.Mono.dll",
+                "source": "thunderstore",
+                "version": "1.0.9"
+            }]
+        });
+
+        let planned = plan_item(item, Some(&env), &[entry], Some(&installed));
+
+        assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+        assert_eq!(
+            planned.resolved_storage_id.as_deref(),
+            Some("meshvault-storage")
+        );
+    }
+
+    #[test]
+    fn plan_item_marks_mod_installed_when_target_file_exists_without_storage_id_row() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.name = "S1API".to_string();
+        item.file_name = Some("S1API.Mono.MelonLoader.dll".to_string());
+        item.source = Some(ModSource::Github);
+        item.source_id = Some("ifBars/S1API".to_string());
+        item.source_version = Some("v3.0.5".to_string());
+        item.storage_id = Some("s1api-v3-0-5".to_string());
+
+        let mut entry = library_entry("s1api-v3-0-5", "ifBars/S1API", Runtime::Mono);
+        entry.display_name = "S1API".to_string();
+        entry.files = vec!["S1API.Mono.MelonLoader.dll".to_string()];
+        entry.source = Some(ModSource::Github);
+        entry.source_version = Some("3.0.5".to_string());
+        entry.installed_in.clear();
+        let installed = serde_json::json!({
+            "mods": [{
+                "name": "S1API",
+                "fileName": "S1API.Mono.MelonLoader.dll",
+                "managed": true,
+                "source": "github",
+                "version": "v3.0.5"
+            }]
+        });
+
+        let planned = plan_item(item, Some(&env), &[entry], Some(&installed));
+
+        assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+        assert_eq!(planned.resolved_storage_id.as_deref(), Some("s1api-v3-0-5"));
     }
 
     #[test]
