@@ -697,10 +697,10 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
                 </div>
               </div>
               <div className="profile-workspace__summary-grid">
-                <div><span>Total</span><strong>{plan.summary.total}</strong></div>
-                <div><span>Ready</span><strong>{plan.summary.readyToInstall}</strong></div>
-                <div><span>Installed</span><strong>{plan.summary.alreadyInstalled}</strong></div>
-                <div><span>Manual</span><strong>{plan.summary.manualRequired + plan.summary.needsDownload + plan.summary.runtimeMismatches}</strong></div>
+                <div className="workspace-pill profile-workspace__summary-pill"><span>Total</span><strong>{plan.summary.total}</strong></div>
+                <div className="workspace-pill workspace-pill--success profile-workspace__summary-pill"><span>Ready</span><strong>{plan.summary.readyToInstall}</strong></div>
+                <div className="workspace-pill workspace-pill--source profile-workspace__summary-pill"><span>Installed</span><strong>{plan.summary.alreadyInstalled}</strong></div>
+                <div className="workspace-pill workspace-pill--warning profile-workspace__summary-pill"><span>Manual</span><strong>{plan.summary.manualRequired + plan.summary.needsDownload + plan.summary.runtimeMismatches}</strong></div>
               </div>
               <div className="profile-workspace__items">
                 {plan.items.map((item, index) => {
