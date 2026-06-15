@@ -1157,12 +1157,62 @@ impl Default for ThunderStoreService {
 mod tests {
     use super::*;
 
+    const LIVE_DOWNLOAD_MAX_BYTES: u64 = 15 * 1024 * 1024;
+
     fn extract_package_id(package: &Value) -> Option<String> {
         ThunderStoreService::extract_package_uuid(package)
     }
 
+    fn thunderstore_version_uuid(version: &Value) -> Option<&str> {
+        version.get("uuid4").and_then(|value| value.as_str())
+    }
+
+    fn thunderstore_version_size(version: &Value) -> Option<u64> {
+        [
+            "file_size",
+            "fileSize",
+            "size",
+            "size_in_bytes",
+            "sizeInBytes",
+        ]
+        .iter()
+        .find_map(|key| version.get(*key).and_then(|value| value.as_u64()))
+    }
+
+    fn thunderstore_download_candidate(package: &Value) -> Option<(String, Option<String>, u64)> {
+        let package_id = extract_package_id(package)?;
+        let versions = package.get("versions").and_then(|value| value.as_array())?;
+        versions
+            .iter()
+            .filter(|version| {
+                version
+                    .get("download_url")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|url| url.starts_with("https://"))
+            })
+            .filter_map(|version| {
+                let size = thunderstore_version_size(version).unwrap_or(LIVE_DOWNLOAD_MAX_BYTES);
+                (size <= LIVE_DOWNLOAD_MAX_BYTES).then(|| {
+                    (
+                        package_id.clone(),
+                        thunderstore_version_uuid(version).map(ToString::to_string),
+                        size,
+                    )
+                })
+            })
+            .min_by_key(|(_, _, size)| *size)
+    }
+
+    fn looks_like_archive(bytes: &[u8]) -> bool {
+        bytes.starts_with(b"PK\x03\x04")
+            || bytes.starts_with(b"PK\x05\x06")
+            || bytes.starts_with(b"PK\x07\x08")
+            || bytes.starts_with(b"Rar!\x1a\x07")
+            || bytes.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])
+    }
+
     #[tokio::test]
-    #[ignore]
+    #[ignore = "Queries live Thunderstore Schedule I metadata"]
     async fn live_search_and_fetch_package() -> Result<()> {
         let service = ThunderStoreService::new();
         let packages = service
@@ -1181,6 +1231,49 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("Package not found for id {}", package_id))?;
 
         assert!(package.get("name").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "Downloads a live Thunderstore Schedule I package archive"]
+    async fn live_search_fetch_and_download_package_archive() -> Result<()> {
+        let service = ThunderStoreService::new();
+        let packages = service
+            .search_packages_filtered_by_runtime("schedule-i", "unknown", None)
+            .await?;
+        assert!(!packages.is_empty(), "Expected Thunderstore packages");
+
+        let (package_id, version_uuid, expected_size) = packages
+            .iter()
+            .filter_map(thunderstore_download_candidate)
+            .min_by_key(|(_, _, size)| *size)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No Thunderstore Schedule I package had an HTTPS download under {} bytes",
+                    LIVE_DOWNLOAD_MAX_BYTES
+                )
+            })?;
+
+        let package = service
+            .get_package(&package_id, Some("schedule-i"))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Package not found for id {}", package_id))?;
+        let bytes = service
+            .download_package_version(&package, version_uuid.as_deref())
+            .await?;
+
+        assert!(
+            bytes.len() > 128,
+            "Expected downloaded package archive to contain bytes"
+        );
+        assert!(
+            bytes.len() as u64 <= LIVE_DOWNLOAD_MAX_BYTES.max(expected_size),
+            "Downloaded package archive exceeded the live smoke size limit"
+        );
+        assert!(
+            looks_like_archive(&bytes),
+            "Expected downloaded package to have a known archive signature"
+        );
         Ok(())
     }
 

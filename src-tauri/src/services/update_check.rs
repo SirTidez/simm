@@ -1,3 +1,4 @@
+use crate::services::depot_downloader::DepotDownloaderService;
 use crate::services::game_version::GameVersionService;
 use crate::services::settings::SettingsService;
 use crate::types::{Environment, UpdateCheckResult};
@@ -588,6 +589,8 @@ impl UpdateCheckService {
             .ok_or_else(|| {
                 anyhow::anyhow!("Steam authentication required. Please authenticate first.")
             })?;
+        let depot_platform =
+            DepotDownloaderService::resolve_depot_platform(app_id, settings.platform.clone());
 
         log::info!(
             "Fetching manifest ID from Steam: app_id={}, branch={}",
@@ -612,11 +615,14 @@ impl UpdateCheckService {
             .arg(branch)
             .arg("-username")
             .arg(&username)
+            .arg("-os")
+            .arg(DepotDownloaderService::platform_arg(&depot_platform))
             .arg("-manifest-only")
             .current_dir(manifest_probe_dir.path());
 
-        // Use -remember-password on Windows if credentials are saved
-        if cfg!(target_os = "windows") && credentials.is_some() {
+        // DepotDownloader's remembered sessions are cross-platform. If SIMM
+        // sends a username without a password, it must opt into the saved token.
+        if credentials.is_some() || settings.steam_username.is_some() {
             cmd.arg("-remember-password");
         }
 

@@ -2,7 +2,7 @@ import { Suspense, lazy, useState, useEffect, useRef, useCallback } from 'react'
 import type { ComponentType } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { useSettingsStore } from '../stores/settingsStore';
-import type { Environment } from '../types';
+import type { Environment, MelonLoaderStatus } from '../types';
 import { AuthenticationModal } from './AuthenticationModal';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
@@ -66,6 +66,16 @@ function getLatestStableMelonLoaderTag(
   releases: Array<{ tag_name: string; prerelease: boolean; isNightly?: boolean }>
 ): string | undefined {
   return releases.find((release) => !release.isNightly && !release.prerelease)?.tag_name ?? releases[0]?.tag_name;
+}
+
+function isLinuxMelonLoaderSetupMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes('protontricks')
+    || normalized.includes('proton prerequisite')
+    || normalized.includes('steam must')
+    || normalized.includes('restart steam')
+    || normalized.includes('launch option')
+    || normalized.includes('managed shortcut prefix');
 }
 
 const lazyNamed = <T,>(
@@ -180,7 +190,7 @@ const environmentCountCache = {
   modUpdates: new Map<string, number>(),
   plugins: new Map<string, number>(),
   userLibs: new Map<string, number>(),
-  melonLoader: new Map<string, { installed: boolean; version?: string }>(),
+  melonLoader: new Map<string, MelonLoaderStatus>(),
 };
 
 type MapStateUpdater<T> = Map<string, T> | ((previous: Map<string, T>) => Map<string, T>);
@@ -246,8 +256,9 @@ export function EnvironmentList({
   const [modUpdatesCounts, setModUpdatesCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.modUpdates));
   const [pluginsCounts, setPluginsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.plugins));
   const [userLibsCounts, setUserLibsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.userLibs));
-  const [melonLoaderStatus, setMelonLoaderStatusState] = useState<Map<string, { installed: boolean; version?: string }>>(() => new Map(environmentCountCache.melonLoader));
+  const [melonLoaderStatus, setMelonLoaderStatusState] = useState<Map<string, MelonLoaderStatus>>(() => new Map(environmentCountCache.melonLoader));
   const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
+  const directLaunchSupported = (settings?.platform ?? 'windows') !== 'linux';
 
   const setModsCounts = useCallback((updater: MapStateUpdater<number>) => {
     setModsCountsState((previous) => {
@@ -289,7 +300,7 @@ export function EnvironmentList({
     });
   }, []);
 
-  const setMelonLoaderStatus = useCallback((updater: MapStateUpdater<{ installed: boolean; version?: string }>) => {
+  const setMelonLoaderStatus = useCallback((updater: MapStateUpdater<MelonLoaderStatus>) => {
     setMelonLoaderStatusState((previous) => {
       const next = resolveMapState(previous, updater);
       environmentCountCache.melonLoader = new Map(next);
@@ -311,6 +322,7 @@ export function EnvironmentList({
   const melonLoaderPrefetchStartedRef = useRef(false);
   const autoInstallMelonLoaderInFlightRef = useRef<Set<string>>(new Set());
   const autoInstallMelonLoaderRef = useRef<((environmentId: string) => Promise<void>) | null>(null);
+  const melonLoaderLaunchRepairPromptedRef = useRef<Set<string>>(new Set());
   const [melonLoaderReleases, setMelonLoaderReleases] = useState<Map<string, Array<{
     tag_name: string;
     name: string;
@@ -378,6 +390,94 @@ export function EnvironmentList({
   const showMessage = useCallback((title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setMessageOverlay({ isOpen: true, title, message, type });
   }, []);
+
+  const verifyMelonLoaderLaunch = useCallback(async (
+    env: Environment,
+    launchStartedAt: number | undefined,
+  ) => {
+    if (!launchStartedAt) {
+      return;
+    }
+
+    try {
+      const verification = await ApiService.verifyMelonLoaderLaunch(env.id, launchStartedAt, 20000);
+      if (verification.confirmed || verification.status === 'notInstalled') {
+        return;
+      }
+
+      showMessage(
+        `MelonLoader Launch Not Confirmed: ${env.name}`,
+        `${verification.message}\n\nLog checked: ${verification.logPath}`,
+        'info',
+      );
+    } catch (error) {
+      logger.warn('Failed to verify MelonLoader launch after starting game from environment card', {
+        environmentId: env.id,
+        error: getErrorMessage(error, 'verification failed'),
+      });
+    }
+  }, [showMessage]);
+
+  const handleRepairMelonLoaderLaunchOptions = useCallback(async (environmentId: string) => {
+    try {
+      const result = await ApiService.repairMelonLoaderLaunchOptions(environmentId);
+      const statusResult = await ApiService.getMelonLoaderStatus(environmentId);
+      setMelonLoaderStatus((previous) => {
+        const next = new Map(previous);
+        next.set(environmentId, statusResult);
+        return next;
+      });
+
+      const shortcutReload = result.shortcut?.requiresClientReload
+        ? ' Fully restart Steam once before launching this shortcut.'
+        : '';
+      const prerequisiteMessage = result.linuxPrerequisiteMessage
+        ? ` ${result.linuxPrerequisiteMessage}`
+        : '';
+      showMessage(
+        'Linux MelonLoader Setup Updated',
+        `SIMM configured the required Proton setup for MelonLoader.${prerequisiteMessage}${shortcutReload}`,
+        'success',
+      );
+    } catch (err) {
+      const errorMessage = getErrorMessage(err, 'Failed to configure Linux MelonLoader setup');
+      showMessage(
+        'Linux MelonLoader Setup Failed',
+        errorMessage,
+        'error',
+      );
+    }
+  }, [setMelonLoaderStatus, showMessage]);
+
+  useEffect(() => {
+    if (confirmOverlay.isOpen) {
+      return;
+    }
+
+    const environment = environments.find((env) => {
+      const status = melonLoaderStatus.get(env.id);
+      return env.status === 'completed'
+        && status?.installed
+        && status.linuxRequirements?.needsSteamLaunchOptionsRepair
+        && status.linuxRequirements?.steamLaunchOptionsRepairable
+        && !melonLoaderLaunchRepairPromptedRef.current.has(env.id);
+    });
+
+    if (!environment) {
+      return;
+    }
+
+    melonLoaderLaunchRepairPromptedRef.current.add(environment.id);
+    setConfirmOverlay({
+      isOpen: true,
+      title: 'Repair Steam Launch Options',
+      message: `MelonLoader is installed for ${environment.name}, but Steam is missing the required Proton launch option. Allow SIMM to update Steam's Schedule I launch options now.`,
+      confirmText: 'Repair',
+      onConfirm: () => {
+        void handleRepairMelonLoaderLaunchOptions(environment.id);
+      },
+    });
+  }, [confirmOverlay.isOpen, environments, handleRepairMelonLoaderLaunchOptions, melonLoaderStatus]);
 
   const resetDeleteConfirm = useCallback(() => {
     setDeleteConfirm({ isOpen: false, env: null, deleteFiles: false });
@@ -621,7 +721,7 @@ export function EnvironmentList({
               const statusResult = await ApiService.getMelonLoaderStatus(data.environmentId);
               setMelonLoaderStatus(prev => {
                 const next = new Map(prev);
-                next.set(data.environmentId, { installed: statusResult.installed, version: statusResult.version || data.version });
+                next.set(data.environmentId, { ...statusResult, version: statusResult.version || data.version });
                 return next;
               });
             } catch (err) {
@@ -644,7 +744,13 @@ export function EnvironmentList({
               next.delete(data.environmentId);
               return next;
             });
-            showMessage('MelonLoader Install Failed', data.message, 'error');
+            showMessage(
+              isLinuxMelonLoaderSetupMessage(data.message)
+                ? 'Linux MelonLoader Setup Failed'
+                : 'MelonLoader Install Failed',
+              data.message,
+              'error',
+            );
           }
         });
 
@@ -1054,7 +1160,10 @@ export function EnvironmentList({
             : 'Game executable not found.',
           'error'
         );
+        return;
       }
+
+      await verifyMelonLoaderLaunch(env, result.launchStartedAt);
     } catch (err) {
       const errorMessage = getErrorMessage(err, 'Unknown error');
       if (method === 'steam' && isSteamShortcutReloadError(errorMessage)) {
@@ -1113,7 +1222,7 @@ export function EnvironmentList({
           }
           try {
             const statusResult = await ApiService.getMelonLoaderStatus(env.id);
-            melonLoaderStatuses.set(env.id, { installed: statusResult.installed, version: statusResult.version });
+            melonLoaderStatuses.set(env.id, statusResult);
           } catch {
             melonLoaderStatuses.set(env.id, { installed: false });
           }
@@ -1413,7 +1522,7 @@ export function EnvironmentList({
       setMelonLoaderStatus((previous) => {
         const next = new Map(previous);
         next.set(environmentId, {
-          installed: statusResult.installed,
+          ...statusResult,
           version: statusResult.version || result.version || versionTag,
         });
         return next;
@@ -1422,8 +1531,12 @@ export function EnvironmentList({
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       console.error(`Failed to auto-install MelonLoader for ${environmentId}:`, err);
       showMessage(
-        'MelonLoader Install Failed',
-        `Failed to auto-install MelonLoader: ${errorMessage}`,
+        isLinuxMelonLoaderSetupMessage(errorMessage)
+          ? 'Linux MelonLoader Setup Failed'
+          : 'MelonLoader Install Failed',
+        isLinuxMelonLoaderSetupMessage(errorMessage)
+          ? `SIMM could not complete the required Linux MelonLoader setup: ${errorMessage}`
+          : `Failed to auto-install MelonLoader: ${errorMessage}`,
         'error',
       );
     } finally {
@@ -1474,7 +1587,7 @@ export function EnvironmentList({
         const statusResult = await ApiService.getMelonLoaderStatus(envId);
         setMelonLoaderStatus(prev => {
           const next = new Map(prev);
-          next.set(envId, { installed: statusResult.installed, version: statusResult.version || result.version });
+          next.set(envId, { ...statusResult, version: statusResult.version || result.version });
           return next;
         });
         setMessageOverlay({
@@ -1495,10 +1608,15 @@ export function EnvironmentList({
           return next;
         });
       } else {
+        const errorMessage = result.error || 'Unknown error';
         setMessageOverlay({
           isOpen: true,
-          title: 'Installation Failed',
-          message: `Failed to install MelonLoader: ${result.error || 'Unknown error'}`,
+          title: isLinuxMelonLoaderSetupMessage(errorMessage)
+            ? 'Linux MelonLoader Setup Failed'
+            : 'Installation Failed',
+          message: isLinuxMelonLoaderSetupMessage(errorMessage)
+            ? `SIMM could not complete the required Linux MelonLoader setup: ${errorMessage}`
+            : `Failed to install MelonLoader: ${errorMessage}`,
           type: 'error'
         });
       }
@@ -1515,8 +1633,12 @@ export function EnvironmentList({
 
       setMessageOverlay({
         isOpen: true,
-        title: 'Installation Failed',
-        message: `Failed to install MelonLoader: ${errorMessage}`,
+        title: isLinuxMelonLoaderSetupMessage(errorMessage)
+          ? 'Linux MelonLoader Setup Failed'
+          : 'Installation Failed',
+        message: isLinuxMelonLoaderSetupMessage(errorMessage)
+          ? `SIMM could not complete the required Linux MelonLoader setup: ${errorMessage}`
+          : `Failed to install MelonLoader: ${errorMessage}`,
         type: 'error'
       });
     } finally {
@@ -1600,7 +1722,9 @@ export function EnvironmentList({
 
   const buildEnvironmentMenuItems = (env: Environment): AnchoredContextMenuItem[] => {
     const isSteam = isSteamEnvironment(env);
-    const currentMethod: LaunchMethod = preferredLaunchMethod.get(env.id) || 'steam';
+    const currentMethod: LaunchMethod = directLaunchSupported
+      ? preferredLaunchMethod.get(env.id) || 'steam'
+      : 'steam';
 
     return [
       {
@@ -1628,19 +1752,21 @@ export function EnvironmentList({
           });
         },
       },
-      {
-        key: 'launch-direct',
-        label: currentMethod === 'direct' ? 'Prefer Local Launch' : 'Use Local Launch',
-        icon: 'fas fa-terminal',
-        disabled: currentMethod === 'direct',
-        onSelect: () => {
-          setPreferredLaunchMethod(prev => {
-            const next = new Map(prev);
-            next.set(env.id, 'direct');
-            return next;
-          });
-        },
-      },
+      ...(directLaunchSupported
+        ? [{
+            key: 'launch-direct',
+            label: currentMethod === 'direct' ? 'Prefer Local Launch' : 'Use Local Launch',
+            icon: 'fas fa-terminal',
+            disabled: currentMethod === 'direct',
+            onSelect: () => {
+              setPreferredLaunchMethod(prev => {
+                const next = new Map(prev);
+                next.set(env.id, 'direct');
+                return next;
+              });
+            },
+          }]
+        : []),
       {
         key: 'delete',
         label: isSteam ? 'Clear Environment Records' : 'Delete Environment',
@@ -1659,7 +1785,9 @@ export function EnvironmentList({
     const isCheckingUpdate = checkingEnvironments.has(env.id);
     const isCompleted = env.status === 'completed';
     const status = getDominantStatus(env);
-    const launchMethod: LaunchMethod = preferredLaunchMethod.get(env.id) || 'steam';
+    const launchMethod: LaunchMethod = directLaunchSupported
+      ? preferredLaunchMethod.get(env.id) || 'steam'
+      : 'steam';
     const launchTitle = launchMethod === 'steam'
       ? 'Launch through Steam'
       : 'Launch this local install directly';
@@ -1670,6 +1798,52 @@ export function EnvironmentList({
     const pluginCount = pluginsCounts.get(env.id) ?? 0;
     const userLibsCount = userLibsCounts.get(env.id) ?? 0;
     const mlStatus = melonLoaderStatus.get(env.id);
+    const linuxMelonLoaderRequirements = mlStatus?.linuxRequirements;
+    const linuxMelonLoaderWarning = linuxMelonLoaderRequirements?.warnings?.[0];
+    const linuxNeedsLaunchRepair = Boolean(
+      mlStatus?.installed
+        && linuxMelonLoaderRequirements?.needsSteamLaunchOptionsRepair
+        && linuxMelonLoaderRequirements?.steamLaunchOptionsRepairable,
+    );
+    const linuxPrerequisitesMissing = linuxMelonLoaderRequirements?.prerequisitesInstalled === false;
+    const linuxCanInstallPrerequisites = Boolean(linuxMelonLoaderRequirements?.canInstallPrerequisites);
+    const linuxCanRepairSetup = linuxNeedsLaunchRepair || (
+      linuxPrerequisitesMissing && linuxCanInstallPrerequisites
+    );
+    const showLinuxMelonLoaderHint = Boolean(
+      linuxMelonLoaderWarning
+        && (
+          mlStatus?.installed
+          || !linuxMelonLoaderRequirements?.protontricksInstalled
+          || linuxPrerequisitesMissing
+        ),
+    );
+    const linuxMelonLoaderHint = showLinuxMelonLoaderHint
+      ? (
+        linuxNeedsLaunchRepair
+          ? 'Repair launch'
+          : !linuxMelonLoaderRequirements?.protontricksInstalled
+            ? 'Protontricks needed'
+            : linuxPrerequisitesMissing && linuxCanInstallPrerequisites
+              ? 'Install setup'
+              : linuxPrerequisitesMissing
+                ? 'Proton setup needed'
+                : 'Manual Proton setup'
+      )
+      : null;
+    const linuxMelonLoaderTitle = linuxMelonLoaderRequirements
+      ? [
+          linuxMelonLoaderWarning,
+          linuxMelonLoaderRequirements.missingPrerequisites?.length
+            ? `Missing: ${linuxMelonLoaderRequirements.missingPrerequisites.join(', ')}`
+            : null,
+          linuxMelonLoaderRequirements.prerequisiteStatusPath
+            ? `Status: ${linuxMelonLoaderRequirements.prerequisiteStatusPath}`
+            : null,
+          linuxMelonLoaderRequirements.prerequisiteCommands?.join(' | '),
+          linuxMelonLoaderRequirements.launchOptions,
+        ].filter(Boolean).join(' - ')
+      : undefined;
     const metrics = [
       { label: 'Version', value: isCompleted ? (env.currentGameVersion || 'Unknown') : 'Not installed' },
       {
@@ -1949,6 +2123,23 @@ export function EnvironmentList({
                   <Icon name={launchMethod === 'direct' ? 'fas fa-terminal' : 'fab fa-steam'} />
                   {launchMethod === 'direct' ? 'Local launch' : 'Steam launch'}
                 </span>
+                {linuxCanRepairSetup ? (
+                  <SimmButton
+                    type="button"
+                    variant="secondary"
+                    className="btn btn-secondary btn-small environment-footer-chip environment-footer-chip--warning"
+                    onClick={() => void handleRepairMelonLoaderLaunchOptions(env.id)}
+                    title={linuxMelonLoaderTitle}
+                  >
+                    <Icon name="fas fa-exclamation-triangle" />
+                    {linuxMelonLoaderHint}
+                  </SimmButton>
+                ) : linuxMelonLoaderHint ? (
+                  <span className="environment-footer-chip environment-footer-chip--warning" title={linuxMelonLoaderTitle}>
+                    <Icon name="fas fa-exclamation-triangle" />
+                    {linuxMelonLoaderHint}
+                  </span>
+                ) : null}
                 <SimmButton
                   type="button"
                   className="btn btn-secondary btn-small"

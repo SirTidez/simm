@@ -940,7 +940,7 @@ Function PagePrerequisitesIntro
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 18u "Before SIMM installs, setup needs to confirm the Windows components used by MelonLoader, DepotDownloader, and admin-backed symlink operations."
+  ${NSD_CreateLabel} 0 0 100% 18u "Before SIMM installs, setup needs to confirm the Windows components used by MelonLoader, DepotDownloader, and managed mod operations."
   Pop $1
 
   ${NSD_CreateLabel} 0 28u 100% 12u "Required components:"

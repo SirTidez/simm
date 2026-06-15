@@ -851,7 +851,7 @@ mod tests {
             detected_runtime: Some(Runtime::Il2cpp),
             runtime_match: Some(true),
             mod_storage_id: Some("storage-1".to_string()),
-            symlink_paths: Some(vec!["C:\\mods\\sample".to_string()]),
+            managed_paths: Some(vec!["C:\\mods\\sample".to_string()]),
             security_scan: None,
         }
     }

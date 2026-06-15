@@ -1357,7 +1357,7 @@ export function ModsOverlay({
     const dialog: ConfirmDialog = {
       title: isManagedInstall ? 'Uninstall Managed Mod?' : 'Delete Installed File?',
       message: isManagedInstall
-        ? `Remove "${mod.name}" from this environment? SIMM will uninstall the managed link from this environment and keep the downloaded library copy.`
+        ? `Remove "${mod.name}" from this environment? SIMM will delete the managed files from this environment and keep the downloaded library copy.`
         : `Delete "${mod.name}" from this environment? This removes the installed file from the Mods folder.`,
       confirmText: isManagedInstall ? 'Uninstall from Environment' : 'Delete File',
       cancelText: 'Cancel',

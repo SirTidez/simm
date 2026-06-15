@@ -32,6 +32,35 @@ struct ModLibraryCacheEntry {
     library: ModLibraryResult,
 }
 
+fn emit_environment_payload_changed_for_envs(
+    app: &AppHandle,
+    environment_ids: impl IntoIterator<Item = String>,
+) {
+    for environment_id in environment_ids {
+        if let Err(error) = crate::events::emit_mods_changed(app, environment_id.clone()) {
+            log::warn!(
+                "Failed to emit mods_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+        if let Err(error) = crate::events::emit_plugins_changed(app, environment_id.clone()) {
+            log::warn!(
+                "Failed to emit plugins_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+        if let Err(error) = crate::events::emit_userlibs_changed(app, environment_id.clone()) {
+            log::warn!(
+                "Failed to emit userlibs_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UploadKind {
     Archive,
@@ -529,6 +558,7 @@ pub async fn get_local_mod_ownership_candidates(
 
 #[tauri::command]
 pub async fn promote_local_mod_to_managed(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     file_name: String,
@@ -548,7 +578,7 @@ pub async fn promote_local_mod_to_managed(
     }
 
     let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let result = mods_service
         .promote_local_mod_to_managed(
             &env.output_dir,
             &file_name,
@@ -557,49 +587,108 @@ pub async fn promote_local_mod_to_managed(
             owned_file_ids.as_deref().unwrap_or(&[]),
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn install_downloaded_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     storage_id: String,
     environment_ids: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let result = mods_service
         .install_storage_mod_to_envs(&storage_id, environment_ids)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let affected_envs = result
+        .get("results")
+        .and_then(|value| value.as_array())
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|result| {
+                    result
+                        .get("environmentId")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    emit_environment_payload_changed_for_envs(&app, affected_envs);
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn uninstall_downloaded_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     storage_id: String,
     environment_ids: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let result = mods_service
         .uninstall_storage_mod_from_envs(&storage_id, environment_ids)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let affected_envs = result
+        .get("results")
+        .and_then(|value| value.as_array())
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|result| {
+                    result
+                        .get("environmentId")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    emit_environment_payload_changed_for_envs(&app, affected_envs);
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn delete_downloaded_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     storage_id: String,
 ) -> Result<serde_json::Value, String> {
     let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let result = mods_service
         .delete_downloaded_mod(&storage_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    let affected_envs = result
+        .get("removedFrom")
+        .and_then(|value| value.as_array())
+        .map(|envs| {
+            envs.iter()
+                .filter_map(|env_id| env_id.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    emit_environment_payload_changed_for_envs(&app, affected_envs);
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn delete_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     mod_file_name: String,
@@ -619,11 +708,16 @@ pub async fn delete_mod(
     mods_service
         .delete_mod(&env.output_dir, &mod_file_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn enable_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     mod_file_name: String,
@@ -643,11 +737,16 @@ pub async fn enable_mod(
     mods_service
         .enable_mod(&env.output_dir, &mod_file_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn disable_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     mod_file_name: String,
@@ -667,7 +766,11 @@ pub async fn disable_mod(
     mods_service
         .disable_mod(&env.output_dir, &mod_file_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_environment_payload_changed_for_envs(&app, [environment_id]);
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -812,6 +915,7 @@ pub async fn get_s1api_installation_status(
 
 #[tauri::command]
 pub async fn upload_mod(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     file_path: String,
@@ -821,9 +925,9 @@ pub async fn upload_mod(
     metadata: Option<serde_json::Value>,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    upload_mod_impl(
+    let result = upload_mod_impl(
         db.inner().clone(),
-        environment_id,
+        environment_id.clone(),
         file_path,
         original_file_name,
         runtime,
@@ -831,7 +935,17 @@ pub async fn upload_mod(
         metadata,
         security_override,
     )
-    .await
+    .await?;
+
+    if result
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        emit_environment_payload_changed_for_envs(&app, [environment_id]);
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -942,6 +1056,7 @@ pub async fn install_s1api(
             .install_storage_mod_to_envs(&existing_mod_id, vec![environment_id.clone()])
             .await
             .map_err(|e| e.to_string())?;
+        emit_environment_payload_changed_for_envs(&app, [environment_id.clone()]);
         return Ok(serde_json::json!({
             "success": true,
             "fromStorage": true,
@@ -1082,7 +1197,16 @@ pub async fn install_s1api(
     // The service returns Ok(serde_json::Value) with success/error fields
     // So we just return it directly
     match result {
-        Ok(json_result) => Ok(json_result),
+        Ok(json_result) => {
+            if json_result
+                .get("success")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                emit_environment_payload_changed_for_envs(&app, [environment_id]);
+            }
+            Ok(json_result)
+        }
         Err(e) => error_json(format!("Installation failed: {}", e)),
     }
 }
@@ -1541,6 +1665,7 @@ pub async fn download_mlvscan_to_library(
 
 #[tauri::command]
 pub async fn uninstall_s1api(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
 ) -> Result<serde_json::Value, String> {
@@ -1556,10 +1681,20 @@ pub async fn uninstall_s1api(
     }
 
     let mods_service = ModsService::new(db.inner().clone());
-    mods_service
+    let result = mods_service
         .uninstall_s1api(&env.output_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    if result
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        emit_environment_payload_changed_for_envs(&app, [environment_id]);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]

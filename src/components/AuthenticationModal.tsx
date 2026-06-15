@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 import { ApiService } from '../services/api';
+import { onSteamAuthQrLine } from '../services/events';
 import { useSettingsStore } from '../stores/settingsStore';
 import {
   Dialog,
@@ -18,9 +19,40 @@ interface Props {
   onClose: () => void;
   onAuthenticated: (credentials: { username: string; password: string; steamGuard: string; saveCredentials: boolean }) => void;
   required: boolean;
+  initialMode?: AuthMode;
   waitingForAuth?: boolean;
   authMessage?: string;
   nested?: boolean;
+}
+
+type AuthMode = 'qr' | 'password';
+
+const QR_REFRESH_MARKERS = [
+  'Use the Steam Mobile App',
+  'The QR code has changed',
+];
+
+function appendQrDisplayLine(currentLines: string[], line: string): string[] {
+  if (QR_REFRESH_MARKERS.some((marker) => line.includes(marker))) {
+    return [];
+  }
+
+  if (line.trim().length === 0) {
+    return currentLines;
+  }
+
+  return [...currentLines, line].slice(-80);
+}
+
+function normalizeQrDisplayLines(lines: string[]): string[] {
+  const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
+  if (nonEmptyLines.length === 0) return lines;
+
+  const commonIndent = Math.min(
+    ...nonEmptyLines.map((line) => line.match(/^\s*/)?.[0].length ?? 0)
+  );
+
+  return lines.map((line) => line.slice(commonIndent).trimEnd());
 }
 
 export function AuthenticationModal({
@@ -28,6 +60,7 @@ export function AuthenticationModal({
   onClose,
   onAuthenticated,
   required,
+  initialMode = 'qr',
   waitingForAuth = false,
   authMessage,
   nested = false,
@@ -38,6 +71,9 @@ export function AuthenticationModal({
   const [steamGuard, setSteamGuard] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>(initialMode);
+  const [qrLines, setQrLines] = useState<string[]>([]);
+  const [qrListenerReady, setQrListenerReady] = useState(false);
   const [saveCredentials, setSaveCredentials] = useState(true);
   const isMountedRef = useRef(true);
 
@@ -48,24 +84,85 @@ export function AuthenticationModal({
     };
   }, []);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    setAuthMode(initialMode);
+    setError(null);
+    setQrLines([]);
+    if (initialMode === 'qr') {
+      setSaveCredentials(true);
+    }
+  }, [initialMode, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setQrListenerReady(false);
+      return;
+    }
+
+    let disposed = false;
+    let cleanupListener: (() => void) | null = null;
+    setQrListenerReady(false);
+
+    onSteamAuthQrLine((data) => {
+      if (!isMountedRef.current) return;
+      setQrLines((currentLines) => {
+        return appendQrDisplayLine(currentLines, data.line);
+      });
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        cleanupListener = cleanup;
+        setQrListenerReady(true);
+      }
+    }).catch((err) => {
+      if (!disposed && isMountedRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to prepare Steam QR listener');
+      }
+    });
+
+    return () => {
+      disposed = true;
+      cleanupListener?.();
+    };
+  }, [isOpen]);
+
+  const handleAuthModeChange = (mode: AuthMode) => {
+    setAuthMode(mode);
+    setError(null);
+    if (mode === 'qr') {
+      setSaveCredentials(true);
+    }
+  };
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setLoading(true);
     setError(null);
+    if (authMode === 'qr') {
+      setQrLines([]);
+    }
 
     try {
-      const result = await ApiService.authenticate(username, password, steamGuard, saveCredentials);
+      const result = authMode === 'qr'
+        ? await ApiService.authenticateQr(saveCredentials)
+        : await ApiService.authenticate(username, password, steamGuard.trim() || undefined, saveCredentials);
 
       if (result.success) {
-        if (saveCredentials && username && password) {
+        const authenticatedUsername = authMode === 'qr' ? result.username || '' : username;
+
+        if (authMode === 'password' && saveCredentials && username && password) {
           await ApiService.saveCredentials(username, password);
           await updateSettings({ steamUsername: username });
+        } else if (authMode === 'qr' && saveCredentials && authenticatedUsername) {
+          await updateSettings({ steamUsername: authenticatedUsername });
         }
 
         onAuthenticated({
-          username,
-          password,
-          steamGuard,
+          username: authenticatedUsername,
+          password: authMode === 'password' ? password : '',
+          steamGuard: authMode === 'password' ? steamGuard : '',
           saveCredentials,
         });
         if (isMountedRef.current) {
@@ -98,6 +195,13 @@ export function AuthenticationModal({
   if (!isOpen) return null;
 
   const contentClass = nested ? 'auth-modal auth-modal--nested' : 'auth-modal';
+  const submitDisabled = loading
+    || (authMode === 'password' && (!username || !password))
+    || (authMode === 'qr' && !qrListenerReady);
+  const qrDisplayLines = normalizeQrDisplayLines(qrLines);
+  const qrOutputClassName = typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent)
+    ? 'auth-modal__qr-output auth-modal__qr-output--windows'
+    : 'auth-modal__qr-output';
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => {
@@ -193,7 +297,9 @@ export function AuthenticationModal({
 
               <div className="settings-callout auth-modal__callout">
                 <strong>What to expect</strong>
-                <p>Enter your Steam account details, then approve the session in Steam if Guard prompts appear.</p>
+                <p>{authMode === 'qr'
+                  ? 'Scan the QR code with the Steam Mobile App. SIMM stores the remembered DepotDownloader session name for future installs.'
+                  : 'Enter your Steam account details, then approve the session in Steam if Guard prompts appear.'}</p>
               </div>
             </aside>
 
@@ -201,50 +307,95 @@ export function AuthenticationModal({
               {error && <div className="error-message auth-modal__error-banner">{error}</div>}
 
               <div className="auth-modal__fields">
-                <div className="form-group">
-                  <label htmlFor="auth-steam-username">Steam Username</label>
-                  <Input
-                    id="auth-steam-username"
-                    type="text"
-                    value={username}
-                    onChange={(event) => setUsername(event.target.value)}
-                    placeholder="Enter your Steam username"
-                    required
-                    autoComplete="username"
-                  />
+                <div className="auth-modal__mode-toggle" role="tablist" aria-label="Steam authentication method">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={authMode === 'qr'}
+                    className={authMode === 'qr' ? 'auth-modal__mode-button auth-modal__mode-button--active' : 'auth-modal__mode-button'}
+                    onClick={() => handleAuthModeChange('qr')}
+                    disabled={loading}
+                  >
+                    <Icon name="fas fa-mobile-screen-button" />
+                    QR Code
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={authMode === 'password'}
+                    className={authMode === 'password' ? 'auth-modal__mode-button auth-modal__mode-button--active' : 'auth-modal__mode-button'}
+                    onClick={() => handleAuthModeChange('password')}
+                    disabled={loading}
+                  >
+                    <Icon name="fas fa-lock" />
+                    Password
+                  </button>
                 </div>
 
-                <div className="form-group">
-                  <label htmlFor="auth-steam-password">Steam Password</label>
-                  <Input
-                    id="auth-steam-password"
-                    type="password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    placeholder="Enter your Steam password"
-                    required
-                    autoComplete="current-password"
-                  />
-                </div>
+                {authMode === 'qr' ? (
+                  <div className="auth-modal__qr-panel">
+                    <div className="auth-modal__qr-header">
+                      <Icon name="fas fa-mobile-screen-button" />
+                      <div>
+                        <strong>Steam Mobile QR login</strong>
+                        <small>Start the QR session, then scan the code shown here with the Steam Mobile App.</small>
+                      </div>
+                    </div>
+                    <pre className={qrOutputClassName} aria-live="polite" data-testid="steam-auth-qr-output">
+                      {qrDisplayLines.length > 0
+                        ? qrDisplayLines.join('\n')
+                        : 'QR code will appear here after the session starts.'}
+                    </pre>
+                  </div>
+                ) : (
+                  <>
+                    <div className="form-group">
+                      <label htmlFor="auth-steam-username">Steam Username</label>
+                      <Input
+                        id="auth-steam-username"
+                        type="text"
+                        value={username}
+                        onChange={(event) => setUsername(event.target.value)}
+                        placeholder="Enter your Steam username"
+                        required
+                        autoComplete="username"
+                      />
+                    </div>
 
-                <div className="form-group">
-                  <label htmlFor="auth-steam-guard">Steam Guard Code <span className="auth-modal__optional">Optional</span></label>
-                  <Input
-                    id="auth-steam-guard"
-                    type="text"
-                    value={steamGuard}
-                    onChange={(event) => setSteamGuard(event.target.value)}
-                    placeholder="Enter the Steam Guard code if Steam requests one"
-                    maxLength={5}
-                    autoComplete="one-time-code"
-                  />
-                  <small className="auth-modal__helper">Only required when Steam asks for a mobile or email verification code.</small>
-                </div>
+                    <div className="form-group">
+                      <label htmlFor="auth-steam-password">Steam Password</label>
+                      <Input
+                        id="auth-steam-password"
+                        type="password"
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        placeholder="Enter your Steam password"
+                        required
+                        autoComplete="current-password"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="auth-steam-guard">Steam Guard Code <span className="auth-modal__optional">Optional</span></label>
+                      <Input
+                        id="auth-steam-guard"
+                        type="text"
+                        value={steamGuard}
+                        onChange={(event) => setSteamGuard(event.target.value)}
+                        placeholder="Enter the Steam Guard code if Steam requests one"
+                        maxLength={5}
+                        autoComplete="one-time-code"
+                      />
+                      <small className="auth-modal__helper">Only required when Steam asks for a mobile or email verification code.</small>
+                    </div>
+                  </>
+                )}
 
                 <div className="settings-field auth-modal__preference">
                   <div
                     className="settings-toggle settings-toggle-button"
                     onClick={(event) => {
+                      if (authMode === 'qr') return;
                       if ((event.target as HTMLElement).closest('[data-slot="switch"]')) return;
                       setSaveCredentials((checked) => !checked);
                     }}
@@ -252,12 +403,15 @@ export function AuthenticationModal({
                     <Switch
                       checked={saveCredentials}
                       onCheckedChange={setSaveCredentials}
+                      disabled={authMode === 'qr'}
                       aria-label="Remember credentials securely"
                       className="settings-toggle__switch"
                     />
                     <span className="settings-toggle__copy">
-                      <strong>Remember credentials securely</strong>
-                      <small>Store this Steam login locally in encrypted form for future Steam authorization.</small>
+                      <strong>{authMode === 'qr' ? 'Remember QR session' : 'Remember credentials securely'}</strong>
+                      <small>{authMode === 'qr'
+                        ? 'DepotDownloader stores the remembered session, and SIMM stores only the account name needed to reuse it.'
+                        : 'Store this Steam login locally in encrypted form for future Steam authorization.'}</small>
                     </span>
                   </div>
                 </div>
@@ -269,9 +423,9 @@ export function AuthenticationModal({
                     Cancel
                   </SimmButton>
                 )}
-                <SimmButton type="submit" className="btn btn-primary" disabled={loading || !username || !password}>
-                  <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-right-to-bracket'} spin={loading} />
-                  {loading ? 'Authenticating…' : 'Authenticate with Steam'}
+                <SimmButton type="submit" className="btn btn-primary" disabled={submitDisabled}>
+                  <Icon name={loading ? 'fas fa-spinner fa-spin' : authMode === 'qr' ? 'fas fa-mobile-screen-button' : 'fas fa-right-to-bracket'} spin={loading} />
+                  {loading ? 'Authenticating…' : authMode === 'qr' ? (qrListenerReady ? 'Start QR Login' : 'Preparing QR Login') : 'Authenticate with Steam'}
                 </SimmButton>
               </div>
             </form>

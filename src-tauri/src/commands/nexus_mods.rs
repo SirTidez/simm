@@ -530,6 +530,65 @@ fn restore_windows_protocol_handler(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn linux_desktop_id_looks_like_simm(desktop_id: &str) -> bool {
+    crate::services::linux_readiness::linux_desktop_id_looks_like_simm(desktop_id)
+}
+
+#[cfg(target_os = "linux")]
+async fn query_linux_default_scheme_handler(protocol: &str) -> Result<Option<String>, String> {
+    let output = match tokio::process::Command::new("xdg-mime")
+        .args(["query", "default", &format!("x-scheme-handler/{protocol}")])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to query Linux desktop scheme handler with xdg-mime: {}",
+                error
+            ));
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "xdg-mime could not query the Linux desktop scheme handler".to_string()
+        } else {
+            format!("xdg-mime could not query the Linux desktop scheme handler: {stderr}")
+        });
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
+}
+
+#[cfg(target_os = "linux")]
+async fn verify_linux_nxm_scheme_handler(protocol: &str) -> Result<(), String> {
+    match query_linux_default_scheme_handler(protocol).await {
+        Ok(Some(handler)) if linux_desktop_id_looks_like_simm(&handler) => {
+            log::info!(
+                "Linux desktop scheme handler for {}:// is registered to {}",
+                protocol,
+                handler
+            );
+        }
+        Ok(Some(handler)) => warn_with_location(&format!(
+            "Linux desktop scheme handler for {}:// is currently '{}'. Nexus manual downloads may open in another app until SIMM is registered as the default handler.",
+            protocol, handler
+        )),
+        Ok(None) => warn_with_location(&format!(
+            "Could not verify Linux desktop scheme handler for {}:// because xdg-mime is not available or no default handler is registered.",
+            protocol
+        )),
+        Err(error) => warn_with_location(&error),
+    }
+
+    Ok(())
+}
+
 fn base64url_sha256(input: &str) -> String {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
@@ -1092,23 +1151,15 @@ async fn clear_nxm_pending_download(db: Arc<SqlitePool>) -> Result<(), String> {
 }
 
 pub(crate) async fn ensure_nxm_runtime_registration(db: Arc<SqlitePool>) -> Result<(), String> {
-    let settings = SettingsService::new(db).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     {
+        let settings = SettingsService::new(db).map_err(|e| e.to_string())?;
         let existing_backup = settings
             .get_nexus_nxm_protocol_backup()
             .await
             .map_err(|e| e.to_string())?;
+        let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
         if existing_backup.is_none() {
-            let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
-            settings
-                .save_nexus_nxm_protocol_backup(
-                    &serde_json::to_value(backup).map_err(|e| e.to_string())?,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-        } else {
-            let backup = register_windows_protocol_handler(NXM_PROTOCOL)?;
             settings
                 .save_nexus_nxm_protocol_backup(
                     &serde_json::to_value(backup).map_err(|e| e.to_string())?,
@@ -1116,14 +1167,27 @@ pub(crate) async fn ensure_nxm_runtime_registration(db: Arc<SqlitePool>) -> Resu
                 .await
                 .map_err(|e| e.to_string())?;
         }
+        return Ok(());
     }
-    Ok(())
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = db;
+        verify_linux_nxm_scheme_handler(NXM_PROTOCOL).await?;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+    {
+        let _ = db;
+        Ok(())
+    }
 }
 
 pub(crate) async fn cleanup_nxm_runtime_registration(db: Arc<SqlitePool>) -> Result<(), String> {
-    let settings = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     {
+        let settings = SettingsService::new(db.clone()).map_err(|e| e.to_string())?;
         let backup = settings
             .get_nexus_nxm_protocol_backup()
             .await
@@ -1134,15 +1198,20 @@ pub(crate) async fn cleanup_nxm_runtime_registration(db: Arc<SqlitePool>) -> Res
             .transpose()?;
 
         restore_windows_protocol_handler(NXM_PROTOCOL, backup.as_ref())?;
+
+        clear_nxm_pending_download(db.clone()).await?;
+        settings
+            .clear_nexus_nxm_protocol_backup()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        return Ok(());
     }
 
-    clear_nxm_pending_download(db.clone()).await?;
-    settings
-        .clear_nexus_nxm_protocol_backup()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        clear_nxm_pending_download(db).await
+    }
 }
 
 pub(crate) async fn cleanup_stale_nxm_runtime_registration(
@@ -2787,11 +2856,19 @@ pub async fn install_nexus_mods_mod(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::linux_desktop_id_looks_like_simm;
     use super::{
         classify_oauth_refresh_failure, decode_jwt_payload, derive_account_flags,
         derive_account_summary, should_clear_pending_after_manual_completion, OAuthRefreshFailure,
     };
+    #[cfg(not(target_os = "windows"))]
+    use super::{cleanup_nxm_runtime_registration, ensure_nxm_runtime_registration};
+    #[cfg(not(target_os = "windows"))]
+    use crate::services::settings::SettingsService;
     use serde_json::json;
+    #[cfg(not(target_os = "windows"))]
+    use serial_test::serial;
 
     fn build_test_jwt(payload: serde_json::Value) -> String {
         use base64::Engine as _;
@@ -2911,5 +2988,63 @@ mod tests {
         assert!(!should_clear_pending_after_manual_completion(
             &runtime_selection
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_desktop_id_matching_accepts_simm_handlers() {
+        assert!(linux_desktop_id_looks_like_simm(
+            "Schedule I Mod Manager.desktop"
+        ));
+        assert!(linux_desktop_id_looks_like_simm(
+            "schedule-i-mod-manager.desktop"
+        ));
+        assert!(linux_desktop_id_looks_like_simm(
+            "com.s1devenvmanager.app.desktop"
+        ));
+        assert!(linux_desktop_id_looks_like_simm("simmrust.desktop"));
+        assert!(linux_desktop_id_looks_like_simm("simm.desktop"));
+        assert!(!linux_desktop_id_looks_like_simm("vortex.desktop"));
+        assert!(!linux_desktop_id_looks_like_simm("nexusmods-app.desktop"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    #[serial]
+    async fn non_windows_nxm_runtime_registration_keeps_protocol_backup_under_tauri_control(
+    ) -> anyhow::Result<()> {
+        let (_temp, _guard, pool) =
+            crate::test_helpers::init_test_pool_with_temp_data_dir().await?;
+        let settings = SettingsService::new(pool.clone())?;
+        let backup = json!({
+            "owner": "desktop-environment",
+            "scheme": "nxm"
+        });
+        settings.save_nexus_nxm_protocol_backup(&backup).await?;
+        settings
+            .save_nexus_nxm_pending_download(&json!({
+                "sessionId": "pending",
+                "kind": "library",
+                "gameId": "schedule1",
+                "modId": 1,
+                "fileId": 2,
+                "createdAt": 1
+            }))
+            .await?;
+
+        ensure_nxm_runtime_registration(pool.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        cleanup_nxm_runtime_registration(pool.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        assert!(settings.get_nexus_nxm_pending_download().await?.is_none());
+        assert_eq!(
+            settings.get_nexus_nxm_protocol_backup().await?,
+            Some(backup)
+        );
+
+        Ok(())
     }
 }

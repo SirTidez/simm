@@ -8,6 +8,9 @@ export interface DepotDownloaderInfo {
   path?: string;
   version?: string;
   method?: 'path' | 'winget' | 'homebrew' | 'manual';
+  canAutoInstall?: boolean;
+  installHelpUrl?: string;
+  installHint?: string;
 }
 
 export interface DownloadProgress {
@@ -70,6 +73,72 @@ export interface Environment {
   steamappsDir?: string;
   steamManifestPath?: string;
   environmentType?: 'Steam' | 'DepotDownloader' | 'steam' | 'depotDownloader' | 'local';
+}
+
+export interface LinuxMelonLoaderRequirements {
+  appId: string;
+  protontricksInstalled: boolean;
+  protontricksCommand: string;
+  canInstallPrerequisites: boolean;
+  prerequisiteCommands: string[];
+  prerequisiteAppId?: string | null;
+  requiredPrerequisites?: string[];
+  installedPrerequisites?: string[];
+  missingPrerequisites?: string[];
+  prerequisitesInstalled?: boolean | null;
+  prerequisiteStatus?: 'installed' | 'missing' | 'unknown';
+  prerequisiteStatusPath?: string | null;
+  prerequisiteStatusError?: string | null;
+  launchOptions: string;
+  steamLaunchOptions?: string | null;
+  steamLaunchOptionsConfigured?: boolean | null;
+  steamLaunchOptionsRepairable?: boolean | null;
+  needsSteamLaunchOptionsRepair?: boolean | null;
+  steamLaunchOptionsPath?: string | null;
+  warnings: string[];
+}
+
+export interface MelonLoaderStatus {
+  installed: boolean;
+  version?: string;
+  linuxRequirements?: LinuxMelonLoaderRequirements | null;
+}
+
+export interface MelonLoaderLaunchOptionsRepairResult {
+  success: boolean;
+  message?: string;
+  linuxPrerequisiteMessage?: string | null;
+  linuxRequirements?: LinuxMelonLoaderRequirements | null;
+  steamLaunchOptions?: {
+    configured: boolean;
+    repairable: boolean;
+    required: string;
+    current?: string | null;
+    configPath?: string | null;
+  } | null;
+  shortcut?: {
+    shortcutUrl: string;
+    shortcutAppId: number;
+    shortcutsFile: string;
+    status: string;
+    requiresClientReload: boolean;
+  } | null;
+}
+
+export interface LaunchGameResult {
+  success: boolean;
+  executablePath?: string;
+  launchStartedAt?: number;
+  launchMethod?: 'steam' | 'steam_restart' | 'direct' | string;
+  environmentId?: string;
+}
+
+export interface MelonLoaderLaunchVerification {
+  status: 'confirmed' | 'notInstalled' | 'noLog' | 'staleLog' | 'noConfirmation' | string;
+  confirmed: boolean;
+  logPath: string;
+  modifiedAt?: number | null;
+  message: string;
 }
 
 export interface UpdateCheckResult {
@@ -148,6 +217,37 @@ export interface Settings {
 export interface AppStartupState {
   simmDirectoryCreated: boolean;
   databaseCreated: boolean;
+}
+
+export type LinuxReadinessCheckStatus =
+  | 'ready'
+  | 'warning'
+  | 'missing'
+  | 'unknown'
+  | 'notApplicable';
+
+export interface LinuxReadinessCheck {
+  id: string;
+  label: string;
+  status: LinuxReadinessCheckStatus;
+  detail: string;
+  command?: string | null;
+  path?: string | null;
+}
+
+export interface LinuxDesktopSchemeStatus {
+  scheme: string;
+  handler?: string | null;
+  ready: boolean;
+  detail: string;
+}
+
+export interface LinuxReadinessStatus {
+  platform: 'windows' | 'macos' | 'linux';
+  available: boolean;
+  summary: LinuxReadinessCheckStatus;
+  checks: LinuxReadinessCheck[];
+  schemeHandlers: LinuxDesktopSchemeStatus[];
 }
 
 export interface CustomThemeDefinition {

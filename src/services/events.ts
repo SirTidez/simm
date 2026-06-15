@@ -30,6 +30,10 @@ export interface AuthErrorEvent {
   error: string;
 }
 
+export interface SteamAuthQrLineEvent {
+  line: string;
+}
+
 export interface MelonLoaderInstallingEvent {
   downloadId: string;
   environmentId: string;
@@ -141,6 +145,12 @@ export async function onAuthSuccess(handler: (data: AuthSuccessEvent) => void): 
 
 export async function onAuthError(handler: (data: AuthErrorEvent) => void): Promise<() => void> {
   return await listen<AuthErrorEvent>('auth_error', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onSteamAuthQrLine(handler: (data: SteamAuthQrLineEvent) => void): Promise<() => void> {
+  return await listen<SteamAuthQrLineEvent>('steam_auth_qr_line', (event) => {
     handler(event.payload);
   });
 }

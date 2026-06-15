@@ -8,7 +8,12 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores([
     '.agents',
+    '.browser-pilot',
+    '.claude',
     '.codex',
+    '.serena',
+    '.stitch',
+    '.vscode',
     'dist',
     'output',
     'target',

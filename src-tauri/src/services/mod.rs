@@ -8,6 +8,7 @@ pub mod filesystem_watcher;
 pub mod fomod;
 pub mod game_version;
 pub mod github_releases;
+pub mod linux_readiness;
 pub mod logger;
 pub mod logs;
 pub mod melon_loader;

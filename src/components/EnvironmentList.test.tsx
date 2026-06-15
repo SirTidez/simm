@@ -22,8 +22,10 @@ const apiMocks = vi.hoisted(() => ({
   getUserLibsCount: vi.fn(),
   openFolder: vi.fn(),
   launchGame: vi.fn(),
+  verifyMelonLoaderLaunch: vi.fn(),
   getMelonLoaderReleases: vi.fn(),
   installMelonLoader: vi.fn(),
+  repairMelonLoaderLaunchOptions: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
@@ -183,8 +185,15 @@ describe('EnvironmentList', () => {
     apiMocks.getUserLibsCount.mockResolvedValue({ count: 0 });
     apiMocks.openFolder.mockResolvedValue({ success: true });
     apiMocks.launchGame.mockResolvedValue({ success: true });
+    apiMocks.verifyMelonLoaderLaunch.mockResolvedValue({
+      status: 'notInstalled',
+      confirmed: false,
+      logPath: 'C:/env-1/MelonLoader/Latest.log',
+      message: 'MelonLoader is not installed for this environment.',
+    });
     apiMocks.getMelonLoaderReleases.mockResolvedValue([]);
     apiMocks.installMelonLoader.mockResolvedValue({ success: true });
+    apiMocks.repairMelonLoaderLaunchOptions.mockResolvedValue({ success: true });
 
     storeMocks.useEnvironmentStore.mockReturnValue({
       environments: [completedEnv],
@@ -327,6 +336,123 @@ describe('EnvironmentList', () => {
     });
   });
 
+  it('verifies MelonLoader startup after a card launch returns a start timestamp', async () => {
+    apiMocks.launchGame.mockResolvedValueOnce({
+      success: true,
+      launchStartedAt: 12345,
+    });
+    apiMocks.verifyMelonLoaderLaunch.mockResolvedValueOnce({
+      status: 'confirmed',
+      confirmed: true,
+      logPath: 'C:/env-1/MelonLoader/Latest.log',
+      message: 'MelonLoader wrote a fresh launch log.',
+    });
+
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch' }));
+
+    await waitFor(() => {
+      expect(apiMocks.verifyMelonLoaderLaunch).toHaveBeenCalledWith('env-1', 12345, 20000);
+    });
+  });
+
+  it('warns when card launch verification does not confirm a fresh MelonLoader log', async () => {
+    apiMocks.launchGame.mockResolvedValueOnce({
+      success: true,
+      launchStartedAt: 12345,
+    });
+    apiMocks.verifyMelonLoaderLaunch.mockResolvedValueOnce({
+      status: 'staleLog',
+      confirmed: false,
+      logPath: 'C:/env-1/MelonLoader/Latest.log',
+      message: 'MelonLoader log exists, but it has not been refreshed since this launch request.',
+    });
+
+    render(<EnvironmentList />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch' }));
+
+    expect(await screen.findByTestId('message-overlay')).toHaveTextContent(
+      'MelonLoader Launch Not Confirmed: Env One',
+    );
+    expect(screen.getByTestId('message-overlay')).toHaveTextContent(
+      'MelonLoader log exists, but it has not been refreshed since this launch request.',
+    );
+    expect(screen.getByTestId('message-overlay')).toHaveTextContent(
+      'C:/env-1/MelonLoader/Latest.log',
+    );
+  });
+
+  it('installs missing Linux MelonLoader Proton setup from the environment chip', async () => {
+    apiMocks.getMelonLoaderStatus.mockResolvedValueOnce({
+      installed: true,
+      version: 'v0.7.2',
+      linuxRequirements: {
+        appId: '3164500',
+        protontricksInstalled: true,
+        protontricksCommand: 'protontricks',
+        canInstallPrerequisites: true,
+        prerequisiteCommands: ['protontricks 3164500 dotnet6', 'protontricks 3164500 vcrun2015'],
+        requiredPrerequisites: ['dotnet6', 'vcrun2015'],
+        installedPrerequisites: ['dotnet6'],
+        missingPrerequisites: ['vcrun2015'],
+        prerequisitesInstalled: false,
+        prerequisiteStatus: 'missing',
+        launchOptions: 'WINEDLLOVERRIDES="version=n,b" %command%',
+        steamLaunchOptionsConfigured: true,
+        steamLaunchOptionsRepairable: true,
+        needsSteamLaunchOptionsRepair: false,
+        warnings: ['Schedule I Proton prefix is missing required MelonLoader prerequisites: vcrun2015.'],
+      },
+    });
+    apiMocks.repairMelonLoaderLaunchOptions.mockResolvedValueOnce({
+      success: true,
+      linuxPrerequisiteMessage: 'Installed Linux prerequisites with protontricks for Steam app 3164500',
+      linuxRequirements: {
+        appId: '3164500',
+        protontricksInstalled: true,
+        protontricksCommand: 'protontricks',
+        canInstallPrerequisites: true,
+        prerequisiteCommands: ['protontricks 3164500 dotnet6', 'protontricks 3164500 vcrun2015'],
+        missingPrerequisites: [],
+        prerequisitesInstalled: true,
+        launchOptions: 'WINEDLLOVERRIDES="version=n,b" %command%',
+        warnings: [],
+      },
+    });
+    apiMocks.getMelonLoaderStatus.mockResolvedValueOnce({
+      installed: true,
+      version: 'v0.7.2',
+      linuxRequirements: {
+        appId: '3164500',
+        protontricksInstalled: true,
+        protontricksCommand: 'protontricks',
+        canInstallPrerequisites: true,
+        prerequisiteCommands: ['protontricks 3164500 dotnet6', 'protontricks 3164500 vcrun2015'],
+        missingPrerequisites: [],
+        prerequisitesInstalled: true,
+        launchOptions: 'WINEDLLOVERRIDES="version=n,b" %command%',
+        warnings: [],
+      },
+    });
+
+    render(<EnvironmentList />);
+
+    const setupButton = await screen.findByRole('button', { name: /Install setup/i });
+    fireEvent.click(setupButton);
+
+    await waitFor(() => {
+      expect(apiMocks.repairMelonLoaderLaunchOptions).toHaveBeenCalledWith('env-1');
+    });
+    expect(await screen.findByTestId('message-overlay')).toHaveTextContent(
+      'Linux MelonLoader Setup Updated',
+    );
+    expect(screen.getByTestId('message-overlay')).toHaveTextContent(
+      'Installed Linux prerequisites with protontricks for Steam app 3164500',
+    );
+  });
+
   it('launches Steam-managed environments through Steam by default', async () => {
     const steamEnv: Environment = {
       ...completedEnv,
@@ -395,6 +521,35 @@ describe('EnvironmentList', () => {
       expect(apiMocks.installMelonLoader).toHaveBeenCalledWith('env-1', 'v1.0.0');
       expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledWith('env-1');
     });
+  });
+
+  it('reports Linux setup blockers without calling the install failed', async () => {
+    render(<EnvironmentList />);
+
+    await waitFor(() => {
+      expect(eventMocks.onComplete).toHaveBeenCalled();
+      expect(completeHandler).not.toBeNull();
+    });
+
+    apiMocks.installMelonLoader.mockClear();
+    apiMocks.installMelonLoader.mockResolvedValueOnce({
+      success: false,
+      error: 'Steam must be fully restarted before SIMM can install Proton prerequisites with Protontricks.',
+    });
+
+    await act(async () => {
+      await completeHandler?.({ downloadId: 'env-1' });
+    });
+
+    expect(await screen.findByTestId('message-overlay')).toHaveTextContent(
+      'Linux MelonLoader Setup Failed',
+    );
+    expect(screen.getByTestId('message-overlay')).toHaveTextContent(
+      'required Linux MelonLoader setup',
+    );
+    expect(screen.getByTestId('message-overlay')).not.toHaveTextContent(
+      'MelonLoader Install Failed',
+    );
   });
 
   it('uses the latest auto-install settings when a download completes', async () => {

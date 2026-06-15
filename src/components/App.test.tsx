@@ -4,7 +4,7 @@ import { App } from './App';
 import type { ReactNode } from 'react';
 
 const invokeMock = vi.hoisted(() => vi.fn());
-const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
+const listenMock = vi.hoisted(() => vi.fn(async (_eventName?: string, _handler?: unknown) => () => {}));
 const deepLinkMocks = vi.hoisted(() => ({
   getCurrent: vi.fn(),
   onOpenUrl: vi.fn(),
@@ -74,6 +74,7 @@ vi.mock('@tauri-apps/plugin-process', () => ({
 const windowMocks = vi.hoisted(() => ({
   isMaximized: vi.fn(),
   onResized: vi.fn(),
+  setDecorations: vi.fn(),
   minimize: vi.fn(),
   toggleMaximize: vi.fn(),
   close: vi.fn(),
@@ -362,6 +363,7 @@ describe('App', () => {
 
     windowMocks.isMaximized.mockReset();
     windowMocks.onResized.mockReset();
+    windowMocks.setDecorations.mockReset();
     windowMocks.minimize.mockReset();
     windowMocks.toggleMaximize.mockReset();
     windowMocks.close.mockReset();
@@ -369,6 +371,7 @@ describe('App', () => {
 
     windowMocks.isMaximized.mockResolvedValue(false);
     windowMocks.onResized.mockResolvedValue(() => {});
+    windowMocks.setDecorations.mockResolvedValue(undefined);
     windowMocks.minimize.mockResolvedValue(undefined);
     windowMocks.toggleMaximize.mockResolvedValue(undefined);
     windowMocks.close.mockResolvedValue(undefined);
@@ -395,6 +398,7 @@ describe('App', () => {
     await waitFor(() => {
       expect(screen.queryByText('Detecting game and MelonLoader versions')).toBeNull();
     });
+    await waitFor(() => expect(windowMocks.setDecorations).toHaveBeenCalledWith(false));
     expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
   });
 
@@ -575,6 +579,57 @@ describe('App', () => {
         environmentId: 'steam-main',
         launchMethod: 'steam',
       });
+    });
+  });
+
+  it('warns when MelonLoader launch verification does not confirm a fresh log', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'launch_game') {
+        return Promise.resolve({ success: true, launchStartedAt: 12345 });
+      }
+      if (command === 'verify_melonloader_launch') {
+        return Promise.resolve({
+          status: 'staleLog',
+          confirmed: false,
+          logPath: 'C:/Games/Main/MelonLoader/Latest.log',
+          message: 'MelonLoader log exists, but it has not been refreshed since this launch request.',
+        });
+      }
+      return Promise.resolve(false);
+    });
+    environmentStoreMocks.useEnvironmentStore.mockReturnValue({
+      environments: [
+        {
+          id: 'env-main',
+          name: 'Main',
+          appId: '3164500',
+          branch: 'main',
+          outputDir: 'C:/Games/Main',
+          runtime: 'IL2CPP',
+          status: 'completed',
+        },
+      ],
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Game' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('verify_melonloader_launch', {
+        environmentId: 'env-main',
+        launchStartedAt: 12345,
+        timeoutMs: 20000,
+      });
+    });
+    await waitFor(() => {
+      expect(dialogMocks.message).toHaveBeenCalledWith(
+        expect.stringContaining('MelonLoader log exists'),
+        {
+          title: 'MelonLoader Launch Not Confirmed: Main',
+          kind: 'warning',
+        },
+      );
     });
   });
 
@@ -1221,6 +1276,53 @@ describe('App', () => {
         ([command]) => command === 'complete_nexus_manual_download_session',
       ),
     ).toHaveLength(2);
+  });
+
+  it('handles Nexus manual download URLs delivered through single-instance args', async () => {
+    const nxmUrl = 'nxm://schedule1/mods/123/files/456?key=abc&expires=999&user_id=1';
+    type SingleInstanceHandler = (event: { payload?: { args?: string[] } }) => void;
+    let singleInstanceHandler: SingleInstanceHandler | null = null;
+    listenMock.mockImplementation(async (eventName?: string, handler?: unknown) => {
+      if (eventName === 'single-instance-args') {
+        singleInstanceHandler = handler as SingleInstanceHandler;
+      }
+      return () => {};
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'complete_nexus_manual_download_session') {
+        return Promise.resolve({
+          success: true,
+          requestedKind: 'library',
+          storageId: 'nexus-mod-1-0-0',
+        });
+      }
+
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(singleInstanceHandler).not.toBeNull();
+    });
+
+    const handler = singleInstanceHandler as SingleInstanceHandler | null;
+    if (!handler) {
+      throw new Error('single-instance listener was not registered');
+    }
+
+    handler({
+      payload: {
+        args: ['/usr/bin/simm', nxmUrl],
+      },
+    });
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('complete_nexus_manual_download_session', {
+        nxmUrl,
+        runtimeOverride: null,
+      });
+    });
   });
 
   it('consumes a replayed successful Nexus OAuth callback when no pending flow remains', async () => {

@@ -7,8 +7,11 @@ permissions:
   contents: write
 
 jobs:
-  publish-release:
+  build-windows:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -39,12 +42,8 @@ jobs:
             throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
           }
 
-          $tag = "v${version}"
-          $assetName = "SIMM_${version}_Setup.exe"
-
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v${version}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Enable updater artifacts for release build
         shell: pwsh
@@ -56,6 +55,9 @@ jobs:
           }
           $config.bundle.createUpdaterArtifacts = $true
           $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+
+      - name: Validate Windows app launch manifest
+        run: bash scripts/validate-windows-app-manifest.sh
 
       - name: Build Windows installer
         env:
@@ -69,58 +71,197 @@ jobs:
         shell: pwsh
         run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
 
-      - name: Prepare release assets
-        id: asset
+      - name: Prepare Windows release assets
+        id: windows_asset
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path 'artifacts/windows' -Force | Out-Null
 
           $setupSources = @(Get-ChildItem -Path 'target/release/bundle/nsis' -File -Filter '*.exe')
           if ($setupSources.Count -ne 1) {
             throw "Expected exactly one NSIS setup executable, found $($setupSources.Count)."
           }
+
           $setupSource = $setupSources[0]
           $signaturePath = Join-Path $setupSource.DirectoryName "$($setupSource.Name).sig"
           if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
             throw "Updater signature '$signaturePath' was not generated for installer '$($setupSource.Name)'."
           }
-          $signatureSource = Get-Item -LiteralPath $signaturePath
 
-          $setupTarget = Join-Path 'artifacts' '${{ steps.version.outputs.asset_name }}'
+          $setupTarget = "artifacts/windows/SIMM_${version}_Setup.exe"
+          $signatureTarget = "$setupTarget.sig"
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
+          Copy-Item -LiteralPath $signaturePath -Destination $signatureTarget -Force
 
-          $signatureTarget = Join-Path 'artifacts' $signatureSource.Name
-          Copy-Item -LiteralPath $signatureSource.FullName -Destination $signatureTarget -Force
-
-          "setup_file=$setupTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "signature_file=$signatureTarget" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Upload workflow artifact
+      - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:
-          name: SIMM_${{ steps.version.outputs.version }}_ReleaseAssets
-          path: |
-            ${{ steps.asset.outputs.setup_file }}
-            ${{ steps.asset.outputs.signature_file }}
+          name: SIMM_${{ steps.version.outputs.version }}_Windows
+          path: artifacts/windows/*
           if-no-files-found: error
           retention-days: 14
+
+  build-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.5"
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            pkg-config \
+            librsvg2-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve app version
+        id: version
+        shell: pwsh
+        run: |
+          $config = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = $config.version
+          if (-not $version) {
+            throw 'Unable to determine app version from src-tauri/tauri.conf.json.'
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Enable updater artifacts for release build
+        shell: pwsh
+        run: |
+          $configPath = 'src-tauri/tauri.conf.json'
+          $config = Get-Content $configPath -Raw | ConvertFrom-Json -AsHashtable
+          if (-not $config.ContainsKey('bundle') -or $null -eq $config.bundle) {
+            $config.bundle = @{}
+          }
+          $config.bundle.createUpdaterArtifacts = $true
+          $config | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+
+      - name: Build Linux packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SIMM_UPDATER_PUBKEY: ${{ secrets.SIMM_UPDATER_PUBKEY }}
+        run: bun run tauri:build:linux
+
+      - name: Restore tauri config
+        if: always()
+        shell: pwsh
+        run: git restore --worktree --source=HEAD -- src-tauri/tauri.conf.json
+
+      - name: Prepare Linux release assets
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Path 'artifacts/linux' -Force | Out-Null
+
+          $bundleRoots = @('target/release/bundle', 'src-tauri/target/release/bundle') | Where-Object { Test-Path -LiteralPath $_ }
+          if ($bundleRoots.Count -eq 0) {
+            throw 'No Tauri bundle output directory was found.'
+          }
+
+          $appImageSources = @($bundleRoots | ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_ 'appimage') -File -Filter '*.AppImage' -ErrorAction SilentlyContinue
+          })
+          if ($appImageSources.Count -ne 1) {
+            throw "Expected exactly one AppImage, found $($appImageSources.Count)."
+          }
+
+          $appImageSource = $appImageSources[0]
+          $appImageSignaturePath = "$($appImageSource.FullName).sig"
+          if (-not (Test-Path -LiteralPath $appImageSignaturePath -PathType Leaf)) {
+            throw "Updater signature '$appImageSignaturePath' was not generated for AppImage '$($appImageSource.Name)'."
+          }
+
+          $debSources = @($bundleRoots | ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_ 'deb') -File -Filter '*.deb' -ErrorAction SilentlyContinue
+          })
+          if ($debSources.Count -ne 1) {
+            throw "Expected exactly one deb package, found $($debSources.Count)."
+          }
+
+          $appImageTarget = "artifacts/linux/SIMM_${version}_x86_64.AppImage"
+          $appImageSignatureTarget = "$appImageTarget.sig"
+          $debTarget = "artifacts/linux/SIMM_${version}_amd64.deb"
+          Copy-Item -LiteralPath $appImageSource.FullName -Destination $appImageTarget -Force
+          Copy-Item -LiteralPath $appImageSignaturePath -Destination $appImageSignatureTarget -Force
+          Copy-Item -LiteralPath $debSources[0].FullName -Destination $debTarget -Force
+          Copy-Item -LiteralPath 'install.sh' -Destination 'artifacts/linux/install.sh' -Force
+          bash -lc 'cd artifacts/linux && rm -f SHA256SUMS && sha256sum * > SHA256SUMS'
+
+      - name: Validate Linux desktop scheme handlers
+        shell: bash
+        run: |
+          bash -n install.sh
+          bash scripts/validate-linux-desktop-mime.sh "artifacts/linux/SIMM_${{ steps.version.outputs.version }}_amd64.deb"
+          bash scripts/validate-linux-desktop-mime.sh "artifacts/linux/SIMM_${{ steps.version.outputs.version }}_x86_64.AppImage"
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: SIMM_${{ steps.version.outputs.version }}_Linux
+          path: artifacts/linux/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
-          $assetPath = '${{ steps.asset.outputs.setup_file }}'
-          $signatureAssetPath = '${{ steps.asset.outputs.signature_file }}'
-          $assetName = '${{ steps.version.outputs.asset_name }}'
-          $signatureAssetName = Split-Path -Path $signatureAssetPath -Leaf
+          $tag = '${{ needs.build-windows.outputs.tag }}'
+          $assetPaths = @(Get-ChildItem -Path 'artifacts' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+          if ($assetPaths.Count -eq 0) {
+            throw 'No release assets were downloaded.'
+          }
 
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "$assetPath#$assetName" "$signatureAssetPath#$signatureAssetName" --clobber
+            gh release upload $tag @assetPaths --clobber
           } else {
-            gh release create $tag "$assetPath#$assetName" "$signatureAssetPath#$signatureAssetName" --title $tag --generate-notes --latest --target $env:GITHUB_SHA
+            gh release create $tag @assetPaths --title $tag --generate-notes --latest --target $env:GITHUB_SHA
           }
 
       - name: Generate stable updater manifest
@@ -128,32 +269,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
-          $installerAssetPath = '${{ steps.asset.outputs.setup_file }}'
-          $signaturePath = '${{ steps.asset.outputs.signature_file }}'
-          $installerAssetName = Split-Path -Path $installerAssetPath -Leaf
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $tag = '${{ needs.build-windows.outputs.tag }}'
           $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
-          $assetUrl = "https://github.com/SirTidez/simm/releases/download/$tag/$installerAssetName"
           $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { '' }
 
+          $windowsInstaller = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_Setup.exe" | Select-Object -First 1
+          $windowsSignature = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_Setup.exe.sig" | Select-Object -First 1
+          $linuxAppImage = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_x86_64.AppImage" | Select-Object -First 1
+          $linuxSignature = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_x86_64.AppImage.sig" | Select-Object -First 1
+
+          if (-not $windowsInstaller -or -not $windowsSignature -or -not $linuxAppImage -or -not $linuxSignature) {
+            throw 'Missing one or more signed updater assets required for manifest generation.'
+          }
+
           .\scripts\generate-updater-manifest.ps1 `
-            -Version '${{ steps.version.outputs.version }}' `
-            -AssetUrl $assetUrl `
-            -SignaturePath $signaturePath `
+            -Version $version `
+            -AssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($windowsInstaller.Name)" `
+            -SignaturePath $windowsSignature.FullName `
+            -LinuxAssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($linuxAppImage.Name)" `
+            -LinuxSignaturePath $linuxSignature.FullName `
             -OutputPath 'updater/stable/latest.json' `
             -Notes ($release.body ?? '') `
             -PubDate $publishedAtIso
 
           $manifest = Get-Content 'updater/stable/latest.json' -Raw | ConvertFrom-Json
-          $platform = $manifest.platforms.'windows-x86_64'
-          if (-not $platform) {
+          $windowsPlatform = $manifest.platforms.'windows-x86_64'
+          if (-not $windowsPlatform) {
             throw 'Stable updater manifest is missing the windows-x86_64 platform entry.'
           }
-          if (-not $platform.url.EndsWith('.exe')) {
-            throw "Stable updater manifest must point to the signed installer, got '$($platform.url)'."
+          if (-not $windowsPlatform.url.EndsWith('.exe')) {
+            throw "Stable updater manifest must point Windows to the signed installer, got '$($windowsPlatform.url)'."
           }
-          if (-not $platform.signature) {
-            throw 'Stable updater manifest is missing the updater signature.'
+          if (-not $windowsPlatform.signature) {
+            throw 'Stable updater manifest is missing the Windows updater signature.'
+          }
+
+          $linuxPlatform = $manifest.platforms.'linux-x86_64'
+          if (-not $linuxPlatform) {
+            throw 'Stable updater manifest is missing the linux-x86_64 platform entry.'
+          }
+          if (-not $linuxPlatform.url.EndsWith('.AppImage')) {
+            throw "Stable updater manifest must point Linux to the signed AppImage, got '$($linuxPlatform.url)'."
+          }
+          if (-not $linuxPlatform.signature) {
+            throw 'Stable updater manifest is missing the Linux updater signature.'
           }
 
       - name: Upload stable updater manifest to release
@@ -161,7 +321,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
+          $tag = '${{ needs.build-windows.outputs.tag }}'
           gh release upload $tag "updater/stable/latest.json#latest.json" --clobber
 
       - name: Commit stable updater manifest
@@ -175,7 +335,7 @@ jobs:
             exit 0
           }
 
-          git commit -m "chore(release): update stable updater manifest for ${{ steps.version.outputs.version }}"
+          git commit -m "chore(release): update stable updater manifest for ${{ needs.build-windows.outputs.version }}"
           $branch = '${{ github.event.repository.default_branch }}'
           git fetch origin $branch
           git rebase "origin/$branch"

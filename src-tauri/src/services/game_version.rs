@@ -502,6 +502,9 @@ impl GameVersionService {
     }
 
     async fn extract_version_from_executable(&self, game_dir: &Path) -> Result<Option<String>> {
+        #[cfg(not(target_os = "windows"))]
+        let _ = game_dir;
+
         #[cfg(target_os = "windows")]
         {
             let executable_name = "Schedule I.exe";

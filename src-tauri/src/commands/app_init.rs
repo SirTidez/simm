@@ -1,6 +1,7 @@
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
+#[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::sync::Mutex;
 
@@ -86,6 +87,7 @@ fn start_post_database_services(app: AppHandle, db_pool: Arc<SqlitePool>) {
             })
             .unwrap_or(false);
 
+    #[cfg(windows)]
     let registration_app = app.clone();
     let registration_db_pool = db_pool.clone();
     tauri::async_runtime::spawn(async move {
@@ -146,6 +148,34 @@ pub async fn get_app_startup_state(
     startup_state: State<'_, crate::types::AppStartupState>,
 ) -> Result<crate::types::AppStartupState, String> {
     Ok(startup_state.inner().clone())
+}
+
+#[tauri::command]
+pub async fn get_linux_readiness_status() -> Result<crate::types::LinuxReadinessStatus, String> {
+    Ok(
+        crate::services::linux_readiness::LinuxReadinessService::new()
+            .get_status()
+            .await,
+    )
+}
+
+#[tauri::command]
+pub async fn repair_linux_desktop_integration(
+    app: AppHandle,
+) -> Result<crate::types::LinuxReadinessStatus, String> {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        if let Err(error) = app.deep_link().register_all() {
+            log::warn!("Failed to repair desktop deep-link registration: {}", error);
+            return Err(format!("Failed to register desktop links: {error}"));
+        }
+    }
+
+    Ok(
+        crate::services::linux_readiness::LinuxReadinessService::new()
+            .get_status()
+            .await,
+    )
 }
 
 /// Get the user's home directory path

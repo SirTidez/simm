@@ -8,6 +8,10 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$SignaturePath,
 
+  [string]$LinuxAssetUrl = "",
+
+  [string]$LinuxSignaturePath = "",
+
   [Parameter(Mandatory = $true)]
   [string]$OutputPath,
 
@@ -54,10 +58,21 @@ function Convert-ToIso8601UtcString {
   throw "PubDate '$raw' could not be converted to an ISO-8601 UTC timestamp."
 }
 
-$signature = (Get-Content -LiteralPath $SignaturePath -Raw).Trim()
-if (-not $signature) {
-  throw "Signature file '$SignaturePath' was empty."
+function Read-SignatureFile {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $signature = (Get-Content -LiteralPath $Path -Raw).Trim()
+  if (-not $signature) {
+    throw "Signature file '$Path' was empty."
+  }
+
+  return $signature
 }
+
+$signature = Read-SignatureFile -Path $SignaturePath
 
 if (-not $PubDate) {
   $PubDate = [DateTimeOffset]::UtcNow.ToString("o")
@@ -74,6 +89,20 @@ $manifest = [ordered]@{
       url = $AssetUrl
       signature = $signature
     }
+  }
+}
+
+if ($LinuxAssetUrl -or $LinuxSignaturePath) {
+  if (-not $LinuxAssetUrl) {
+    throw "LinuxAssetUrl is required when LinuxSignaturePath is provided."
+  }
+  if (-not $LinuxSignaturePath) {
+    throw "LinuxSignaturePath is required when LinuxAssetUrl is provided."
+  }
+
+  $manifest.platforms["linux-x86_64"] = [ordered]@{
+    url = $LinuxAssetUrl
+    signature = Read-SignatureFile -Path $LinuxSignaturePath
   }
 }
 
