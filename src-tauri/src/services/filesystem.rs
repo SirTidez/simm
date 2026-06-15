@@ -240,10 +240,7 @@ impl FileSystemService {
             ));
         }
 
-        if Self::steam_shortcut_status_requires_client_reload(
-            registration.status,
-            &registration.shortcuts_file,
-        ) {
+        if Self::steam_shortcut_requires_client_reload(registration.shortcut_app_id)? {
             let message = Self::steam_shortcut_reload_message(game_dir);
             warn_with_location(&message);
             return Err(anyhow::anyhow!(message));
@@ -282,6 +279,7 @@ impl FileSystemService {
             crate::services::logger::LoggerService::sanitize_log_text(game_dir)
         ));
         self.restart_steam_client().await?;
+        Self::clear_steam_shortcut_reload_marker(registration.shortcut_app_id)?;
 
         if let Err(error) = self.launch_via_steam_url(&registration.shortcut_url).await {
             warn_with_location(format!(
@@ -324,6 +322,7 @@ impl FileSystemService {
         );
 
         let (shortcuts_file, status) = self.upsert_steam_shortcut(&shortcut)?;
+        Self::sync_steam_shortcut_reload_marker(shortcut_app_id, status)?;
 
         Ok(SteamShortcutRegistration {
             shortcut_url,
@@ -352,10 +351,9 @@ impl FileSystemService {
                 SteamShortcutStatus::Unchanged => "unchanged",
             }
             .to_string(),
-            requires_client_reload: Self::steam_shortcut_status_requires_client_reload(
-                registration.status,
-                &registration.shortcuts_file,
-            ),
+            requires_client_reload: Self::steam_shortcut_requires_client_reload(
+                registration.shortcut_app_id,
+            )?,
         })
     }
 
@@ -734,33 +732,79 @@ impl FileSystemService {
             .map(ToOwned::to_owned)
     }
 
-    fn steam_shortcut_requires_client_reload(shortcuts_file: &Path) -> bool {
-        let modified_at = shortcuts_file
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok();
-
-        Self::steam_shortcut_requires_client_reload_for_times(
-            modified_at,
-            Self::steam_process_started_at(),
-        )
-    }
-
-    fn steam_shortcut_status_requires_client_reload(
+    fn sync_steam_shortcut_reload_marker(
+        shortcut_app_id: u32,
         status: SteamShortcutStatus,
-        shortcuts_file: &Path,
-    ) -> bool {
-        status != SteamShortcutStatus::Unchanged
-            || Self::steam_shortcut_requires_client_reload(shortcuts_file)
+    ) -> Result<()> {
+        if status == SteamShortcutStatus::Unchanged {
+            return Ok(());
+        }
+
+        if Self::steam_process_started_at().is_some() {
+            Self::mark_steam_shortcut_reload_pending(shortcut_app_id)
+        } else {
+            Self::clear_steam_shortcut_reload_marker(shortcut_app_id)
+        }
     }
 
-    fn steam_shortcut_requires_client_reload_for_times(
-        shortcut_modified_at: Option<SystemTime>,
+    fn steam_shortcut_requires_client_reload(shortcut_app_id: u32) -> Result<bool> {
+        let marker_path = Self::steam_shortcut_reload_marker_path(shortcut_app_id)?;
+        let marker_modified_at = match marker_path.metadata() {
+            Ok(metadata) => metadata
+                .modified()
+                .with_context(|| format!("Failed to read {}", marker_path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to inspect {}", marker_path.display()));
+            }
+        };
+
+        if Self::steam_shortcut_marker_requires_client_reload_for_times(
+            marker_modified_at,
+            Self::steam_process_started_at(),
+        ) {
+            return Ok(true);
+        }
+
+        Self::clear_steam_shortcut_reload_marker(shortcut_app_id)?;
+        Ok(false)
+    }
+
+    fn mark_steam_shortcut_reload_pending(shortcut_app_id: u32) -> Result<()> {
+        let marker_path = Self::steam_shortcut_reload_marker_path(shortcut_app_id)?;
+        if let Some(parent) = marker_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&marker_path, b"pending")
+            .with_context(|| format!("Failed to write {}", marker_path.display()))
+    }
+
+    fn clear_steam_shortcut_reload_marker(shortcut_app_id: u32) -> Result<()> {
+        let marker_path = Self::steam_shortcut_reload_marker_path(shortcut_app_id)?;
+        match std::fs::remove_file(&marker_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("Failed to remove {}", marker_path.display()))
+            }
+        }
+    }
+
+    fn steam_shortcut_reload_marker_path(shortcut_app_id: u32) -> Result<PathBuf> {
+        Ok(crate::db::get_data_dir()?
+            .join("steam-shortcuts")
+            .join(format!("{shortcut_app_id}.reload-pending")))
+    }
+
+    fn steam_shortcut_marker_requires_client_reload_for_times(
+        marker_modified_at: SystemTime,
         steam_started_at: Option<SystemTime>,
     ) -> bool {
-        match (shortcut_modified_at, steam_started_at) {
-            (Some(modified_at), Some(started_at)) => modified_at > started_at,
-            _ => false,
+        match steam_started_at {
+            Some(started_at) => started_at <= marker_modified_at,
+            None => false,
         }
     }
 
@@ -1506,7 +1550,7 @@ fn crc32_ieee(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn launch_game_rejects_unknown_method() {
@@ -1587,53 +1631,34 @@ mod tests {
     }
 
     #[test]
-    fn steam_shortcut_reload_check_requires_known_modified_and_started_times() {
-        let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
-        let modified_after = SystemTime::UNIX_EPOCH + Duration::from_secs(101);
-        let modified_before = SystemTime::UNIX_EPOCH + Duration::from_secs(99);
+    fn steam_shortcut_reload_check_waits_for_steam_reinitialization() {
+        let marker_modified_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let steam_started_before = SystemTime::UNIX_EPOCH + Duration::from_secs(99);
+        let steam_started_same_tick = marker_modified_at;
+        let steam_started_after = SystemTime::UNIX_EPOCH + Duration::from_secs(101);
 
         assert!(
-            FileSystemService::steam_shortcut_requires_client_reload_for_times(
-                Some(modified_after),
-                Some(started_at)
+            FileSystemService::steam_shortcut_marker_requires_client_reload_for_times(
+                marker_modified_at,
+                Some(steam_started_before)
             )
         );
         assert!(
-            !FileSystemService::steam_shortcut_requires_client_reload_for_times(
-                Some(modified_before),
-                Some(started_at)
+            FileSystemService::steam_shortcut_marker_requires_client_reload_for_times(
+                marker_modified_at,
+                Some(steam_started_same_tick)
             )
         );
         assert!(
-            !FileSystemService::steam_shortcut_requires_client_reload_for_times(
-                None,
-                Some(started_at)
+            !FileSystemService::steam_shortcut_marker_requires_client_reload_for_times(
+                marker_modified_at,
+                Some(steam_started_after)
             )
         );
         assert!(
-            !FileSystemService::steam_shortcut_requires_client_reload_for_times(
-                Some(modified_after),
+            !FileSystemService::steam_shortcut_marker_requires_client_reload_for_times(
+                marker_modified_at,
                 None
-            )
-        );
-    }
-
-    #[test]
-    fn steam_shortcut_reload_check_requires_reload_after_insert_or_update() {
-        let temp = TempDir::new().expect("temp dir");
-        let shortcuts_file = temp.path().join("shortcuts.vdf");
-        std::fs::write(&shortcuts_file, b"shortcuts").expect("write shortcuts");
-
-        assert!(
-            FileSystemService::steam_shortcut_status_requires_client_reload(
-                SteamShortcutStatus::Inserted,
-                &shortcuts_file
-            )
-        );
-        assert!(
-            FileSystemService::steam_shortcut_status_requires_client_reload(
-                SteamShortcutStatus::Updated,
-                &shortcuts_file
             )
         );
     }
