@@ -23,6 +23,8 @@ const INITIAL_LOG_LINE_LIMIT = 4000;
 const LOG_LINE_CHUNK_SIZE = 4000;
 const LOG_FILE_CACHE_LIMIT = 10;
 const LOG_ROW_ESTIMATED_HEIGHT = 58;
+const LOG_ROW_CONTENT_LINE_HEIGHT = 18;
+const LOG_ROW_WRAP_CHARACTER_ESTIMATE = 140;
 const LOG_ROW_OVERSCAN = 14;
 const LOG_LOAD_OLDER_THRESHOLD = LOG_ROW_ESTIMATED_HEIGHT * 8;
 
@@ -104,6 +106,42 @@ function normalizeModTag(modTag: string): string {
 
 function getLineKey(line: LogLine): string {
   return `${line.lineNumber}-${line.timestamp ?? 'none'}-${line.modTag ?? 'none'}-${line.content}`;
+}
+
+function estimateLogRowHeight(line: LogLine): number {
+  const visualContentLines = line.content.split('\n').reduce((total, segment) => (
+    total + Math.max(1, Math.ceil(segment.length / LOG_ROW_WRAP_CHARACTER_ESTIMATE))
+  ), 0);
+
+  return LOG_ROW_ESTIMATED_HEIGHT + Math.max(0, visualContentLines - 1) * LOG_ROW_CONTENT_LINE_HEIGHT;
+}
+
+function buildLogRowOffsets(lines: LogLine[]): number[] {
+  const offsets = [0];
+  let totalHeight = 0;
+
+  for (const line of lines) {
+    totalHeight += estimateLogRowHeight(line);
+    offsets.push(totalHeight);
+  }
+
+  return offsets;
+}
+
+function findLogRowIndexAtOffset(offsets: number[], targetOffset: number): number {
+  let low = 0;
+  let high = Math.max(0, offsets.length - 1);
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (offsets[mid + 1] <= targetOffset) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
 }
 
 function areLogLinesEqual(left: LogLine[], right: LogLine[]): boolean {
@@ -192,9 +230,16 @@ function areLogFilesEqual(left: LogFile[], right: LogFile[]): boolean {
 }
 
 function getEffectiveLevel(line: LogLine): EffectiveLevel {
-  const sourceText = `${line.level ?? ''} ${line.content}`.toLowerCase();
+  const normalizedLevel = line.level?.toUpperCase();
 
-  if (/\berror\b|\bfatal\b/.test(sourceText)) return 'ERROR';
+  if (normalizedLevel === 'ERROR' || normalizedLevel === 'FATAL') return 'ERROR';
+  if (normalizedLevel === 'WARN' || normalizedLevel === 'WARNING') return 'WARN';
+  if (normalizedLevel === 'DEBUG' || normalizedLevel === 'TRACE') return 'DEBUG';
+  if (normalizedLevel === 'INFO') return 'INFO';
+
+  const sourceText = line.content.toLowerCase();
+
+  if (/\b(error|fatal|exception|failed|failure)\b/.test(sourceText)) return 'ERROR';
   if (/\bwarn(ing)?\b/.test(sourceText)) return 'WARN';
   if (/\bdebug\b|\btrace\b/.test(sourceText)) return 'DEBUG';
   return 'INFO';
@@ -460,8 +505,9 @@ const LogStream = memo(function LogStream({
     if (!container) return;
 
     const { scrollTop, scrollHeight, clientHeight } = container;
-    onScrollStateChange(Math.abs(scrollHeight - clientHeight - scrollTop) < 12);
-    if (scrollTop <= LOG_LOAD_OLDER_THRESHOLD) {
+    const atBottom = Math.abs(scrollHeight - clientHeight - scrollTop) < 12;
+    onScrollStateChange(atBottom);
+    if (!atBottom && scrollHeight > clientHeight && scrollTop <= LOG_LOAD_OLDER_THRESHOLD) {
       onLoadOlder();
     }
 
@@ -507,15 +553,20 @@ const LogStream = memo(function LogStream({
     }
   }, []);
 
+  const rowOffsets = useMemo(() => buildLogRowOffsets(visibleLines), [visibleLines]);
+  const totalEstimatedHeight = rowOffsets[rowOffsets.length - 1] ?? 0;
   const effectiveStreamViewportHeight = scrollMetrics.height > 0 ? scrollMetrics.height : 720;
-  const virtualStartIndex = Math.max(0, Math.floor(scrollMetrics.top / LOG_ROW_ESTIMATED_HEIGHT) - LOG_ROW_OVERSCAN);
+  const virtualStartIndex = Math.max(
+    0,
+    findLogRowIndexAtOffset(rowOffsets, scrollMetrics.top) - LOG_ROW_OVERSCAN,
+  );
   const virtualEndIndex = Math.min(
     visibleLines.length,
-    Math.ceil((scrollMetrics.top + effectiveStreamViewportHeight) / LOG_ROW_ESTIMATED_HEIGHT) + LOG_ROW_OVERSCAN,
+    findLogRowIndexAtOffset(rowOffsets, scrollMetrics.top + effectiveStreamViewportHeight) + LOG_ROW_OVERSCAN + 1,
   );
   const virtualLines = visibleLines.slice(virtualStartIndex, virtualEndIndex);
-  const virtualTopPadding = virtualStartIndex * LOG_ROW_ESTIMATED_HEIGHT;
-  const virtualBottomPadding = Math.max(0, (visibleLines.length - virtualEndIndex) * LOG_ROW_ESTIMATED_HEIGHT);
+  const virtualTopPadding = rowOffsets[virtualStartIndex] ?? 0;
+  const virtualBottomPadding = Math.max(0, totalEstimatedHeight - (rowOffsets[virtualEndIndex] ?? totalEstimatedHeight));
 
   return (
     <div
@@ -859,8 +910,9 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     const targetIndex = visibleLines.findIndex((candidate) => getLineKey(candidate) === key);
     if (targetIndex >= 0 && logContainerRef.current) {
+      const rowOffsets = buildLogRowOffsets(visibleLines);
       logContainerRef.current.scrollTo({
-        top: Math.max(0, targetIndex * LOG_ROW_ESTIMATED_HEIGHT - LOG_ROW_ESTIMATED_HEIGHT),
+        top: Math.max(0, (rowOffsets[targetIndex] ?? 0) - LOG_ROW_ESTIMATED_HEIGHT),
         behavior: 'auto',
       });
     }

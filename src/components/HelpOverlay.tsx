@@ -309,10 +309,11 @@ export function HelpOverlay({ isOpen, onClose, onOpenWizard, onOpenSettings, onO
                   <div>
                     <span className="help-eyebrow">Repair Hint</span>
                     <h3>DepotDownloader powers advanced Steam branch installs.</h3>
-                    <p>If SIMM reports that DepotDownloader is missing, let SIMM install it automatically or repair prerequisites before retrying the branch install.</p>
+                    <p>If SIMM reports that DepotDownloader is missing, use SIMM's automatic installer or install the SteamRE release manually.</p>
                   </div>
                 </div>
-                <code>winget install --exact --id SteamRE.DepotDownloader</code>
+                <code>Windows: winget install --exact --id SteamRE.DepotDownloader</code>
+                <code>Linux: SIMM installs DepotDownloader to ~/.local/bin</code>
               </section>
             </div>
           </TabsContent>

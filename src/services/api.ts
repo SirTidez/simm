@@ -20,6 +20,11 @@ import type {
   CustomThemeDefinition,
   AppUpdateChannel,
   AppStartupState,
+  LinuxReadinessStatus,
+  MelonLoaderStatus,
+  MelonLoaderLaunchOptionsRepairResult,
+  LaunchGameResult,
+  MelonLoaderLaunchVerification,
   ModProfileApplyRequest,
   ModProfileApplyResult,
   ModProfileImportPlan,
@@ -52,6 +57,18 @@ export class ApiService {
 
   static async getStartupState(): Promise<AppStartupState> {
     return invoke('get_app_startup_state');
+  }
+
+  static async prepareApp(): Promise<AppStartupState> {
+    return invoke('prepare_app');
+  }
+
+  static async getLinuxReadinessStatus(): Promise<LinuxReadinessStatus> {
+    return invoke('get_linux_readiness_status');
+  }
+
+  static async repairLinuxDesktopIntegration(): Promise<LinuxReadinessStatus> {
+    return invoke('repair_linux_desktop_integration');
   }
 
   static async checkAppUpdate(channel?: AppUpdateChannel | null): Promise<AppUpdateStatus> {
@@ -224,13 +241,19 @@ export class ApiService {
     password: string,
     steamGuard?: string,
     saveCredentials?: boolean
-  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean }> {
+  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean; username?: string }> {
     return invoke('authenticate', {
       username,
       password,
       steamGuard,
       saveCredentials,
     });
+  }
+
+  static async authenticateQr(
+    saveCredentials: boolean = true
+  ): Promise<{ success: boolean; message?: string; error?: string; requiresSteamGuard?: boolean; username?: string }> {
+    return invoke('authenticate_qr', { saveCredentials });
   }
 
   // Credentials
@@ -305,11 +328,7 @@ export class ApiService {
   static async launchGame(
     environmentId: string,
     launchMethod?: 'steam' | 'steam_restart' | 'direct'
-  ): Promise<{
-    success: boolean;
-    executablePath?: string;
-  }> {
-    console.log(`[Launch] ApiService: Calling launch_game with environmentId: ${environmentId}, launchMethod: ${launchMethod}`);
+  ): Promise<LaunchGameResult> {
     return invoke('launch_game', {
       environmentId,
       launchMethod,
@@ -673,6 +692,14 @@ export class ApiService {
     return { success: true };
   }
 
+  static async deleteUserLib(
+    environmentId: string,
+    userLibPath: string
+  ): Promise<{ success: boolean }> {
+    await invoke('delete_user_lib', { environmentId, userLibPath });
+    return { success: true };
+  }
+
   static async disableUserLib(
     environmentId: string,
     userLibPath: string
@@ -689,11 +716,31 @@ export class ApiService {
     return { success: true };
   }
 
-  // MelonLoader methods
-  static async getMelonLoaderStatus(environmentId: string): Promise<{
-    installed: boolean;
-    version?: string;
+  static async uploadUserLib(
+    environmentId: string,
+    filePath: string,
+    originalFileName: string,
+    runtime: string
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    installedFiles?: string[];
+    source?: string;
+    error?: string;
   }> {
+    return invoke('upload_user_lib', {
+      environmentId,
+      filePath,
+      originalFileName,
+      runtime,
+      metadata: {
+        source: 'local',
+      },
+    });
+  }
+
+  // MelonLoader methods
+  static async getMelonLoaderStatus(environmentId: string): Promise<MelonLoaderStatus> {
     return invoke('get_melon_loader_status', { environmentId });
   }
 
@@ -734,6 +781,8 @@ export class ApiService {
     message?: string;
     version?: string;
     installedFiles?: string[];
+    linuxPrerequisiteMessage?: string;
+    linuxLaunchOptions?: string;
   }> {
     try {
       const result = await invoke<{
@@ -742,15 +791,12 @@ export class ApiService {
         message?: string;
         version?: string;
         installedFiles?: string[];
+        linuxPrerequisiteMessage?: string;
+        linuxLaunchOptions?: string;
       }>('install_melon_loader', { environmentId, versionTag: versionTag });
-      console.log('installMelonLoader result:', result);
       return result;
     } catch (err: any) {
       // Handle Tauri command errors - they throw exceptions
-      console.error('installMelonLoader error:', err);
-      console.error('Error type:', typeof err);
-      console.error('Error details:', JSON.stringify(err, null, 2));
-
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
         errorMessage = err;
@@ -775,6 +821,24 @@ export class ApiService {
         error: errorMessage
       };
     }
+  }
+
+  static async repairMelonLoaderLaunchOptions(
+    environmentId: string
+  ): Promise<MelonLoaderLaunchOptionsRepairResult> {
+    return invoke('repair_melonloader_launch_options', { environmentId });
+  }
+
+  static async verifyMelonLoaderLaunch(
+    environmentId: string,
+    launchStartedAt: number,
+    timeoutMs: number = 20000,
+  ): Promise<MelonLoaderLaunchVerification> {
+    return invoke('verify_melonloader_launch', {
+      environmentId,
+      launchStartedAt,
+      timeoutMs,
+    });
   }
 
   static async extractGameVersion(environmentId: string): Promise<ExtractGameVersionResult> {
@@ -1153,10 +1217,8 @@ export class ApiService {
         installedFiles?: string[];
         error?: string;
       }>('install_s1api', { environmentId, versionTag });
-      console.log('installS1API result:', result);
       return result;
     } catch (err: any) {
-      console.error('installS1API error:', err);
       // Extract error message from various Tauri error formats
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
@@ -1248,10 +1310,8 @@ export class ApiService {
         version?: string;
         error?: string;
       }>('install_mlvscan', { environmentId, versionTag });
-      console.log('installMLVScan result:', result);
       return result;
     } catch (err: any) {
-      console.error('installMLVScan error:', err);
       // Extract error message from various Tauri error formats
       let errorMessage = 'Unknown error';
       if (typeof err === 'string') {
@@ -1404,7 +1464,6 @@ export class ApiService {
     });
 
     if (checkResult.installed) {
-      console.log(`Mod ${modName} version ${versionNumber} is already installed, skipping download`);
       return {
         success: true,
         message: 'Mod already installed',

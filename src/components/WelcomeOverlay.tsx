@@ -602,9 +602,9 @@ export function WelcomeOverlay({
                   <span className="welcome-panel__eyebrow">Workspace Files</span>
                   <h4>What SIMM stores</h4>
                 </div>
-                <div className="welcome-panel__storage-grid">
+                <div className="welcome-panel__storage-list">
                   {storageCards.map((card) => (
-                    <article key={card.title} className="welcome-panel__storage-card">
+                    <article key={card.title} className="welcome-panel__storage-card welcome-panel__storage-card--compact">
                       <div className="welcome-panel__storage-icon">
                         <Icon name={card.icon} />
                       </div>

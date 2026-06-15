@@ -48,6 +48,12 @@ enum LogEncoding {
     Utf16Be,
 }
 
+#[derive(Debug, Clone)]
+struct LogModCandidate {
+    display_name: String,
+    normalized_name: String,
+}
+
 pub struct LogsService {
     watching: Arc<RwLock<bool>>,
     last_position: Arc<RwLock<u64>>,
@@ -249,32 +255,9 @@ impl LogsService {
         }
 
         let (content, start_line) = Self::read_log_content(path, max_lines).await?;
+        let mod_candidates = Self::load_mod_candidates_for_log(path).await;
 
-        let mut log_lines = Vec::new();
-        for (idx, line) in content.lines().enumerate() {
-            let line_number = start_line + idx + 1;
-            let raw_content = line.to_string();
-
-            // Parse MelonLoader log format
-            let timestamp = Self::extract_melonloader_timestamp(&raw_content);
-            let mod_tag = Self::extract_mod_tag(&raw_content);
-            let level = Self::extract_log_level(&raw_content);
-            let category = Self::categorize_log(&raw_content, &mod_tag);
-
-            // Strip timestamp and mod tag from content
-            let content = Self::strip_timestamp_and_tag(&raw_content, &timestamp, &mod_tag);
-
-            log_lines.push(LogLine {
-                line_number,
-                content,
-                level,
-                timestamp,
-                mod_tag,
-                category,
-            });
-        }
-
-        Ok(log_lines)
+        Ok(Self::parse_log_lines(&content, start_line, &mod_candidates))
     }
 
     async fn read_log_content(path: &Path, max_lines: Option<usize>) -> Result<(String, usize)> {
@@ -676,16 +659,164 @@ impl LogsService {
         }
     }
 
-    fn extract_log_level(line: &str) -> Option<String> {
-        // Try to match [LEVEL] pattern
-        if let Some(start) = line.find('[') {
-            if let Some(end) = line[start + 1..].find(']') {
-                let level = &line[start + 1..start + 1 + end];
-                if ["INFO", "WARN", "ERROR", "DEBUG", "FATAL", "TRACE"].contains(&level) {
-                    return Some(level.to_string());
+    fn parse_log_lines(
+        content: &str,
+        start_line: usize,
+        mod_candidates: &[LogModCandidate],
+    ) -> Vec<LogLine> {
+        let mut log_lines = Vec::new();
+        let mut current_line: Option<LogLine> = None;
+
+        for (idx, line) in content.lines().enumerate() {
+            let line_number = start_line + idx + 1;
+            let raw_content = line.to_string();
+
+            if Self::starts_log_entry(&raw_content) || current_line.is_none() {
+                if let Some(line) = current_line.take() {
+                    log_lines.push(line);
+                }
+                current_line = Some(Self::parse_single_log_line(
+                    &raw_content,
+                    line_number,
+                    mod_candidates,
+                ));
+                continue;
+            }
+
+            if let Some(line) = current_line.as_mut() {
+                if !line.content.is_empty() {
+                    line.content.push('\n');
+                }
+                line.content.push_str(&raw_content);
+                line.level = Self::stronger_log_level(
+                    line.level.take(),
+                    Self::infer_log_level(&raw_content),
+                );
+                if line.mod_tag.is_none() {
+                    line.mod_tag = Self::infer_installed_mod_tag(&raw_content, mod_candidates);
                 }
             }
         }
+
+        if let Some(line) = current_line {
+            log_lines.push(line);
+        }
+
+        log_lines
+    }
+
+    fn parse_single_log_line(
+        raw_content: &str,
+        line_number: usize,
+        mod_candidates: &[LogModCandidate],
+    ) -> LogLine {
+        let timestamp = Self::extract_melonloader_timestamp(raw_content);
+        let mod_tag = Self::extract_mod_tag(raw_content)
+            .or_else(|| Self::infer_installed_mod_tag(raw_content, mod_candidates));
+        let explicit_level = Self::extract_explicit_log_level(raw_content);
+        let level = Self::stronger_log_level(explicit_level, Self::infer_log_level(raw_content));
+        let category = Self::categorize_log(raw_content, &mod_tag);
+        let content = Self::strip_timestamp_and_tag(raw_content, &timestamp, &mod_tag);
+
+        LogLine {
+            line_number,
+            content,
+            level,
+            timestamp,
+            mod_tag,
+            category,
+        }
+    }
+
+    fn starts_log_entry(line: &str) -> bool {
+        Self::extract_melonloader_timestamp(line).is_some()
+    }
+
+    fn log_level_rank(level: &str) -> u8 {
+        match level.to_ascii_uppercase().as_str() {
+            "FATAL" | "ERROR" => 4,
+            "WARN" | "WARNING" => 3,
+            "INFO" => 2,
+            "DEBUG" => 1,
+            "TRACE" => 0,
+            _ => 2,
+        }
+    }
+
+    fn stronger_log_level(left: Option<String>, right: Option<String>) -> Option<String> {
+        match (left, right) {
+            (Some(left), Some(right)) => {
+                if Self::log_level_rank(&right) > Self::log_level_rank(&left) {
+                    Some(right)
+                } else {
+                    Some(left)
+                }
+            }
+            (Some(level), None) | (None, Some(level)) => Some(level),
+            (None, None) => None,
+        }
+    }
+
+    fn infer_log_level(line: &str) -> Option<String> {
+        let lower = line.to_ascii_lowercase();
+
+        let warning_markers = [
+            "unsupported return type",
+            "unsupported parameter",
+            "signatures have been exhausted",
+            "using a substitute",
+            "using normal patch handlers",
+            "will retry",
+            "might run before",
+            "warning",
+        ];
+
+        if warning_markers.iter().any(|marker| lower.contains(marker)) {
+            return Some("WARN".to_string());
+        }
+
+        let error_markers = [
+            "exception",
+            "failed to load",
+            "failed",
+            "fatal",
+            "error",
+            "could not load",
+            "failure has occurred",
+            "unable to load",
+            "stack trace",
+        ];
+
+        if error_markers.iter().any(|marker| lower.contains(marker)) {
+            return Some("ERROR".to_string());
+        }
+
+        None
+    }
+
+    fn extract_explicit_log_level(line: &str) -> Option<String> {
+        let Ok(re) = Regex::new(r"\[([A-Za-z]+)\]") else {
+            return None;
+        };
+
+        for captures in re.captures_iter(line) {
+            let Some(level) = captures.get(1).map(|m| m.as_str().to_ascii_uppercase()) else {
+                continue;
+            };
+
+            if [
+                "INFO", "WARN", "WARNING", "ERROR", "DEBUG", "FATAL", "TRACE",
+            ]
+            .contains(&level.as_str())
+            {
+                return Some(if level == "WARNING" {
+                    "WARN".to_string()
+                } else {
+                    level
+                });
+            }
+        }
+
         None
     }
 
@@ -725,8 +856,12 @@ impl LogsService {
                     }
 
                     // Skip MelonLoader system tags
-                    let melonloader_system_tags =
-                        ["Il2CppAssemblyGenerator", "Il2CppInterop", "StoragePatches"];
+                    let melonloader_system_tags = [
+                        "Il2CppAssemblyGenerator",
+                        "Il2CppInterop",
+                        "StoragePatches",
+                        "UnityExceptionTrace",
+                    ];
 
                     if melonloader_system_tags
                         .iter()
@@ -740,6 +875,193 @@ impl LogsService {
             }
         }
         None
+    }
+
+    fn infer_installed_mod_tag(line: &str, mod_candidates: &[LogModCandidate]) -> Option<String> {
+        let normalized_line = Self::normalize_mod_candidate_text(line);
+        if normalized_line.is_empty() {
+            return None;
+        }
+
+        mod_candidates
+            .iter()
+            .find(|candidate| normalized_line.contains(&candidate.normalized_name))
+            .map(|candidate| candidate.display_name.clone())
+    }
+
+    fn normalize_mod_candidate_text(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .map(|ch| ch.to_ascii_lowercase())
+            .collect()
+    }
+
+    fn should_skip_mod_candidate(name: &str) -> bool {
+        let normalized = Self::normalize_mod_candidate_text(name);
+
+        if normalized.len() < 3 {
+            return true;
+        }
+
+        matches!(
+            normalized.as_str(),
+            "0harmony"
+                | "assemblycsharp"
+                | "il2cppinterop"
+                | "melonloader"
+                | "mscorlib"
+                | "s1api"
+                | "unityengine"
+                | "unityenginecoremodule"
+        )
+    }
+
+    fn infer_game_dir_from_log_path(log_path: &Path) -> Option<PathBuf> {
+        let file_name = log_path.file_name()?.to_str()?;
+        if !file_name.eq_ignore_ascii_case("latest.log") && !file_name.ends_with(".log") {
+            return None;
+        }
+
+        let parent = log_path.parent()?;
+        let parent_name = parent.file_name()?.to_str()?;
+
+        if parent_name.eq_ignore_ascii_case("melonloader") {
+            return parent.parent().map(Path::to_path_buf);
+        }
+
+        if parent_name.eq_ignore_ascii_case("logs") {
+            let melonloader_dir = parent.parent()?;
+            let melonloader_name = melonloader_dir.file_name()?.to_str()?;
+            if melonloader_name.eq_ignore_ascii_case("melonloader") {
+                return melonloader_dir.parent().map(Path::to_path_buf);
+            }
+        }
+
+        None
+    }
+
+    async fn load_mod_candidates_for_log(log_path: &Path) -> Vec<LogModCandidate> {
+        let Some(game_dir) = Self::infer_game_dir_from_log_path(log_path) else {
+            return Vec::new();
+        };
+
+        let mut candidates = Vec::new();
+        for folder_name in ["Mods", "mods", "Plugins", "plugins"] {
+            Self::collect_mod_candidates_from_dir(game_dir.join(folder_name), &mut candidates)
+                .await;
+        }
+
+        candidates.sort_by(|left, right| {
+            right
+                .normalized_name
+                .len()
+                .cmp(&left.normalized_name.len())
+                .then_with(|| left.display_name.cmp(&right.display_name))
+        });
+        candidates.dedup_by(|left, right| left.normalized_name == right.normalized_name);
+        candidates
+    }
+
+    async fn collect_mod_candidates_from_dir(root: PathBuf, candidates: &mut Vec<LogModCandidate>) {
+        if !root.exists() {
+            return;
+        }
+
+        let mut pending_dirs = vec![root];
+        while let Some(dir) = pending_dirs.pop() {
+            let Ok(mut entries) = fs::read_dir(&dir).await else {
+                continue;
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type().await else {
+                    continue;
+                };
+
+                if file_type.is_dir() {
+                    pending_dirs.push(path);
+                    continue;
+                }
+
+                let Some(raw_name) = Self::dll_mod_candidate_name(&path) else {
+                    continue;
+                };
+
+                candidates.extend(Self::build_mod_candidates_from_dll_name(&raw_name));
+            }
+        }
+    }
+
+    fn build_mod_candidates_from_dll_name(raw_name: &str) -> Vec<LogModCandidate> {
+        let display_name = Self::strip_runtime_suffix_from_mod_name(raw_name);
+        let mut names = vec![display_name.as_str()];
+
+        if display_name != raw_name {
+            names.push(raw_name);
+        }
+
+        names
+            .into_iter()
+            .filter(|name| !Self::should_skip_mod_candidate(name))
+            .map(|name| LogModCandidate {
+                display_name: display_name.clone(),
+                normalized_name: Self::normalize_mod_candidate_text(name),
+            })
+            .filter(|candidate| !candidate.normalized_name.is_empty())
+            .collect()
+    }
+
+    fn strip_runtime_suffix_from_mod_name(name: &str) -> String {
+        let mut trimmed = name.trim().to_string();
+
+        loop {
+            let lower = trimmed.to_ascii_lowercase();
+            let suffixes = [
+                ".melonloader",
+                ".il2cpp",
+                "-il2cpp",
+                "_il2cpp",
+                "il2cpp",
+                ".mono",
+                "-mono",
+                "_mono",
+            ];
+
+            let Some(suffix) = suffixes.iter().find(|suffix| lower.ends_with(**suffix)) else {
+                break;
+            };
+
+            let next_len = trimmed.len().saturating_sub(suffix.len());
+            trimmed.truncate(next_len);
+            trimmed = trimmed
+                .trim_end_matches(['.', '-', '_', ' '])
+                .trim()
+                .to_string();
+
+            if trimmed.is_empty() {
+                return name.trim().to_string();
+            }
+        }
+
+        trimmed
+    }
+
+    fn dll_mod_candidate_name(path: &Path) -> Option<String> {
+        let file_name = path.file_name()?.to_str()?;
+        let lower_name = file_name.to_ascii_lowercase();
+
+        let base_name = if lower_name.ends_with(".dll.disabled") {
+            &file_name[..file_name.len().saturating_sub(".dll.disabled".len())]
+        } else if lower_name.ends_with(".dll") {
+            &file_name[..file_name.len().saturating_sub(".dll".len())]
+        } else {
+            return None;
+        };
+
+        let trimmed = base_name.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     }
 
     fn strip_timestamp_and_tag(
@@ -775,7 +1097,15 @@ impl LogsService {
             "Il2CppInterop",
             "StoragePatches",
             "PhoneApp",
+            "UnityExceptionTrace",
         ];
+
+        if melonloader_tags
+            .iter()
+            .any(|tag| line.contains(&format!("[{}]", tag)))
+        {
+            return LogCategory::MelonLoader;
+        }
 
         if let Some(tag) = mod_tag {
             if melonloader_tags.iter().any(|&ml_tag| tag.contains(ml_tag)) {
@@ -787,6 +1117,10 @@ impl LogsService {
         // Check if line contains MelonLoader-specific text
         if line.contains("MelonLoader")
             || line.contains("Unity")
+            || line.contains("IL2CPP")
+            || line.contains("Il2Cpp")
+            || line.contains("Il2CppInterop")
+            || line.contains("Il2CppAssemblyGenerator")
             || line.contains("Game Name:")
             || line.contains("Game Developer:")
             || line.contains("Loading Plugins...")
@@ -1019,6 +1353,7 @@ impl LogsService {
         let mut watched_file = fs::File::open(&path).await?;
         let metadata = watched_file.metadata().await?;
         let (mut encoding, mut data_start) = Self::detect_log_encoding(&mut watched_file).await?;
+        let mod_candidates = Self::load_mod_candidates_for_log(&path).await;
         *self.last_position.write().await = metadata.len();
         *self.last_line_count.write().await =
             Self::count_lines(&mut watched_file, metadata.len(), data_start, encoding).await?;
@@ -1074,32 +1409,11 @@ impl LogsService {
                         let previous_line_count = *last_line_count.read().await;
 
                         if !lines.is_empty() {
-                            let mut log_lines = Vec::new();
-                            for (idx, line) in lines.iter().enumerate() {
-                                let line_number = previous_line_count + idx + 1;
-                                let raw_content = line.to_string();
-
-                                let timestamp = Self::extract_melonloader_timestamp(&raw_content);
-                                let mod_tag = Self::extract_mod_tag(&raw_content);
-                                let level = Self::extract_log_level(&raw_content);
-                                let category = Self::categorize_log(&raw_content, &mod_tag);
-
-                                // Strip timestamp and mod tag from content
-                                let content = Self::strip_timestamp_and_tag(
-                                    &raw_content,
-                                    &timestamp,
-                                    &mod_tag,
-                                );
-
-                                log_lines.push(LogLine {
-                                    line_number,
-                                    content,
-                                    level,
-                                    timestamp,
-                                    mod_tag,
-                                    category,
-                                });
-                            }
+                            let log_lines = Self::parse_log_lines(
+                                &file_content,
+                                previous_line_count,
+                                &mod_candidates,
+                            );
 
                             // Emit event with new log lines
                             let _ = app_handle.emit(
@@ -1214,6 +1528,152 @@ mod tests {
         assert_eq!(lines[0].content, "second");
         assert_eq!(lines[1].line_number, 3);
         assert_eq!(lines[1].content, "third");
+    }
+
+    #[tokio::test]
+    async fn read_log_file_combines_il2cpp_exception_stack_trace() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let log_path = temp_dir.path().join("Latest.log");
+        let content = [
+            "[23:50:29.919] [SidewalkEconomy] Build preview placement failed: System.Reflection.TargetInvocationException: Exception has been thrown by the target of an invocation.",
+            " ---> Il2CppInterop.Runtime.Il2CppException: System.ArgumentOutOfRangeException: Index was out of range.",
+            "--- BEGIN IL2CPP STACK TRACE ---",
+            "System.ArgumentOutOfRangeException: Index was out of range.",
+            "  at ScheduleOne.Building.BuildUpdate_Grid.Place () [0x00000] in <00000000000000000000000000000000>:0 ",
+            "--- END IL2CPP STACK TRACE ---",
+            "[23:50:29.923] [SidewalkEconomy] BuildManager.StopBuilding did not fully clear build mode (preview placement exception); escalating to forced reset",
+        ]
+        .join("\n");
+
+        fs::write(&log_path, content).await.expect("write log file");
+
+        let service = LogsService::new();
+        let lines = service
+            .read_log_file(log_path.to_str().expect("utf8 path"), None)
+            .await
+            .expect("read log file");
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].line_number, 1);
+        assert_eq!(lines[0].level.as_deref(), Some("ERROR"));
+        assert_eq!(lines[0].mod_tag.as_deref(), Some("SidewalkEconomy"));
+        assert!(lines[0].content.contains("Il2CppException"));
+        assert!(lines[0]
+            .content
+            .contains("ScheduleOne.Building.BuildUpdate_Grid.Place"));
+        assert_eq!(lines[1].line_number, 7);
+        assert_eq!(lines[1].level.as_deref(), Some("ERROR"));
+    }
+
+    #[tokio::test]
+    async fn read_log_file_marks_il2cpp_warnings_and_system_category() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let log_path = temp_dir.path().join("Latest.log");
+        let content = [
+            "[23:49:03.471] [Il2CppInterop] Failed to init IL2CPP patch backend for void UnityEngine.WaitForSeconds::.ctor(float seconds), using normal patch handlers: Derived classes must provide an implementation.",
+            "[06:29:12.276] [Il2CppInterop] Method PackRat.Config.BackpackTierDefinition get_CurrentTier() on type PackRat.PlayerBackpack has unsupported return type PackRat.Config.BackpackTierDefinition",
+            "[01:06:34.484] [Il2CppInterop] Exception in IL2CPP-to-Managed trampoline, not passing it to il2cpp: System.MissingMethodException: Method not found: 'Il2CppScheduleOne.ItemFramework.EItemCategory Il2CppScheduleOne.ItemFramework.ItemInstance.get_Category()'.",
+            "   at AdvancedDealing.Economy.DealerExtension.GetAllProducts(Int32& totalAmount)",
+            "   at AdvancedDealing.Economy.DealerExtension.OnTick()",
+        ]
+        .join("\n");
+
+        fs::write(&log_path, content).await.expect("write log file");
+
+        let service = LogsService::new();
+        let lines = service
+            .read_log_file(log_path.to_str().expect("utf8 path"), None)
+            .await
+            .expect("read log file");
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].level.as_deref(), Some("WARN"));
+        assert!(matches!(lines[0].category, LogCategory::MelonLoader));
+        assert_eq!(lines[1].level.as_deref(), Some("WARN"));
+        assert!(matches!(lines[1].category, LogCategory::MelonLoader));
+        assert_eq!(lines[2].level.as_deref(), Some("ERROR"));
+        assert!(matches!(lines[2].category, LogCategory::MelonLoader));
+        assert!(lines[2].content.contains("DealerExtension.GetAllProducts"));
+        assert!(lines[2].content.contains("DealerExtension.OnTick"));
+    }
+
+    #[tokio::test]
+    async fn read_log_file_links_generic_il2cpp_entries_to_installed_mods() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let game_dir = temp_dir.path().join("Schedule I");
+        let mods_dir = game_dir.join("mods");
+        let plugins_dir = game_dir.join("Plugins");
+        let melonloader_dir = game_dir.join("MelonLoader");
+        let log_path = melonloader_dir.join("Latest.log");
+
+        fs::create_dir_all(&mods_dir)
+            .await
+            .expect("create lowercase mods dir");
+        fs::create_dir_all(&plugins_dir)
+            .await
+            .expect("create plugins dir");
+        fs::create_dir_all(&melonloader_dir)
+            .await
+            .expect("create melonloader dir");
+        fs::write(mods_dir.join("PackRat-IL2CPP.dll"), b"")
+            .await
+            .expect("write PackRat dll");
+        fs::write(plugins_dir.join("AdvancedDealing.Il2Cpp.dll.disabled"), b"")
+            .await
+            .expect("write disabled AdvancedDealing dll");
+
+        let content = [
+            "[06:29:12.276] [Il2CppInterop] Method PackRat.Config.BackpackTierDefinition get_CurrentTier() on type PackRat.PlayerBackpack has unsupported return type PackRat.Config.BackpackTierDefinition",
+            "[01:06:34.484] [Il2CppInterop] Exception in IL2CPP-to-Managed trampoline, not passing it to il2cpp: System.MissingMethodException: Method not found.",
+            "   at AdvancedDealing.Economy.DealerExtension.GetAllProducts(Int32& totalAmount)",
+        ]
+        .join("\n");
+
+        fs::write(&log_path, content).await.expect("write log file");
+
+        let service = LogsService::new();
+        let lines = service
+            .read_log_file(log_path.to_str().expect("utf8 path"), None)
+            .await
+            .expect("read log file");
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].mod_tag.as_deref(), Some("PackRat"));
+        assert_eq!(lines[0].level.as_deref(), Some("WARN"));
+        assert!(matches!(lines[0].category, LogCategory::MelonLoader));
+        assert_eq!(lines[1].mod_tag.as_deref(), Some("AdvancedDealing"));
+        assert_eq!(lines[1].level.as_deref(), Some("ERROR"));
+        assert!(matches!(lines[1].category, LogCategory::MelonLoader));
+    }
+
+    #[tokio::test]
+    async fn read_log_file_keeps_generic_il2cpp_mod_tag_empty_without_installed_match() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let game_dir = temp_dir.path().join("Schedule I");
+        let melonloader_dir = game_dir.join("MelonLoader");
+        let log_path = melonloader_dir.join("Latest.log");
+
+        fs::create_dir_all(&melonloader_dir)
+            .await
+            .expect("create melonloader dir");
+
+        fs::write(
+            &log_path,
+            "[01:06:34.484] [Il2CppInterop] Exception in IL2CPP-to-Managed trampoline, not passing it to il2cpp: UnknownMod.SomeType threw.",
+        )
+        .await
+        .expect("write log file");
+
+        let service = LogsService::new();
+        let lines = service
+            .read_log_file(log_path.to_str().expect("utf8 path"), None)
+            .await
+            .expect("read log file");
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].mod_tag, None);
+        assert_eq!(lines[0].level.as_deref(), Some("ERROR"));
+        assert!(matches!(lines[0].category, LogCategory::MelonLoader));
     }
 
     #[test]

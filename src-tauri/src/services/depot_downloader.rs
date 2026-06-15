@@ -32,6 +32,27 @@ impl DepotDownloaderService {
         }
     }
 
+    pub(crate) fn resolve_depot_platform(
+        app_id: &str,
+        configured_platform: crate::types::Platform,
+    ) -> crate::types::Platform {
+        if cfg!(not(target_os = "windows"))
+            && app_id == crate::services::steam::SteamService::get_steam_app_id()
+        {
+            crate::types::Platform::Windows
+        } else {
+            configured_platform
+        }
+    }
+
+    pub(crate) fn platform_arg(platform: &crate::types::Platform) -> &'static str {
+        match platform {
+            crate::types::Platform::Windows => "windows",
+            crate::types::Platform::Macos => "macos",
+            crate::types::Platform::Linux => "linux",
+        }
+    }
+
     fn build_command_args(&self, options: &DepotDownloadOptions) -> Vec<String> {
         let mut args = Vec::new();
 
@@ -45,9 +66,7 @@ impl DepotDownloaderService {
         if let Some(ref username) = options.username {
             args.push("-username".to_string());
             args.push(username.clone());
-            if cfg!(target_os = "windows") {
-                args.push("-remember-password".to_string());
-            }
+            args.push("-remember-password".to_string());
         }
 
         if let Some(ref steam_guard) = options.steam_guard {
@@ -61,12 +80,7 @@ impl DepotDownloaderService {
 
         if let Some(ref os) = options.os {
             args.push("-os".to_string());
-            let os_str = match os {
-                crate::types::Platform::Windows => "windows",
-                crate::types::Platform::Macos => "macos",
-                crate::types::Platform::Linux => "linux",
-            };
-            args.push(os_str.to_string());
+            args.push(Self::platform_arg(os).to_string());
         }
 
         if let Some(ref language) = options.language {
@@ -644,15 +658,19 @@ impl Default for DepotDownloaderService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
     use serial_test::serial;
     use tauri::test::mock_app;
+    #[cfg(target_os = "windows")]
     use tempfile::tempdir;
 
+    #[cfg(target_os = "windows")]
     struct EnvVarGuard {
         key: &'static str,
         original: Option<String>,
     }
 
+    #[cfg(target_os = "windows")]
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let original = std::env::var(key).ok();
@@ -661,6 +679,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             if let Some(value) = &self.original {
@@ -671,10 +690,12 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
     struct CurrentDirGuard {
         original: std::path::PathBuf,
     }
 
+    #[cfg(target_os = "windows")]
     impl CurrentDirGuard {
         fn new(path: &std::path::Path) -> Result<Self> {
             let original = std::env::current_dir().context("Failed to read current dir")?;
@@ -683,6 +704,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "windows")]
     impl Drop for CurrentDirGuard {
         fn drop(&mut self) {
             let _ = std::env::set_current_dir(&self.original);
@@ -724,9 +746,53 @@ mod tests {
         assert!(args.contains(&"-max-downloads".to_string()));
         assert!(args.contains(&"3".to_string()));
 
+        assert!(args.contains(&"-remember-password".to_string()));
+    }
+
+    #[test]
+    fn build_command_args_uses_remembered_session_for_username_on_all_hosts() {
+        let service = DepotDownloaderService::new();
+        let options = DepotDownloadOptions {
+            app_id: "3164500".to_string(),
+            branch: "alternate-beta".to_string(),
+            output_dir: "/home/user/SIMM/alternate-beta".to_string(),
+            username: Some("ditidez".to_string()),
+            password: None,
+            steam_guard: None,
+            validate: None,
+            os: Some(crate::types::Platform::Windows),
+            language: Some("english".to_string()),
+            max_downloads: None,
+        };
+
+        let args = service.build_command_args(&options);
+
+        assert!(args
+            .windows(2)
+            .any(|window| { window[0] == "-username" && window[1] == "ditidez" }));
+        assert!(args.contains(&"-remember-password".to_string()));
+    }
+
+    #[test]
+    fn resolve_depot_platform_uses_windows_depots_for_schedule_i_on_proton_hosts() {
+        let platform = DepotDownloaderService::resolve_depot_platform(
+            "3164500",
+            crate::types::Platform::Linux,
+        );
+
         if cfg!(target_os = "windows") {
-            assert!(args.contains(&"-remember-password".to_string()));
+            assert_eq!(platform, crate::types::Platform::Linux);
+        } else {
+            assert_eq!(platform, crate::types::Platform::Windows);
         }
+    }
+
+    #[test]
+    fn resolve_depot_platform_keeps_non_schedule_i_platform() {
+        let platform =
+            DepotDownloaderService::resolve_depot_platform("123", crate::types::Platform::Linux);
+
+        assert_eq!(platform, crate::types::Platform::Linux);
     }
 
     #[tokio::test]

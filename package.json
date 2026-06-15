@@ -22,6 +22,13 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev:linux": "WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 tauri dev",
+    "tauri:dev:linux:x11": "GDK_BACKEND=x11 WINIT_X11_SCALE_FACTOR=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 tauri dev",
+    "tauri:build:linux": "NO_STRIP=1 tauri build --bundles deb,appimage",
+    "tauri:build:linux:appimage": "NO_STRIP=1 tauri build --bundles appimage",
+    "tauri:build:linux:deb": "tauri build --bundles deb",
+    "tauri:validate:linux-mime": "bash scripts/validate-linux-desktop-mime.sh",
+    "tauri:validate:windows-manifest": "bash scripts/validate-windows-app-manifest.sh",
     "tauri:scan": "bun --env-file=.env.react-scan run tauri dev",
     "tauri:playwright": "node scripts/tauri-playwright-dev.mjs",
     "test": "vitest run",
@@ -31,7 +38,8 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "test:rust:live": "cargo test --manifest-path src-tauri/Cargo.toml -- --ignored"
+    "test:rust:live": "cargo test --manifest-path src-tauri/Cargo.toml -- --ignored",
+    "test:linux-parity": "bash scripts/validate-linux-parity-smoke.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

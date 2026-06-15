@@ -19,6 +19,7 @@ Ground in the repo before choosing a path:
 - IPC, shared DTOs, Tauri commands, `ApiService`, event wiring: use `$simmrust-ipc-contracts`.
 - Mods, plugins, UserLibs, shared library storage, runtime compatibility, metadata sync, update state: use `$simmrust-runtime-library`.
 - Nexus OAuth/API key, `nxm://`, manual downloads, FOMOD archives, callback replay, runtime prompt loops: use `$simmrust-nexus-fomod-debug`.
+- Windows/Linux parity, OS-specific paths/processes, Steam/Proton, Linux readiness, protocol handlers, or platform package behavior: use `$simmrust-cross-platform`.
 - Changelog, version bumps, GitHub Actions release jobs, updater manifests, Windows installer artifacts: use `$simmrust-release-updater`.
 - Desktop app layout, overlays, app shell, smoke tests, browser/Tauri UI gaps: use `$simmrust-desktop-ui-validation`.
 

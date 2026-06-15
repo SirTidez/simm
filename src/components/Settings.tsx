@@ -7,7 +7,12 @@ import {
   lastUpdateCheckTimeRef,
   notifyBatchUpdateCheckStarted,
 } from "../services/updateCheckCoordinator";
-import type { CustomThemeDefinition, SecurityScannerStatus } from "../types";
+import type {
+  CustomThemeDefinition,
+  LinuxReadinessCheckStatus,
+  LinuxReadinessStatus,
+  SecurityScannerStatus,
+} from "../types";
 import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
@@ -152,11 +157,40 @@ function extractReleaseApiLastUpdated(
   return null;
 }
 
+function getReadinessStatusLabel(status: LinuxReadinessCheckStatus): string {
+  switch (status) {
+    case "ready":
+      return "Ready";
+    case "warning":
+      return "Needs Review";
+    case "missing":
+      return "Missing";
+    case "unknown":
+      return "Unknown";
+    case "notApplicable":
+      return "Not Applicable";
+    default:
+      return status;
+  }
+}
+
+function getReadinessTone(status: LinuxReadinessCheckStatus): "online" | "offline" | "checking" {
+  if (status === "ready") {
+    return "online";
+  }
+
+  if (status === "missing") {
+    return "offline";
+  }
+
+  return "checking";
+}
+
 function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
   return {
     defaultDownloadDir: settings.defaultDownloadDir || "",
     maxConcurrentDownloads: settings.maxConcurrentDownloads || 2,
-    platform: "windows",
+    platform: settings.platform ?? "windows",
     language: "english",
     theme: settings.theme || "modern-blue",
     melonLoaderVersion: settings.melonLoaderVersion || "",
@@ -359,6 +393,15 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     useState(false);
   const [installingSecurityScanner, setInstallingSecurityScanner] =
     useState(false);
+  const [linuxReadinessStatus, setLinuxReadinessStatus] =
+    useState<LinuxReadinessStatus | null>(null);
+  const [loadingLinuxReadiness, setLoadingLinuxReadiness] = useState(false);
+  const [repairingLinuxDesktopIntegration, setRepairingLinuxDesktopIntegration] =
+    useState(false);
+  const [linuxReadinessFeedback, setLinuxReadinessFeedback] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
   const [openingThemesFolder, setOpeningThemesFolder] = useState(false);
   const [reloadingThemes, setReloadingThemes] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -473,6 +516,34 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen || settings?.platform !== "linux") {
+      setLinuxReadinessStatus(null);
+      return;
+    }
+
+    setLoadingLinuxReadiness(true);
+    setLinuxReadinessFeedback(null);
+    ApiService.getLinuxReadinessStatus()
+      .then((status) => {
+        setLinuxReadinessStatus(status);
+      })
+      .catch((err) => {
+        console.error("Failed to load Linux readiness status:", err);
+        setLinuxReadinessStatus(null);
+        setLinuxReadinessFeedback({
+          tone: "error",
+          message:
+            err instanceof Error
+              ? err.message
+              : "Failed to load Linux readiness status",
+        });
+      })
+      .finally(() => {
+        setLoadingLinuxReadiness(false);
+      });
+  }, [isOpen, settings?.platform]);
+
   // Auto-save with debouncing
   useEffect(() => {
     if (!settings) return; // Don't save on initial load
@@ -491,7 +562,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         setError(null);
-        // Always set platform to 'windows' and language to 'english' since they're not user-configurable
+        // Platform and language are not user-configurable here, but they must
+        // preserve the backend defaults for the host OS.
         const normalizedFormData = {
           defaultDownloadDir: formData.defaultDownloadDir,
           maxConcurrentDownloads: formData.maxConcurrentDownloads,
@@ -519,7 +591,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
           experienceMode: formData.experienceMode,
           showAdvancedGameTools: formData.showAdvancedGameTools,
           setupGuideCompleted: true,
-          platform: "windows" as const,
+          platform: formData.platform,
           language: "english",
         };
         await updateSettings(normalizedFormData);
@@ -624,7 +696,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     setNewFolderName("");
   };
 
-  const depotStatusLabel = depotDownloader ? "Installed" : "Missing";
+  const depotInstalled = depotDownloader?.installed === true;
+  const depotStatusLabel = depotInstalled ? "Installed" : "Missing";
   const releaseApiLastUpdated = extractReleaseApiLastUpdated(releaseApiHealth);
   const releaseApiTone = checkingReleaseApi
     ? "checking"
@@ -636,11 +709,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     : releaseApiError
       ? "Offline"
       : "Online";
-  const depotStatusDetail = depotDownloader
+  const depotStatusDetail = depotInstalled
     ? depotDownloader.method
       ? `Managed via ${depotDownloader.method}`
       : "Managed automatically for advanced branch installs"
-    : "Installed automatically when advanced branch installs need it";
+    : depotDownloader?.installHint || "Install DepotDownloader before using advanced branch installs";
   const releaseApiDetail = checkingReleaseApi
     ? "Checking release metadata"
     : releaseApiError
@@ -648,6 +721,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       : releaseApiLastUpdated
         ? `Last updated ${releaseApiLastUpdated}`
         : "Release metadata available";
+  const linuxReadinessSummary = linuxReadinessStatus
+    ? getReadinessStatusLabel(linuxReadinessStatus.summary)
+    : loadingLinuxReadiness
+      ? "Checking"
+      : "Unavailable";
+  const linuxReadinessTone = linuxReadinessStatus
+    ? getReadinessTone(linuxReadinessStatus.summary)
+    : loadingLinuxReadiness
+      ? "checking"
+      : "offline";
 
   const handleBackupDatabase = async () => {
     try {
@@ -729,6 +812,48 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
     } finally {
       setReloadingThemes(false);
+    }
+  };
+
+  const handleRefreshLinuxReadiness = async () => {
+    try {
+      setLoadingLinuxReadiness(true);
+      setLinuxReadinessFeedback(null);
+      const status = await ApiService.getLinuxReadinessStatus();
+      setLinuxReadinessStatus(status);
+    } catch (err) {
+      setLinuxReadinessFeedback({
+        tone: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to refresh Linux readiness status",
+      });
+    } finally {
+      setLoadingLinuxReadiness(false);
+    }
+  };
+
+  const handleRepairLinuxDesktopIntegration = async () => {
+    try {
+      setRepairingLinuxDesktopIntegration(true);
+      setLinuxReadinessFeedback(null);
+      const status = await ApiService.repairLinuxDesktopIntegration();
+      setLinuxReadinessStatus(status);
+      setLinuxReadinessFeedback({
+        tone: "success",
+        message: "Re-registered SIMM desktop links for this executable.",
+      });
+    } catch (err) {
+      setLinuxReadinessFeedback({
+        tone: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Failed to repair Linux desktop links",
+      });
+    } finally {
+      setRepairingLinuxDesktopIntegration(false);
     }
   };
 
@@ -1162,6 +1287,80 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </SimmButton>
                     </div>
                   </div>
+
+                  {formData.platform === "linux" && (
+                    <div className="settings-inline-status-grid">
+                      <div className="settings-inline-status">
+                        <span>Linux Readiness</span>
+                        <strong>{linuxReadinessSummary}</strong>
+                        <small>
+                          Steam, Protontricks, DepotDownloader, MLVScan, and desktop link checks for Linux parity.
+                        </small>
+                      </div>
+                      {(linuxReadinessStatus?.checks ?? []).map((check) => (
+                        <div className="settings-inline-status" key={check.id}>
+                          <span>{check.label}</span>
+                          <strong>
+                            {getReadinessStatusLabel(check.status)}
+                          </strong>
+                          <small title={check.path || check.command || undefined}>
+                            {check.detail}
+                          </small>
+                        </div>
+                      ))}
+                      {(linuxReadinessStatus?.schemeHandlers ?? []).map((scheme) => (
+                        <div className="settings-inline-status" key={scheme.scheme}>
+                          <span>{scheme.scheme}:// handler</span>
+                          <strong>{scheme.ready ? "SIMM" : "Needs Repair"}</strong>
+                          <small title={scheme.handler || undefined}>
+                            {scheme.detail}
+                          </small>
+                        </div>
+                      ))}
+                      <div className="settings-inline-status settings-inline-status--action">
+                        <span>Linux Actions</span>
+                        <strong>
+                          <span
+                            className={`settings-status-pill settings-status-pill--${linuxReadinessTone}`}
+                          >
+                            {linuxReadinessSummary}
+                          </span>
+                        </strong>
+                        <small>
+                          Repair is useful after moving an AppImage or changing desktop defaults.
+                        </small>
+                        <div className="settings-backup-panel__actions">
+                          <SimmButton
+                            type="button"
+                            onClick={() => void handleRefreshLinuxReadiness()}
+                            disabled={loadingLinuxReadiness}
+                            className="btn btn-secondary btn-small"
+                          >
+                            {loadingLinuxReadiness ? "Checking..." : "Refresh"}
+                          </SimmButton>
+                          <SimmButton
+                            type="button"
+                            onClick={() => void handleRepairLinuxDesktopIntegration()}
+                            disabled={repairingLinuxDesktopIntegration}
+                            className="btn btn-secondary btn-small"
+                          >
+                            {repairingLinuxDesktopIntegration
+                              ? "Repairing..."
+                              : "Repair Desktop Links"}
+                          </SimmButton>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {linuxReadinessFeedback && (
+                    <div
+                      className={`settings-inline-feedback settings-inline-feedback--${linuxReadinessFeedback.tone}`}
+                      role={linuxReadinessFeedback.tone === "error" ? "alert" : "status"}
+                    >
+                      {linuxReadinessFeedback.message}
+                    </div>
+                  )}
                 </div>
 
                 <hr className="settings-divider" />

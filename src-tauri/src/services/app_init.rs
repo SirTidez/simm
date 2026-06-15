@@ -57,6 +57,30 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         }
     };
 
+    let startup_mods_service = ModsService::new(pool.clone());
+    match startup_mods_service
+        .migrate_legacy_symlink_installs_to_managed_copies()
+        .await
+    {
+        Ok(affected_envs) => {
+            for env_id in affected_envs {
+                if let Err(err) = crate::events::emit_mods_changed(&app, env_id.clone()) {
+                    log::warn!(
+                        "Failed to emit mods_changed after legacy symlink migration for {}: {}",
+                        env_id,
+                        err
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            log::warn!(
+                "Failed to migrate legacy symlink-backed mod installs: {}",
+                err
+            );
+        }
+    }
+
     match env_service.get_environments().await {
         Ok(environments) => {
             let env_count = environments.len();
@@ -136,6 +160,28 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
 
         loop {
             interval.tick().await;
+
+            match maintenance_mods_service
+                .migrate_legacy_symlink_installs_to_managed_copies()
+                .await
+            {
+                Ok(affected_envs) => {
+                    for env_id in affected_envs {
+                        if let Err(err) =
+                            crate::events::emit_mods_changed(&maintenance_app, env_id.clone())
+                        {
+                            log::warn!(
+                                "Failed to emit mods_changed after legacy symlink migration for {}: {}",
+                                env_id,
+                                err
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::warn!("Failed to run legacy symlink migration: {}", err);
+                }
+            }
 
             match maintenance_mods_service.reconcile_tracked_mod_state().await {
                 Ok(affected_envs) => {

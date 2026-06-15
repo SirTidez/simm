@@ -675,7 +675,7 @@ pub async fn check_all_updates(
                 detected_runtime: None,
                 runtime_match: None,
                 mod_storage_id: None,
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: None,
             });
 

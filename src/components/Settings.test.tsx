@@ -25,6 +25,8 @@ const environmentStoreMocks = vi.hoisted(() => ({
 
 const apiMocks = vi.hoisted(() => ({
   getReleaseApiHealth: vi.fn(),
+  getLinuxReadinessStatus: vi.fn(),
+  repairLinuxDesktopIntegration: vi.fn(),
   getAvailableMelonLoaderVersions: vi.fn(),
   getSecurityScannerStatus: vi.fn(),
   installSecurityScanner: vi.fn(),
@@ -136,6 +138,20 @@ describe("Settings", () => {
     });
 
     apiMocks.getReleaseApiHealth.mockResolvedValue({});
+    apiMocks.getLinuxReadinessStatus.mockResolvedValue({
+      platform: "linux",
+      available: true,
+      summary: "ready",
+      checks: [],
+      schemeHandlers: [],
+    });
+    apiMocks.repairLinuxDesktopIntegration.mockResolvedValue({
+      platform: "linux",
+      available: true,
+      summary: "ready",
+      checks: [],
+      schemeHandlers: [],
+    });
     apiMocks.getAvailableMelonLoaderVersions.mockResolvedValue([]);
     apiMocks.getSecurityScannerStatus.mockResolvedValue({
       enabled: true,
@@ -305,6 +321,149 @@ describe("Settings", () => {
       screen.getByRole("switch", {
         name: /auto-install after download/i,
       }),
+    ).toBeTruthy();
+  });
+
+  it("preserves a Linux platform value when saving settings", async () => {
+    vi.useFakeTimers();
+
+    const updateSettingsSpy = vi.fn().mockResolvedValue(undefined);
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        defaultDownloadDir: "/home/sirtidez/SIMM",
+        maxConcurrentDownloads: 2,
+        platform: "linux" as const,
+        language: "english",
+        theme: "modern-blue",
+        melonLoaderVersion: "",
+        autoInstallMelonLoader: true,
+        enableSecurityScanner: true,
+        autoInstallSecurityScanner: true,
+        blockCriticalScans: true,
+        promptOnHighScans: true,
+        showSecurityScanBadges: true,
+        updateCheckInterval: 60,
+        autoCheckUpdates: true,
+        logLevel: "info",
+        modIconCacheLimitMb: 500,
+        databaseBackupCount: 10,
+        appUpdate: { channel: "beta" as const },
+      },
+      customThemes: [],
+      themesDirectory: "/home/sirtidez/SIMM/themes",
+      depotDownloader: null,
+      loading: false,
+      updateSettings: updateSettingsSpy,
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+      refreshThemes,
+    });
+
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: /auto-install after download/i,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(updateSettingsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        autoInstallMelonLoader: false,
+        platform: "linux",
+        language: "english",
+      }),
+    );
+  });
+
+  it("shows Linux readiness status and repairs desktop links", async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        defaultDownloadDir: "/home/sirtidez/SIMM",
+        maxConcurrentDownloads: 2,
+        platform: "linux" as const,
+        language: "english",
+        theme: "modern-blue",
+        melonLoaderVersion: "",
+        autoInstallMelonLoader: true,
+        enableSecurityScanner: true,
+        autoInstallSecurityScanner: true,
+        blockCriticalScans: true,
+        promptOnHighScans: true,
+        showSecurityScanBadges: true,
+        updateCheckInterval: 60,
+        autoCheckUpdates: true,
+        logLevel: "info",
+        modIconCacheLimitMb: 500,
+        databaseBackupCount: 10,
+        appUpdate: { channel: "beta" as const },
+      },
+      customThemes: [],
+      themesDirectory: "/home/sirtidez/SIMM/themes",
+      depotDownloader: {
+        installed: true,
+        path: "/home/sirtidez/.local/bin/DepotDownloader",
+        method: "manual",
+      },
+      loading: false,
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+      refreshThemes,
+    });
+    apiMocks.getLinuxReadinessStatus.mockResolvedValueOnce({
+      platform: "linux",
+      available: true,
+      summary: "warning",
+      checks: [
+        {
+          id: "protontricks",
+          label: "Protontricks",
+          status: "ready",
+          detail: "Protontricks is available.",
+        },
+      ],
+      schemeHandlers: [
+        {
+          scheme: "nxm",
+          handler: "vortex.desktop",
+          ready: false,
+          detail: "nxm:// is currently registered to vortex.desktop.",
+        },
+      ],
+    });
+    apiMocks.repairLinuxDesktopIntegration.mockResolvedValueOnce({
+      platform: "linux",
+      available: true,
+      summary: "ready",
+      checks: [],
+      schemeHandlers: [
+        {
+          scheme: "nxm",
+          handler: "com.s1devenvmanager.app.desktop",
+          ready: true,
+          detail: "nxm:// is registered to SIMM.",
+        },
+      ],
+    });
+
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    expect(await screen.findByText("Linux Readiness")).toBeTruthy();
+    expect(await screen.findByText("Protontricks")).toBeTruthy();
+    expect(await screen.findByText("nxm:// handler")).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /repair desktop links/i }),
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.repairLinuxDesktopIntegration).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText(/re-registered simm desktop links/i),
     ).toBeTruthy();
   });
 

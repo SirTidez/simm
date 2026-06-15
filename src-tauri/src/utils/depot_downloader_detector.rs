@@ -7,80 +7,101 @@ use std::process::Command;
 
 /// Detects if DepotDownloader is installed and returns its path
 pub async fn detect_depot_downloader() -> Result<DepotDownloaderInfo> {
-    let executable_name = if cfg!(target_os = "windows") {
-        "DepotDownloader.exe"
+    let executable_names = if cfg!(target_os = "windows") {
+        vec!["DepotDownloader.exe"]
     } else {
-        "DepotDownloader"
+        vec!["DepotDownloader", "depotdownloader"]
     };
 
-    // First, try to find it in PATH
-    let which_command = if cfg!(target_os = "windows") {
-        "where"
-    } else {
-        "which"
-    };
+    for executable_name in &executable_names {
+        // First, try to find it in PATH
+        let which_command = if cfg!(target_os = "windows") {
+            "where"
+        } else {
+            "which"
+        };
 
-    #[cfg(target_os = "windows")]
-    let output = {
-        use std::os::windows::process::CommandExt;
-        Command::new(which_command)
-            .arg(executable_name)
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
-            .output()
-    };
+        #[cfg(target_os = "windows")]
+        let output = {
+            use std::os::windows::process::CommandExt;
+            Command::new(which_command)
+                .arg(executable_name)
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .output()
+        };
 
-    #[cfg(not(target_os = "windows"))]
-    let output = Command::new(which_command).arg(executable_name).output();
+        #[cfg(not(target_os = "windows"))]
+        let output = Command::new(which_command).arg(executable_name).output();
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout);
-            let path = path_str.lines().next().and_then(|line| {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() && Path::new(trimmed).exists() {
-                    Some(trimmed.to_string())
-                } else {
-                    None
-                }
-            });
-
-            if let Some(path) = path {
-                return Ok(DepotDownloaderInfo {
-                    installed: true,
-                    path: Some(path),
-                    method: Some(DetectionMethod::Path),
-                    version: None,
+        if let Ok(output) = output {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout);
+                let path = path_str.lines().next().and_then(|line| {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && Path::new(trimmed).exists() {
+                        Some(trimmed.to_string())
+                    } else {
+                        None
+                    }
                 });
+
+                if let Some(path) = path {
+                    return Ok(depot_downloader_info(
+                        true,
+                        Some(path),
+                        Some(DetectionMethod::Path),
+                    ));
+                }
             }
         }
     }
 
     // Check common installation locations
-    let common_paths = get_common_paths(executable_name);
+    let common_paths = get_common_paths(&executable_names);
 
     for (path, method) in common_paths {
         if Path::new(&path).exists() {
-            return Ok(DepotDownloaderInfo {
-                installed: true,
-                path: Some(path),
-                method: Some(method),
-                version: None,
-            });
+            return Ok(depot_downloader_info(true, Some(path), Some(method)));
         }
     }
 
-    Ok(DepotDownloaderInfo {
-        installed: false,
-        path: None,
-        method: None,
-        version: None,
-    })
+    Ok(depot_downloader_info(false, None, None))
 }
 
-fn get_common_paths(executable_name: &str) -> Vec<(String, DetectionMethod)> {
+fn depot_downloader_info(
+    installed: bool,
+    path: Option<String>,
+    method: Option<DetectionMethod>,
+) -> DepotDownloaderInfo {
+    DepotDownloaderInfo {
+        installed,
+        path,
+        method,
+        version: None,
+        can_auto_install: cfg!(any(target_os = "windows", target_os = "linux")),
+        install_help_url: "https://github.com/SteamRE/DepotDownloader#installation".to_string(),
+        install_hint: depot_downloader_install_hint(),
+    }
+}
+
+fn depot_downloader_install_hint() -> String {
+    if cfg!(target_os = "windows") {
+        "SIMM can install DepotDownloader with winget.".to_string()
+    } else if cfg!(target_os = "macos") {
+        "Install DepotDownloader with Homebrew (`brew tap steamre/tools && brew install depotdownloader`) or download a release from GitHub.".to_string()
+    } else {
+        "SIMM can install the latest Linux DepotDownloader release into ~/.local/bin, or you can install it manually from GitHub.".to_string()
+    }
+}
+
+fn get_common_paths(executable_names: &[&str]) -> Vec<(String, DetectionMethod)> {
     let mut paths = Vec::new();
 
     if cfg!(target_os = "windows") {
+        let executable_name = executable_names
+            .first()
+            .copied()
+            .unwrap_or("DepotDownloader.exe");
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
             paths.push((
                 format!("{}\\Microsoft\\WinGet\\Packages\\SteamRE.DepotDownloader_Microsoft.Winget.Source_8wekyb3d8bbwe\\{}",
@@ -104,35 +125,43 @@ fn get_common_paths(executable_name: &str) -> Vec<(String, DetectionMethod)> {
             ));
         }
     } else if cfg!(target_os = "macos") {
-        paths.push((
-            "/opt/homebrew/bin/DepotDownloader".to_string(),
-            DetectionMethod::Homebrew,
-        ));
-        paths.push((
-            "/usr/local/bin/DepotDownloader".to_string(),
-            DetectionMethod::Homebrew,
-        ));
-        if let Ok(home) = std::env::var("HOME") {
+        for executable_name in executable_names {
             paths.push((
-                format!("{}/.homebrew/bin/DepotDownloader", home),
+                format!("/opt/homebrew/bin/{}", executable_name),
                 DetectionMethod::Homebrew,
             ));
+            paths.push((
+                format!("/usr/local/bin/{}", executable_name),
+                DetectionMethod::Homebrew,
+            ));
+            if let Ok(home) = std::env::var("HOME") {
+                paths.push((
+                    format!("{}/.homebrew/bin/{}", home, executable_name),
+                    DetectionMethod::Homebrew,
+                ));
+            }
         }
     } else {
         // Linux
-        paths.push((
-            "/usr/local/bin/DepotDownloader".to_string(),
-            DetectionMethod::Manual,
-        ));
-        paths.push((
-            "/usr/bin/DepotDownloader".to_string(),
-            DetectionMethod::Manual,
-        ));
-        if let Ok(home) = std::env::var("HOME") {
+        for executable_name in executable_names {
             paths.push((
-                format!("{}/.local/bin/DepotDownloader", home),
+                format!("/usr/local/bin/{}", executable_name),
                 DetectionMethod::Manual,
             ));
+            paths.push((
+                format!("/usr/bin/{}", executable_name),
+                DetectionMethod::Manual,
+            ));
+            if let Ok(home) = std::env::var("HOME") {
+                paths.push((
+                    format!("{}/.local/bin/{}", home, executable_name),
+                    DetectionMethod::Manual,
+                ));
+                paths.push((
+                    format!("{}/.dotnet/tools/{}", home, executable_name),
+                    DetectionMethod::Manual,
+                ));
+            }
         }
     }
 
@@ -242,5 +271,38 @@ mod tests {
         assert!(matches!(result.method, Some(DetectionMethod::Manual)));
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn common_paths_include_linux_binary_name_variants() {
+        let paths = get_common_paths(&["DepotDownloader", "depotdownloader"]);
+        let path_strings: Vec<&str> = paths.iter().map(|(path, _)| path.as_str()).collect();
+
+        assert!(path_strings.contains(&"/usr/local/bin/DepotDownloader"));
+        assert!(path_strings.contains(&"/usr/local/bin/depotdownloader"));
+        assert!(path_strings.contains(&"/usr/bin/DepotDownloader"));
+        assert!(path_strings.contains(&"/usr/bin/depotdownloader"));
+        assert!(
+            path_strings
+                .iter()
+                .any(|path| path.ends_with("/.dotnet/tools/DepotDownloader")),
+            "expected dotnet global tool path in {:?}",
+            path_strings
+        );
+    }
+
+    #[test]
+    fn linux_info_reports_user_local_auto_install_flow() {
+        let info = depot_downloader_info(false, None, None);
+
+        assert!(!info.installed);
+        assert!(info.can_auto_install);
+        assert!(info.install_hint.contains("~/.local/bin"));
+        assert!(info.install_help_url.contains("SteamRE/DepotDownloader"));
     }
 }

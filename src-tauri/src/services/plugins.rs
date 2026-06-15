@@ -241,6 +241,7 @@ impl PluginsService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn extract_thunderstore_manifest(&self, zip_path: &Path) -> Option<serde_json::Value> {
         // Try to extract and parse manifest.json from the ZIP
         let file = File::open(zip_path).ok()?;
@@ -265,6 +266,7 @@ impl PluginsService {
         None
     }
 
+    #[allow(dead_code)]
     pub async fn install_zip_plugin(
         &self,
         game_dir: &str,
@@ -534,7 +536,7 @@ impl PluginsService {
                     detected_runtime: None,
                     runtime_match: None,
                     mod_storage_id: None,
-                    symlink_paths: None,
+                    managed_paths: None,
                     security_scan: None,
                 },
             );
@@ -627,7 +629,7 @@ impl PluginsService {
                 .or_else(|| mods_metadata.get(&file_name))
                 .or_else(|| {
                     mods_metadata.values().find(|meta| {
-                        meta.symlink_paths.as_ref().is_some_and(|paths| {
+                        meta.managed_paths.as_ref().is_some_and(|paths| {
                             paths.iter().any(|path| {
                                 let normalized_path = Self::normalize_path(path);
                                 let normalized_path_active = normalized_path
@@ -798,6 +800,7 @@ impl PluginsService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn install_dll_plugin(
         &self,
         game_dir: &str,
@@ -904,7 +907,7 @@ impl PluginsService {
                 detected_runtime: None,
                 runtime_match: None,
                 mod_storage_id: None,
-                symlink_paths: None,
+                managed_paths: None,
                 security_scan: None,
             },
         );
@@ -979,7 +982,7 @@ impl PluginsService {
             detected_runtime: None,
             runtime_match: None,
             mod_storage_id: None,
-            symlink_paths: None,
+            managed_paths: None,
             security_scan: None,
         };
 
@@ -1233,11 +1236,32 @@ mod tests {
             .disable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
             .await?;
         assert!(plugins_dir.join("ExamplePlugin.dll.disabled").exists());
+        assert!(!plugins_dir.join("ExamplePlugin.dll").exists());
+        let disabled_meta =
+            fs::symlink_metadata(plugins_dir.join("ExamplePlugin.dll.disabled")).await?;
+        assert!(
+            disabled_meta.is_file() && !disabled_meta.file_type().is_symlink(),
+            "disabled plugin should be a real file, not a symlink"
+        );
+        assert_eq!(
+            fs::read(plugins_dir.join("ExamplePlugin.dll.disabled")).await?,
+            b"data"
+        );
 
         service
             .enable_plugin(output_dir.to_string_lossy().as_ref(), "ExamplePlugin.dll")
             .await?;
         assert!(plugins_dir.join("ExamplePlugin.dll").exists());
+        assert!(!plugins_dir.join("ExamplePlugin.dll.disabled").exists());
+        let enabled_meta = fs::symlink_metadata(plugins_dir.join("ExamplePlugin.dll")).await?;
+        assert!(
+            enabled_meta.is_file() && !enabled_meta.file_type().is_symlink(),
+            "enabled plugin should be a real file, not a symlink"
+        );
+        assert_eq!(
+            fs::read(plugins_dir.join("ExamplePlugin.dll")).await?,
+            b"data"
+        );
 
         Ok(())
     }
@@ -1290,7 +1314,21 @@ mod tests {
         );
 
         let plugins_dir = output_dir.join("Plugins");
-        assert!(plugins_dir.join("InstalledPlugin.dll").exists());
+        let installed_path = plugins_dir.join("InstalledPlugin.dll");
+        assert!(installed_path.exists());
+        assert!(
+            source_dll.exists(),
+            "plugin upload should keep the source file"
+        );
+        assert_eq!(
+            fs::read(&installed_path).await?,
+            b"not-a-real-dotnet-assembly"
+        );
+        let installed_meta = fs::symlink_metadata(&installed_path).await?;
+        assert!(
+            installed_meta.is_file() && !installed_meta.file_type().is_symlink(),
+            "installed plugin should be a real copied file, not a symlink"
+        );
 
         let metadata = service.load_plugin_metadata(&plugins_dir).await?;
         let entry = metadata
@@ -1358,7 +1396,7 @@ mod tests {
             detected_runtime: None,
             runtime_match: None,
             mod_storage_id: Some("s1api-storage".to_string()),
-            symlink_paths: Some(vec![plugins_dir
+            managed_paths: Some(vec![plugins_dir
                 .join("LoaderPlugin.dll")
                 .to_string_lossy()
                 .to_string()]),
@@ -1451,7 +1489,7 @@ mod tests {
             detected_runtime: None,
             runtime_match: None,
             mod_storage_id: Some("s1api-storage".to_string()),
-            symlink_paths: Some(vec![plugins_dir
+            managed_paths: Some(vec![plugins_dir
                 .join("LoaderPlugin.dll")
                 .to_string_lossy()
                 .to_string()]),

@@ -719,6 +719,7 @@ impl SettingsService {
         self.clear_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn get_nexus_nxm_protocol_backup(&self) -> Result<Option<serde_json::Value>> {
         let encrypted = match self.get_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY).await? {
             Some(value) => value,
@@ -735,12 +736,14 @@ impl SettingsService {
         Ok(Some(parsed))
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn save_nexus_nxm_protocol_backup(&self, backup: &serde_json::Value) -> Result<()> {
         let encrypted = Self::encrypt_credentials(&backup.to_string()).await?;
         self.set_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted)
             .await
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn clear_nexus_nxm_protocol_backup(&self) -> Result<()> {
         self.clear_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY).await
     }
