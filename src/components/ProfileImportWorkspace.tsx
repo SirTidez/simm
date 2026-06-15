@@ -21,6 +21,33 @@ const statusLabels: Record<string, string> = {
   unsupported: 'Unsupported',
 };
 
+type ProfileResolutionNotice = {
+  kind: 'matched' | 'noMatchFound' | 'manual' | 'nexusManual';
+  message: string;
+  nexus?: NexusMatch;
+  modUrl?: string;
+};
+
+type ProfileResolutionMode = 'preview' | 'download';
+
+type ThunderstoreMatch = {
+  package: any;
+  packageUuid: string;
+  sourceId: string;
+  versionNumber: string | null;
+  versionUuid: string | undefined;
+};
+
+type NexusMatch = {
+  modId: number;
+  fileId: number;
+};
+
+const FEATURED_THUNDERSTORE_SOURCE_IDS: Record<string, string> = {
+  meshvault: 'hdlmrell/MeshVault',
+  s1mapi: 'ifBars/S1MAPI',
+};
+
 function parseManifest(value: string): ModProfileManifest {
   const parsed = JSON.parse(value) as ModProfileManifest;
   if (!parsed || parsed.kind !== 'simm.profile' || parsed.schemaVersion !== 1) {
@@ -30,6 +57,228 @@ function parseManifest(value: string): ModProfileManifest {
     throw new Error('Profile export is missing profile details or items.');
   }
   return parsed;
+}
+
+function profileItemKey(item: ModProfileManifest['items'][number], index: number): string {
+  return [
+    item.itemType,
+    item.name,
+    item.fileName ?? '',
+    item.source ?? '',
+    item.sourceId ?? '',
+    item.sourceVersion ?? '',
+    index,
+  ].join('|');
+}
+
+function normalizeMatchToken(value: string | null | undefined): string {
+  return (value ?? '')
+    .trim()
+    .replace(/\.disabled$/i, '')
+    .replace(/\.(dll|zip|rar|7z)$/i, '')
+    .replace(/\b(il2cpp|mono|melonloader|bepinex)\b/gi, ' ')
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeVersion(value: string | null | undefined): string {
+  return (value ?? '').trim().replace(/^v/i, '').toLowerCase();
+}
+
+function profileRuntime(runtime: string | null | undefined): 'IL2CPP' | 'Mono' | undefined {
+  const normalized = (runtime ?? '').toLowerCase();
+  if (normalized.includes('il2cpp')) return 'IL2CPP';
+  if (normalized.includes('mono')) return 'Mono';
+  return undefined;
+}
+
+function sourceIdParts(sourceId: string | null | undefined): { owner?: string; name?: string } {
+  const [owner, name] = (sourceId ?? '').split('/').map((part) => part.trim()).filter(Boolean);
+  return { owner, name };
+}
+
+function itemSearchToken(item: ModProfileManifest['items'][number]): string {
+  return normalizeMatchToken([item.name, item.fileName ?? ''].join(' '));
+}
+
+function featuredThunderstoreSourceId(item: ModProfileManifest['items'][number]): string | null {
+  const token = itemSearchToken(item);
+  if (token.includes('steamnetworklib')) {
+    return profileRuntime(item.runtime) === 'IL2CPP'
+      ? 'ifBars/SteamNetworkLib_Il2Cpp'
+      : 'ifBars/SteamNetworkLib_Mono';
+  }
+  for (const [needle, sourceId] of Object.entries(FEATURED_THUNDERSTORE_SOURCE_IDS)) {
+    if (token.includes(needle)) return sourceId;
+  }
+  return null;
+}
+
+function featuredGithubSourceId(item: ModProfileManifest['items'][number]): 'ifBars/S1API' | 'ifBars/MLVScan' | null {
+  const token = itemSearchToken(item);
+  if (token.includes('s1api') || token.includes('s1apiloader')) return 'ifBars/S1API';
+  if (token.includes('mlvscan')) return 'ifBars/MLVScan';
+  return null;
+}
+
+function thunderstorePackageUuid(pkg: any): string | null {
+  return pkg?.uuid4 ?? pkg?.uuid ?? pkg?.package_uuid ?? pkg?.packageUuid ?? pkg?.id ?? null;
+}
+
+function thunderstoreSourceId(pkg: any): string {
+  const owner = pkg?.owner ?? pkg?.namespace ?? '';
+  const name = pkg?.name ?? '';
+  return owner && name ? `${owner}/${name}` : thunderstorePackageUuid(pkg) ?? '';
+}
+
+function thunderstoreVersions(pkg: any): any[] {
+  return Array.isArray(pkg?.versions) ? pkg.versions : [];
+}
+
+function thunderstoreVersionNumber(version: any): string | null {
+  return version?.version_number ?? version?.versionNumber ?? version?.version ?? null;
+}
+
+function thunderstoreVersionUuid(version: any): string | undefined {
+  return version?.uuid4 ?? version?.uuid ?? undefined;
+}
+
+function selectThunderstoreVersion(pkg: any, requestedVersion: string | null | undefined): any | null {
+  const versions = thunderstoreVersions(pkg);
+  if (versions.length === 0) return null;
+  if (requestedVersion) {
+    const requested = normalizeVersion(requestedVersion);
+    const exact = versions.find((version) => normalizeVersion(thunderstoreVersionNumber(version)) === requested);
+    if (exact) return exact;
+  }
+  return versions[0];
+}
+
+function isThunderstorePackageMatch(pkg: any, item: ModProfileManifest['items'][number]): boolean {
+  const { owner, name } = sourceIdParts(item.sourceId);
+  const packageOwner = (pkg?.owner ?? '').toString();
+  const packageName = (pkg?.name ?? '').toString();
+  if (owner && name && packageOwner.toLowerCase() === owner.toLowerCase() && packageName.toLowerCase() === name.toLowerCase()) {
+    return true;
+  }
+
+  const wanted = [
+    item.name,
+    item.fileName ?? undefined,
+    name,
+  ].map(normalizeMatchToken).filter(Boolean);
+  const candidate = normalizeMatchToken(packageName);
+  return wanted.some((token) => token === candidate || token.includes(candidate) || candidate.includes(token));
+}
+
+function bestThunderstoreMatch(
+  packages: any[],
+  item: ModProfileManifest['items'][number],
+): ThunderstoreMatch | null {
+  const pkg = packages.find((candidate) => isThunderstorePackageMatch(candidate, item));
+  if (!pkg) return null;
+  const packageUuid = thunderstorePackageUuid(pkg);
+  if (!packageUuid) return null;
+  const selectedVersion = selectThunderstoreVersion(pkg, item.sourceVersion);
+  const versionNumber = thunderstoreVersionNumber(selectedVersion);
+  return {
+    package: pkg,
+    packageUuid,
+    sourceId: thunderstoreSourceId(pkg),
+    versionNumber,
+    versionUuid: thunderstoreVersionUuid(selectedVersion),
+  };
+}
+
+function profileSearchQueries(item: ModProfileManifest['items'][number]): string[] {
+  const { name } = sourceIdParts(item.sourceId);
+  const featuredSourceId = featuredThunderstoreSourceId(item);
+  const featuredName = sourceIdParts(featuredSourceId).name;
+  return Array.from(new Set([
+    featuredName,
+    name,
+    item.name,
+    item.fileName ?? undefined,
+    normalizeMatchToken(item.name),
+  ].filter((value): value is string => Boolean(value && value.trim()))));
+}
+
+async function findThunderstoreMatch(item: ModProfileManifest['items'][number]): Promise<ThunderstoreMatch | null> {
+  const runtime = profileRuntime(item.runtime);
+  const featuredSourceId = featuredThunderstoreSourceId(item);
+  const searchItem = featuredSourceId && !item.sourceId
+    ? { ...item, sourceId: featuredSourceId }
+    : item;
+  for (const query of profileSearchQueries(item)) {
+    const result = await ApiService.searchThunderstore('schedule-i', query, runtime ?? 'unknown');
+    const match = bestThunderstoreMatch(result.packages ?? [], searchItem);
+    if (match) return match;
+  }
+  return null;
+}
+
+function numericId(value: string | number | null | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function nexusFileVersion(file: any): string | null {
+  return file?.version ?? file?.mod_version ?? null;
+}
+
+function nexusFileId(file: any): number | null {
+  return numericId(file?.file_id ?? file?.fileId);
+}
+
+function fileRuntimeMatches(file: any, item: ModProfileManifest['items'][number]): boolean {
+  const runtime = profileRuntime(item.runtime);
+  if (!runtime) return true;
+  const haystack = [
+    file?.name,
+    file?.file_name,
+    file?.category_name,
+  ].filter(Boolean).join(' ');
+  const fileRuntime = profileRuntime(haystack);
+  return !fileRuntime || fileRuntime === runtime;
+}
+
+function selectNexusFile(files: any[], item: ModProfileManifest['items'][number]): any | null {
+  const requested = normalizeVersion(item.sourceVersion);
+  if (requested) {
+    const exact = files.find((file) =>
+      fileRuntimeMatches(file, item) && normalizeVersion(nexusFileVersion(file)) === requested
+    );
+    if (exact) return exact;
+  }
+  return files.find((file) => fileRuntimeMatches(file, item)) ?? files[0] ?? null;
+}
+
+function isNexusModMatch(mod: any, item: ModProfileManifest['items'][number]): boolean {
+  const wanted = [item.name, item.fileName ?? undefined].map(normalizeMatchToken).filter(Boolean);
+  const candidate = normalizeMatchToken(mod?.name);
+  return wanted.some((token) => token === candidate || token.includes(candidate) || candidate.includes(token));
+}
+
+async function findNexusMatch(item: ModProfileManifest['items'][number]): Promise<NexusMatch | null> {
+  const directModId = numericId(item.sourceId);
+  const directFileId = numericId(item.nexusFileId);
+  if (directModId && directFileId) {
+    return { modId: directModId, fileId: directFileId };
+  }
+
+  for (const query of profileSearchQueries(item)) {
+    const result = await ApiService.searchNexusMods('schedule1', query);
+    const mod = (result.mods ?? []).find((candidate) => isNexusModMatch(candidate, item));
+    const modId = numericId(mod?.mod_id);
+    if (!modId) continue;
+    const files = await ApiService.getNexusModsModFiles('schedule1', modId);
+    const file = selectNexusFile(files, item);
+    const fileId = nexusFileId(file);
+    if (fileId) return { modId, fileId };
+  }
+
+  return null;
 }
 
 export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps) {
@@ -42,8 +291,10 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
   const [profileSource, setProfileSource] = useState<string | null>(null);
   const [targetEnvironmentId, setTargetEnvironmentId] = useState(completedEnvironments[0]?.id ?? '');
   const [plan, setPlan] = useState<ModProfileImportPlan | null>(null);
+  const [resolutionNotices, setResolutionNotices] = useState<Record<string, ProfileResolutionNotice>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingNexusImportKey, setPendingNexusImportKey] = useState<string | null>(null);
   const [applyMessage, setApplyMessage] = useState<string | null>(null);
 
   const selectedTarget = completedEnvironments.find((environment) => environment.id === targetEnvironmentId) ?? null;
@@ -71,8 +322,10 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
       setProfileText(JSON.stringify(manifest, null, 2));
       const nextPlan = await ApiService.previewModProfileImport(manifest, targetEnvironmentId || null);
       setPlan(nextPlan);
+      await resolveProfileDownloads(manifest, nextPlan, 'preview');
     } catch (err) {
       setPlan(null);
+      setResolutionNotices({});
       setError(err instanceof Error ? err.message : 'Failed to load profile file.');
     } finally {
       setBusy(false);
@@ -87,11 +340,254 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
       const manifest = await loadManifest();
       const nextPlan = await ApiService.previewModProfileImport(manifest, targetEnvironmentId || null);
       setPlan(nextPlan);
+      await resolveProfileDownloads(manifest, nextPlan, 'preview');
     } catch (err) {
       setPlan(null);
+      setResolutionNotices({});
       setError(err instanceof Error ? err.message : 'Failed to preview profile import.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const resolveProfileDownloads = async (
+    manifest: ModProfileManifest,
+    currentPlan: ModProfileImportPlan,
+    mode: ProfileResolutionMode,
+  ): Promise<ModProfileManifest> => {
+    const nexusStatus = await ApiService.getNexusOAuthStatus().catch(() => null);
+    const canDirectDownloadNexus = Boolean(
+      nexusStatus?.account?.canDirectDownload || nexusStatus?.account?.isPremium,
+    );
+    const notices: Record<string, ProfileResolutionNotice> = {};
+    const nextItems = [...manifest.items];
+
+    for (const [index, planItem] of currentPlan.items.entries()) {
+      const item = nextItems[index];
+      if (!item) continue;
+      if (!['needsDownload', 'manualRequired'].includes(planItem.status)) continue;
+
+      const key = profileItemKey(item, index);
+      const runtime = profileRuntime(item.runtime);
+      const featuredGithubSource = featuredGithubSourceId(item);
+      const exactNexusMatch = item.source === 'nexusmods' ? await findNexusMatch(item) : null;
+      const applyThunderstoreMatch = async (thunderstoreMatch: ThunderstoreMatch): Promise<void> => {
+        if (mode === 'download') {
+          const result = await ApiService.downloadThunderstoreToLibrary(
+            thunderstoreMatch.packageUuid,
+            runtime,
+            undefined,
+            thunderstoreMatch.versionUuid,
+          );
+          if (result.securityScanBlocked || result.securityScanConfirmationRequired) {
+            notices[key] = { kind: 'manual', message: `${item.name} needs security review before SIMM can import it.` };
+            return;
+          }
+          if (result.storageId) {
+            nextItems[index] = {
+              ...item,
+              source: 'thunderstore',
+              sourceId: thunderstoreMatch.sourceId,
+              sourceVersion: thunderstoreMatch.versionNumber ?? item.sourceVersion,
+              sourceUrl: thunderstoreMatch.package?.package_url ?? item.sourceUrl,
+              runtime: runtime ?? item.runtime,
+              storageId: result.storageId,
+              manualReason: null,
+            };
+          }
+        }
+        notices[key] = {
+          kind: 'matched',
+          message: `${item.name} matched ${thunderstoreMatch.sourceId} on Thunderstore.`,
+        };
+      };
+
+      if (exactNexusMatch) {
+        if (!canDirectDownloadNexus) {
+          const thunderstoreMatch = await findThunderstoreMatch(item);
+          const thunderstoreVersionMatch = !item.sourceVersion
+            || normalizeVersion(thunderstoreMatch?.versionNumber) === normalizeVersion(item.sourceVersion);
+          if (thunderstoreMatch && thunderstoreVersionMatch) {
+            await applyThunderstoreMatch(thunderstoreMatch);
+            continue;
+          }
+
+          notices[key] = {
+            kind: 'nexusManual',
+            message: `${item.name} has a Nexus Mods file match, but this account must confirm the download manually.`,
+            nexus: exactNexusMatch,
+            modUrl: `https://www.nexusmods.com/schedule1/mods/${exactNexusMatch.modId}?tab=files`,
+          };
+          continue;
+        }
+
+        if (mode === 'download') {
+          const result = await ApiService.downloadNexusModToLibrary(exactNexusMatch.modId, exactNexusMatch.fileId, runtime);
+          if (result.requiresManualDownload) {
+            notices[key] = {
+              kind: 'nexusManual',
+              message: `${item.name} has a Nexus Mods file match, but this account must confirm the download manually.`,
+              nexus: exactNexusMatch,
+              modUrl: result.modUrl ?? `https://www.nexusmods.com/schedule1/mods/${exactNexusMatch.modId}?tab=files`,
+            };
+            continue;
+          }
+          if (result.securityScanBlocked || result.securityScanConfirmationRequired) {
+            notices[key] = { kind: 'manual', message: `${item.name} needs security review before SIMM can import it.` };
+            continue;
+          }
+          if (result.storageId) {
+            nextItems[index] = {
+              ...item,
+              source: 'nexusmods',
+              sourceId: String(exactNexusMatch.modId),
+              nexusFileId: String(exactNexusMatch.fileId),
+              runtime: runtime ?? item.runtime,
+              storageId: result.storageId,
+              manualReason: null,
+            };
+          }
+        }
+        notices[key] = { kind: 'matched', message: `${item.name} matched the listed Nexus Mods file.` };
+        continue;
+      }
+
+      if (featuredGithubSource === 'ifBars/S1API' && item.sourceVersion) {
+        if (mode === 'download') {
+          const result = await ApiService.downloadS1APIToLibrary(item.sourceVersion);
+          if (result.securityScanBlocked || result.securityScanConfirmationRequired) {
+            notices[key] = { kind: 'manual', message: `${item.name} needs security review before SIMM can import it.` };
+            continue;
+          }
+          if (result.storageId) {
+            nextItems[index] = {
+              ...item,
+              source: 'github',
+              sourceId: 'ifBars/S1API',
+              sourceUrl: 'https://github.com/ifBars/S1API',
+              runtime: runtime ?? item.runtime,
+              storageId: result.storageId,
+              manualReason: null,
+            };
+          }
+        }
+        notices[key] = { kind: 'matched', message: `${item.name} can be downloaded from GitHub.` };
+        continue;
+      }
+
+      if (featuredGithubSource === 'ifBars/MLVScan' && item.sourceVersion) {
+        if (mode === 'download') {
+          const result = await ApiService.downloadMLVScanToLibrary(item.sourceVersion);
+          if (result.securityScanBlocked || result.securityScanConfirmationRequired) {
+            notices[key] = { kind: 'manual', message: `${item.name} needs security review before SIMM can import it.` };
+            continue;
+          }
+          if (result.storageId) {
+            nextItems[index] = {
+              ...item,
+              source: 'github',
+              sourceId: 'ifBars/MLVScan',
+              sourceUrl: 'https://github.com/ifBars/MLVScan',
+              runtime: runtime ?? item.runtime,
+              storageId: result.storageId,
+              manualReason: null,
+            };
+          }
+        }
+        notices[key] = { kind: 'matched', message: `${item.name} can be downloaded from GitHub.` };
+        continue;
+      }
+
+      const thunderstoreMatch = await findThunderstoreMatch(item);
+
+      if (thunderstoreMatch) {
+        await applyThunderstoreMatch(thunderstoreMatch);
+        continue;
+      }
+
+      if (item.source !== 'nexusmods') {
+        const match = await findNexusMatch(item);
+        if (match) {
+          if (!canDirectDownloadNexus) {
+            notices[key] = {
+              kind: 'nexusManual',
+              message: `${item.name} matched Nexus Mods, but this account must confirm the download manually.`,
+              nexus: match,
+              modUrl: `https://www.nexusmods.com/schedule1/mods/${match.modId}?tab=files`,
+            };
+            continue;
+          }
+          if (mode === 'download') {
+            const result = await ApiService.downloadNexusModToLibrary(match.modId, match.fileId, runtime);
+            if (result.requiresManualDownload) {
+              notices[key] = {
+                kind: 'nexusManual',
+                message: `${item.name} matched Nexus Mods, but this account must confirm the download manually.`,
+                nexus: match,
+                modUrl: result.modUrl ?? `https://www.nexusmods.com/schedule1/mods/${match.modId}?tab=files`,
+              };
+              continue;
+            }
+            if (result.securityScanBlocked || result.securityScanConfirmationRequired) {
+              notices[key] = { kind: 'manual', message: `${item.name} needs security review before SIMM can import it.` };
+              continue;
+            }
+            if (result.storageId) {
+              nextItems[index] = {
+                ...item,
+                source: 'nexusmods',
+                sourceId: String(match.modId),
+                nexusFileId: String(match.fileId),
+                runtime: runtime ?? item.runtime,
+                storageId: result.storageId,
+                manualReason: null,
+              };
+            }
+          }
+          notices[key] = { kind: 'matched', message: `${item.name} matched Nexus Mods.` };
+          continue;
+        }
+      }
+
+      notices[key] = {
+        kind: 'noMatchFound',
+        message: `No matching downloadable source found for ${item.name}.`,
+      };
+    }
+
+    setResolutionNotices(notices);
+    return { ...manifest, items: nextItems };
+  };
+
+  const handleStartNexusManualImport = async (
+    item: ModProfileImportPlan['items'][number],
+    index: number,
+    notice: ProfileResolutionNotice,
+  ) => {
+    if (!targetEnvironmentId) {
+      setError('Choose a target environment before starting a Nexus manual import.');
+      return;
+    }
+    if (!notice.nexus) return;
+
+    const key = profileItemKey(item.item, index);
+    setPendingNexusImportKey(key);
+    setError(null);
+    setApplyMessage(null);
+    try {
+      const result = await ApiService.beginNexusManualDownloadSession({
+        kind: 'install',
+        modId: notice.nexus.modId,
+        fileId: notice.nexus.fileId,
+        gameId: 'schedule1',
+        environmentId: targetEnvironmentId,
+        runtime: profileRuntime(item.item.runtime),
+      });
+      window.open(result.filesPageUrl || notice.modUrl, '_blank', 'noopener,noreferrer');
+      setApplyMessage(`Started Nexus manual import for ${item.item.name}. Use the Nexus download prompt to continue.`);
+    } catch (err) {
+      setPendingNexusImportKey(null);
+      setError(err instanceof Error ? err.message : 'Failed to start Nexus manual import.');
     }
   };
 
@@ -105,8 +601,11 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
     setApplyMessage(null);
     try {
       const manifest = await loadManifest();
+      const initialPlan = await ApiService.previewModProfileImport(manifest, targetEnvironmentId || null);
+      setPlan(initialPlan);
+      const resolvedManifest = await resolveProfileDownloads(manifest, initialPlan, 'download');
       const result = await ApiService.applyModProfileImport({
-        manifest,
+        manifest: resolvedManifest,
         targetEnvironmentId,
       });
       setPlan(result.plan);
@@ -182,7 +681,7 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
             </SimmButton>
             <SimmButton type="button" className="btn btn-primary" onClick={handleApply} disabled={busy || (!profileText.trim() && !profileSource) || !targetEnvironmentId || !plan}>
               <Icon name={busy ? 'spinner' : 'download'} />
-              Apply Ready Items
+              Download & Apply
             </SimmButton>
           </div>
         </section>
@@ -204,16 +703,46 @@ export function ProfileImportWorkspace({ onClose }: ProfileImportWorkspaceProps)
                 <div><span>Manual</span><strong>{plan.summary.manualRequired + plan.summary.needsDownload + plan.summary.runtimeMismatches}</strong></div>
               </div>
               <div className="profile-workspace__items">
-                {plan.items.map((item, index) => (
-                  <article key={`${item.item.name}-${index}`} className={`profile-workspace__item profile-workspace__item--${item.status}`}>
-                    <div>
-                      <strong>{item.item.name}</strong>
-                      <span>{item.item.source || item.item.itemType}{item.item.sourceVersion ? ` - ${item.item.sourceVersion}` : ''}</span>
-                    </div>
-                    <span>{statusLabels[item.status] || item.status}</span>
-                    <p>{item.message}</p>
-                  </article>
-                ))}
+                {plan.items.map((item, index) => {
+                  const notice = resolutionNotices[profileItemKey(item.item, index)];
+                  const itemStatusClass = notice?.kind === 'noMatchFound'
+                    ? 'noMatchFound'
+                    : notice?.kind === 'nexusManual'
+                      ? 'nexusManual'
+                    : item.status;
+                  const itemKey = profileItemKey(item.item, index);
+                  const nexusManualBusy = Boolean(pendingNexusImportKey && pendingNexusImportKey !== itemKey);
+                  return (
+                    <article key={`${item.item.name}-${index}`} className={`profile-workspace__item profile-workspace__item--${itemStatusClass}`}>
+                      <div>
+                        <strong>{item.item.name}</strong>
+                        <span>{item.item.source || item.item.itemType}{item.item.sourceVersion ? ` - ${item.item.sourceVersion}` : ''}</span>
+                      </div>
+                      <span>
+                        {notice?.kind === 'noMatchFound'
+                          ? 'No match found'
+                          : notice?.kind === 'nexusManual'
+                            ? 'Nexus manual'
+                            : statusLabels[item.status] || item.status}
+                      </span>
+                      <p>{notice?.message ?? item.message}</p>
+                      {notice?.kind === 'nexusManual' && notice.nexus ? (
+                        <div className="profile-workspace__item-actions">
+                          <SimmButton
+                            type="button"
+                            variant="secondary"
+                            className="btn btn-secondary btn-small"
+                            disabled={busy || nexusManualBusy || pendingNexusImportKey === itemKey}
+                            onClick={() => void handleStartNexusManualImport(item, index, notice)}
+                          >
+                            <Icon name={pendingNexusImportKey === itemKey ? 'spinner' : 'download'} />
+                            {pendingNexusImportKey === itemKey ? 'Import Started' : 'Start Nexus Import'}
+                          </SimmButton>
+                        </div>
+                      ) : null}
+                    </article>
+                  );
+                })}
               </div>
             </>
           ) : (

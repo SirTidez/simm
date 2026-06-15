@@ -8681,6 +8681,27 @@ body {
   border-color: rgba(236, 177, 82, 0.42);
 }
 
+.profile-workspace__item--nexusManual {
+  border-color: rgba(127, 168, 223, 0.48);
+  background: color-mix(in srgb, var(--workspace-surface-muted-soft) 86%, rgba(79, 146, 222, 0.16));
+}
+
+.profile-workspace__item--noMatchFound {
+  border-color: rgba(255, 99, 132, 0.5);
+  background: color-mix(in srgb, var(--workspace-surface-muted-soft) 86%, rgba(190, 48, 70, 0.16));
+}
+
+.profile-workspace__item--noMatchFound p {
+  color: #ffb9c6;
+}
+
+.profile-workspace__item-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .profile-workspace__empty {
   display: grid;
   place-items: center;

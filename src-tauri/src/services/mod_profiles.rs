@@ -139,14 +139,6 @@ impl ModProfilesService {
         for item in &plan.items {
             match item.status {
                 ModProfileImportStatus::ReadyToInstall => {
-                    if item.item.item_type != ModProfileItemType::Mod {
-                        skipped += 1;
-                        messages.push(format!(
-                            "Skipped {} because only mod installs are automated in this version.",
-                            item.item.name
-                        ));
-                        continue;
-                    }
                     if let Some(storage_id) = item.resolved_storage_id.as_deref() {
                         mods_service
                             .install_storage_mod_to_envs(
@@ -435,25 +427,17 @@ fn plan_item(
     library: &[ModLibraryEntry],
     installed_mods: Option<&Value>,
 ) -> ModProfileImportPlanItem {
-    if item.item_type != ModProfileItemType::Mod {
-        return ModProfileImportPlanItem {
-            item,
-            status: ModProfileImportStatus::ManualRequired,
-            resolved_storage_id: None,
-            message: "Plugins and UserLibs are included as manual checklist items.".to_string(),
-        };
-    }
-
     if matches!(
         item.source,
         Some(ModSource::Local) | Some(ModSource::Unknown) | None
     ) && item.source_id.is_none()
+        && item.storage_id.is_none()
     {
         return ModProfileImportPlanItem {
             item,
             status: ModProfileImportStatus::ManualRequired,
             resolved_storage_id: None,
-            message: "This local mod is not linked to a downloadable source.".to_string(),
+            message: "This profile item is not linked to a downloadable source.".to_string(),
         };
     }
 
@@ -698,6 +682,21 @@ mod tests {
     #[test]
     fn plan_item_marks_downloaded_source_ready_to_install() {
         let item = profile_item();
+        let library = vec![library_entry("storage-1", "Author/Example", Runtime::Mono)];
+        let planned = plan_item(item, None, &library, None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::ReadyToInstall);
+        assert_eq!(planned.resolved_storage_id.as_deref(), Some("storage-1"));
+    }
+
+    #[test]
+    fn plan_item_marks_plugin_with_storage_ready_to_install() {
+        let mut item = profile_item();
+        item.item_type = ModProfileItemType::Plugin;
+        item.name = "MeshVault.Mono".to_string();
+        item.file_name = Some("MeshVault.Mono.dll".to_string());
+        item.source_id = Some("Author/Example".to_string());
+
         let library = vec![library_entry("storage-1", "Author/Example", Runtime::Mono)];
         let planned = plan_item(item, None, &library, None);
 
