@@ -25,6 +25,10 @@ import type {
   MelonLoaderLaunchOptionsRepairResult,
   LaunchGameResult,
   MelonLoaderLaunchVerification,
+  ModProfileApplyRequest,
+  ModProfileApplyResult,
+  ModProfileImportPlan,
+  ModProfileManifest,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -133,6 +137,37 @@ export class ApiService {
   static async deleteEnvironment(id: string, deleteFiles?: boolean): Promise<{ success: boolean }> {
     const result = await invoke<boolean>('delete_environment', { id, deleteFiles });
     return { success: result };
+  }
+
+  static async exportEnvironmentProfile(environmentId: string): Promise<ModProfileManifest> {
+    return invoke('export_environment_profile', { environmentId });
+  }
+
+  static async saveModProfileFile(
+    manifest: ModProfileManifest,
+    destination: string,
+  ): Promise<void> {
+    return invoke('save_mod_profile_file', { manifest, destination });
+  }
+
+  static async readModProfileFile(source: string): Promise<ModProfileManifest> {
+    return invoke('read_mod_profile_file', { source });
+  }
+
+  static async previewModProfileImport(
+    manifest: ModProfileManifest,
+    targetEnvironmentId?: string | null,
+  ): Promise<ModProfileImportPlan> {
+    return invoke('preview_mod_profile_import', {
+      manifest,
+      targetEnvironmentId: targetEnvironmentId ?? null,
+    });
+  }
+
+  static async applyModProfileImport(
+    request: ModProfileApplyRequest,
+  ): Promise<ModProfileApplyResult> {
+    return invoke('apply_mod_profile_import', { request });
   }
 
   // Downloads

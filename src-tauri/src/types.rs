@@ -402,7 +402,7 @@ pub struct UpdateCheckResult {
     pub update_game_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModSource {
     Local,
@@ -599,6 +599,111 @@ pub struct ModLibraryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ModLibraryResult {
     pub downloaded: Vec<ModLibraryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileManifest {
+    pub schema_version: u32,
+    pub kind: String,
+    pub profile: ModProfileInfo,
+    #[serde(default)]
+    pub items: Vec<ModProfileItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileInfo {
+    pub name: String,
+    pub game: String,
+    pub environment_id: Option<String>,
+    pub runtime: Runtime,
+    pub branch: String,
+    pub game_version: Option<String>,
+    pub exported_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModProfileItemType {
+    Mod,
+    Plugin,
+    Userlib,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileItem {
+    pub item_type: ModProfileItemType,
+    pub name: String,
+    pub file_name: Option<String>,
+    pub required: bool,
+    pub source: Option<ModSource>,
+    pub source_id: Option<String>,
+    pub source_version: Option<String>,
+    pub source_url: Option<String>,
+    pub runtime: Option<Runtime>,
+    pub storage_id: Option<String>,
+    pub nexus_file_id: Option<String>,
+    pub manual_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileImportPlan {
+    pub profile: ModProfileInfo,
+    pub target_environment_id: Option<String>,
+    pub items: Vec<ModProfileImportPlanItem>,
+    pub summary: ModProfileImportSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ModProfileImportStatus {
+    AlreadyInstalled,
+    ReadyToInstall,
+    NeedsDownload,
+    ManualRequired,
+    RuntimeMismatch,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileImportPlanItem {
+    pub item: ModProfileItem,
+    pub status: ModProfileImportStatus,
+    pub resolved_storage_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileImportSummary {
+    pub total: usize,
+    pub already_installed: usize,
+    pub ready_to_install: usize,
+    pub needs_download: usize,
+    pub manual_required: usize,
+    pub runtime_mismatches: usize,
+    pub unsupported: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileApplyRequest {
+    pub manifest: ModProfileManifest,
+    pub target_environment_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileApplyResult {
+    pub plan: ModProfileImportPlan,
+    pub installed: usize,
+    pub skipped: usize,
+    pub unresolved: usize,
+    pub messages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

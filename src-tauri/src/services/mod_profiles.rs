@@ -1,0 +1,1431 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
+use serde_json::Value;
+use sqlx::SqlitePool;
+
+use crate::services::environment::EnvironmentService;
+use crate::services::mods::ModsService;
+use crate::services::plugins::PluginsService;
+use crate::services::userlibs::UserLibsService;
+use crate::types::{
+    Environment, ModLibraryEntry, ModProfileApplyRequest, ModProfileApplyResult,
+    ModProfileImportPlan, ModProfileImportPlanItem, ModProfileImportStatus,
+    ModProfileImportSummary, ModProfileInfo, ModProfileItem, ModProfileItemType,
+    ModProfileManifest, ModSource, Runtime,
+};
+
+const PROFILE_KIND: &str = "simm.profile";
+const PROFILE_SCHEMA_VERSION: u32 = 1;
+const PROFILE_GAME_ID: &str = "schedule-i";
+const NEXUS_FILE_ID_TAG_PREFIX: &str = "nexus-file-id:";
+
+pub struct ModProfilesService {
+    pool: Arc<SqlitePool>,
+}
+
+impl ModProfilesService {
+    pub fn new(pool: Arc<SqlitePool>) -> Self {
+        Self { pool }
+    }
+
+    pub async fn export_environment_profile(
+        &self,
+        environment_id: &str,
+    ) -> Result<ModProfileManifest> {
+        let env_service = EnvironmentService::new(self.pool.clone())?;
+        let environment = env_service
+            .get_environment(environment_id)
+            .await?
+            .ok_or_else(|| anyhow!("Environment not found"))?;
+
+        let mods_service = ModsService::new(self.pool.clone());
+        let installed_mods = mods_service
+            .list_mods(&environment.output_dir)
+            .await
+            .context("Failed to list installed mods for profile export")?;
+        let library = mods_service
+            .get_mod_library()
+            .await
+            .context("Failed to load mod library for profile export")?;
+
+        let mut items = build_managed_mod_items(&environment, &library.downloaded, &installed_mods);
+        items.extend(build_unmanaged_mod_items(&environment, &installed_mods));
+        items.extend(
+            build_plugin_items(self.pool.clone(), &environment, &library.downloaded).await?,
+        );
+        items.extend(build_userlib_items(&environment, &library.downloaded).await?);
+
+        items.sort_by(|left, right| {
+            format!("{:?}:{}", left.item_type, left.name.to_lowercase()).cmp(&format!(
+                "{:?}:{}",
+                right.item_type,
+                right.name.to_lowercase()
+            ))
+        });
+
+        Ok(ModProfileManifest {
+            schema_version: PROFILE_SCHEMA_VERSION,
+            kind: PROFILE_KIND.to_string(),
+            profile: ModProfileInfo {
+                name: environment.name.clone(),
+                game: PROFILE_GAME_ID.to_string(),
+                environment_id: Some(environment.id.clone()),
+                runtime: environment.runtime,
+                branch: environment.branch,
+                game_version: environment.current_game_version,
+                exported_at: Utc::now().to_rfc3339(),
+            },
+            items,
+        })
+    }
+
+    pub async fn preview_import(
+        &self,
+        manifest: ModProfileManifest,
+        target_environment_id: Option<String>,
+    ) -> Result<ModProfileImportPlan> {
+        validate_manifest(&manifest)?;
+        let target_environment = self
+            .load_target_environment(target_environment_id.as_deref())
+            .await?;
+        let mods_service = ModsService::new(self.pool.clone());
+        let library = mods_service.get_mod_library().await?;
+        let installed_snapshot = if let Some(environment) = target_environment.as_ref() {
+            Some(build_installed_snapshot(self.pool.clone(), &mods_service, environment).await?)
+        } else {
+            None
+        };
+
+        let mut summary = ModProfileImportSummary {
+            total: manifest.items.len(),
+            ..Default::default()
+        };
+        let mut items = Vec::with_capacity(manifest.items.len());
+
+        for item in manifest.items.iter().cloned() {
+            let plan_item = plan_item(
+                item,
+                target_environment.as_ref(),
+                &library.downloaded,
+                installed_snapshot.as_ref(),
+            );
+            increment_summary(&mut summary, &plan_item.status);
+            items.push(plan_item);
+        }
+
+        Ok(ModProfileImportPlan {
+            profile: manifest.profile,
+            target_environment_id,
+            items,
+            summary,
+        })
+    }
+
+    pub async fn apply_import(
+        &self,
+        request: ModProfileApplyRequest,
+    ) -> Result<ModProfileApplyResult> {
+        let target_environment_id = request.target_environment_id.clone();
+        let plan = self
+            .preview_import(request.manifest, Some(target_environment_id.clone()))
+            .await?;
+        let mods_service = ModsService::new(self.pool.clone());
+        let mut installed = 0usize;
+        let mut skipped = 0usize;
+        let mut unresolved = 0usize;
+        let mut messages = Vec::new();
+
+        for item in &plan.items {
+            match item.status {
+                ModProfileImportStatus::ReadyToInstall => {
+                    if let Some(storage_id) = item.resolved_storage_id.as_deref() {
+                        mods_service
+                            .install_storage_mod_to_envs(
+                                storage_id,
+                                vec![target_environment_id.clone()],
+                            )
+                            .await
+                            .with_context(|| format!("Failed to install {}", item.item.name))?;
+                        installed += 1;
+                    } else {
+                        unresolved += 1;
+                    }
+                }
+                ModProfileImportStatus::AlreadyInstalled => {
+                    skipped += 1;
+                }
+                _ => {
+                    unresolved += 1;
+                    messages.push(format!("{}: {}", item.item.name, item.message));
+                }
+            }
+        }
+
+        let refreshed_plan = self
+            .preview_import(plan_to_manifest(&plan), Some(target_environment_id))
+            .await?;
+
+        Ok(ModProfileApplyResult {
+            plan: refreshed_plan,
+            installed,
+            skipped,
+            unresolved,
+            messages,
+        })
+    }
+
+    pub async fn save_manifest_to_file(
+        &self,
+        manifest: ModProfileManifest,
+        destination: PathBuf,
+    ) -> Result<()> {
+        validate_manifest(&manifest)?;
+        let profile_json = serde_json::to_string_pretty(&manifest)
+            .context("Failed to serialize profile manifest")?;
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        tokio::fs::write(&destination, profile_json)
+            .await
+            .with_context(|| format!("Failed to write {}", destination.display()))?;
+        Ok(())
+    }
+
+    pub async fn read_manifest_from_file(&self, source: PathBuf) -> Result<ModProfileManifest> {
+        let profile_json = tokio::fs::read_to_string(&source)
+            .await
+            .with_context(|| format!("Failed to read {}", source.display()))?;
+        let manifest = serde_json::from_str::<ModProfileManifest>(&profile_json)
+            .with_context(|| format!("Failed to parse {}", source.display()))?;
+        validate_manifest(&manifest)?;
+        Ok(manifest)
+    }
+
+    async fn load_target_environment(&self, id: Option<&str>) -> Result<Option<Environment>> {
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let env_service = EnvironmentService::new(self.pool.clone())?;
+        env_service
+            .get_environment(id)
+            .await?
+            .map(Some)
+            .ok_or_else(|| anyhow!("Target environment not found"))
+    }
+}
+
+fn validate_manifest(manifest: &ModProfileManifest) -> Result<()> {
+    if manifest.schema_version != PROFILE_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "Unsupported profile schema version {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.kind != PROFILE_KIND {
+        return Err(anyhow!("Unsupported profile kind {}", manifest.kind));
+    }
+    if manifest.profile.game != PROFILE_GAME_ID {
+        return Err(anyhow!(
+            "Unsupported profile game {}",
+            manifest.profile.game
+        ));
+    }
+    Ok(())
+}
+
+fn build_managed_mod_items(
+    environment: &Environment,
+    library: &[ModLibraryEntry],
+    installed_mods: &Value,
+) -> Vec<ModProfileItem> {
+    installed_mods
+        .get("mods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|mod_value| {
+            mod_value
+                .get("managed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter(|mod_value| !is_disabled(mod_value))
+        .filter_map(|mod_value| {
+            let storage_id = read_string(mod_value, "modStorageId")?;
+            let entry = library.iter().find(|entry| entry.storage_id == storage_id);
+            let name = entry
+                .map(|entry| entry.display_name.clone())
+                .or_else(|| read_string(mod_value, "name"))
+                .or_else(|| read_string(mod_value, "fileName"))
+                .unwrap_or_else(|| "Managed mod".to_string());
+            let file_name = read_string(mod_value, "fileName")
+                .or_else(|| entry.and_then(|entry| entry.files.first().cloned()));
+            ModProfileItem {
+                item_type: ModProfileItemType::Mod,
+                name,
+                file_name,
+                required: true,
+                source: entry.and_then(|entry| entry.source.clone()).or_else(|| {
+                    mod_value
+                        .get("source")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                }),
+                source_id: entry.and_then(|entry| entry.source_id.clone()),
+                source_version: entry
+                    .and_then(|entry| {
+                        entry
+                            .source_version
+                            .clone()
+                            .or(entry.installed_version.clone())
+                    })
+                    .or_else(|| read_string(mod_value, "version")),
+                source_url: entry.and_then(|entry| entry.source_url.clone()),
+                runtime: Some(environment.runtime.clone()),
+                storage_id: Some(storage_id),
+                nexus_file_id: entry.and_then(|entry| parse_nexus_file_id(entry.tags.as_deref())),
+                manual_reason: None,
+            }
+            .into()
+        })
+        .collect()
+}
+
+fn build_unmanaged_mod_items(
+    environment: &Environment,
+    installed_mods: &Value,
+) -> Vec<ModProfileItem> {
+    installed_mods
+        .get("mods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|mod_value| {
+            !mod_value
+                .get("managed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter(|mod_value| !is_disabled(mod_value))
+        .map(|mod_value| {
+            let name = read_string(mod_value, "name")
+                .or_else(|| read_string(mod_value, "fileName"))
+                .unwrap_or_else(|| "Local mod".to_string());
+            ModProfileItem {
+                item_type: ModProfileItemType::Mod,
+                name,
+                file_name: read_string(mod_value, "fileName"),
+                required: true,
+                source: Some(ModSource::Local),
+                source_id: None,
+                source_version: read_string(mod_value, "version"),
+                source_url: read_string(mod_value, "sourceUrl"),
+                runtime: Some(environment.runtime.clone()),
+                storage_id: None,
+                nexus_file_id: None,
+                manual_reason: Some("Local mod is not linked to a supported source.".to_string()),
+            }
+        })
+        .collect()
+}
+
+async fn build_plugin_items(
+    pool: Arc<SqlitePool>,
+    environment: &Environment,
+    library: &[ModLibraryEntry],
+) -> Result<Vec<ModProfileItem>> {
+    let plugins = PluginsService::new(pool)
+        .list_plugins(&environment.output_dir)
+        .await
+        .context("Failed to list plugins for profile export")?;
+    Ok(plugins
+        .get("plugins")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|plugin| !is_disabled(plugin))
+        .map(|plugin| {
+            let name = read_string(plugin, "name")
+                .or_else(|| read_string(plugin, "fileName"))
+                .unwrap_or_else(|| "Plugin".to_string());
+            let file_name = read_string(plugin, "fileName");
+            let entry = file_name.as_deref().and_then(|file_name| {
+                library_entry_for_exported_file(
+                    library,
+                    ModProfileItemType::Plugin,
+                    file_name,
+                    environment,
+                )
+            });
+            ModProfileItem {
+                item_type: ModProfileItemType::Plugin,
+                name,
+                file_name,
+                required: true,
+                source: entry.and_then(|entry| entry.source.clone()).or_else(|| {
+                    plugin
+                        .get("source")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                }),
+                source_id: entry.and_then(|entry| entry.source_id.clone()),
+                source_version: entry
+                    .and_then(library_entry_source_version)
+                    .or_else(|| read_string(plugin, "version")),
+                source_url: entry.and_then(|entry| entry.source_url.clone()),
+                runtime: Some(environment.runtime.clone()),
+                storage_id: entry
+                    .and_then(|entry| storage_id_for_runtime(entry, &environment.runtime)),
+                nexus_file_id: None,
+                manual_reason: entry
+                    .is_none()
+                    .then(|| "Plugin sync is exported as a manual checklist item.".to_string()),
+            }
+        })
+        .collect())
+}
+
+async fn build_userlib_items(
+    environment: &Environment,
+    library: &[ModLibraryEntry],
+) -> Result<Vec<ModProfileItem>> {
+    let userlibs = UserLibsService::new()
+        .list_user_libs(&environment.output_dir)
+        .await
+        .context("Failed to list UserLibs for profile export")?;
+    Ok(userlibs
+        .get("userLibs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|userlib| !is_disabled(userlib))
+        .map(|userlib| {
+            let name = read_string(userlib, "name")
+                .or_else(|| read_string(userlib, "fileName"))
+                .unwrap_or_else(|| "UserLib".to_string());
+            let file_name = read_string(userlib, "fileName");
+            let entry = file_name.as_deref().and_then(|file_name| {
+                library_entry_for_exported_file(
+                    library,
+                    ModProfileItemType::Userlib,
+                    file_name,
+                    environment,
+                )
+            });
+            ModProfileItem {
+                item_type: ModProfileItemType::Userlib,
+                name,
+                file_name,
+                required: true,
+                source: entry
+                    .and_then(|entry| entry.source.clone())
+                    .or(Some(ModSource::Local)),
+                source_id: entry.and_then(|entry| entry.source_id.clone()),
+                source_version: entry.and_then(library_entry_source_version),
+                source_url: entry.and_then(|entry| entry.source_url.clone()),
+                runtime: Some(environment.runtime.clone()),
+                storage_id: entry
+                    .and_then(|entry| storage_id_for_runtime(entry, &environment.runtime)),
+                nexus_file_id: None,
+                manual_reason: entry
+                    .is_none()
+                    .then(|| "UserLib sync is exported as a manual checklist item.".to_string()),
+            }
+        })
+        .collect())
+}
+
+async fn build_installed_snapshot(
+    pool: Arc<SqlitePool>,
+    mods_service: &ModsService,
+    environment: &Environment,
+) -> Result<Value> {
+    let mut snapshot = mods_service.list_mods(&environment.output_dir).await?;
+    if let Some(object) = snapshot.as_object_mut() {
+        let plugins = PluginsService::new(pool)
+            .list_plugins(&environment.output_dir)
+            .await
+            .context("Failed to list installed plugins for profile import preview")?;
+        let userlibs = UserLibsService::new()
+            .list_user_libs(&environment.output_dir)
+            .await
+            .context("Failed to list installed UserLibs for profile import preview")?;
+        object.insert(
+            "plugins".to_string(),
+            plugins
+                .get("plugins")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        );
+        object.insert(
+            "userLibs".to_string(),
+            userlibs
+                .get("userLibs")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(Vec::new())),
+        );
+    }
+    Ok(snapshot)
+}
+
+fn plan_item(
+    item: ModProfileItem,
+    target_environment: Option<&Environment>,
+    library: &[ModLibraryEntry],
+    installed_mods: Option<&Value>,
+) -> ModProfileImportPlanItem {
+    if let Some(environment) = target_environment {
+        if let Some(runtime) = item.runtime.clone() {
+            if runtime != environment.runtime {
+                return ModProfileImportPlanItem {
+                    item,
+                    status: ModProfileImportStatus::RuntimeMismatch,
+                    resolved_storage_id: None,
+                    message: format!(
+                        "Profile item is for {:?}, but target environment is {:?}.",
+                        runtime, environment.runtime
+                    ),
+                };
+            }
+        }
+    }
+
+    if let Some(storage_id) =
+        installed_storage_id(installed_mods, library, target_environment, &item)
+    {
+        return ModProfileImportPlanItem {
+            item,
+            status: ModProfileImportStatus::AlreadyInstalled,
+            resolved_storage_id: Some(storage_id),
+            message: "Already installed in the target environment.".to_string(),
+        };
+    }
+
+    let resolved = resolve_library_storage_id(library, &item);
+    if resolved.is_none()
+        && matches!(
+            item.source,
+            Some(ModSource::Local) | Some(ModSource::Unknown) | None
+        )
+        && item.source_id.is_none()
+        && item.storage_id.is_none()
+    {
+        return ModProfileImportPlanItem {
+            item,
+            status: ModProfileImportStatus::ManualRequired,
+            resolved_storage_id: None,
+            message: "This profile item is not linked to a downloadable source.".to_string(),
+        };
+    }
+
+    match resolved {
+        Some(storage_id) => ModProfileImportPlanItem {
+            item,
+            status: ModProfileImportStatus::ReadyToInstall,
+            resolved_storage_id: Some(storage_id),
+            message: "Downloaded library entry is ready to install.".to_string(),
+        },
+        None if item.source_id.is_some() => ModProfileImportPlanItem {
+            item,
+            status: ModProfileImportStatus::NeedsDownload,
+            resolved_storage_id: None,
+            message: "Supported source is known, but the matching version is not downloaded yet."
+                .to_string(),
+        },
+        None => ModProfileImportPlanItem {
+            item,
+            status: ModProfileImportStatus::ManualRequired,
+            resolved_storage_id: None,
+            message: "No supported source identity is available.".to_string(),
+        },
+    }
+}
+
+fn installed_storage_id(
+    installed_mods: Option<&Value>,
+    library: &[ModLibraryEntry],
+    target_environment: Option<&Environment>,
+    item: &ModProfileItem,
+) -> Option<String> {
+    let installed_mods = installed_mods?;
+    if let Some(storage_id) = installed_mods
+        .get("mods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|mod_value| {
+            let storage_id = read_string(mod_value, "modStorageId")?;
+            let same_storage_id = item
+                .storage_id
+                .as_ref()
+                .map(|expected| expected == &storage_id)
+                .unwrap_or(false);
+            if same_storage_id
+                && (installed_mod_value_matches_item(mod_value, item)
+                    || library.iter().any(|entry| {
+                        library_entry_storage_id_matches(entry, &storage_id)
+                            && library_entry_profile_identity_matches(entry, item)
+                    }))
+            {
+                return Some(storage_id);
+            }
+            let same_source = item.source_id.as_ref().is_some_and(|source_id| {
+                read_string(mod_value, "sourceId")
+                    .as_ref()
+                    .map(|value| value.eq_ignore_ascii_case(source_id))
+                    .unwrap_or(false)
+            });
+            if same_source && installed_mod_value_matches_item(mod_value, item) {
+                Some(storage_id)
+            } else {
+                None
+            }
+        })
+    {
+        return Some(storage_id);
+    }
+
+    if installed_profile_file_present(installed_mods, item) {
+        if let Some(storage_id) = resolve_library_storage_id(library, item) {
+            return Some(storage_id);
+        }
+    }
+
+    if let Some(environment) = target_environment {
+        if let Some(storage_id) = installed_library_storage_id(library, environment, item) {
+            return Some(storage_id);
+        }
+    }
+
+    None
+}
+
+fn installed_profile_file_present(installed_mods: &Value, item: &ModProfileItem) -> bool {
+    let collection = match item.item_type {
+        ModProfileItemType::Mod => "mods",
+        ModProfileItemType::Plugin => "plugins",
+        ModProfileItemType::Userlib => "userLibs",
+    };
+    let Some(item_file) = item.file_name.as_deref().or(Some(item.name.as_str())) else {
+        return false;
+    };
+    let item_file = normalize_file_identity(item_file);
+    if item_file.is_empty() {
+        return false;
+    }
+
+    installed_mods
+        .get(collection)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|value| {
+            read_string(value, "fileName")
+                .or_else(|| read_string(value, "name"))
+                .map(|file_name| normalize_file_identity(&file_name) == item_file)
+                .unwrap_or(false)
+        })
+}
+
+fn resolve_library_storage_id(
+    library: &[ModLibraryEntry],
+    item: &ModProfileItem,
+) -> Option<String> {
+    if let Some(storage_id) = item.storage_id.as_deref() {
+        if let Some(entry) = library.iter().find(|entry| {
+            library_entry_storage_id_matches(entry, storage_id)
+                && library_entry_profile_identity_matches(entry, item)
+        }) {
+            return storage_id_for_item_runtime(entry, item);
+        }
+    }
+
+    if let Some(source_id) = item.source_id.as_deref() {
+        if let Some(storage_id) = library.iter().find_map(|entry| {
+            let entry_source_id = entry.source_id.as_deref()?;
+            if !entry_source_id.eq_ignore_ascii_case(source_id) {
+                return None;
+            }
+            if !library_entry_source_matches(entry, item)
+                || !library_entry_version_matches(entry, item)
+                || !library_entry_runtime_matches(entry, item)
+            {
+                return None;
+            }
+            storage_id_for_item_runtime(entry, item)
+        }) {
+            return Some(storage_id);
+        }
+    }
+
+    if matches!(
+        item.item_type,
+        ModProfileItemType::Plugin | ModProfileItemType::Userlib
+    ) {
+        return library.iter().find_map(|entry| {
+            if !library_entry_source_matches(entry, item)
+                || !library_entry_version_matches(entry, item)
+                || !library_entry_runtime_matches(entry, item)
+                || !library_entry_file_matches_item(entry, item)
+            {
+                return None;
+            }
+            storage_id_for_item_runtime(entry, item)
+        });
+    }
+
+    None
+}
+
+fn installed_library_storage_id(
+    library: &[ModLibraryEntry],
+    environment: &Environment,
+    item: &ModProfileItem,
+) -> Option<String> {
+    library.iter().find_map(|entry| {
+        if !library_entry_installed_in_environment(entry, environment, item)
+            || !library_entry_source_matches(entry, item)
+            || !library_entry_version_matches(entry, item)
+            || !library_entry_runtime_matches(entry, item)
+        {
+            return None;
+        }
+        if item.source_id.is_some() {
+            let item_source_id = item.source_id.as_deref()?;
+            if !entry
+                .source_id
+                .as_deref()
+                .map(|entry_source_id| entry_source_id.eq_ignore_ascii_case(item_source_id))
+                .unwrap_or(false)
+            {
+                return None;
+            }
+        } else if !library_entry_file_matches_item(entry, item) {
+            return None;
+        }
+        storage_id_for_item_runtime(entry, item)
+    })
+}
+
+fn library_entry_storage_id_matches(entry: &ModLibraryEntry, storage_id: &str) -> bool {
+    entry.storage_id == storage_id
+        || entry
+            .storage_ids_by_runtime
+            .values()
+            .any(|candidate| candidate == storage_id)
+}
+
+fn library_entry_profile_identity_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    if !library_entry_source_matches(entry, item)
+        || !library_entry_version_matches(entry, item)
+        || !library_entry_runtime_matches(entry, item)
+    {
+        return false;
+    }
+
+    if let Some(source_id) = item.source_id.as_deref() {
+        return entry
+            .source_id
+            .as_deref()
+            .map(|entry_source_id| entry_source_id.eq_ignore_ascii_case(source_id))
+            .unwrap_or(false);
+    }
+
+    library_entry_file_matches_item(entry, item)
+}
+
+fn library_entry_installed_in_environment(
+    entry: &ModLibraryEntry,
+    environment: &Environment,
+    item: &ModProfileItem,
+) -> bool {
+    if let Some(runtime) = item.runtime.as_ref() {
+        if library_entry_installed_in_environment_for_runtime(entry, environment, runtime) {
+            return true;
+        }
+    }
+    entry.installed_in.iter().any(|id| id == &environment.id)
+}
+
+fn library_entry_installed_in_environment_for_runtime(
+    entry: &ModLibraryEntry,
+    environment: &Environment,
+    runtime: &Runtime,
+) -> bool {
+    let runtime_key = runtime_key(runtime);
+    entry
+        .installed_in_by_runtime
+        .get(runtime_key)
+        .is_some_and(|env_ids| env_ids.iter().any(|id| id == &environment.id))
+        || entry.installed_in.iter().any(|id| id == &environment.id)
+}
+
+fn library_entry_version_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    let Some(version) = item.source_version.as_deref() else {
+        return true;
+    };
+    let entry_version = entry
+        .source_version
+        .as_deref()
+        .or(entry.installed_version.as_deref());
+    entry_version
+        .map(|entry_version| version_eq(entry_version, version))
+        .unwrap_or(false)
+}
+
+fn library_entry_runtime_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    let Some(runtime) = item.runtime.as_ref() else {
+        return true;
+    };
+    let runtime_key = runtime_key(runtime);
+    entry.available_runtimes.is_empty()
+        || entry
+            .available_runtimes
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(runtime_key))
+}
+
+fn library_entry_source_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    match item.source.as_ref() {
+        Some(ModSource::Unknown) | None => true,
+        Some(ModSource::Local) if item.source_id.is_none() => true,
+        Some(source) => entry
+            .source
+            .as_ref()
+            .map(|entry_source| entry_source == source)
+            .unwrap_or(false),
+    }
+}
+
+fn installed_mod_value_matches_item(mod_value: &Value, item: &ModProfileItem) -> bool {
+    if item.item_type != ModProfileItemType::Mod {
+        return false;
+    }
+
+    if let Some(source_id) = item.source_id.as_deref() {
+        let Some(installed_source_id) = read_string(mod_value, "sourceId") else {
+            return false;
+        };
+        if !installed_source_id.eq_ignore_ascii_case(source_id) {
+            return false;
+        }
+    }
+
+    if let Some(source) = item.source.as_ref() {
+        if !matches!(source, ModSource::Unknown | ModSource::Local) {
+            let Some(installed_source) = read_string(mod_value, "source") else {
+                return false;
+            };
+            if !installed_source.eq_ignore_ascii_case(mod_source_key(source)) {
+                return false;
+            }
+        }
+    }
+
+    if let Some(version) = item.source_version.as_deref() {
+        let Some(installed_version) = read_string(mod_value, "version") else {
+            return false;
+        };
+        if !version_eq(&installed_version, version) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn storage_id_for_item_runtime(entry: &ModLibraryEntry, item: &ModProfileItem) -> Option<String> {
+    if let Some(runtime) = item.runtime.as_ref() {
+        return storage_id_for_runtime(entry, runtime);
+    }
+    Some(entry.storage_id.clone())
+}
+
+fn library_entry_file_matches_item(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    if matches!(item.item_type, ModProfileItemType::Mod) {
+        return false;
+    }
+    let item_file = item
+        .file_name
+        .as_deref()
+        .unwrap_or(item.name.as_str())
+        .trim();
+    if item_file.is_empty() {
+        return false;
+    }
+    library_entry_file_matches(entry, &item.item_type, item_file, item.runtime.as_ref())
+}
+
+fn library_entry_for_exported_file<'a>(
+    library: &'a [ModLibraryEntry],
+    item_type: ModProfileItemType,
+    file_name: &str,
+    environment: &Environment,
+) -> Option<&'a ModLibraryEntry> {
+    library.iter().find(|entry| {
+        library_entry_installed_in_environment_for_runtime(entry, environment, &environment.runtime)
+            && library_entry_file_matches(entry, &item_type, file_name, Some(&environment.runtime))
+    })
+}
+
+fn library_entry_file_matches(
+    entry: &ModLibraryEntry,
+    item_type: &ModProfileItemType,
+    file_name: &str,
+    runtime: Option<&Runtime>,
+) -> bool {
+    let item_file = normalize_file_identity(file_name);
+    library_entry_files_for_type(entry, item_type, runtime)
+        .into_iter()
+        .any(|file| normalize_file_identity(file) == item_file)
+}
+
+fn library_entry_files_for_type<'a>(
+    entry: &'a ModLibraryEntry,
+    item_type: &ModProfileItemType,
+    runtime: Option<&Runtime>,
+) -> Vec<&'a str> {
+    let mut files = Vec::new();
+    match item_type {
+        ModProfileItemType::Plugin => {
+            files.extend(entry.files.iter().map(String::as_str));
+        }
+        ModProfileItemType::Userlib => {
+            files.extend(entry.attached_userlibs.iter().map(String::as_str));
+        }
+        ModProfileItemType::Mod => {}
+    }
+
+    if let Some(runtime) = runtime {
+        if let Some(runtime_files) = entry.files_by_runtime.get(runtime_key(runtime)) {
+            files.extend(runtime_files.iter().map(String::as_str));
+        }
+    }
+    files
+}
+
+fn library_entry_source_version(entry: &ModLibraryEntry) -> Option<String> {
+    entry
+        .source_version
+        .clone()
+        .or_else(|| entry.installed_version.clone())
+}
+
+fn storage_id_for_runtime(entry: &ModLibraryEntry, runtime: &Runtime) -> Option<String> {
+    entry
+        .storage_ids_by_runtime
+        .get(runtime_key(runtime))
+        .cloned()
+        .or_else(|| Some(entry.storage_id.clone()))
+}
+
+fn normalize_file_identity(value: &str) -> String {
+    let file_name = Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(value)
+        .trim();
+    file_name
+        .strip_suffix(".disabled")
+        .unwrap_or(file_name)
+        .to_ascii_lowercase()
+}
+
+fn version_eq(left: &str, right: &str) -> bool {
+    left.trim()
+        .trim_start_matches('v')
+        .eq_ignore_ascii_case(right.trim().trim_start_matches('v'))
+}
+
+fn parse_nexus_file_id(tags: Option<&[String]>) -> Option<String> {
+    tags.into_iter().flatten().find_map(|tag| {
+        tag.strip_prefix(NEXUS_FILE_ID_TAG_PREFIX)
+            .map(|value| value.to_string())
+    })
+}
+
+fn read_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn is_disabled(value: &Value) -> bool {
+    value
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn runtime_key(runtime: &Runtime) -> &'static str {
+    match runtime {
+        Runtime::Il2cpp => "IL2CPP",
+        Runtime::Mono => "Mono",
+    }
+}
+
+fn mod_source_key(source: &ModSource) -> &'static str {
+    match source {
+        ModSource::Local => "local",
+        ModSource::Thunderstore => "thunderstore",
+        ModSource::Nexusmods => "nexusmods",
+        ModSource::Github => "github",
+        ModSource::Unknown => "unknown",
+    }
+}
+
+fn increment_summary(summary: &mut ModProfileImportSummary, status: &ModProfileImportStatus) {
+    match status {
+        ModProfileImportStatus::AlreadyInstalled => summary.already_installed += 1,
+        ModProfileImportStatus::ReadyToInstall => summary.ready_to_install += 1,
+        ModProfileImportStatus::NeedsDownload => summary.needs_download += 1,
+        ModProfileImportStatus::ManualRequired => summary.manual_required += 1,
+        ModProfileImportStatus::RuntimeMismatch => summary.runtime_mismatches += 1,
+        ModProfileImportStatus::Unsupported => summary.unsupported += 1,
+    }
+}
+
+fn plan_to_manifest(plan: &ModProfileImportPlan) -> ModProfileManifest {
+    ModProfileManifest {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        kind: PROFILE_KIND.to_string(),
+        profile: plan.profile.clone(),
+        items: plan.items.iter().map(|item| item.item.clone()).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn library_entry(storage_id: &str, source_id: &str, runtime: Runtime) -> ModLibraryEntry {
+        ModLibraryEntry {
+            storage_id: storage_id.to_string(),
+            display_name: "Example".to_string(),
+            files: vec!["Example.dll".to_string()],
+            attached_userlibs: Vec::new(),
+            attached_userdata: Vec::new(),
+            source: Some(ModSource::Thunderstore),
+            source_id: Some(source_id.to_string()),
+            source_version: Some("1.0.0".to_string()),
+            source_url: None,
+            summary: None,
+            icon_url: None,
+            icon_cache_path: None,
+            downloads: None,
+            likes_or_endorsements: None,
+            updated_at: None,
+            tags: None,
+            installed_version: None,
+            library_added_at: None,
+            installed_at: None,
+            author: None,
+            update_available: None,
+            remote_version: None,
+            managed: true,
+            installed_in: Vec::new(),
+            available_runtimes: vec![runtime_key(&runtime).to_string()],
+            storage_ids_by_runtime: Default::default(),
+            installed_in_by_runtime: Default::default(),
+            files_by_runtime: Default::default(),
+            security_scan: None,
+        }
+    }
+
+    fn profile_item() -> ModProfileItem {
+        ModProfileItem {
+            item_type: ModProfileItemType::Mod,
+            name: "Example".to_string(),
+            file_name: Some("Example.dll".to_string()),
+            required: true,
+            source: Some(ModSource::Thunderstore),
+            source_id: Some("Author/Example".to_string()),
+            source_version: Some("1.0.0".to_string()),
+            source_url: None,
+            runtime: Some(Runtime::Mono),
+            storage_id: None,
+            nexus_file_id: None,
+            manual_reason: None,
+        }
+    }
+
+    fn profile_manifest() -> ModProfileManifest {
+        ModProfileManifest {
+            schema_version: PROFILE_SCHEMA_VERSION,
+            kind: PROFILE_KIND.to_string(),
+            profile: ModProfileInfo {
+                name: "Co-op".to_string(),
+                game: PROFILE_GAME_ID.to_string(),
+                environment_id: Some("env-1".to_string()),
+                runtime: Runtime::Mono,
+                branch: "alternate".to_string(),
+                game_version: Some("0.4.5f2".to_string()),
+                exported_at: "2026-05-31T00:00:00Z".to_string(),
+            },
+            items: vec![profile_item()],
+        }
+    }
+
+    fn test_environment(runtime: Runtime) -> Environment {
+        Environment {
+            id: "env-1".to_string(),
+            name: "Test".to_string(),
+            description: None,
+            app_id: PROFILE_GAME_ID.to_string(),
+            branch: "main".to_string(),
+            output_dir: String::new(),
+            runtime,
+            status: crate::types::EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: None,
+        }
+    }
+
+    #[test]
+    fn plan_item_marks_downloaded_source_ready_to_install() {
+        let item = profile_item();
+        let library = vec![library_entry("storage-1", "Author/Example", Runtime::Mono)];
+        let planned = plan_item(item, None, &library, None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::ReadyToInstall);
+        assert_eq!(planned.resolved_storage_id.as_deref(), Some("storage-1"));
+    }
+
+    #[test]
+    fn plan_item_marks_plugin_with_storage_ready_to_install() {
+        let mut item = profile_item();
+        item.item_type = ModProfileItemType::Plugin;
+        item.name = "MeshVault.Mono".to_string();
+        item.file_name = Some("MeshVault.Mono.dll".to_string());
+        item.source_id = Some("Author/Example".to_string());
+
+        let library = vec![library_entry("storage-1", "Author/Example", Runtime::Mono)];
+        let planned = plan_item(item, None, &library, None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::ReadyToInstall);
+        assert_eq!(planned.resolved_storage_id.as_deref(), Some("storage-1"));
+    }
+
+    #[test]
+    fn plan_item_marks_source_less_managed_plugin_already_installed_by_file() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.item_type = ModProfileItemType::Plugin;
+        item.name = "MeshVault.Mono".to_string();
+        item.file_name = Some("MeshVault.Mono.dll".to_string());
+        item.source = Some(ModSource::Thunderstore);
+        item.source_id = None;
+        item.source_version = Some("1.0.9".to_string());
+        item.storage_id = None;
+
+        let mut entry = library_entry("meshvault-storage", "hdlmrell/MeshVault", Runtime::Mono);
+        entry.display_name = "MeshVault".to_string();
+        entry.files = vec!["MeshVault.Mono.dll".to_string()];
+        entry.source_version = Some("1.0.9".to_string());
+        entry.installed_in = vec![env.id.clone()];
+
+        let planned = plan_item(item, Some(&env), &[entry], Some(&serde_json::json!({})));
+
+        assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+        assert_eq!(
+            planned.resolved_storage_id.as_deref(),
+            Some("meshvault-storage")
+        );
+    }
+
+    #[test]
+    fn plan_item_marks_plugin_installed_when_target_file_exists_without_library_install_flag() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.item_type = ModProfileItemType::Plugin;
+        item.name = "MeshVault.Mono".to_string();
+        item.file_name = Some("MeshVault.Mono.dll".to_string());
+        item.source = Some(ModSource::Thunderstore);
+        item.source_id = None;
+        item.source_version = Some("1.0.9".to_string());
+        item.storage_id = None;
+
+        let mut entry = library_entry("meshvault-storage", "hdlmrell/MeshVault", Runtime::Mono);
+        entry.display_name = "MeshVault".to_string();
+        entry.files = vec!["MeshVault.Mono.dll".to_string()];
+        entry.source_version = Some("1.0.9".to_string());
+        entry.installed_in.clear();
+        let installed = serde_json::json!({
+            "plugins": [{
+                "name": "MeshVault.Mono",
+                "fileName": "MeshVault.Mono.dll",
+                "source": "thunderstore",
+                "version": "1.0.9"
+            }]
+        });
+
+        let planned = plan_item(item, Some(&env), &[entry], Some(&installed));
+
+        assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+        assert_eq!(
+            planned.resolved_storage_id.as_deref(),
+            Some("meshvault-storage")
+        );
+    }
+
+    #[test]
+    fn plan_item_marks_mod_installed_when_target_file_exists_without_storage_id_row() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.name = "S1API".to_string();
+        item.file_name = Some("S1API.Mono.MelonLoader.dll".to_string());
+        item.source = Some(ModSource::Github);
+        item.source_id = Some("ifBars/S1API".to_string());
+        item.source_version = Some("v3.0.5".to_string());
+        item.storage_id = Some("s1api-v3-0-5".to_string());
+
+        let mut entry = library_entry("s1api-v3-0-5", "ifBars/S1API", Runtime::Mono);
+        entry.display_name = "S1API".to_string();
+        entry.files = vec!["S1API.Mono.MelonLoader.dll".to_string()];
+        entry.source = Some(ModSource::Github);
+        entry.source_version = Some("3.0.5".to_string());
+        entry.installed_in.clear();
+        let installed = serde_json::json!({
+            "mods": [{
+                "name": "S1API",
+                "fileName": "S1API.Mono.MelonLoader.dll",
+                "managed": true,
+                "source": "github",
+                "version": "v3.0.5"
+            }]
+        });
+
+        let planned = plan_item(item, Some(&env), &[entry], Some(&installed));
+
+        assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+        assert_eq!(planned.resolved_storage_id.as_deref(), Some("s1api-v3-0-5"));
+    }
+
+    #[test]
+    fn plan_item_marks_source_less_managed_userlib_ready_to_install_by_file() {
+        let mut item = profile_item();
+        item.item_type = ModProfileItemType::Userlib;
+        item.name = "S1MAPI_Mono.dll".to_string();
+        item.file_name = Some("S1MAPI_Mono.dll".to_string());
+        item.source = Some(ModSource::Local);
+        item.source_id = None;
+        item.source_version = None;
+        item.storage_id = None;
+
+        let mut entry = library_entry("s1mapi-storage", "ifBars/S1MAPI", Runtime::Mono);
+        entry.display_name = "S1MAPI".to_string();
+        entry.files.clear();
+        entry.attached_userlibs = vec!["S1MAPI_Mono.dll".to_string()];
+
+        let planned = plan_item(item, None, &[entry], None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::ReadyToInstall);
+        assert_eq!(
+            planned.resolved_storage_id.as_deref(),
+            Some("s1mapi-storage")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_plugin_items_exports_managed_storage_identity() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let output_dir = temp.path().join("game");
+        let plugins_dir = output_dir.join("Plugins");
+        tokio::fs::create_dir_all(&plugins_dir).await?;
+        tokio::fs::write(plugins_dir.join("MeshVault.Mono.dll"), b"plugin").await?;
+
+        let mut env = test_environment(Runtime::Mono);
+        env.output_dir = output_dir.to_string_lossy().to_string();
+        let mut entry = library_entry("meshvault-storage", "hdlmrell/MeshVault", Runtime::Mono);
+        entry.display_name = "MeshVault".to_string();
+        entry.files = vec!["MeshVault.Mono.dll".to_string()];
+        entry.source_version = Some("1.0.9".to_string());
+        entry.installed_in = vec![env.id.clone()];
+
+        let pool = Arc::new(SqlitePool::connect(":memory:").await?);
+        let items = build_plugin_items(pool, &env, &[entry]).await?;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].storage_id.as_deref(), Some("meshvault-storage"));
+        assert_eq!(items[0].source_id.as_deref(), Some("hdlmrell/MeshVault"));
+        assert_eq!(items[0].source_version.as_deref(), Some("1.0.9"));
+        assert!(items[0].manual_reason.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_userlib_items_exports_managed_storage_identity() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let output_dir = temp.path().join("game");
+        let userlibs_dir = output_dir.join("UserLibs");
+        tokio::fs::create_dir_all(&userlibs_dir).await?;
+        tokio::fs::write(userlibs_dir.join("S1MAPI_Mono.dll"), b"userlib").await?;
+
+        let mut env = test_environment(Runtime::Mono);
+        env.output_dir = output_dir.to_string_lossy().to_string();
+        let mut entry = library_entry("s1mapi-storage", "ifBars/S1MAPI", Runtime::Mono);
+        entry.display_name = "S1MAPI".to_string();
+        entry.files.clear();
+        entry.attached_userlibs = vec!["S1MAPI_Mono.dll".to_string()];
+        entry.source_version = Some("1.0.0".to_string());
+        entry.installed_in = vec![env.id.clone()];
+
+        let items = build_userlib_items(&env, &[entry]).await?;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].storage_id.as_deref(), Some("s1mapi-storage"));
+        assert!(matches!(items[0].source, Some(ModSource::Thunderstore)));
+        assert_eq!(items[0].source_id.as_deref(), Some("ifBars/S1MAPI"));
+        assert_eq!(items[0].source_version.as_deref(), Some("1.0.0"));
+        assert!(items[0].manual_reason.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn export_managed_mod_items_uses_live_installed_snapshot() {
+        let env = test_environment(Runtime::Il2cpp);
+        let mut visible_entry = library_entry("visible-storage", "Author/Visible", Runtime::Il2cpp);
+        visible_entry.display_name = "Visible Mod".to_string();
+        let mut stale_entry = library_entry("stale-storage", "Author/Stale", Runtime::Il2cpp);
+        stale_entry.display_name = "Stale Library Mod".to_string();
+        stale_entry.installed_in = vec![env.id.clone()];
+        let installed_mods = serde_json::json!({
+            "mods": [{
+                "name": "Visible Mod",
+                "fileName": "Visible.dll",
+                "managed": true,
+                "modStorageId": "visible-storage"
+            }],
+            "count": 1
+        });
+
+        let items = build_managed_mod_items(&env, &[visible_entry, stale_entry], &installed_mods);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Visible Mod");
+        assert_eq!(items[0].storage_id.as_deref(), Some("visible-storage"));
+    }
+
+    #[test]
+    fn export_managed_mod_items_skips_disabled_mods() {
+        let env = test_environment(Runtime::Il2cpp);
+        let entry = library_entry("disabled-storage", "Author/Disabled", Runtime::Il2cpp);
+        let installed_mods = serde_json::json!({
+            "mods": [{
+                "name": "Disabled Mod",
+                "fileName": "Disabled.dll.disabled",
+                "managed": true,
+                "disabled": true,
+                "modStorageId": "disabled-storage"
+            }],
+            "count": 1
+        });
+
+        let items = build_managed_mod_items(&env, &[entry], &installed_mods);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn plan_item_does_not_trust_colliding_storage_id() {
+        let mut item = profile_item();
+        item.storage_id = Some("storage-collision".to_string());
+
+        let library = vec![library_entry(
+            "storage-collision",
+            "OtherAuthor/OtherMod",
+            Runtime::Mono,
+        )];
+        let planned = plan_item(item, None, &library, None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::NeedsDownload);
+        assert_eq!(planned.resolved_storage_id, None);
+    }
+
+    #[test]
+    fn plan_item_does_not_mark_storage_collision_installed() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.storage_id = Some("storage-collision".to_string());
+
+        let library = vec![library_entry(
+            "storage-collision",
+            "OtherAuthor/OtherMod",
+            Runtime::Mono,
+        )];
+        let installed = serde_json::json!({
+            "mods": [{
+                "name": "Other Mod",
+                "fileName": "Other.dll",
+                "managed": true,
+                "modStorageId": "storage-collision",
+                "source": "thunderstore",
+                "sourceId": "OtherAuthor/OtherMod",
+                "version": "1.0.0"
+            }]
+        });
+
+        let planned = plan_item(item, Some(&env), &library, Some(&installed));
+
+        assert_eq!(planned.status, ModProfileImportStatus::NeedsDownload);
+        assert_eq!(planned.resolved_storage_id, None);
+    }
+
+    #[test]
+    fn plan_item_blocks_runtime_mismatch_before_install() {
+        let item = profile_item();
+        let env = test_environment(Runtime::Il2cpp);
+
+        let planned = plan_item(item, Some(&env), &[], None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::RuntimeMismatch);
+    }
+
+    #[test]
+    fn plan_item_marks_local_mod_manual() {
+        let mut item = profile_item();
+        item.source = Some(ModSource::Local);
+        item.source_id = None;
+
+        let planned = plan_item(item, None, &[], None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::ManualRequired);
+    }
+
+    #[tokio::test]
+    async fn profile_file_round_trips_manifest() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let pool = Arc::new(SqlitePool::connect(":memory:").await?);
+        let service = ModProfilesService::new(pool);
+        let path = temp.path().join("coop-profile.json");
+        let manifest = profile_manifest();
+
+        service
+            .save_manifest_to_file(manifest.clone(), path.clone())
+            .await?;
+        let loaded = service.read_manifest_from_file(path).await?;
+
+        assert_eq!(loaded.profile.name, "Co-op");
+        assert_eq!(loaded.items.len(), 1);
+        assert_eq!(loaded.items[0].name, "Example");
+        Ok(())
+    }
+}

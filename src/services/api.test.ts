@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiService } from './api';
 import { invoke } from '@tauri-apps/api/core';
+import type { ModProfileManifest } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -106,6 +107,63 @@ describe('ApiService', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('delete_environment', { id: 'env-1' });
     expect(result).toEqual({ success: true });
+  });
+
+  it('profile commands use the environment profile IPC contract', async () => {
+    const manifest: ModProfileManifest = {
+      schemaVersion: 1,
+      kind: 'simm.profile',
+      profile: {
+        name: 'Co-op',
+        game: 'schedule-i',
+        runtime: 'Mono',
+        branch: 'alternate',
+        exportedAt: '2026-05-31T00:00:00Z',
+      },
+      items: [],
+    };
+    const plan = {
+      profile: manifest.profile,
+      targetEnvironmentId: 'env-2',
+      items: [],
+      summary: {
+        total: 0,
+        alreadyInstalled: 0,
+        readyToInstall: 0,
+        needsDownload: 0,
+        manualRequired: 0,
+        runtimeMismatches: 0,
+        unsupported: 0,
+      },
+    };
+
+    invokeMock.mockResolvedValueOnce(manifest);
+    invokeMock.mockResolvedValueOnce(undefined);
+    invokeMock.mockResolvedValueOnce(manifest);
+    invokeMock.mockResolvedValueOnce(plan);
+    invokeMock.mockResolvedValueOnce({ plan, installed: 0, skipped: 0, unresolved: 0, messages: [] });
+
+    await ApiService.exportEnvironmentProfile('env-1');
+    await ApiService.saveModProfileFile(manifest, 'C:\\Profiles\\coop.json');
+    await ApiService.readModProfileFile('C:\\Profiles\\coop.json');
+    await ApiService.previewModProfileImport(manifest, 'env-2');
+    await ApiService.applyModProfileImport({ manifest, targetEnvironmentId: 'env-2' });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'export_environment_profile', { environmentId: 'env-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'save_mod_profile_file', {
+      manifest,
+      destination: 'C:\\Profiles\\coop.json',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'read_mod_profile_file', {
+      source: 'C:\\Profiles\\coop.json',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'preview_mod_profile_import', {
+      manifest,
+      targetEnvironmentId: 'env-2',
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(5, 'apply_mod_profile_import', {
+      request: { manifest, targetEnvironmentId: 'env-2' },
+    });
   });
 
   it('getProgress throws when download is missing', async () => {
