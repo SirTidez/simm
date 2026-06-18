@@ -220,7 +220,6 @@ describe('EnvironmentList', () => {
           name: 'CustomTV',
           fileName: 'CustomTV.dll',
           required: true,
-          enabled: true,
           source: 'thunderstore',
           sourceId: 'CustomTV/CustomTV',
           sourceVersion: '1.6.4',

@@ -402,7 +402,7 @@ pub struct UpdateCheckResult {
     pub update_game_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModSource {
     Local,
@@ -638,7 +638,6 @@ pub struct ModProfileItem {
     pub name: String,
     pub file_name: Option<String>,
     pub required: bool,
-    pub enabled: bool,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
     pub source_version: Option<String>,

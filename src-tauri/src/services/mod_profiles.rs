@@ -254,13 +254,10 @@ fn build_managed_mod_items(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
+        .filter(|mod_value| !is_disabled(mod_value))
         .filter_map(|mod_value| {
             let storage_id = read_string(mod_value, "modStorageId")?;
             let entry = library.iter().find(|entry| entry.storage_id == storage_id);
-            let enabled = !mod_value
-                .get("disabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
             let name = entry
                 .map(|entry| entry.display_name.clone())
                 .or_else(|| read_string(mod_value, "name"))
@@ -273,7 +270,6 @@ fn build_managed_mod_items(
                 name,
                 file_name,
                 required: true,
-                enabled,
                 source: entry.and_then(|entry| entry.source.clone()).or_else(|| {
                     mod_value
                         .get("source")
@@ -315,6 +311,7 @@ fn build_unmanaged_mod_items(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
+        .filter(|mod_value| !is_disabled(mod_value))
         .map(|mod_value| {
             let name = read_string(mod_value, "name")
                 .or_else(|| read_string(mod_value, "fileName"))
@@ -324,10 +321,6 @@ fn build_unmanaged_mod_items(
                 name,
                 file_name: read_string(mod_value, "fileName"),
                 required: true,
-                enabled: !mod_value
-                    .get("disabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
                 source: Some(ModSource::Local),
                 source_id: None,
                 source_version: read_string(mod_value, "version"),
@@ -355,6 +348,7 @@ async fn build_plugin_items(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|plugin| !is_disabled(plugin))
         .map(|plugin| {
             let name = read_string(plugin, "name")
                 .or_else(|| read_string(plugin, "fileName"))
@@ -373,10 +367,6 @@ async fn build_plugin_items(
                 name,
                 file_name,
                 required: true,
-                enabled: !plugin
-                    .get("disabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
                 source: entry.and_then(|entry| entry.source.clone()).or_else(|| {
                     plugin
                         .get("source")
@@ -413,6 +403,7 @@ async fn build_userlib_items(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|userlib| !is_disabled(userlib))
         .map(|userlib| {
             let name = read_string(userlib, "name")
                 .or_else(|| read_string(userlib, "fileName"))
@@ -431,10 +422,6 @@ async fn build_userlib_items(
                 name,
                 file_name,
                 required: true,
-                enabled: !userlib
-                    .get("disabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
                 source: entry
                     .and_then(|entry| entry.source.clone())
                     .or(Some(ModSource::Local)),
@@ -573,11 +560,17 @@ fn installed_storage_id(
         .flatten()
         .find_map(|mod_value| {
             let storage_id = read_string(mod_value, "modStorageId")?;
-            if item
+            let same_storage_id = item
                 .storage_id
                 .as_ref()
                 .map(|expected| expected == &storage_id)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if same_storage_id
+                && (installed_mod_value_matches_item(mod_value, item)
+                    || library.iter().any(|entry| {
+                        library_entry_storage_id_matches(entry, &storage_id)
+                            && library_entry_profile_identity_matches(entry, item)
+                    }))
             {
                 return Some(storage_id);
             }
@@ -587,7 +580,7 @@ fn installed_storage_id(
                     .map(|value| value.eq_ignore_ascii_case(source_id))
                     .unwrap_or(false)
             });
-            if same_source {
+            if same_source && installed_mod_value_matches_item(mod_value, item) {
                 Some(storage_id)
             } else {
                 None
@@ -644,8 +637,11 @@ fn resolve_library_storage_id(
     item: &ModProfileItem,
 ) -> Option<String> {
     if let Some(storage_id) = item.storage_id.as_deref() {
-        if library.iter().any(|entry| entry.storage_id == storage_id) {
-            return Some(storage_id.to_string());
+        if let Some(entry) = library.iter().find(|entry| {
+            library_entry_storage_id_matches(entry, storage_id)
+                && library_entry_profile_identity_matches(entry, item)
+        }) {
+            return storage_id_for_item_runtime(entry, item);
         }
     }
 
@@ -655,7 +651,8 @@ fn resolve_library_storage_id(
             if !entry_source_id.eq_ignore_ascii_case(source_id) {
                 return None;
             }
-            if !library_entry_version_matches(entry, item)
+            if !library_entry_source_matches(entry, item)
+                || !library_entry_version_matches(entry, item)
                 || !library_entry_runtime_matches(entry, item)
             {
                 return None;
@@ -671,7 +668,8 @@ fn resolve_library_storage_id(
         ModProfileItemType::Plugin | ModProfileItemType::Userlib
     ) {
         return library.iter().find_map(|entry| {
-            if !library_entry_version_matches(entry, item)
+            if !library_entry_source_matches(entry, item)
+                || !library_entry_version_matches(entry, item)
                 || !library_entry_runtime_matches(entry, item)
                 || !library_entry_file_matches_item(entry, item)
             {
@@ -691,6 +689,7 @@ fn installed_library_storage_id(
 ) -> Option<String> {
     library.iter().find_map(|entry| {
         if !library_entry_installed_in_environment(entry, environment, item)
+            || !library_entry_source_matches(entry, item)
             || !library_entry_version_matches(entry, item)
             || !library_entry_runtime_matches(entry, item)
         {
@@ -711,6 +710,33 @@ fn installed_library_storage_id(
         }
         storage_id_for_item_runtime(entry, item)
     })
+}
+
+fn library_entry_storage_id_matches(entry: &ModLibraryEntry, storage_id: &str) -> bool {
+    entry.storage_id == storage_id
+        || entry
+            .storage_ids_by_runtime
+            .values()
+            .any(|candidate| candidate == storage_id)
+}
+
+fn library_entry_profile_identity_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    if !library_entry_source_matches(entry, item)
+        || !library_entry_version_matches(entry, item)
+        || !library_entry_runtime_matches(entry, item)
+    {
+        return false;
+    }
+
+    if let Some(source_id) = item.source_id.as_deref() {
+        return entry
+            .source_id
+            .as_deref()
+            .map(|entry_source_id| entry_source_id.eq_ignore_ascii_case(source_id))
+            .unwrap_or(false);
+    }
+
+    library_entry_file_matches_item(entry, item)
 }
 
 fn library_entry_installed_in_environment(
@@ -762,6 +788,55 @@ fn library_entry_runtime_matches(entry: &ModLibraryEntry, item: &ModProfileItem)
             .available_runtimes
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(runtime_key))
+}
+
+fn library_entry_source_matches(entry: &ModLibraryEntry, item: &ModProfileItem) -> bool {
+    match item.source.as_ref() {
+        Some(ModSource::Unknown) | None => true,
+        Some(ModSource::Local) if item.source_id.is_none() => true,
+        Some(source) => entry
+            .source
+            .as_ref()
+            .map(|entry_source| entry_source == source)
+            .unwrap_or(false),
+    }
+}
+
+fn installed_mod_value_matches_item(mod_value: &Value, item: &ModProfileItem) -> bool {
+    if item.item_type != ModProfileItemType::Mod {
+        return false;
+    }
+
+    if let Some(source_id) = item.source_id.as_deref() {
+        let Some(installed_source_id) = read_string(mod_value, "sourceId") else {
+            return false;
+        };
+        if !installed_source_id.eq_ignore_ascii_case(source_id) {
+            return false;
+        }
+    }
+
+    if let Some(source) = item.source.as_ref() {
+        if !matches!(source, ModSource::Unknown | ModSource::Local) {
+            let Some(installed_source) = read_string(mod_value, "source") else {
+                return false;
+            };
+            if !installed_source.eq_ignore_ascii_case(mod_source_key(source)) {
+                return false;
+            }
+        }
+    }
+
+    if let Some(version) = item.source_version.as_deref() {
+        let Some(installed_version) = read_string(mod_value, "version") else {
+            return false;
+        };
+        if !version_eq(&installed_version, version) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn storage_id_for_item_runtime(entry: &ModLibraryEntry, item: &ModProfileItem) -> Option<String> {
@@ -882,10 +957,27 @@ fn read_string(value: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn is_disabled(value: &Value) -> bool {
+    value
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn runtime_key(runtime: &Runtime) -> &'static str {
     match runtime {
         Runtime::Il2cpp => "IL2CPP",
         Runtime::Mono => "Mono",
+    }
+}
+
+fn mod_source_key(source: &ModSource) -> &'static str {
+    match source {
+        ModSource::Local => "local",
+        ModSource::Thunderstore => "thunderstore",
+        ModSource::Nexusmods => "nexusmods",
+        ModSource::Github => "github",
+        ModSource::Unknown => "unknown",
     }
 }
 
@@ -953,7 +1045,6 @@ mod tests {
             name: "Example".to_string(),
             file_name: Some("Example.dll".to_string()),
             required: true,
-            enabled: true,
             source: Some(ModSource::Thunderstore),
             source_id: Some("Author/Example".to_string()),
             source_version: Some("1.0.0".to_string()),
@@ -1231,6 +1322,71 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "Visible Mod");
         assert_eq!(items[0].storage_id.as_deref(), Some("visible-storage"));
+    }
+
+    #[test]
+    fn export_managed_mod_items_skips_disabled_mods() {
+        let env = test_environment(Runtime::Il2cpp);
+        let entry = library_entry("disabled-storage", "Author/Disabled", Runtime::Il2cpp);
+        let installed_mods = serde_json::json!({
+            "mods": [{
+                "name": "Disabled Mod",
+                "fileName": "Disabled.dll.disabled",
+                "managed": true,
+                "disabled": true,
+                "modStorageId": "disabled-storage"
+            }],
+            "count": 1
+        });
+
+        let items = build_managed_mod_items(&env, &[entry], &installed_mods);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn plan_item_does_not_trust_colliding_storage_id() {
+        let mut item = profile_item();
+        item.storage_id = Some("storage-collision".to_string());
+
+        let library = vec![library_entry(
+            "storage-collision",
+            "OtherAuthor/OtherMod",
+            Runtime::Mono,
+        )];
+        let planned = plan_item(item, None, &library, None);
+
+        assert_eq!(planned.status, ModProfileImportStatus::NeedsDownload);
+        assert_eq!(planned.resolved_storage_id, None);
+    }
+
+    #[test]
+    fn plan_item_does_not_mark_storage_collision_installed() {
+        let env = test_environment(Runtime::Mono);
+        let mut item = profile_item();
+        item.storage_id = Some("storage-collision".to_string());
+
+        let library = vec![library_entry(
+            "storage-collision",
+            "OtherAuthor/OtherMod",
+            Runtime::Mono,
+        )];
+        let installed = serde_json::json!({
+            "mods": [{
+                "name": "Other Mod",
+                "fileName": "Other.dll",
+                "managed": true,
+                "modStorageId": "storage-collision",
+                "source": "thunderstore",
+                "sourceId": "OtherAuthor/OtherMod",
+                "version": "1.0.0"
+            }]
+        });
+
+        let planned = plan_item(item, Some(&env), &library, Some(&installed));
+
+        assert_eq!(planned.status, ModProfileImportStatus::NeedsDownload);
+        assert_eq!(planned.resolved_storage_id, None);
     }
 
     #[test]

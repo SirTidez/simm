@@ -8514,8 +8514,7 @@ body {
 }
 
 .profile-export-dialog__summary-grid span,
-.profile-export-dialog__item-main span,
-.profile-export-dialog__item-state {
+.profile-export-dialog__item-main span {
   color: var(--workspace-eyebrow-color);
   font-size: 0.76rem;
 }

@@ -429,7 +429,6 @@ export interface ModProfileItem {
   name: string;
   fileName?: string | null;
   required: boolean;
-  enabled: boolean;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown' | null;
   sourceId?: string | null;
   sourceVersion?: string | null;

@@ -2731,9 +2731,6 @@ export function EnvironmentList({
                           </span>
                           {item.manualReason && <em>{item.manualReason}</em>}
                         </span>
-                        <span className="profile-export-dialog__item-state">
-                          {item.enabled ? 'Enabled' : 'Disabled'}
-                        </span>
                       </label>
                     );
                   })}

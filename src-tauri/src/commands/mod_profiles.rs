@@ -69,9 +69,21 @@ pub async fn apply_mod_profile_import<R: Runtime>(
         .map_err(|error| error.to_string())?;
 
     if result.installed > 0 {
-        if let Err(error) = events::emit_mods_changed(&app, target_environment_id) {
+        if let Err(error) = events::emit_mods_changed(&app, target_environment_id.clone()) {
             log::warn!(
                 "Failed to emit mods_changed after profile import: {}",
+                error
+            );
+        }
+        if let Err(error) = events::emit_plugins_changed(&app, target_environment_id.clone()) {
+            log::warn!(
+                "Failed to emit plugins_changed after profile import: {}",
+                error
+            );
+        }
+        if let Err(error) = events::emit_userlibs_changed(&app, target_environment_id) {
+            log::warn!(
+                "Failed to emit userlibs_changed after profile import: {}",
                 error
             );
         }
