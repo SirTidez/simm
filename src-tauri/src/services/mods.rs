@@ -6131,27 +6131,26 @@ exit 1
         let storage_userlibs = storage_base.join("UserLibs");
         let storage_userdata = storage_base.join("UserData");
 
-        // Debug logging to help diagnose issues
-        eprintln!(
+        log::debug!(
             "[install_storage_mod_to_envs] Storage base: {}",
             storage_base.display()
         );
-        eprintln!(
+        log::debug!(
             "[install_storage_mod_to_envs] Mods dir exists: {}, path: {}",
             storage_mods.exists(),
             storage_mods.display()
         );
-        eprintln!(
+        log::debug!(
             "[install_storage_mod_to_envs] Plugins dir exists: {}, path: {}",
             storage_plugins.exists(),
             storage_plugins.display()
         );
-        eprintln!(
+        log::debug!(
             "[install_storage_mod_to_envs] UserLibs dir exists: {}, path: {}",
             storage_userlibs.exists(),
             storage_userlibs.display()
         );
-        eprintln!(
+        log::debug!(
             "[install_storage_mod_to_envs] UserData dir exists: {}, path: {}",
             storage_userdata.exists(),
             storage_userdata.display()
@@ -6320,7 +6319,7 @@ exit 1
                 ));
             }
 
-            eprintln!(
+            log::debug!(
                 "[install_storage_mod_to_envs] Installed {} files for env {}",
                 installed_files.len(),
                 env_id

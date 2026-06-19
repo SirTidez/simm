@@ -25,6 +25,8 @@ export interface DownloadProgress {
   error?: string;
 }
 
+export type Runtime = 'IL2CPP' | 'Mono' | 'MONO';
+
 export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework';
 
 export interface TrackedDownload {
@@ -48,7 +50,7 @@ export interface TrackedDownload {
 export interface ExtractGameVersionResult {
   version: string | null;
   branch?: string;
-  runtime?: 'IL2CPP' | 'Mono';
+  runtime?: Runtime;
 }
 
 export interface Environment {
@@ -58,7 +60,7 @@ export interface Environment {
   appId: string;
   branch: string;
   outputDir: string;
-  runtime: 'IL2CPP' | 'Mono';
+  runtime: Runtime;
   status: 'not_downloaded' | 'downloading' | 'completed' | 'unavailable' | 'error';
   lastUpdated?: string;
   size?: number;
@@ -394,10 +396,10 @@ export interface ModLibraryEntry {
   remoteVersion?: string;
   managed: boolean;
   installedIn: string[];
-  availableRuntimes: Array<'IL2CPP' | 'Mono'>;
-  storageIdsByRuntime: Partial<Record<'IL2CPP' | 'Mono', string>>;
-  installedInByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
-  filesByRuntime: Partial<Record<'IL2CPP' | 'Mono', string[]>>;
+  availableRuntimes: Runtime[];
+  storageIdsByRuntime: Partial<Record<Runtime, string>>;
+  installedInByRuntime: Partial<Record<Runtime, string[]>>;
+  filesByRuntime: Partial<Record<Runtime, string[]>>;
   securityScan?: SecurityScanSummary;
 }
 
@@ -408,6 +410,10 @@ export interface ModLibraryResult {
 export interface ModProfileManifest {
   schemaVersion: number;
   kind: 'simm.profile' | string;
+  profileId?: string | null;
+  isDefault?: boolean | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
   profile: ModProfileInfo;
   items: ModProfileItem[];
 }
@@ -416,7 +422,7 @@ export interface ModProfileInfo {
   name: string;
   game: string;
   environmentId?: string | null;
-  runtime: 'IL2CPP' | 'Mono';
+  runtime: Runtime;
   branch: string;
   gameVersion?: string | null;
   exportedAt: string;
@@ -429,11 +435,12 @@ export interface ModProfileItem {
   name: string;
   fileName?: string | null;
   required: boolean;
+  enabled?: boolean;
   source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown' | null;
   sourceId?: string | null;
   sourceVersion?: string | null;
   sourceUrl?: string | null;
-  runtime?: 'IL2CPP' | 'Mono' | null;
+  runtime?: Runtime | null;
   storageId?: string | null;
   nexusFileId?: string | null;
   manualReason?: string | null;
@@ -482,6 +489,36 @@ export interface ModProfileApplyResult {
   skipped: number;
   unresolved: number;
   messages: string[];
+}
+
+export interface StoredModProfile {
+  id: string;
+  name: string;
+  runtime: Runtime;
+  isDefault: boolean;
+  activeEnvironmentIds?: string[];
+  manifest: ModProfileManifest;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModProfileCaptureRequest {
+  environmentId: string;
+  name?: string | null;
+  profileId?: string | null;
+  includeDisabled?: boolean;
+}
+
+export interface ModProfileSaveRequest {
+  profileId?: string | null;
+  name: string;
+  runtime: Runtime;
+  manifest: ModProfileManifest;
+}
+
+export interface ModProfileExportRequest {
+  profileId: string;
+  includeDisabled: boolean;
 }
 
 export interface LocalModSourceVersionOption {

@@ -1,6 +1,7 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
+use crate::services::mod_profiles::ModProfilesService;
 use crate::services::mods::ModsService;
 use crate::services::plugins::PluginsService;
 use once_cell::sync::Lazy;
@@ -410,6 +411,23 @@ pub async fn upload_plugin(
         metadata,
     )
     .await?;
+
+    if result
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        if let Err(error) = ModProfilesService::new(db.inner().clone())
+            .sync_active_profile_from_environment(&environment_id)
+            .await
+        {
+            log::warn!(
+                "Failed to sync active profile for {} after plugin upload: {}",
+                environment_id,
+                error
+            );
+        }
+    }
 
     if let Err(error) = crate::events::emit_mods_changed(&app, environment_id.clone()) {
         log::warn!(

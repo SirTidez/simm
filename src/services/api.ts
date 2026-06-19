@@ -27,8 +27,12 @@ import type {
   MelonLoaderLaunchVerification,
   ModProfileApplyRequest,
   ModProfileApplyResult,
+  ModProfileCaptureRequest,
+  ModProfileExportRequest,
   ModProfileImportPlan,
   ModProfileManifest,
+  ModProfileSaveRequest,
+  StoredModProfile,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -143,6 +147,37 @@ export class ApiService {
     return invoke('export_environment_profile', { environmentId });
   }
 
+  static async listModProfiles(): Promise<StoredModProfile[]> {
+    return invoke('list_mod_profiles');
+  }
+
+  static async getModProfile(profileId: string): Promise<StoredModProfile> {
+    return invoke('get_mod_profile', { profileId });
+  }
+
+  static async saveModProfile(request: ModProfileSaveRequest): Promise<StoredModProfile> {
+    return invoke('save_mod_profile', { request });
+  }
+
+  static async captureModProfile(request: ModProfileCaptureRequest): Promise<StoredModProfile> {
+    return invoke('capture_mod_profile', { request });
+  }
+
+  static async importModProfileToLibrary(manifest: ModProfileManifest): Promise<StoredModProfile> {
+    return invoke('import_mod_profile_to_library', { manifest });
+  }
+
+  static async exportModProfileFromLibrary(
+    request: ModProfileExportRequest,
+  ): Promise<ModProfileManifest> {
+    return invoke('export_mod_profile_from_library', { request });
+  }
+
+  static async deleteModProfile(profileId: string): Promise<{ success: boolean }> {
+    const result = await invoke<boolean>('delete_mod_profile', { profileId });
+    return { success: result };
+  }
+
   static async saveModProfileFile(
     manifest: ModProfileManifest,
     destination: string,
@@ -168,6 +203,20 @@ export class ApiService {
     request: ModProfileApplyRequest,
   ): Promise<ModProfileApplyResult> {
     return invoke('apply_mod_profile_import', { request });
+  }
+
+  static async previewModProfileApply(
+    profileId: string,
+    targetEnvironmentId: string,
+  ): Promise<ModProfileImportPlan> {
+    return invoke('preview_mod_profile_apply', { profileId, targetEnvironmentId });
+  }
+
+  static async applyModProfile(
+    profileId: string,
+    targetEnvironmentId: string,
+  ): Promise<ModProfileApplyResult> {
+    return invoke('apply_mod_profile', { profileId, targetEnvironmentId });
   }
 
   // Downloads

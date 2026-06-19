@@ -396,13 +396,13 @@ describe('EnvironmentList', () => {
     });
   });
 
-  it('opens the profile import workspace from the environments toolbar', async () => {
+  it('opens the profiles workspace from the environments toolbar', async () => {
     const onOpenWorkspace = vi.fn();
     render(<EnvironmentList onOpenWorkspace={onOpenWorkspace} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /import profile/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /profiles/i }));
 
-    expect(onOpenWorkspace).toHaveBeenCalledWith({ view: 'profileImport' });
+    expect(onOpenWorkspace).toHaveBeenCalledWith({ view: 'profiles' });
   });
 
   it('launches non-Steam environments through Steam by default', async () => {

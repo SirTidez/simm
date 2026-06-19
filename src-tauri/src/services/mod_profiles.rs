@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -5,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::services::environment::EnvironmentService;
 use crate::services::mods::ModsService;
@@ -12,15 +14,18 @@ use crate::services::plugins::PluginsService;
 use crate::services::userlibs::UserLibsService;
 use crate::types::{
     Environment, ModLibraryEntry, ModProfileApplyRequest, ModProfileApplyResult,
-    ModProfileImportPlan, ModProfileImportPlanItem, ModProfileImportStatus,
-    ModProfileImportSummary, ModProfileInfo, ModProfileItem, ModProfileItemType,
-    ModProfileManifest, ModSource, Runtime,
+    ModProfileCaptureRequest, ModProfileExportRequest, ModProfileImportPlan,
+    ModProfileImportPlanItem, ModProfileImportStatus, ModProfileImportSummary, ModProfileInfo,
+    ModProfileItem, ModProfileItemType, ModProfileManifest, ModProfileSaveRequest, ModSource,
+    Runtime, StoredModProfile,
 };
 
 const PROFILE_KIND: &str = "simm.profile";
 const PROFILE_SCHEMA_VERSION: u32 = 1;
 const PROFILE_GAME_ID: &str = "schedule-i";
 const NEXUS_FILE_ID_TAG_PREFIX: &str = "nexus-file-id:";
+const DEFAULT_IL2CPP_PROFILE_ID: &str = "default-il2cpp";
+const DEFAULT_MONO_PROFILE_ID: &str = "default-mono";
 
 pub struct ModProfilesService {
     pool: Arc<SqlitePool>,
@@ -34,6 +39,15 @@ impl ModProfilesService {
     pub async fn export_environment_profile(
         &self,
         environment_id: &str,
+    ) -> Result<ModProfileManifest> {
+        self.export_environment_profile_with_options(environment_id, false)
+            .await
+    }
+
+    pub async fn export_environment_profile_with_options(
+        &self,
+        environment_id: &str,
+        include_disabled: bool,
     ) -> Result<ModProfileManifest> {
         let env_service = EnvironmentService::new(self.pool.clone())?;
         let environment = env_service
@@ -51,12 +65,29 @@ impl ModProfilesService {
             .await
             .context("Failed to load mod library for profile export")?;
 
-        let mut items = build_managed_mod_items(&environment, &library.downloaded, &installed_mods);
-        items.extend(build_unmanaged_mod_items(&environment, &installed_mods));
-        items.extend(
-            build_plugin_items(self.pool.clone(), &environment, &library.downloaded).await?,
+        let mut items = build_managed_mod_items(
+            &environment,
+            &library.downloaded,
+            &installed_mods,
+            include_disabled,
         );
-        items.extend(build_userlib_items(&environment, &library.downloaded).await?);
+        items.extend(build_unmanaged_mod_items(
+            &environment,
+            &installed_mods,
+            include_disabled,
+        ));
+        items.extend(
+            build_plugin_items(
+                self.pool.clone(),
+                &environment,
+                &library.downloaded,
+                include_disabled,
+            )
+            .await?,
+        );
+        items.extend(
+            build_userlib_items(&environment, &library.downloaded, include_disabled).await?,
+        );
 
         items.sort_by(|left, right| {
             format!("{:?}:{}", left.item_type, left.name.to_lowercase()).cmp(&format!(
@@ -69,6 +100,10 @@ impl ModProfilesService {
         Ok(ModProfileManifest {
             schema_version: PROFILE_SCHEMA_VERSION,
             kind: PROFILE_KIND.to_string(),
+            profile_id: None,
+            is_default: None,
+            created_at: None,
+            updated_at: None,
             profile: ModProfileInfo {
                 name: environment.name.clone(),
                 game: PROFILE_GAME_ID.to_string(),
@@ -80,6 +115,182 @@ impl ModProfilesService {
             },
             items,
         })
+    }
+
+    pub async fn list_profiles(&self) -> Result<Vec<StoredModProfile>> {
+        self.ensure_default_profiles().await?;
+        let rows = sqlx::query_as::<_, (String, String, String, i64, String, String, String)>(
+            "SELECT id, name, runtime, is_default, manifest, created_at, updated_at \
+             FROM profiles ORDER BY runtime, is_default DESC, name COLLATE NOCASE",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to list profiles")?;
+
+        let active_environment_ids = self.active_environment_ids_by_profile().await?;
+        rows.into_iter()
+            .map(profile_from_row)
+            .map(|profile| {
+                profile.map(|mut profile| {
+                    profile.active_environment_ids = active_environment_ids
+                        .get(&profile.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    profile
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub async fn get_profile(&self, profile_id: &str) -> Result<StoredModProfile> {
+        self.ensure_default_profiles().await?;
+        let row = sqlx::query_as::<_, (String, String, String, i64, String, String, String)>(
+            "SELECT id, name, runtime, is_default, manifest, created_at, updated_at \
+             FROM profiles WHERE id = ?",
+        )
+        .bind(profile_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .context("Failed to load profile")?
+        .ok_or_else(|| anyhow!("Profile not found"))?;
+        let mut profile = profile_from_row(row)?;
+        profile.active_environment_ids =
+            self.active_environment_ids_for_profile(profile_id).await?;
+        Ok(profile)
+    }
+
+    pub async fn save_profile(&self, request: ModProfileSaveRequest) -> Result<StoredModProfile> {
+        self.ensure_default_profiles().await?;
+        validate_manifest(&request.manifest)?;
+        if request.manifest.profile.runtime != request.runtime {
+            return Err(anyhow!("Profile runtime does not match manifest runtime"));
+        }
+        let id = request
+            .profile_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("profile-{}", Uuid::new_v4().simple()));
+        let now = Utc::now().to_rfc3339();
+        let created_at =
+            sqlx::query_scalar::<_, String>("SELECT created_at FROM profiles WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(self.pool.as_ref())
+                .await?
+                .unwrap_or_else(|| now.clone());
+        let mut manifest = request.manifest;
+        manifest.profile_id = Some(id.clone());
+        manifest.is_default = Some(false);
+        manifest.created_at = Some(created_at.clone());
+        manifest.updated_at = Some(now.clone());
+        manifest.profile.name = request.name.clone();
+        manifest.profile.runtime = request.runtime.clone();
+        normalize_profile_items(&mut manifest, Some(&request.runtime));
+        let manifest_json = serde_json::to_string(&manifest)?;
+        sqlx::query(
+            "INSERT INTO profiles (id, name, runtime, is_default, manifest, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET \
+             name = excluded.name, runtime = excluded.runtime, manifest = excluded.manifest, updated_at = excluded.updated_at",
+        )
+        .bind(&id)
+        .bind(&request.name)
+        .bind(runtime_key(&request.runtime))
+        .bind(manifest_json)
+        .bind(&created_at)
+        .bind(&now)
+        .execute(self.pool.as_ref())
+        .await
+        .context("Failed to save profile")?;
+
+        self.get_profile(&id).await
+    }
+
+    pub async fn capture_profile(
+        &self,
+        request: ModProfileCaptureRequest,
+    ) -> Result<StoredModProfile> {
+        let mut manifest = self
+            .export_environment_profile_with_options(
+                &request.environment_id,
+                request.include_disabled,
+            )
+            .await?;
+        let runtime = manifest.profile.runtime.clone();
+        let name = request
+            .name
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| manifest.profile.name.clone());
+        manifest.profile.name = name.clone();
+        self.save_profile(ModProfileSaveRequest {
+            profile_id: request.profile_id,
+            name,
+            runtime,
+            manifest,
+        })
+        .await
+    }
+
+    pub async fn import_profile_manifest(
+        &self,
+        mut manifest: ModProfileManifest,
+    ) -> Result<StoredModProfile> {
+        self.ensure_default_profiles().await?;
+        validate_manifest(&manifest)?;
+        let runtime = manifest.profile.runtime.clone();
+        normalize_profile_items(&mut manifest, Some(&runtime));
+        self.save_profile(ModProfileSaveRequest {
+            profile_id: None,
+            name: manifest.profile.name.clone(),
+            runtime,
+            manifest,
+        })
+        .await
+    }
+
+    pub async fn export_profile_manifest(
+        &self,
+        request: ModProfileExportRequest,
+    ) -> Result<ModProfileManifest> {
+        let profile = self.get_profile(&request.profile_id).await?;
+        let mut manifest = profile.manifest;
+        if !request.include_disabled {
+            manifest.items.retain(|item| item.enabled);
+        }
+        manifest.profile_id = Some(profile.id);
+        manifest.is_default = Some(profile.is_default);
+        manifest.created_at = Some(profile.created_at);
+        manifest.updated_at = Some(profile.updated_at);
+        Ok(manifest)
+    }
+
+    pub async fn delete_profile(&self, profile_id: &str) -> Result<()> {
+        self.ensure_default_profiles().await?;
+        let profile = self.get_profile(profile_id).await?;
+        if profile.is_default {
+            return Err(anyhow!("Default runtime profiles cannot be deleted"));
+        }
+        let active_environment_ids = self.active_environment_ids_for_profile(profile_id).await?;
+        if !active_environment_ids.is_empty() {
+            return Err(anyhow!(
+                "Profile is active in {} environment(s) and cannot be deleted until another profile is applied",
+                active_environment_ids.len()
+            ));
+        }
+        sqlx::query("DELETE FROM profiles WHERE id = ?")
+            .bind(profile_id)
+            .execute(self.pool.as_ref())
+            .await
+            .context("Failed to delete profile")?;
+        Ok(())
+    }
+
+    pub async fn preview_profile_apply(
+        &self,
+        profile_id: &str,
+        target_environment_id: String,
+    ) -> Result<ModProfileImportPlan> {
+        let profile = self.get_profile(profile_id).await?;
+        self.preview_import(profile.manifest, Some(target_environment_id))
+            .await
     }
 
     pub async fn preview_import(
@@ -129,6 +340,17 @@ impl ModProfilesService {
         request: ModProfileApplyRequest,
     ) -> Result<ModProfileApplyResult> {
         let target_environment_id = request.target_environment_id.clone();
+        let target_environment = self
+            .load_target_environment(Some(&target_environment_id))
+            .await?
+            .ok_or_else(|| anyhow!("Target environment not found"))?;
+        if request.manifest.profile.runtime != target_environment.runtime {
+            return Err(anyhow!(
+                "Profile runtime {:?} cannot be applied to {:?} environment",
+                request.manifest.profile.runtime,
+                target_environment.runtime
+            ));
+        }
         let plan = self
             .preview_import(request.manifest, Some(target_environment_id.clone()))
             .await?;
@@ -138,18 +360,23 @@ impl ModProfilesService {
         let mut unresolved = 0usize;
         let mut messages = Vec::new();
 
+        let mut installed_storage_ids = HashSet::new();
         for item in &plan.items {
             match item.status {
                 ModProfileImportStatus::ReadyToInstall => {
                     if let Some(storage_id) = item.resolved_storage_id.as_deref() {
-                        mods_service
-                            .install_storage_mod_to_envs(
-                                storage_id,
-                                vec![target_environment_id.clone()],
-                            )
-                            .await
-                            .with_context(|| format!("Failed to install {}", item.item.name))?;
-                        installed += 1;
+                        if installed_storage_ids.insert(storage_id.to_string()) {
+                            mods_service
+                                .install_storage_mod_to_envs(
+                                    storage_id,
+                                    vec![target_environment_id.clone()],
+                                )
+                                .await
+                                .with_context(|| format!("Failed to install {}", item.item.name))?;
+                            installed += 1;
+                        } else {
+                            skipped += 1;
+                        }
                     } else {
                         unresolved += 1;
                     }
@@ -164,6 +391,9 @@ impl ModProfilesService {
             }
         }
 
+        self.sync_profile_enabled_state(&target_environment, &plan)
+            .await?;
+
         let refreshed_plan = self
             .preview_import(plan_to_manifest(&plan), Some(target_environment_id))
             .await?;
@@ -175,6 +405,23 @@ impl ModProfilesService {
             unresolved,
             messages,
         })
+    }
+
+    pub async fn apply_profile(
+        &self,
+        profile_id: &str,
+        target_environment_id: String,
+    ) -> Result<ModProfileApplyResult> {
+        let profile = self.get_profile(profile_id).await?;
+        let mut request = ModProfileApplyRequest {
+            manifest: profile.manifest,
+            target_environment_id: target_environment_id.clone(),
+        };
+        request.manifest.profile_id = Some(profile.id.clone());
+        let result = self.apply_import(request).await?;
+        self.set_environment_active_profile(&target_environment_id, &profile.id)
+            .await?;
+        Ok(result)
     }
 
     pub async fn save_manifest_to_file(
@@ -217,6 +464,274 @@ impl ModProfilesService {
             .map(Some)
             .ok_or_else(|| anyhow!("Target environment not found"))
     }
+
+    async fn set_environment_active_profile(
+        &self,
+        environment_id: &str,
+        profile_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO environment_profiles (environment_id, active_profile_id, last_applied_at) \
+             VALUES (?, ?, ?) \
+             ON CONFLICT(environment_id) DO UPDATE SET \
+             active_profile_id = excluded.active_profile_id, last_applied_at = excluded.last_applied_at",
+        )
+        .bind(environment_id)
+        .bind(profile_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(self.pool.as_ref())
+        .await
+        .context("Failed to update active profile")?;
+        Ok(())
+    }
+
+    async fn active_environment_ids_by_profile(&self) -> Result<HashMap<String, Vec<String>>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT active_profile_id, environment_id FROM environment_profiles",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to query active profile environments")?;
+
+        let mut by_profile: HashMap<String, Vec<String>> = HashMap::new();
+        for (profile_id, environment_id) in rows {
+            by_profile
+                .entry(profile_id)
+                .or_default()
+                .push(environment_id);
+        }
+        Ok(by_profile)
+    }
+
+    async fn active_environment_ids_for_profile(&self, profile_id: &str) -> Result<Vec<String>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT environment_id FROM environment_profiles WHERE active_profile_id = ?",
+        )
+        .bind(profile_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to query active profile environments")
+    }
+
+    pub async fn sync_active_profile_from_environment(&self, environment_id: &str) -> Result<()> {
+        self.ensure_default_profiles().await?;
+        let env_service = EnvironmentService::new(self.pool.clone())?;
+        let environment = env_service
+            .get_environment(environment_id)
+            .await?
+            .ok_or_else(|| anyhow!("Environment not found"))?;
+        let active_profile_id = sqlx::query_scalar::<_, String>(
+            "SELECT active_profile_id FROM environment_profiles WHERE environment_id = ?",
+        )
+        .bind(environment_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?
+        .unwrap_or_else(|| default_profile_id(&environment.runtime).to_string());
+        let profile = self.get_profile(&active_profile_id).await?;
+        self.capture_profile(ModProfileCaptureRequest {
+            environment_id: environment_id.to_string(),
+            name: Some(profile.name),
+            profile_id: Some(active_profile_id),
+            include_disabled: true,
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn ensure_default_profiles(&self) -> Result<()> {
+        let env_service = EnvironmentService::new(self.pool.clone())?;
+        let environments = env_service.get_environments().await.unwrap_or_default();
+        for runtime in [Runtime::Il2cpp, Runtime::Mono] {
+            let default_id = default_profile_id(&runtime);
+            let existing: Option<String> =
+                sqlx::query_scalar("SELECT id FROM profiles WHERE id = ?")
+                    .bind(default_id)
+                    .fetch_optional(self.pool.as_ref())
+                    .await?;
+            if existing.is_none() {
+                let mut manifest = self.seed_default_manifest(&runtime, &environments).await?;
+                let now = Utc::now().to_rfc3339();
+                manifest.profile_id = Some(default_id.to_string());
+                manifest.is_default = Some(true);
+                manifest.created_at = Some(now.clone());
+                manifest.updated_at = Some(now.clone());
+                let name = default_profile_name(&runtime).to_string();
+                let manifest_json = serde_json::to_string(&manifest)?;
+                sqlx::query(
+                    "INSERT INTO profiles (id, name, runtime, is_default, manifest, created_at, updated_at) \
+                     VALUES (?, ?, ?, 1, ?, ?, ?)",
+                )
+                .bind(default_id)
+                .bind(name)
+                .bind(runtime_key(&runtime))
+                .bind(manifest_json)
+                .bind(&now)
+                .bind(&now)
+                .execute(self.pool.as_ref())
+                .await
+                .context("Failed to seed default profile")?;
+            }
+
+            for environment in environments.iter().filter(|env| env.runtime == runtime) {
+                sqlx::query(
+                    "INSERT INTO environment_profiles (environment_id, active_profile_id, last_applied_at) \
+                     VALUES (?, ?, NULL) \
+                     ON CONFLICT(environment_id) DO NOTHING",
+                )
+                .bind(&environment.id)
+                .bind(default_id)
+                .execute(self.pool.as_ref())
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn seed_default_manifest(
+        &self,
+        runtime: &Runtime,
+        environments: &[Environment],
+    ) -> Result<ModProfileManifest> {
+        let mut items = Vec::new();
+        let mut seen = HashSet::new();
+        for environment in environments.iter().filter(|env| &env.runtime == runtime) {
+            if environment.output_dir.is_empty() {
+                continue;
+            }
+            let manifest = self
+                .export_environment_profile_with_options(&environment.id, true)
+                .await
+                .unwrap_or_else(|_| {
+                    empty_profile_manifest(default_profile_name(runtime), runtime.clone())
+                });
+            for mut item in manifest.items {
+                item.runtime = Some(runtime.clone());
+                let key = profile_item_identity(&item);
+                if seen.insert(key) {
+                    items.push(item);
+                }
+            }
+        }
+
+        let mut manifest = empty_profile_manifest(default_profile_name(runtime), runtime.clone());
+        manifest.items = items;
+        Ok(manifest)
+    }
+
+    async fn sync_profile_enabled_state(
+        &self,
+        environment: &Environment,
+        plan: &ModProfileImportPlan,
+    ) -> Result<()> {
+        let mods_service = ModsService::new(self.pool.clone());
+        let snapshot =
+            build_installed_snapshot(self.pool.clone(), &mods_service, environment).await?;
+        let desired: HashMap<String, bool> = plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.status == ModProfileImportStatus::AlreadyInstalled
+                    || item.status == ModProfileImportStatus::ReadyToInstall
+            })
+            .map(|item| (profile_item_identity(&item.item), item.item.enabled))
+            .collect();
+
+        for item in &plan.items {
+            if desired.contains_key(&profile_item_identity(&item.item)) {
+                let _ = toggle_profile_item(
+                    self.pool.clone(),
+                    environment,
+                    &item.item,
+                    item.item.enabled,
+                )
+                .await;
+            }
+        }
+
+        for installed in installed_snapshot_items(&snapshot) {
+            let key = profile_item_identity(&installed);
+            if !desired.contains_key(&key) && installed.enabled {
+                let _ =
+                    toggle_profile_item(self.pool.clone(), environment, &installed, false).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn profile_from_row(
+    row: (String, String, String, i64, String, String, String),
+) -> Result<StoredModProfile> {
+    let (id, name, runtime, is_default, manifest_json, created_at, updated_at) = row;
+    let runtime = parse_runtime_key(&runtime)?;
+    let mut manifest: ModProfileManifest = serde_json::from_str(&manifest_json)
+        .with_context(|| format!("Failed to parse stored profile {}", id))?;
+    manifest.profile_id = Some(id.clone());
+    manifest.is_default = Some(is_default != 0);
+    manifest.created_at = Some(created_at.clone());
+    manifest.updated_at = Some(updated_at.clone());
+    normalize_profile_items(&mut manifest, Some(&runtime));
+    Ok(StoredModProfile {
+        id,
+        name,
+        runtime,
+        is_default: is_default != 0,
+        active_environment_ids: Vec::new(),
+        manifest,
+        created_at,
+        updated_at,
+    })
+}
+
+fn empty_profile_manifest(name: &str, runtime: Runtime) -> ModProfileManifest {
+    ModProfileManifest {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        kind: PROFILE_KIND.to_string(),
+        profile_id: None,
+        is_default: None,
+        created_at: None,
+        updated_at: None,
+        profile: ModProfileInfo {
+            name: name.to_string(),
+            game: PROFILE_GAME_ID.to_string(),
+            environment_id: None,
+            runtime,
+            branch: "any".to_string(),
+            game_version: None,
+            exported_at: Utc::now().to_rfc3339(),
+        },
+        items: Vec::new(),
+    }
+}
+
+fn default_profile_id(runtime: &Runtime) -> &'static str {
+    match runtime {
+        Runtime::Il2cpp => DEFAULT_IL2CPP_PROFILE_ID,
+        Runtime::Mono => DEFAULT_MONO_PROFILE_ID,
+    }
+}
+
+fn default_profile_name(runtime: &Runtime) -> &'static str {
+    match runtime {
+        Runtime::Il2cpp => "Default IL2CPP",
+        Runtime::Mono => "Default Mono",
+    }
+}
+
+fn parse_runtime_key(value: &str) -> Result<Runtime> {
+    match value.to_ascii_uppercase().as_str() {
+        "IL2CPP" => Ok(Runtime::Il2cpp),
+        "MONO" => Ok(Runtime::Mono),
+        other => Err(anyhow!("Unsupported profile runtime {}", other)),
+    }
+}
+
+fn normalize_profile_items(manifest: &mut ModProfileManifest, runtime: Option<&Runtime>) {
+    for item in &mut manifest.items {
+        if item.runtime.is_none() {
+            item.runtime = runtime.cloned();
+        }
+    }
 }
 
 fn validate_manifest(manifest: &ModProfileManifest) -> Result<()> {
@@ -242,6 +757,7 @@ fn build_managed_mod_items(
     environment: &Environment,
     library: &[ModLibraryEntry],
     installed_mods: &Value,
+    include_disabled: bool,
 ) -> Vec<ModProfileItem> {
     installed_mods
         .get("mods")
@@ -254,8 +770,9 @@ fn build_managed_mod_items(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
-        .filter(|mod_value| !is_disabled(mod_value))
+        .filter(|mod_value| include_disabled || !is_disabled(mod_value))
         .filter_map(|mod_value| {
+            let enabled = !is_disabled(mod_value);
             let storage_id = read_string(mod_value, "modStorageId")?;
             let entry = library.iter().find(|entry| entry.storage_id == storage_id);
             let name = entry
@@ -270,6 +787,7 @@ fn build_managed_mod_items(
                 name,
                 file_name,
                 required: true,
+                enabled,
                 source: entry.and_then(|entry| entry.source.clone()).or_else(|| {
                     mod_value
                         .get("source")
@@ -299,6 +817,7 @@ fn build_managed_mod_items(
 fn build_unmanaged_mod_items(
     environment: &Environment,
     installed_mods: &Value,
+    include_disabled: bool,
 ) -> Vec<ModProfileItem> {
     installed_mods
         .get("mods")
@@ -311,8 +830,9 @@ fn build_unmanaged_mod_items(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
-        .filter(|mod_value| !is_disabled(mod_value))
+        .filter(|mod_value| include_disabled || !is_disabled(mod_value))
         .map(|mod_value| {
+            let enabled = !is_disabled(mod_value);
             let name = read_string(mod_value, "name")
                 .or_else(|| read_string(mod_value, "fileName"))
                 .unwrap_or_else(|| "Local mod".to_string());
@@ -321,6 +841,7 @@ fn build_unmanaged_mod_items(
                 name,
                 file_name: read_string(mod_value, "fileName"),
                 required: true,
+                enabled,
                 source: Some(ModSource::Local),
                 source_id: None,
                 source_version: read_string(mod_value, "version"),
@@ -338,6 +859,7 @@ async fn build_plugin_items(
     pool: Arc<SqlitePool>,
     environment: &Environment,
     library: &[ModLibraryEntry],
+    include_disabled: bool,
 ) -> Result<Vec<ModProfileItem>> {
     let plugins = PluginsService::new(pool)
         .list_plugins(&environment.output_dir)
@@ -348,8 +870,9 @@ async fn build_plugin_items(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|plugin| !is_disabled(plugin))
+        .filter(|plugin| include_disabled || !is_disabled(plugin))
         .map(|plugin| {
+            let enabled = !is_disabled(plugin);
             let name = read_string(plugin, "name")
                 .or_else(|| read_string(plugin, "fileName"))
                 .unwrap_or_else(|| "Plugin".to_string());
@@ -367,6 +890,7 @@ async fn build_plugin_items(
                 name,
                 file_name,
                 required: true,
+                enabled,
                 source: entry.and_then(|entry| entry.source.clone()).or_else(|| {
                     plugin
                         .get("source")
@@ -393,6 +917,7 @@ async fn build_plugin_items(
 async fn build_userlib_items(
     environment: &Environment,
     library: &[ModLibraryEntry],
+    include_disabled: bool,
 ) -> Result<Vec<ModProfileItem>> {
     let userlibs = UserLibsService::new()
         .list_user_libs(&environment.output_dir)
@@ -403,8 +928,9 @@ async fn build_userlib_items(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|userlib| !is_disabled(userlib))
+        .filter(|userlib| include_disabled || !is_disabled(userlib))
         .map(|userlib| {
+            let enabled = !is_disabled(userlib);
             let name = read_string(userlib, "name")
                 .or_else(|| read_string(userlib, "fileName"))
                 .unwrap_or_else(|| "UserLib".to_string());
@@ -422,6 +948,7 @@ async fn build_userlib_items(
                 name,
                 file_name,
                 required: true,
+                enabled,
                 source: entry
                     .and_then(|entry| entry.source.clone())
                     .or(Some(ModSource::Local)),
@@ -603,6 +1130,123 @@ fn installed_storage_id(
     }
 
     None
+}
+
+fn profile_item_identity(item: &ModProfileItem) -> String {
+    format!(
+        "{:?}:{}",
+        item.item_type,
+        normalize_file_identity(
+            item.file_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(item.name.as_str())
+        )
+    )
+}
+
+fn installed_snapshot_items(snapshot: &Value) -> Vec<ModProfileItem> {
+    let mut items = Vec::new();
+    collect_installed_snapshot_items(snapshot, "mods", ModProfileItemType::Mod, &mut items);
+    collect_installed_snapshot_items(snapshot, "plugins", ModProfileItemType::Plugin, &mut items);
+    collect_installed_snapshot_items(
+        snapshot,
+        "userLibs",
+        ModProfileItemType::Userlib,
+        &mut items,
+    );
+    items
+}
+
+fn collect_installed_snapshot_items(
+    snapshot: &Value,
+    collection: &str,
+    item_type: ModProfileItemType,
+    items: &mut Vec<ModProfileItem>,
+) {
+    let Some(values) = snapshot.get(collection).and_then(Value::as_array) else {
+        return;
+    };
+    for value in values {
+        let name = read_string(value, "name")
+            .or_else(|| read_string(value, "fileName"))
+            .unwrap_or_else(|| "Installed item".to_string());
+        items.push(ModProfileItem {
+            item_type: item_type.clone(),
+            name,
+            file_name: read_string(value, "fileName"),
+            required: true,
+            enabled: !is_disabled(value),
+            source: value
+                .get("source")
+                .cloned()
+                .and_then(|source| serde_json::from_value(source).ok()),
+            source_id: read_string(value, "sourceId"),
+            source_version: read_string(value, "version"),
+            source_url: read_string(value, "sourceUrl"),
+            runtime: None,
+            storage_id: read_string(value, "modStorageId"),
+            nexus_file_id: None,
+            manual_reason: None,
+        });
+    }
+}
+
+async fn toggle_profile_item(
+    pool: Arc<SqlitePool>,
+    environment: &Environment,
+    item: &ModProfileItem,
+    enabled: bool,
+) -> Result<()> {
+    let Some(file_name) = item
+        .file_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(Some(item.name.as_str()))
+    else {
+        return Ok(());
+    };
+
+    match item.item_type {
+        ModProfileItemType::Mod => {
+            let service = ModsService::new(pool);
+            if enabled {
+                service
+                    .enable_mod(&environment.output_dir, file_name)
+                    .await?;
+            } else {
+                service
+                    .disable_mod(&environment.output_dir, file_name)
+                    .await?;
+            }
+        }
+        ModProfileItemType::Plugin => {
+            let service = PluginsService::new(pool);
+            if enabled {
+                service
+                    .enable_plugin(&environment.output_dir, file_name)
+                    .await?;
+            } else {
+                service
+                    .disable_plugin(&environment.output_dir, file_name)
+                    .await?;
+            }
+        }
+        ModProfileItemType::Userlib => {
+            let service = UserLibsService::new();
+            if enabled {
+                service
+                    .enable_user_lib(&environment.output_dir, file_name)
+                    .await?;
+            } else {
+                service
+                    .disable_user_lib(&environment.output_dir, file_name)
+                    .await?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn installed_profile_file_present(installed_mods: &Value, item: &ModProfileItem) -> bool {
@@ -996,6 +1640,10 @@ fn plan_to_manifest(plan: &ModProfileImportPlan) -> ModProfileManifest {
     ModProfileManifest {
         schema_version: PROFILE_SCHEMA_VERSION,
         kind: PROFILE_KIND.to_string(),
+        profile_id: None,
+        is_default: None,
+        created_at: None,
+        updated_at: None,
         profile: plan.profile.clone(),
         items: plan.items.iter().map(|item| item.item.clone()).collect(),
     }
@@ -1004,6 +1652,30 @@ fn plan_to_manifest(plan: &ModProfileImportPlan) -> ModProfileManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::initialize_pool;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn library_entry(storage_id: &str, source_id: &str, runtime: Runtime) -> ModLibraryEntry {
         ModLibraryEntry {
@@ -1045,6 +1717,7 @@ mod tests {
             name: "Example".to_string(),
             file_name: Some("Example.dll".to_string()),
             required: true,
+            enabled: true,
             source: Some(ModSource::Thunderstore),
             source_id: Some("Author/Example".to_string()),
             source_version: Some("1.0.0".to_string()),
@@ -1060,6 +1733,10 @@ mod tests {
         ModProfileManifest {
             schema_version: PROFILE_SCHEMA_VERSION,
             kind: PROFILE_KIND.to_string(),
+            profile_id: None,
+            is_default: None,
+            created_at: None,
+            updated_at: None,
             profile: ModProfileInfo {
                 name: "Co-op".to_string(),
                 game: PROFILE_GAME_ID.to_string(),
@@ -1097,6 +1774,57 @@ mod tests {
             steam_manifest_path: None,
             environment_type: None,
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn profiles_include_active_environment_ids() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModProfilesService::new(pool.clone());
+
+        let saved = service
+            .save_profile(ModProfileSaveRequest {
+                profile_id: Some("profile-active".to_string()),
+                name: "Active profile".to_string(),
+                runtime: Runtime::Mono,
+                manifest: profile_manifest(),
+            })
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO environment_profiles (environment_id, active_profile_id, last_applied_at) VALUES (?, ?, NULL)",
+        )
+        .bind("env-active")
+        .bind(&saved.id)
+        .execute(pool.as_ref())
+        .await?;
+
+        let listed = service.list_profiles().await?;
+        let listed_profile = listed
+            .iter()
+            .find(|profile| profile.id == saved.id)
+            .expect("saved profile listed");
+        assert_eq!(
+            listed_profile.active_environment_ids,
+            vec!["env-active".to_string()]
+        );
+
+        let loaded = service.get_profile(&saved.id).await?;
+        assert_eq!(
+            loaded.active_environment_ids,
+            vec!["env-active".to_string()]
+        );
+
+        let delete_error = service
+            .delete_profile(&saved.id)
+            .await
+            .expect_err("active profile deletion should be rejected");
+        assert!(delete_error.to_string().contains("Profile is active"));
+
+        Ok(())
     }
 
     #[test]
@@ -1261,7 +1989,7 @@ mod tests {
         entry.installed_in = vec![env.id.clone()];
 
         let pool = Arc::new(SqlitePool::connect(":memory:").await?);
-        let items = build_plugin_items(pool, &env, &[entry]).await?;
+        let items = build_plugin_items(pool, &env, &[entry], false).await?;
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].storage_id.as_deref(), Some("meshvault-storage"));
@@ -1288,7 +2016,7 @@ mod tests {
         entry.source_version = Some("1.0.0".to_string());
         entry.installed_in = vec![env.id.clone()];
 
-        let items = build_userlib_items(&env, &[entry]).await?;
+        let items = build_userlib_items(&env, &[entry], false).await?;
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].storage_id.as_deref(), Some("s1mapi-storage"));
@@ -1317,7 +2045,8 @@ mod tests {
             "count": 1
         });
 
-        let items = build_managed_mod_items(&env, &[visible_entry, stale_entry], &installed_mods);
+        let items =
+            build_managed_mod_items(&env, &[visible_entry, stale_entry], &installed_mods, false);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "Visible Mod");
@@ -1339,7 +2068,7 @@ mod tests {
             "count": 1
         });
 
-        let items = build_managed_mod_items(&env, &[entry], &installed_mods);
+        let items = build_managed_mod_items(&env, &[entry], &installed_mods, false);
 
         assert!(items.is_empty());
     }

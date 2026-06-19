@@ -113,9 +113,15 @@ pub struct Environment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "UPPERCASE")]
 pub enum Runtime {
+    #[serde(
+        rename = "IL2CPP",
+        alias = "il2cpp",
+        alias = "Il2Cpp",
+        alias = "Il2cpp"
+    )]
     Il2cpp,
+    #[serde(rename = "MONO", alias = "Mono", alias = "mono")]
     Mono,
 }
 
@@ -606,6 +612,14 @@ pub struct ModLibraryResult {
 pub struct ModProfileManifest {
     pub schema_version: u32,
     pub kind: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
     pub profile: ModProfileInfo,
     #[serde(default)]
     pub items: Vec<ModProfileItem>,
@@ -638,6 +652,8 @@ pub struct ModProfileItem {
     pub name: String,
     pub file_name: Option<String>,
     pub required: bool,
+    #[serde(default = "default_profile_item_enabled")]
+    pub enabled: bool,
     pub source: Option<ModSource>,
     pub source_id: Option<String>,
     pub source_version: Option<String>,
@@ -646,6 +662,51 @@ pub struct ModProfileItem {
     pub storage_id: Option<String>,
     pub nexus_file_id: Option<String>,
     pub manual_reason: Option<String>,
+}
+
+fn default_profile_item_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredModProfile {
+    pub id: String,
+    pub name: String,
+    pub runtime: Runtime,
+    pub is_default: bool,
+    #[serde(default)]
+    pub active_environment_ids: Vec<String>,
+    pub manifest: ModProfileManifest,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileCaptureRequest {
+    pub environment_id: String,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub include_disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileSaveRequest {
+    pub profile_id: Option<String>,
+    pub name: String,
+    pub runtime: Runtime,
+    pub manifest: ModProfileManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModProfileExportRequest {
+    pub profile_id: String,
+    pub include_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -826,6 +887,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Runtime::Mono).expect("serialize"),
             "\"MONO\""
+        );
+    }
+
+    #[test]
+    fn runtime_deserializes_legacy_mono_aliases() {
+        assert_eq!(
+            serde_json::from_str::<Runtime>("\"Mono\"").expect("deserialize Mono"),
+            Runtime::Mono
+        );
+        assert_eq!(
+            serde_json::from_str::<Runtime>("\"mono\"").expect("deserialize mono"),
+            Runtime::Mono
+        );
+        assert_eq!(
+            serde_json::from_str::<Runtime>("\"MONO\"").expect("deserialize MONO"),
+            Runtime::Mono
         );
     }
 

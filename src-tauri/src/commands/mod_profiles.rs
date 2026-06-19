@@ -7,8 +7,132 @@ use tauri::{AppHandle, Runtime, State};
 use crate::events;
 use crate::services::mod_profiles::ModProfilesService;
 use crate::types::{
-    ModProfileApplyRequest, ModProfileApplyResult, ModProfileImportPlan, ModProfileManifest,
+    ModProfileApplyRequest, ModProfileApplyResult, ModProfileCaptureRequest,
+    ModProfileExportRequest, ModProfileImportPlan, ModProfileManifest, ModProfileSaveRequest,
+    StoredModProfile,
 };
+
+fn emit_profile_apply_events<R: Runtime>(app: &AppHandle<R>, environment_id: String) {
+    if let Err(error) = events::emit_mods_changed(app, environment_id.clone()) {
+        log::warn!("Failed to emit mods_changed after profile apply: {}", error);
+    }
+    if let Err(error) = events::emit_plugins_changed(app, environment_id.clone()) {
+        log::warn!(
+            "Failed to emit plugins_changed after profile apply: {}",
+            error
+        );
+    }
+    if let Err(error) = events::emit_userlibs_changed(app, environment_id) {
+        log::warn!(
+            "Failed to emit userlibs_changed after profile apply: {}",
+            error
+        );
+    }
+}
+
+#[tauri::command]
+pub async fn list_mod_profiles(
+    db: State<'_, Arc<SqlitePool>>,
+) -> Result<Vec<StoredModProfile>, String> {
+    ModProfilesService::new(db.inner().clone())
+        .list_profiles()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_mod_profile(
+    db: State<'_, Arc<SqlitePool>>,
+    profile_id: String,
+) -> Result<StoredModProfile, String> {
+    ModProfilesService::new(db.inner().clone())
+        .get_profile(&profile_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_mod_profile(
+    db: State<'_, Arc<SqlitePool>>,
+    request: ModProfileSaveRequest,
+) -> Result<StoredModProfile, String> {
+    ModProfilesService::new(db.inner().clone())
+        .save_profile(request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn capture_mod_profile(
+    db: State<'_, Arc<SqlitePool>>,
+    request: ModProfileCaptureRequest,
+) -> Result<StoredModProfile, String> {
+    ModProfilesService::new(db.inner().clone())
+        .capture_profile(request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn import_mod_profile_to_library(
+    db: State<'_, Arc<SqlitePool>>,
+    manifest: ModProfileManifest,
+) -> Result<StoredModProfile, String> {
+    ModProfilesService::new(db.inner().clone())
+        .import_profile_manifest(manifest)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn export_mod_profile_from_library(
+    db: State<'_, Arc<SqlitePool>>,
+    request: ModProfileExportRequest,
+) -> Result<ModProfileManifest, String> {
+    ModProfilesService::new(db.inner().clone())
+        .export_profile_manifest(request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_mod_profile(
+    db: State<'_, Arc<SqlitePool>>,
+    profile_id: String,
+) -> Result<(), String> {
+    ModProfilesService::new(db.inner().clone())
+        .delete_profile(&profile_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_mod_profile_apply(
+    db: State<'_, Arc<SqlitePool>>,
+    profile_id: String,
+    target_environment_id: String,
+) -> Result<ModProfileImportPlan, String> {
+    ModProfilesService::new(db.inner().clone())
+        .preview_profile_apply(&profile_id, target_environment_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn apply_mod_profile<R: Runtime>(
+    app: AppHandle<R>,
+    db: State<'_, Arc<SqlitePool>>,
+    profile_id: String,
+    target_environment_id: String,
+) -> Result<ModProfileApplyResult, String> {
+    let result = ModProfilesService::new(db.inner().clone())
+        .apply_profile(&profile_id, target_environment_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+
+    emit_profile_apply_events(&app, target_environment_id);
+    Ok(result)
+}
 
 #[tauri::command]
 pub async fn export_environment_profile(
@@ -68,26 +192,7 @@ pub async fn apply_mod_profile_import<R: Runtime>(
         .await
         .map_err(|error| error.to_string())?;
 
-    if result.installed > 0 {
-        if let Err(error) = events::emit_mods_changed(&app, target_environment_id.clone()) {
-            log::warn!(
-                "Failed to emit mods_changed after profile import: {}",
-                error
-            );
-        }
-        if let Err(error) = events::emit_plugins_changed(&app, target_environment_id.clone()) {
-            log::warn!(
-                "Failed to emit plugins_changed after profile import: {}",
-                error
-            );
-        }
-        if let Err(error) = events::emit_userlibs_changed(&app, target_environment_id) {
-            log::warn!(
-                "Failed to emit userlibs_changed after profile import: {}",
-                error
-            );
-        }
-    }
+    emit_profile_apply_events(&app, target_environment_id);
 
     Ok(result)
 }

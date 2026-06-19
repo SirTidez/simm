@@ -179,9 +179,9 @@ const DownloadsPanel = lazyNamed(
   () => import('./DownloadsPanel'),
   (module) => module.DownloadsPanel,
 );
-const ProfileImportWorkspace = lazyNamed(
-  () => import('./ProfileImportWorkspace'),
-  (module) => module.ProfileImportWorkspace,
+const ProfilesWorkspace = lazyNamed(
+  () => import('./ProfilesWorkspace'),
+  (module) => module.ProfilesWorkspace,
 );
 
 function WorkspacePanelFallback() {
@@ -535,7 +535,7 @@ function HomeDashboard({
   onOpenModUpdates,
   onOpenWizard,
   onOpenSettings,
-  onOpenProfileImport,
+  onOpenProfiles,
 }: {
   environments: Environment[];
   environmentsLoading: boolean;
@@ -549,7 +549,7 @@ function HomeDashboard({
   onOpenModUpdates: () => void;
   onOpenWizard: () => void;
   onOpenSettings: () => void;
-  onOpenProfileImport: () => void;
+  onOpenProfiles: () => void;
 }) {
   const completed = environments.filter((env) => env.status === 'completed');
   const updateCount = completed.filter((env) => env.updateAvailable).length;
@@ -617,9 +617,9 @@ function HomeDashboard({
             <Icon name="plus" />
             Add Environment
           </SimmButton>
-          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenProfileImport}>
-            <Icon name="upload" />
-            Import Profile
+          <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={onOpenProfiles}>
+            <Icon name="userGear" />
+            Profiles
           </SimmButton>
         </div>
       </div>
@@ -734,9 +734,9 @@ function HomeDashboard({
               <Icon name="sliders" />
               Preferences
             </SimmButton>
-            <SimmButton type="button" variant="ghost" onClick={onOpenProfileImport}>
-              <Icon name="upload" />
-              Import Profile
+            <SimmButton type="button" variant="ghost" onClick={onOpenProfiles}>
+              <Icon name="userGear" />
+              Profiles
             </SimmButton>
           </div>
         </section>
@@ -940,6 +940,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenEnvironmentsWorkspace,
   onOpenHome,
   onOpenLibrary,
+  onOpenProfiles,
   onShellNavTransitionEnd,
   onToggleShellNavigation,
   shellNavAnimating,
@@ -956,6 +957,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenEnvironmentsWorkspace: () => void;
   onOpenHome: () => void;
   onOpenLibrary: () => void;
+  onOpenProfiles: () => void;
   onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
   onToggleShellNavigation: () => void;
   shellNavAnimating: boolean;
@@ -1002,6 +1004,13 @@ const AppShellSidebar = memo(function AppShellSidebar({
       icon: 'boxOpen',
       active: activeWorkspace.view === 'library',
       onClick: onOpenLibrary,
+    },
+    {
+      key: 'profiles',
+      label: 'Profiles',
+      icon: 'userGear',
+      active: activeWorkspace.view === 'profiles',
+      onClick: onOpenProfiles,
     },
     {
       key: 'mods',
@@ -2146,11 +2155,9 @@ function AppContent() {
             onRunSetupGuide={() => pushWorkspace({ view: 'welcome' }, { welcomeMode: 'setup' })}
           />
         );
-      case 'profileImport':
+      case 'profiles':
         return (
-          <ProfileImportWorkspace
-            onClose={onCloseHandler}
-          />
+          <ProfilesWorkspace preferredEnvironmentId={selectedEnvironmentId} />
         );
       case 'welcome':
         return (
@@ -2486,6 +2493,7 @@ function AppContent() {
             onOpenEnvironmentsWorkspace={openEnvironmentsWorkspace}
             onOpenHome={goHome}
             onOpenLibrary={openLibraryWorkspaceFromShell}
+            onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
             onShellNavTransitionEnd={handleShellNavTransitionEnd}
             onToggleShellNavigation={toggleShellNavigation}
             shellNavAnimating={shellNavAnimating}
@@ -2512,7 +2520,7 @@ function AppContent() {
                     })}
                     onOpenWizard={() => openWorkspace({ view: 'wizard' })}
                     onOpenSettings={() => openWorkspace({ view: 'settings' })}
-                    onOpenProfileImport={() => openWorkspace({ view: 'profileImport' })}
+                    onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
                   />
                 </main>
               </div>

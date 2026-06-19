@@ -1,6 +1,7 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
+use crate::services::mod_profiles::ModProfilesService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
 use crate::types::{
@@ -54,6 +55,25 @@ fn emit_environment_payload_changed_for_envs(
         if let Err(error) = crate::events::emit_userlibs_changed(app, environment_id.clone()) {
             log::warn!(
                 "Failed to emit userlibs_changed for {}: {}",
+                environment_id,
+                error
+            );
+        }
+    }
+}
+
+async fn sync_active_profiles_for_envs(
+    pool: Arc<SqlitePool>,
+    environment_ids: impl IntoIterator<Item = String>,
+) {
+    let profile_service = ModProfilesService::new(pool);
+    for environment_id in environment_ids {
+        if let Err(error) = profile_service
+            .sync_active_profile_from_environment(&environment_id)
+            .await
+        {
+            log::warn!(
+                "Failed to sync active profile for {} after install: {}",
                 environment_id,
                 error
             );
@@ -622,6 +642,7 @@ pub async fn install_downloaded_mod(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    sync_active_profiles_for_envs(db.inner().clone(), affected_envs.clone()).await;
     emit_environment_payload_changed_for_envs(&app, affected_envs);
 
     Ok(result)
@@ -942,6 +963,7 @@ pub async fn upload_mod(
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
     {
+        sync_active_profiles_for_envs(db.inner().clone(), [environment_id.clone()]).await;
         emit_environment_payload_changed_for_envs(&app, [environment_id]);
     }
 
