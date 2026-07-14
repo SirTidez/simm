@@ -177,6 +177,28 @@ body::before {
   color: var(--app-text-color, #ffffff);
   position: relative;
   z-index: 1;
+  /* Application chrome should behave like a native desktop surface, not a document. */
+  user-select: none;
+}
+
+/* Keep copyable, user-authored, and diagnostic content intentionally selectable. */
+.app :is(
+  input,
+  textarea,
+  select,
+  [contenteditable="true"],
+  .description-text,
+  .workspace-collection__row-summary,
+  .workspace-inspector-card__summary,
+  .workspace-version-row__summary,
+  .mod-card-summary,
+  .logs-panel__line-content,
+  .logs-panel__inspector-content,
+  .logs-panel__file-path,
+  .selectable-text,
+  pre
+) {
+  user-select: text;
 }
 
 .app-body {
@@ -11696,6 +11718,61 @@ body {
 .profiles-workspace__empty--compact {
   padding: 0.45rem 0.2rem;
   font-size: 0.78rem;
+}
+
+.telemetry-workspace {
+  min-width: 0;
+  display: grid;
+  gap: 1rem;
+  padding: 1.25rem;
+  color: var(--workspace-copy-color, #b8c5d6);
+}
+
+.telemetry-workspace__header-actions,
+.telemetry-workspace__filters,
+.telemetry-workspace__controls,
+.telemetry-session-row,
+.telemetry-event__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.telemetry-workspace__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--workspace-copy-color, #9fb1c7);
+  font-size: 0.82rem;
+}
+
+.telemetry-workspace__status--active { color: #5fcf9b; }
+.telemetry-workspace__controls { flex-wrap: wrap; padding-bottom: 0.9rem; border-bottom: 1px solid var(--border-color, #263447); }
+.telemetry-workspace__controls label,
+.telemetry-workspace__filters select { font-size: 0.82rem; }
+.telemetry-workspace__controls label { display: inline-flex; align-items: center; gap: 0.45rem; }
+.telemetry-workspace__controls select,
+.telemetry-workspace__filters select { min-height: 2rem; background: var(--input-bg, #16202e); color: inherit; border: 1px solid var(--border-color, #344257); border-radius: 4px; padding: 0.2rem 0.45rem; }
+.telemetry-workspace__spacer { flex: 1; }
+.telemetry-workspace__feedback { margin: 0; color: #67c7ff; font-size: 0.84rem; }
+.telemetry-workspace__sessions { border-top: 1px solid var(--border-color, #263447); border-bottom: 1px solid var(--border-color, #263447); }
+.telemetry-session-row { justify-content: space-between; padding: 0.7rem 0.2rem; border-bottom: 1px solid color-mix(in srgb, var(--border-color, #263447) 70%, transparent); font-size: 0.82rem; }
+.telemetry-session-row:last-child { border-bottom: 0; }
+.telemetry-session-row div { display: grid; gap: 0.16rem; }
+.telemetry-session-row span { color: var(--workspace-copy-color, #9fb1c7); }
+.telemetry-workspace__event-list { display: grid; gap: 0.55rem; max-height: 32rem; overflow: auto; }
+.telemetry-event { border-left: 3px solid #e5b75a; background: color-mix(in srgb, var(--panel-bg, #152131) 82%, transparent); padding: 0.7rem 0.8rem; }
+.telemetry-event--error, .telemetry-event--fatal { border-left-color: #e16b70; }
+.telemetry-event__meta { flex-wrap: wrap; font-size: 0.78rem; }
+.telemetry-event__meta span, .telemetry-event code { color: var(--workspace-copy-color, #9fb1c7); }
+.telemetry-event code { display: block; margin-top: 0.4rem; font-size: 0.72rem; }
+.telemetry-event pre { margin: 0.5rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--workspace-title-color, #eef5ff); font: inherit; font-size: 0.78rem; }
+
+@media (max-width: 760px) {
+  .telemetry-workspace { padding: 0.8rem; }
+  .telemetry-workspace__filters { flex-wrap: wrap; }
+  .telemetry-workspace__spacer { display: none; }
+  .telemetry-session-row { align-items: flex-start; flex-direction: column; gap: 0.25rem; }
 }
 
 @container (max-width: 58rem) {

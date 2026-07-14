@@ -2,13 +2,14 @@ use crate::types::{DepotDownloadOptions, DownloadProgress, DownloadStatus};
 use crate::utils::depot_downloader_detector::detect_depot_downloader;
 use anyhow::{Context, Result};
 use regex::Regex;
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)] // Required for CommandExt trait methods
 use std::os::windows::process::CommandExt;
 use std::process::Stdio;
 use std::sync::Arc;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
@@ -94,6 +95,77 @@ impl DepotDownloaderService {
         }
 
         args
+    }
+
+    fn read_installed_manifest_id(output_dir: &str) -> Option<String> {
+        let manifest_dir = std::path::Path::new(output_dir).join(".DepotDownloader");
+        let manifest_name = Regex::new(r"^\d+_(\d+)\.manifest$")
+            .expect("installed DepotDownloader manifest regex is valid");
+
+        std::fs::read_dir(manifest_dir)
+            .ok()?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let manifest_id = manifest_name
+                    .captures(&file_name)?
+                    .get(1)?
+                    .as_str()
+                    .to_string();
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, manifest_id))
+            })
+            .max_by_key(|(modified, _)| *modified)
+            .map(|(_, manifest_id)| manifest_id)
+    }
+
+    async fn persist_completed_download<R: Runtime>(
+        app: &AppHandle<R>,
+        download_id: &str,
+        manifest_id: Option<&str>,
+    ) {
+        let Some(pool) = app.try_state::<Arc<SqlitePool>>() else {
+            log::error!(
+                "[DepotDownloader] Cannot persist completed download {} because SIMM database state is unavailable",
+                download_id
+            );
+            return;
+        };
+        let pool = pool.inner().clone();
+        if let Err(error) =
+            Self::persist_completed_download_to_pool(pool, download_id, manifest_id).await
+        {
+            log::error!(
+                "[DepotDownloader] Failed to persist completed download {}: {:#}",
+                download_id,
+                error
+            );
+        }
+    }
+
+    async fn persist_completed_download_to_pool(
+        pool: Arc<SqlitePool>,
+        download_id: &str,
+        manifest_id: Option<&str>,
+    ) -> Result<()> {
+        let environment_service = crate::services::environment::EnvironmentService::new(pool)?;
+        let mut updates = vec![
+            ("status".to_string(), serde_json::json!("completed")),
+            ("updateAvailable".to_string(), serde_json::json!(false)),
+            ("updateGameVersion".to_string(), serde_json::Value::Null),
+        ];
+        if let Some(manifest_id) = manifest_id {
+            updates.push(("lastManifestId".to_string(), serde_json::json!(manifest_id)));
+            updates.push((
+                "remoteManifestId".to_string(),
+                serde_json::json!(manifest_id),
+            ));
+        }
+
+        environment_service
+            .update_environment(download_id, updates)
+            .await?;
+        Ok(())
     }
 
     async fn parse_progress<R: Runtime>(
@@ -409,6 +481,8 @@ impl DepotDownloaderService {
             );
         }
 
+        let output_dir = options.output_dir.clone();
+
         // Build command
         let args = self.build_command_args(&options);
 
@@ -519,16 +593,26 @@ impl DepotDownloaderService {
                             }
 
                             if status.success() {
+                                let manifest_id = service_complete
+                                    .download_progress
+                                    .read()
+                                    .await
+                                    .get(&download_id_complete)
+                                    .and_then(|progress| progress.manifest_id.clone());
+
+                                let manifest_id = manifest_id.or_else(|| {
+                                    DepotDownloaderService::read_installed_manifest_id(&output_dir)
+                                });
+
+                                DepotDownloaderService::persist_completed_download(
+                                    &app_complete,
+                                    &download_id_complete,
+                                    manifest_id.as_deref(),
+                                )
+                                .await;
+
                                 let mut progress_map =
                                     service_complete.download_progress.write().await;
-                                let manifest_id = if let Some(progress) =
-                                    progress_map.get(&download_id_complete)
-                                {
-                                    progress.manifest_id.clone()
-                                } else {
-                                    None
-                                };
-
                                 if let Some(progress) = progress_map.get_mut(&download_id_complete)
                                 {
                                     progress.status = DownloadStatus::Completed;
@@ -658,6 +742,9 @@ impl Default for DepotDownloaderService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::initialize_pool;
+    use crate::services::environment::EnvironmentService;
+    use crate::types::schedule_i_config;
     #[cfg(target_os = "windows")]
     use serial_test::serial;
     use tauri::test::mock_app;
@@ -840,6 +927,92 @@ mod tests {
             .expect_err("expected DepotDownloader missing error");
         assert!(err.to_string().contains("DepotDownloader"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn read_installed_manifest_id_reads_the_downloaded_manifest() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest_dir = temp.path().join(".DepotDownloader");
+        std::fs::create_dir_all(&manifest_dir)?;
+        std::fs::write(
+            manifest_dir.join("3164501_5738443694136269112.manifest"),
+            b"manifest contents",
+        )?;
+
+        assert_eq!(
+            DepotDownloaderService::read_installed_manifest_id(
+                temp.path().to_string_lossy().as_ref()
+            ),
+            Some("5738443694136269112".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn completed_download_persistence_clears_update_state_before_event_delivery() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let environment_service = EnvironmentService::new(pool.clone())?;
+        let environment = environment_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "beta".to_string(),
+                temp.path().join("beta").to_string_lossy().to_string(),
+                Some("Beta".to_string()),
+                None,
+            )
+            .await?;
+
+        environment_service
+            .update_environment(
+                &environment.id,
+                vec![
+                    ("status".to_string(), serde_json::json!("downloading")),
+                    ("updateAvailable".to_string(), serde_json::json!(true)),
+                    (
+                        "updateGameVersion".to_string(),
+                        serde_json::json!("0.4.6f5"),
+                    ),
+                    (
+                        "lastManifestId".to_string(),
+                        serde_json::json!("old-manifest"),
+                    ),
+                    (
+                        "remoteManifestId".to_string(),
+                        serde_json::json!("new-manifest"),
+                    ),
+                ],
+            )
+            .await?;
+
+        DepotDownloaderService::persist_completed_download_to_pool(
+            pool,
+            &environment.id,
+            Some("new-manifest"),
+        )
+        .await?;
+
+        let persisted = environment_service
+            .get_environment(&environment.id)
+            .await?
+            .expect("environment remains available");
+        assert!(matches!(
+            persisted.status,
+            crate::types::EnvironmentStatus::Completed
+        ));
+        assert_eq!(persisted.last_manifest_id.as_deref(), Some("new-manifest"));
+        assert_eq!(
+            persisted.remote_manifest_id.as_deref(),
+            Some("new-manifest")
+        );
+        assert_eq!(persisted.update_available, Some(false));
+        assert_eq!(persisted.update_game_version, None);
         Ok(())
     }
 

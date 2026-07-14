@@ -15,7 +15,9 @@ mod utils;
 
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tauri::{Emitter, Manager, RunEvent};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 fn main() {
     // Initialize global logger FIRST to capture all output
@@ -70,9 +72,62 @@ fn main() {
                 } else {
                     log::warn!("No default window icon available");
                 }
+                let close_app = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let close_app = close_app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::commands::tray::handle_main_window_close(close_app).await;
+                        });
+                    }
+                });
             } else {
                 log::warn!("Main window not found!");
             }
+
+            let show = MenuItem::with_id(app, "show", "Show SIMM", true, None::<&str>)?;
+            let check_updates = MenuItem::with_id(
+                app,
+                "check_updates",
+                "Check for Updates",
+                true,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(app, "quit", "Quit SIMM", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &check_updates, &quit])?;
+            let mut tray = TrayIconBuilder::with_id("simm-tray").menu(&menu);
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.on_menu_event(|app, event| match event.id.as_ref() {
+                "show" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                "check_updates" => {
+                    if let Some(pool) = app.try_state::<Arc<SqlitePool>>() {
+                        let pool = pool.inner().clone();
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) =
+                                crate::commands::update_check::run_background_update_checks(
+                                    pool, app, true,
+                                )
+                                .await
+                            {
+                                log::warn!("Tray update check failed: {}", error);
+                            }
+                        });
+                    }
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            })
+            .build(app)?;
 
             log::info!("Tauri setup complete");
             Ok(())
@@ -87,6 +142,8 @@ fn main() {
             commands::app_init::get_linux_readiness_status,
             commands::app_init::repair_linux_desktop_integration,
             commands::app_init::get_home_directory,
+            commands::tray::hide_main_window,
+            commands::tray::quit_simm,
             // DepotDownloader
             commands::depotdownloader::detect_depot_downloader,
             commands::depotdownloader::install_depot_downloader,
@@ -96,6 +153,16 @@ fn main() {
             commands::settings::backup_database,
             commands::settings::get_custom_themes,
             commands::settings::get_themes_directory,
+            commands::telemetry::get_telemetry_preferences,
+            commands::telemetry::save_telemetry_preferences,
+            commands::telemetry::capture_mod_telemetry_snapshot,
+            commands::telemetry::list_mod_telemetry_snapshots,
+            commands::telemetry::get_mod_telemetry_snapshot,
+            commands::telemetry::delete_mod_telemetry_snapshot,
+            commands::telemetry::get_live_telemetry_status,
+            commands::telemetry::list_live_telemetry_events,
+            commands::telemetry::clear_live_telemetry_history,
+            commands::telemetry::export_live_telemetry_history,
             commands::settings::save_credentials,
             commands::settings::clear_credentials,
             commands::settings::save_nexus_mods_api_key,

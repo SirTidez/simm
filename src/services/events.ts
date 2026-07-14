@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import type { DownloadProgress, TrackedDownload, UpdateCheckResult } from '../types';
+import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, TrackedDownload, UpdateCheckResult } from '../types';
 
 export interface ProgressEvent {
   downloadId: string;
@@ -112,6 +112,14 @@ export interface ModMetadataRefreshStatusEvent {
 }
 
 export type TrackedDownloadUpdatedEvent = TrackedDownload;
+
+export async function onLiveTelemetryEvent(handler: (data: LiveTelemetryEvent) => void): Promise<() => void> {
+  return await listen<LiveTelemetryEvent>('live_telemetry_event', (event) => handler(event.payload));
+}
+
+export async function onLiveTelemetryStatus(handler: (data: LiveTelemetryStatus) => void): Promise<() => void> {
+  return await listen<LiveTelemetryStatus>('live_telemetry_status', (event) => handler(event.payload));
+}
 
 export async function onProgress(handler: (data: DownloadProgress) => void): Promise<() => void> {
   return await listen<ProgressEvent>('download_progress', (event) => {

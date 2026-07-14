@@ -152,7 +152,7 @@ describe('EnvironmentStore', () => {
     expect(screen.getByTestId('env-version').textContent).toBe('1.0.0');
   });
 
-  it('updates progress map and status from progress events', async () => {
+  it('updates the progress map without persisting completion from progress events', async () => {
     apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
     apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
       ...baseEnv,
@@ -181,11 +181,11 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('progress-count').textContent).toBe('1');
     });
 
-    expect(apiMocks.updateEnvironment).toHaveBeenCalledWith('env-1', { status: 'completed' });
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalled();
   });
 
-  it('handles completion events and clears progress', async () => {
-    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+  it('refreshes backend-owned completion state and clears progress', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([baseEnv]);
     apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
       ...baseEnv,
       id,
@@ -219,19 +219,15 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('env-version').textContent).toBe('2.0.0');
     });
 
-    expect(apiMocks.updateEnvironment).toHaveBeenCalledWith(
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalledWith(
       'env-1',
-      expect.objectContaining({
-        status: 'completed',
-        lastManifestId: '123',
-        remoteManifestId: '123',
-        updateAvailable: false,
-      })
+      expect.objectContaining({ status: 'completed' }),
     );
   });
 
-  it('does not trigger an immediate manifest backfill when the completion payload is missing', async () => {
-    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+  it('refreshes completion state even when the completion payload omits a manifest', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([baseEnv]);
     apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
       ...baseEnv,
       id,
@@ -258,12 +254,12 @@ describe('EnvironmentStore', () => {
     });
 
     expect(apiMocks.checkUpdate).not.toHaveBeenCalled();
-    expect(apiMocks.updateEnvironment).toHaveBeenCalledWith(
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalledWith(
       'env-1',
       expect.objectContaining({
         status: 'completed',
-        updateAvailable: false,
-      })
+      }),
     );
   });
 

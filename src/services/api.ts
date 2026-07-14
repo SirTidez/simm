@@ -33,6 +33,14 @@ import type {
   ModProfileManifest,
   ModProfileSaveRequest,
   StoredModProfile,
+  ModTelemetryCaptureRequest,
+  ModTelemetrySnapshot,
+  ModTelemetrySnapshotSummary,
+  LiveTelemetryEvent,
+  LiveTelemetryExport,
+  LiveTelemetryStatus,
+  TelemetryPreferences,
+  TelemetryPreferencesUpdate,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -104,6 +112,69 @@ export class ApiService {
 
   static async getThemesDirectory(): Promise<string> {
     return invoke('get_themes_directory');
+  }
+
+  static async hideMainWindow(): Promise<void> {
+    await invoke('hide_main_window');
+  }
+
+  static async quitSimm(): Promise<void> {
+    await invoke('quit_simm');
+  }
+
+  // Telemetry
+  static async getTelemetryPreferences(): Promise<TelemetryPreferences> {
+    return invoke('get_telemetry_preferences');
+  }
+
+  static async saveTelemetryPreferences(
+    updates: TelemetryPreferencesUpdate,
+  ): Promise<TelemetryPreferences> {
+    return invoke('save_telemetry_preferences', { updates });
+  }
+
+  static async captureModTelemetrySnapshot(
+    request: ModTelemetryCaptureRequest,
+  ): Promise<ModTelemetrySnapshot> {
+    return invoke('capture_mod_telemetry_snapshot', { request });
+  }
+
+  static async listModTelemetrySnapshots(
+    environmentId?: string | null,
+  ): Promise<ModTelemetrySnapshotSummary[]> {
+    return invoke('list_mod_telemetry_snapshots', { environmentId: environmentId ?? null });
+  }
+
+  static async getModTelemetrySnapshot(snapshotId: string): Promise<ModTelemetrySnapshot> {
+    return invoke('get_mod_telemetry_snapshot', { snapshotId });
+  }
+
+  static async deleteModTelemetrySnapshot(snapshotId: string): Promise<{ success: boolean }> {
+    await invoke('delete_mod_telemetry_snapshot', { snapshotId });
+    return { success: true };
+  }
+
+  static async getLiveTelemetryStatus(): Promise<LiveTelemetryStatus[]> {
+    return invoke('get_live_telemetry_status');
+  }
+
+  static async listLiveTelemetryEvents(
+    environmentId?: string | null,
+    limit?: number,
+  ): Promise<LiveTelemetryEvent[]> {
+    return invoke('list_live_telemetry_events', {
+      environmentId: environmentId ?? null,
+      limit: limit ?? null,
+    });
+  }
+
+  static async clearLiveTelemetryHistory(environmentId?: string | null): Promise<{ success: boolean }> {
+    await invoke('clear_live_telemetry_history', { environmentId: environmentId ?? null });
+    return { success: true };
+  }
+
+  static async exportLiveTelemetryHistory(environmentId?: string | null): Promise<LiveTelemetryExport> {
+    return invoke('export_live_telemetry_history', { environmentId: environmentId ?? null });
   }
 
   // Environments

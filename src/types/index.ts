@@ -287,6 +287,125 @@ export interface NexusRateLimits {
   hourlyUsed?: number;
 }
 
+export interface TelemetryPreferences {
+  collectionEnabled: boolean;
+  uploadEnabled: boolean;
+  errorExcerptsEnabled: boolean;
+  retentionDays: number;
+  closeBehavior: 'ask' | 'tray' | 'quit';
+  updatedAt?: string | null;
+}
+
+export interface TelemetryPreferencesUpdate {
+  collectionEnabled?: boolean | null;
+  uploadEnabled?: boolean | null;
+  errorExcerptsEnabled?: boolean | null;
+  retentionDays?: number | null;
+  closeBehavior?: 'ask' | 'tray' | 'quit' | null;
+}
+
+export interface LiveTelemetrySession {
+  sessionId: string;
+  environmentId: string;
+  startedAt: string;
+  endedAt?: string | null;
+  environment: ModTelemetryEnvironment;
+  mods: ModTelemetryModEntry[];
+  monitoring: boolean;
+}
+
+export interface LiveTelemetryEvent {
+  eventId: string;
+  sessionId: string;
+  environmentId: string;
+  occurredAt: string;
+  severity: string;
+  attribution: 'mod' | 'system' | 'unknown';
+  modKey?: string | null;
+  modName?: string | null;
+  fingerprint: string;
+  message?: string | null;
+  source: string;
+  lineNumber?: number | null;
+  origin: 'attach' | 'live';
+}
+
+export interface LiveTelemetryStatus {
+  environmentId: string;
+  running: boolean;
+  monitoring: boolean;
+  activeSessionId?: string | null;
+  eventCount: number;
+  lastEventAt?: string | null;
+}
+
+export interface LiveTelemetryExport {
+  schemaVersion: number;
+  exportedAt: string;
+  sessions: Array<{
+    sessionId: string;
+    startedAt: string;
+    endedAt?: string | null;
+    environment: ModTelemetryEnvironment;
+    mods: ModTelemetryModEntry[];
+    events: Array<Omit<LiveTelemetryEvent, 'sessionId' | 'environmentId'>>;
+  }>;
+}
+
+export interface ModTelemetryCaptureRequest {
+  environmentId: string;
+  maxLogLines?: number | null;
+}
+
+export interface ModTelemetryEnvironment {
+  appId: string;
+  branch: string;
+  runtime: Runtime;
+  s1Version?: string | null;
+}
+
+export interface ModTelemetryModEntry {
+  modKey: string;
+  name: string;
+  fileName: string;
+  version?: string | null;
+  source?: 'local' | 'thunderstore' | 'nexusmods' | 'github' | 'unknown' | null;
+  author?: string | null;
+  managed: boolean;
+  disabled: boolean;
+}
+
+export interface ModTelemetrySourceError {
+  modKey?: string | null;
+  modName: string;
+  level: string;
+  message?: string | null;
+  timestamp?: string | null;
+  source?: string | null;
+  lineNumber?: number | null;
+}
+
+export interface ModTelemetrySnapshot {
+  schemaVersion: number;
+  snapshotId: string;
+  createdAt: string;
+  environment: ModTelemetryEnvironment;
+  mods: ModTelemetryModEntry[];
+  errors: ModTelemetrySourceError[];
+  uploadReady: boolean;
+}
+
+export interface ModTelemetrySnapshotSummary {
+  snapshotId: string;
+  environmentId: string;
+  createdAt: string;
+  runtime: Runtime;
+  s1Version?: string | null;
+  modCount: number;
+  errorCount: number;
+  uploadReady: boolean;
+}
+
 export type ConfigFileType = 'MelonPreferences' | 'LoaderConfig' | 'Json' | 'Other';
 
 export interface ConfigEntry {

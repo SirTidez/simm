@@ -19,6 +19,8 @@ pub mod nexus_mods;
 pub mod plugins;
 pub mod security_scanner;
 pub mod settings;
+pub mod telemetry;
 pub mod thunderstore;
+pub mod tray;
 pub mod update_check;
 pub mod userlibs;

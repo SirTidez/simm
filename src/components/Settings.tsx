@@ -12,6 +12,7 @@ import type {
   LinuxReadinessCheckStatus,
   LinuxReadinessStatus,
   SecurityScannerStatus,
+  TelemetryPreferences,
 } from "../types";
 import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
@@ -90,6 +91,40 @@ function getActiveBuiltInTheme(
   }
 
   return BUILT_IN_THEME_OPTIONS.find((theme) => theme.id === selectedThemeId)?.id || "modern-blue";
+}
+
+function TelemetrySettingsPanel() {
+  const [preferences, setPreferences] = useState<TelemetryPreferences | null>(null);
+  useEffect(() => {
+    const loadPreferences = ApiService.getTelemetryPreferences;
+    if (typeof loadPreferences === 'function') {
+      void loadPreferences().then(setPreferences).catch(() => undefined);
+    }
+  }, []);
+  const save = async (updates: Partial<TelemetryPreferences>) => {
+    const savePreferences = ApiService.saveTelemetryPreferences;
+    if (typeof savePreferences === 'function') {
+      const next = await savePreferences(updates);
+      setPreferences(next);
+    }
+  };
+  return (
+    <div className="settings-subsection">
+      <div className="settings-subsection__header">
+        <div>
+          <span className="settings-section__eyebrow">Live Telemetry</span>
+          <h3><Icon name="waveSquare" /> Local diagnostic collection</h3>
+        </div>
+        <p>Collection stays on this device until you review an export preview. SIMM never uploads from these controls.</p>
+      </div>
+      <div className="settings-field-grid">
+        <div className="settings-field settings-field--toggle"><SettingsToggle label="Collect local telemetry" description="Monitor warnings and errors while a registered Schedule I environment is running." checked={preferences?.collectionEnabled ?? false} onChange={(collectionEnabled) => void save({ collectionEnabled })} /></div>
+        <div className="settings-field settings-field--toggle"><SettingsToggle label="Include sanitized excerpts" description="Keep a readable, sanitized error excerpt alongside its grouping fingerprint." checked={preferences?.errorExcerptsEnabled ?? false} onChange={(errorExcerptsEnabled) => void save({ errorExcerptsEnabled })} /></div>
+        <div className="settings-field settings-field--compact"><label>Local retention</label><SettingsSelect ariaLabel="Telemetry retention" value={String(preferences?.retentionDays ?? 30)} onValueChange={(value) => void save({ retentionDays: Number(value) })} options={[{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }, { value: '90', label: '90 days' }]} /></div>
+        <div className="settings-field settings-field--compact"><label>Window close behavior</label><SettingsSelect ariaLabel="Window close behavior" value={preferences?.closeBehavior ?? 'ask'} onValueChange={(closeBehavior) => void save({ closeBehavior: closeBehavior as 'ask' | 'tray' | 'quit' })} options={[{ value: 'ask', label: 'Ask every time' }, { value: 'tray', label: 'Hide to tray' }, { value: 'quit', label: 'Quit SIMM' }]} /></div>
+      </div>
+    </div>
+  );
 }
 
 export function normalizeModIconCacheLimitMb(value: unknown): number {
@@ -1141,6 +1176,10 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                     </div>
                   )}
                 </div>
+
+                <hr className="settings-divider" />
+
+                <TelemetrySettingsPanel />
 
                 <hr className="settings-divider" />
 

@@ -38,13 +38,6 @@ fn build_environment_update_fields_from_result(
         serde_json::json!(result.update_available),
     ));
 
-    if let Some(ref current_manifest_id) = result.current_manifest_id {
-        updates.push((
-            "lastManifestId".to_string(),
-            serde_json::json!(current_manifest_id),
-        ));
-    }
-
     if let Some(ref remote_manifest_id) = result.remote_manifest_id {
         updates.push((
             "remoteManifestId".to_string(),
@@ -78,6 +71,107 @@ fn build_environment_update_fields_from_result(
     ));
 
     updates
+}
+
+fn normalize_result_for_persisted_manifest(
+    mut result: UpdateCheckResult,
+    installed_manifest_id: Option<&str>,
+) -> UpdateCheckResult {
+    if installed_manifest_id.is_some()
+        && installed_manifest_id == result.remote_manifest_id.as_deref()
+    {
+        result.update_available = false;
+        result.update_game_version = None;
+    } else if !result.update_available {
+        result.update_game_version = None;
+    }
+
+    result
+}
+
+async fn normalize_result_for_current_environment(
+    env_service: &EnvironmentService,
+    environment_id: &str,
+    result: UpdateCheckResult,
+) -> UpdateCheckResult {
+    match env_service.get_environment(environment_id).await {
+        Ok(Some(environment)) => {
+            normalize_result_for_persisted_manifest(result, environment.last_manifest_id.as_deref())
+        }
+        Ok(None) => result,
+        Err(error) => {
+            log::warn!(
+                "[UpdateCheck] Could not reload {} before persisting its result: {:#}",
+                environment_id,
+                error
+            );
+            result
+        }
+    }
+}
+
+pub async fn run_background_update_checks(
+    pool: Arc<SqlitePool>,
+    app: AppHandle,
+    manual: bool,
+) -> Result<(), String> {
+    let env_service =
+        Arc::new(EnvironmentService::new(pool.clone()).map_err(|error| error.to_string())?);
+    let environments = env_service
+        .get_environments()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut settings_service =
+        SettingsService::new(pool.clone()).map_err(|error| error.to_string())?;
+    let settings = settings_service
+        .load_settings()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !manual && settings.auto_check_updates == Some(false) {
+        return Ok(());
+    }
+    let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
+    let now = chrono::Utc::now();
+    let due = environments
+        .into_iter()
+        .filter(|environment| {
+            manual
+                || environment
+                    .last_update_check
+                    .map(|last| now.signed_duration_since(last).num_minutes() >= interval_minutes)
+                    .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    if due.is_empty() {
+        return Ok(());
+    }
+    let results = UpdateCheckService::new(pool)
+        .check_all_environments(&due)
+        .await
+        .map_err(|error| error.to_string())?;
+    for (environment_id, result) in results {
+        let result =
+            normalize_result_for_current_environment(env_service.as_ref(), &environment_id, result)
+                .await;
+        if let Err(error) = env_service
+            .update_environment(
+                &environment_id,
+                build_environment_update_fields_from_result(&result),
+            )
+            .await
+        {
+            log::warn!(
+                "[UpdateCheck] Failed to persist background check for {}: {:#}",
+                environment_id,
+                error
+            );
+        }
+        let _ = events::emit_update_check_complete(&app, environment_id.clone(), result.clone());
+        if result.update_available {
+            let _ = events::emit_update_available(&app, environment_id, result);
+        }
+    }
+    Ok(())
 }
 
 fn extract_mod_name_for_event(result: &serde_json::Value) -> String {
@@ -440,28 +534,43 @@ pub async fn check_update(
         let now = chrono::Utc::now();
         if let Some(last_check) = env.last_update_check {
             if now.signed_duration_since(last_check).num_minutes() < interval_minutes {
-                return serde_json::to_value(UpdateCheckResult {
-                    update_available: env.update_available.unwrap_or(false),
-                    current_manifest_id: env.last_manifest_id.clone(),
-                    remote_manifest_id: env.remote_manifest_id.clone(),
-                    remote_build_id: env.remote_build_id.clone(),
-                    branch: env.branch.clone(),
-                    app_id: env.app_id.clone(),
-                    checked_at: last_check,
-                    error: None,
-                    current_game_version: env.current_game_version.clone(),
-                    update_game_version: env.update_game_version.clone(),
-                })
-                .map_err(|e| e.to_string());
+                let result = normalize_result_for_persisted_manifest(
+                    UpdateCheckResult {
+                        update_available: env.update_available.unwrap_or(false),
+                        current_manifest_id: env.last_manifest_id.clone(),
+                        remote_manifest_id: env.remote_manifest_id.clone(),
+                        remote_build_id: env.remote_build_id.clone(),
+                        branch: env.branch.clone(),
+                        app_id: env.app_id.clone(),
+                        checked_at: last_check,
+                        error: None,
+                        current_game_version: env.current_game_version.clone(),
+                        update_game_version: env.update_game_version.clone(),
+                    },
+                    env.last_manifest_id.as_deref(),
+                );
+                return serde_json::to_value(result).map_err(|e| e.to_string());
             }
         }
     }
 
     let update_service = UpdateCheckService::new(db.inner().clone());
-    let result = update_service
-        .check_update_for_environment(&env)
+    // A direct update action still needs the Steam installation as a version
+    // witness. Steam and managed environments can share a manifest while the
+    // managed copy is on an older game version.
+    let peer_environments = env_service
+        .get_environments()
         .await
         .map_err(|e| e.to_string())?;
+    let mut results = update_service
+        .check_all_environments(&peer_environments)
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = results
+        .remove(&environment_id)
+        .ok_or_else(|| "Environment update result was not produced".to_string())?;
+    let result =
+        normalize_result_for_current_environment(&env_service, &environment_id, result).await;
 
     if let Err(e) = env_service
         .update_environment(
@@ -525,15 +634,23 @@ pub async fn check_all_updates(
     };
 
     let update_service = UpdateCheckService::new(db.inner().clone());
-    let results = update_service
+    let mut results = update_service
         .check_all_environments(&envs_to_check)
         .await
         .map_err(|e| e.to_string())?;
 
     // Persist and emit environment update-check results before running the slower mod update scan.
-    for (env_id, result) in &results {
+    let environment_ids = results.keys().cloned().collect::<Vec<_>>();
+    for env_id in environment_ids {
+        let Some(result) = results.remove(&env_id) else {
+            continue;
+        };
+        let result = normalize_result_for_current_environment(&env_service, &env_id, result).await;
         if let Err(e) = env_service
-            .update_environment(env_id, build_environment_update_fields_from_result(result))
+            .update_environment(
+                &env_id,
+                build_environment_update_fields_from_result(&result),
+            )
             .await
         {
             log::warn!(
@@ -547,6 +664,7 @@ pub async fn check_all_updates(
         if result.update_available {
             let _ = events::emit_update_available(&app, env_id.clone(), result.clone());
         }
+        results.insert(env_id, result);
     }
 
     // Also check tracked library mod updates once, then project the result to installed environments.
@@ -819,10 +937,13 @@ pub async fn get_update_status(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mod_updates_payload, compare_thunderstore_versions, extract_mod_name_for_event,
-        get_github_service, select_latest_thunderstore_version,
+        build_environment_update_fields_from_result, build_mod_updates_payload,
+        compare_thunderstore_versions, extract_mod_name_for_event, get_github_service,
+        normalize_result_for_persisted_manifest, select_latest_thunderstore_version,
     };
     use crate::db::initialize_pool;
+    use crate::types::UpdateCheckResult;
+    use chrono::Utc;
     use serial_test::serial;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -888,6 +1009,49 @@ mod tests {
             "modFileName": "File.dll"
         });
         assert_eq!(extract_mod_name_for_event(&from_file), "File.dll");
+    }
+
+    #[test]
+    fn update_check_persistence_never_replaces_the_installed_manifest_baseline() {
+        let fields = build_environment_update_fields_from_result(&UpdateCheckResult {
+            update_available: true,
+            current_manifest_id: Some("installed-manifest".to_string()),
+            remote_manifest_id: Some("remote-manifest".to_string()),
+            remote_build_id: None,
+            branch: "beta".to_string(),
+            app_id: "3164500".to_string(),
+            checked_at: Utc::now(),
+            error: None,
+            current_game_version: Some("0.4.5f2".to_string()),
+            update_game_version: Some("0.4.6f5".to_string()),
+        });
+
+        assert!(!fields.iter().any(|(key, _)| key == "lastManifestId"));
+        assert!(fields
+            .iter()
+            .any(|(key, value)| { key == "remoteManifestId" && value == "remote-manifest" }));
+    }
+
+    #[test]
+    fn persisted_manifest_match_clears_a_late_stale_update_result() {
+        let result = normalize_result_for_persisted_manifest(
+            UpdateCheckResult {
+                update_available: true,
+                current_manifest_id: Some("old-manifest".to_string()),
+                remote_manifest_id: Some("new-manifest".to_string()),
+                remote_build_id: None,
+                branch: "beta".to_string(),
+                app_id: "3164500".to_string(),
+                checked_at: Utc::now(),
+                error: None,
+                current_game_version: Some("0.4.6f5".to_string()),
+                update_game_version: Some("0.4.6f5".to_string()),
+            },
+            Some("new-manifest"),
+        );
+
+        assert!(!result.update_available);
+        assert_eq!(result.update_game_version, None);
     }
 
     #[test]

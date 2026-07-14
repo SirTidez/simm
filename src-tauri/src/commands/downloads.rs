@@ -65,12 +65,8 @@ pub async fn start_download(
     };
 
     let download_service = get_download_service().await?;
-    download_service
-        .start_download(environment_id.clone(), options, app)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Update environment status
+    // Persist the lifecycle transition before spawning the process so a fast
+    // completion cannot be overwritten by this command's initial status write.
     env_service
         .update_environment(
             &environment_id,
@@ -78,6 +74,29 @@ pub async fn start_download(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+    if let Err(error) = download_service
+        .start_download(environment_id.clone(), options, app)
+        .await
+    {
+        if let Err(rollback_error) = env_service
+            .update_environment(
+                &environment_id,
+                vec![(
+                    "status".to_string(),
+                    serde_json::to_value(&env.status).expect("environment status serializes"),
+                )],
+            )
+            .await
+        {
+            log::warn!(
+                "[DepotDownloader] Failed to restore environment {} after download startup failed: {:#}",
+                environment_id,
+                rollback_error
+            );
+        }
+        return Err(error.to_string());
+    }
 
     Ok(serde_json::json!({ "success": true, "downloadId": environment_id }))
 }

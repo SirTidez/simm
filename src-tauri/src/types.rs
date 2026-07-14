@@ -418,6 +418,197 @@ pub enum ModSource {
     Unknown,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryPreferences {
+    pub collection_enabled: bool,
+    pub upload_enabled: bool,
+    pub error_excerpts_enabled: bool,
+    #[serde(default = "default_telemetry_retention_days")]
+    pub retention_days: u32,
+    #[serde(default)]
+    pub close_behavior: TelemetryCloseBehavior,
+    pub updated_at: Option<String>,
+}
+
+fn default_telemetry_retention_days() -> u32 {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum TelemetryCloseBehavior {
+    Tray,
+    #[default]
+    Ask,
+    Quit,
+}
+
+impl Default for TelemetryPreferences {
+    fn default() -> Self {
+        Self {
+            collection_enabled: false,
+            upload_enabled: false,
+            error_excerpts_enabled: false,
+            retention_days: default_telemetry_retention_days(),
+            close_behavior: TelemetryCloseBehavior::Ask,
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryPreferencesUpdate {
+    pub collection_enabled: Option<bool>,
+    pub upload_enabled: Option<bool>,
+    pub error_excerpts_enabled: Option<bool>,
+    pub retention_days: Option<u32>,
+    pub close_behavior: Option<TelemetryCloseBehavior>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveTelemetrySession {
+    pub session_id: String,
+    pub environment_id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub environment: ModTelemetryEnvironment,
+    pub mods: Vec<ModTelemetryModEntry>,
+    pub monitoring: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveTelemetryEvent {
+    pub event_id: String,
+    pub session_id: String,
+    pub environment_id: String,
+    pub occurred_at: String,
+    pub severity: String,
+    pub attribution: String,
+    pub mod_key: Option<String>,
+    pub mod_name: Option<String>,
+    pub fingerprint: String,
+    pub message: Option<String>,
+    pub source: String,
+    pub line_number: Option<u32>,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveTelemetryStatus {
+    pub environment_id: String,
+    pub running: bool,
+    pub monitoring: bool,
+    pub active_session_id: Option<String>,
+    pub event_count: u64,
+    pub last_event_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveTelemetryExport {
+    pub schema_version: u32,
+    pub exported_at: String,
+    pub sessions: Vec<LiveTelemetryExportSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveTelemetryExportSession {
+    pub session_id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub environment: ModTelemetryEnvironment,
+    pub mods: Vec<ModTelemetryModEntry>,
+    pub events: Vec<LiveTelemetryExportEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveTelemetryExportEvent {
+    pub event_id: String,
+    pub occurred_at: String,
+    pub severity: String,
+    pub attribution: String,
+    pub mod_key: Option<String>,
+    pub mod_name: Option<String>,
+    pub fingerprint: String,
+    pub message: Option<String>,
+    pub source: String,
+    pub line_number: Option<u32>,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModTelemetryCaptureRequest {
+    pub environment_id: String,
+    pub max_log_lines: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModTelemetryEnvironment {
+    pub app_id: String,
+    pub branch: String,
+    pub runtime: Runtime,
+    pub s1_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModTelemetryModEntry {
+    pub mod_key: String,
+    pub name: String,
+    pub file_name: String,
+    pub version: Option<String>,
+    pub source: Option<ModSource>,
+    pub author: Option<String>,
+    pub managed: bool,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModTelemetrySourceError {
+    pub mod_key: Option<String>,
+    pub mod_name: String,
+    pub level: String,
+    pub message: Option<String>,
+    pub timestamp: Option<String>,
+    pub source: Option<String>,
+    pub line_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModTelemetrySnapshot {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub created_at: String,
+    pub environment: ModTelemetryEnvironment,
+    pub mods: Vec<ModTelemetryModEntry>,
+    pub errors: Vec<ModTelemetrySourceError>,
+    pub upload_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModTelemetrySnapshotSummary {
+    pub snapshot_id: String,
+    pub environment_id: String,
+    pub created_at: String,
+    pub runtime: Runtime,
+    pub s1_version: Option<String>,
+    pub mod_count: usize,
+    pub error_count: usize,
+    pub upload_ready: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SecurityScanState {

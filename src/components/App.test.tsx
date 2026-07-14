@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { App } from './App';
+import { App, formatDashboardTime, formatDashboardTimeDetail } from './App';
 import type { ReactNode } from 'react';
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -316,6 +316,13 @@ vi.mock('./DownloadsPanel', () => ({
 }));
 
 describe('App', () => {
+  it('formats home dashboard check timestamps without seconds or a four-digit year', () => {
+    const localTimestampSeconds = Math.floor(new Date(2026, 6, 13, 17, 59, 29).getTime() / 1000);
+
+    expect(formatDashboardTime(localTimestampSeconds)).toBe('07/13/26, 5:59 PM');
+    expect(formatDashboardTimeDetail(localTimestampSeconds)).toBe('7/13/2026, 5:59:29 PM');
+  });
+
   beforeEach(() => {
     modLibraryOverlayMocks.lastNavigationState = null;
     modLibraryOverlayMocks.suspendOnRender = false;

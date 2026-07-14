@@ -16,8 +16,6 @@ import { logger } from '../services/logger';
 import {
   batchUpdateCheckEventName,
   batchUpdateCheckRef,
-  lastUpdateCheckTimeRef,
-  notifyBatchUpdateCheckStarted,
 } from '../services/updateCheckCoordinator';
 import { isSteamEnvironment, sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
 import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
@@ -263,6 +261,7 @@ export type WorkspaceRoute =
   | { view: 'logs'; environmentId: string }
   | { view: 'config'; environmentId: string }
   | { view: 'settings' }
+  | { view: 'telemetry' }
   | { view: 'accounts' }
   | { view: 'help' }
   | { view: 'welcome' }
@@ -277,9 +276,8 @@ export function EnvironmentList({
   onOpenWorkspace,
   onSelectEnvironment
 }: EnvironmentListProps) {
-  const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, checkAllUpdates, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
+  const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
   const { settings } = useSettingsStore();
-  const autoCheckIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
   const [, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
@@ -301,7 +299,6 @@ export function EnvironmentList({
   const [pluginsCounts, setPluginsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.plugins));
   const [userLibsCounts, setUserLibsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.userLibs));
   const [melonLoaderStatus, setMelonLoaderStatusState] = useState<Map<string, MelonLoaderStatus>>(() => new Map(environmentCountCache.melonLoader));
-  const completedEnvironmentCount = environments.filter(env => env.status === 'completed').length;
   const adjustedProfileManifest = profileExport.manifest ? {
     ...profileExport.manifest,
     profile: {
@@ -372,7 +369,6 @@ export function EnvironmentList({
   useEffect(() => {
     environmentsRef.current = environments;
   }, [environments]);
-  const initialUpdateCheckDoneRef = useRef(false);
   const melonLoaderPrefetchStartedRef = useRef(false);
   const autoInstallMelonLoaderInFlightRef = useRef<Set<string>>(new Set());
   const autoInstallMelonLoaderRef = useRef<((environmentId: string) => Promise<void>) | null>(null);
@@ -583,114 +579,6 @@ export function EnvironmentList({
       setAuthCredentials(null);
     }
   };
-
-  // Perform automatic update check (respects 60-minute interval)
-  const performAutoUpdateCheck = useCallback(async (isManual: boolean = false) => {
-    batchUpdateCheckRef.current = false;
-    const completedEnvironments = environmentsRef.current.filter(env => env.status === 'completed');
-
-    if (completedEnvironments.length === 0) {
-      console.log('[EnvironmentList] No completed environments to check for updates');
-      return;
-    }
-
-    const now = Date.now();
-    const checkInterval = (settings?.updateCheckInterval || 60) * 60 * 1000; // Convert minutes to milliseconds
-
-    // If this is not a manual check, enforce the 60-minute minimum interval
-    if (!isManual && lastUpdateCheckTimeRef.current !== null) {
-      const timeSinceLastCheck = now - lastUpdateCheckTimeRef.current;
-      if (timeSinceLastCheck < checkInterval) {
-        const minutesRemaining = Math.ceil((checkInterval - timeSinceLastCheck) / 60000);
-        console.log(`[EnvironmentList] Skipping automatic update check - last check was ${Math.floor(timeSinceLastCheck / 60000)} minutes ago. Next check in ${minutesRemaining} minute(s)`);
-        batchUpdateCheckRef.current = false;
-        return;
-      }
-    }
-
-    console.log(`[EnvironmentList] ${isManual ? 'Manual' : 'Automatic'} update check starting for ${completedEnvironments.length} environment(s)`);
-    lastUpdateCheckTimeRef.current = now;
-
-    const dueEnvironmentIds = completedEnvironments
-      .filter(env => {
-        if (isManual || !env.lastUpdateCheck) return true;
-
-        const lastCheckMs = typeof env.lastUpdateCheck === 'number'
-          ? env.lastUpdateCheck * 1000
-          : new Date(env.lastUpdateCheck).getTime();
-
-        return Number.isNaN(lastCheckMs) || now - lastCheckMs >= checkInterval;
-      })
-      .map(env => env.id);
-
-    try {
-      batchUpdateCheckRef.current = true;
-      notifyBatchUpdateCheckStarted(dueEnvironmentIds);
-      await checkAllUpdates(false);
-      console.log(`[EnvironmentList] Update check completed successfully`);
-    } catch (err) {
-      console.error('[EnvironmentList] Failed to check for updates:', err);
-      // Reset last check time on error so it can retry sooner
-      if (!isManual) {
-        lastUpdateCheckTimeRef.current = null;
-      }
-    } finally {
-      batchUpdateCheckRef.current = false;
-    }
-  }, [settings?.updateCheckInterval, checkAllUpdates]);
-
-  // Check for updates automatically on app launch (after environments are loaded)
-  useEffect(() => {
-    if (initialUpdateCheckDoneRef.current) {
-      return;
-    }
-    if (environments.length === 0) {
-      console.log('[EnvironmentList] Waiting for environments to load...');
-      return;
-    }
-
-    if (completedEnvironmentCount === 0) {
-      console.log('[EnvironmentList] No completed environments to check for updates');
-      return;
-    }
-
-    // Always run update check on app launch (first time)
-    console.log(`[EnvironmentList] Running initial update check on app launch for ${completedEnvironmentCount} environment(s)`);
-    initialUpdateCheckDoneRef.current = true;
-    performAutoUpdateCheck(false).catch(err => {
-      console.error('[EnvironmentList] Failed to check for updates on app launch:', err);
-    });
-  }, [environments.length, completedEnvironmentCount, performAutoUpdateCheck]); // Run when environments are first loaded
-
-  // Set up automatic update check interval (every 60 minutes or based on settings)
-  useEffect(() => {
-    // Clear any existing interval
-    if (autoCheckIntervalRef.current) {
-      clearInterval(autoCheckIntervalRef.current);
-    }
-
-    const checkInterval = (settings?.updateCheckInterval || 60) * 60 * 1000; // Convert minutes to milliseconds
-    const autoCheckEnabled = settings?.autoCheckUpdates !== false; // Default to true
-
-    if (autoCheckEnabled) {
-      console.log(`[EnvironmentList] Setting up automatic update checks every ${settings?.updateCheckInterval || 60} minutes`);
-
-      // Set up interval for automatic checks
-      autoCheckIntervalRef.current = setInterval(() => {
-        performAutoUpdateCheck(false);
-      }, checkInterval);
-    } else {
-      console.log('[EnvironmentList] Automatic update checks are disabled in settings');
-    }
-
-    // Cleanup on unmount
-    return () => {
-      if (autoCheckIntervalRef.current) {
-        clearInterval(autoCheckIntervalRef.current);
-        autoCheckIntervalRef.current = null;
-      }
-    };
-  }, [settings?.updateCheckInterval, settings?.autoCheckUpdates, performAutoUpdateCheck]);
 
   // Listen for Tauri auth events and password prompts
   useEffect(() => {
@@ -1461,10 +1349,6 @@ export function EnvironmentList({
     setConfigOverlay({ isOpen: true, envId });
   };
 
-  const handleOpenProfileImport = () => {
-    onOpenWorkspace?.({ view: 'profiles' });
-  };
-
   const handleShareProfile = async (env: Environment) => {
     setProfileExport({
       isOpen: true,
@@ -1779,7 +1663,14 @@ export function EnvironmentList({
     if (!value) return 'Never checked';
     const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
     if (Number.isNaN(date.getTime())) return 'Unknown';
-    return date.toLocaleString();
+    return date.toLocaleString('en-US', {
+      month: '2-digit',
+      day: '2-digit',
+      year: '2-digit',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
   };
 
   const melonLoaderSelectorEnvironment = showMelonLoaderVersionSelector
@@ -1974,8 +1865,17 @@ export function EnvironmentList({
           linuxMelonLoaderRequirements.launchOptions,
         ].filter(Boolean).join(' - ')
       : undefined;
+    const currentGameVersion = env.currentGameVersion || 'Unknown';
+    const hasGameUpdate = isCompleted && Boolean(env.updateAvailable && env.updateGameVersion);
     const metrics = [
-      { label: 'Version', value: isCompleted ? (env.currentGameVersion || 'Unknown') : 'Not installed' },
+      {
+        label: 'Version',
+        value: isCompleted
+          ? (hasGameUpdate ? `${currentGameVersion} -> ${env.updateGameVersion}` : currentGameVersion)
+          : 'Not installed',
+        tone: hasGameUpdate ? 'warning' : undefined,
+        title: hasGameUpdate ? `Game update available: ${currentGameVersion} -> ${env.updateGameVersion}` : undefined,
+      },
       {
         label: 'Mods',
         value: isCompleted
@@ -2080,7 +1980,9 @@ export function EnvironmentList({
               </div>
               <div className="environment-card__identity-badges">
                 <span className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}>
-                  {env.branch}
+                  {isSteam && !['main', 'beta', 'alternate', 'alternate-beta'].includes(env.branch.toLowerCase())
+                    ? `Closed beta (${env.branch})`
+                    : env.branch}
                 </span>
                 <span className="badge badge-gray">{env.runtime}</span>
                 {isSteam && <SteamBadge />}
@@ -2141,16 +2043,6 @@ export function EnvironmentList({
               <strong title={metric.title || metric.value}>{metric.value}</strong>
             </div>
           ))}
-          {env.updateAvailable && env.updateGameVersion && (
-            <div
-              className="environment-metric environment-metric--warning"
-              aria-label={`Available update: ${env.updateGameVersion}`}
-              title={`Available update: ${env.updateGameVersion}`}
-            >
-              <span>Available update</span>
-              <strong>{env.updateGameVersion}</strong>
-            </div>
-          )}
         </div>
 
         <div className="environment-card__action-group">
@@ -2660,19 +2552,6 @@ export function EnvironmentList({
         onToggleItem={handleToggleProfileItem}
         onSave={() => void handleSaveProfile()}
       />
-
-      <div className="environment-list__toolbar">
-        <SimmButton
-          type="button"
-          variant="secondary"
-          className="btn btn-secondary"
-          onClick={handleOpenProfileImport}
-          disabled={!onOpenWorkspace}
-        >
-          <Icon name="upload" />
-          Profiles
-        </SimmButton>
-      </div>
 
       <div className="environments-grid">
         {sortEnvironmentsForDisplay(environments).map(renderEnvironmentCard)}

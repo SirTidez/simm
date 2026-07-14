@@ -396,13 +396,11 @@ describe('EnvironmentList', () => {
     });
   });
 
-  it('opens the profiles workspace from the environments toolbar', async () => {
-    const onOpenWorkspace = vi.fn();
-    render(<EnvironmentList onOpenWorkspace={onOpenWorkspace} />);
+  it('does not render a duplicate profiles action above the environments', async () => {
+    render(<EnvironmentList onOpenWorkspace={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /profiles/i }));
-
-    expect(onOpenWorkspace).toHaveBeenCalledWith({ view: 'profiles' });
+    await screen.findByText('Env One');
+    expect(screen.queryByRole('button', { name: /profiles/i })).toBeNull();
   });
 
   it('launches non-Steam environments through Steam by default', async () => {

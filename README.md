@@ -110,6 +110,14 @@ Managed mod installs use copied files instead of symlinks, so normal launch path
 
 Linux releases build AppImage and Debian package artifacts. Steam-managed Schedule I installs launch through Steam so Proton can load MelonLoader with the required `WINEDLLOVERRIDES="version=n,b" %command%` launch option.
 
+Flatpak bundles are also available for Linux testing. The Flatpak sandbox is configured with home-directory access because SIMM must detect and manage host Steam/Proton installs and user-selected game environments. Build a test bundle with Docker:
+
+```powershell
+.\scripts\build-flatpak-container.cmd
+```
+
+The bundle is written to `target/flatpak/dev.lockwirelabs.simm-<version>.flatpak`.
+
 On Linux, Settings includes a readiness section for Steam, Protontricks, DepotDownloader, MLVScan/.NET SDK, and `simm://`/`nxm://` desktop handlers. Use **Repair Desktop Links** after moving an AppImage or changing default protocol handlers.
 
 ### Install On Linux

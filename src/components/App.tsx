@@ -139,6 +139,10 @@ const Settings = lazyNamed(
   () => import('./Settings'),
   (module) => module.Settings,
 );
+const TelemetryWorkspace = lazyNamed(
+  () => import('./TelemetryWorkspace'),
+  (module) => module.TelemetryWorkspace,
+);
 const SteamAccountOverlay = lazyNamed(
   () => import('./SteamAccountOverlay'),
   (module) => module.SteamAccountOverlay,
@@ -349,17 +353,36 @@ const compareVersionCores = (left: string, right: string) => {
   return 0;
 };
 
-function formatDashboardTime(value: string | number | undefined) {
-  if (!value) return 'Not checked yet';
+function parseDashboardTime(value: string | number | undefined) {
+  if (!value) return null;
   const date = typeof value === 'number'
     ? new Date(value > 1_000_000_000_000 ? value : value * 1000)
     : new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return 'Not checked yet';
+    return null;
   }
 
-  return date.toLocaleString();
+  return date;
+}
+
+export function formatDashboardTime(value: string | number | undefined) {
+  const date = parseDashboardTime(value);
+  if (!date) return 'Not checked yet';
+
+  return date.toLocaleString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    year: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+export function formatDashboardTimeDetail(value: string | number | undefined) {
+  const date = parseDashboardTime(value);
+  return date ? date.toLocaleString('en-US') : 'Not checked yet';
 }
 
 type HomeFeedItem = {
@@ -667,7 +690,7 @@ function HomeDashboard({
             </>
           ) : (
             <>
-              <strong title={formatDashboardTime(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
+              <strong title={formatDashboardTimeDetail(lastChecked)}>{formatDashboardTime(lastChecked)}</strong>
               <small>Environment metadata</small>
             </>
           )}
@@ -1598,6 +1621,37 @@ function AppContent() {
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
 
+  useEffect(() => {
+    let unlistenCloseRequest: (() => void) | undefined;
+    void listen('simm_close_requested', async () => {
+      try {
+        const preferences = await ApiService.getTelemetryPreferences();
+        let keepRunning = preferences.closeBehavior === 'tray';
+        if (preferences.closeBehavior === 'ask') {
+          keepRunning = await confirm(
+            'Keep SIMM running in the system tray? Monitoring and configured update checks will continue.',
+            { title: 'Close SIMM', kind: 'info' },
+          );
+          const remember = await confirm(
+            'Remember this close behavior? You can change it later in Live Telemetry.',
+            { title: 'Remember close behavior', kind: 'info' },
+          );
+          if (remember) {
+            await ApiService.saveTelemetryPreferences({ closeBehavior: keepRunning ? 'tray' : 'quit' });
+          }
+        }
+        if (keepRunning) {
+          await ApiService.hideMainWindow();
+        } else {
+          await ApiService.quitSimm();
+        }
+      } catch (error) {
+        logger.error('Failed to handle SIMM close request', { error: getErrorMessage(error, 'unknown error') });
+      }
+    }).then((unlisten) => { unlistenCloseRequest = unlisten; });
+    return () => unlistenCloseRequest?.();
+  }, []);
+
   // Check if SIMM directory was just created on app launch
   useEffect(() => {
     if (!hasSettings || startupSetupCheckedRef.current) {
@@ -2155,6 +2209,8 @@ function AppContent() {
             onRunSetupGuide={() => pushWorkspace({ view: 'welcome' }, { welcomeMode: 'setup' })}
           />
         );
+      case 'telemetry':
+        return <TelemetryWorkspace onClose={onCloseHandler} />;
       case 'profiles':
         return (
           <ProfilesWorkspace preferredEnvironmentId={selectedEnvironmentId} />
@@ -2464,6 +2520,16 @@ function AppContent() {
       onClick: () => openWorkspace({ view: 'help' }),
       disabled: false,
       title: 'Open help and troubleshooting guidance',
+    },
+    {
+      key: 'telemetry',
+      label: 'Telemetry',
+      icon: 'waveSquare',
+      active: activeWorkspace.view === 'telemetry',
+      variant: 'btn-secondary' as const,
+      onClick: () => openWorkspace({ view: 'telemetry' }),
+      disabled: false,
+      title: 'Open live telemetry diagnostics',
     },
     {
       key: 'settings',

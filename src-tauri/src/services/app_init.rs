@@ -48,6 +48,12 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         }
     };
 
+    crate::services::game_session_monitor::GameSessionMonitor::new(pool.clone(), app.clone())
+        .start();
+    log::info!("Live telemetry game-session monitor initialized");
+    crate::services::runtime_update_scheduler::start(pool.clone(), app.clone());
+    log::info!("Background update scheduler initialized");
+
     let env_service = match EnvironmentService::new(pool.clone()) {
         Ok(s) => s,
         Err(e) => {

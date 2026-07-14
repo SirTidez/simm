@@ -1,0 +1,38 @@
+id: dev.lockwirelabs.simm
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: simmrust
+appstream-compose: false
+
+build-options:
+  no-debuginfo: true
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # SIMM manages Steam/Proton installations and user-selected environment folders.
+  - --filesystem=home
+
+modules:
+  - name: simm
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 simmrust /app/bin/simmrust
+      - install -Dm644 dev.lockwirelabs.simm.desktop /app/share/applications/dev.lockwirelabs.simm.desktop
+      - install -Dm644 dev.lockwirelabs.simm.metainfo.xml /app/share/metainfo/dev.lockwirelabs.simm.metainfo.xml
+      - install -Dm644 dev.lockwirelabs.simm.png /app/share/icons/hicolor/256x256/apps/dev.lockwirelabs.simm.png
+    sources:
+      - type: file
+        path: ../target/release/simmrust
+        dest-filename: simmrust
+      - type: file
+        path: dev.lockwirelabs.simm.desktop
+      - type: file
+        path: dev.lockwirelabs.simm.metainfo.xml
+      - type: file
+        path: ../src-tauri/icons/128x128@2x.png
+        dest-filename: dev.lockwirelabs.simm.png

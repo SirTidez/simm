@@ -946,6 +946,8 @@ mod tests {
             "environments",
             "secrets",
             "mod_metadata",
+            "telemetry_preferences",
+            "telemetry_snapshots",
         ] {
             assert!(tables.contains(&table.to_string()));
         }

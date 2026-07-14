@@ -20,7 +20,12 @@ RUN apt-get update \
       build-essential \
       ca-certificates \
       curl \
+      appstream-util \
+      desktop-file-utils \
+      elfutils \
       file \
+      flatpak \
+      flatpak-builder \
       git \
       libayatana-appindicator3-dev \
       libfuse2 \
@@ -62,7 +67,8 @@ RUN if [ "${BUN_VERSION}" = "latest" ]; then \
 WORKDIR /workspace
 
 COPY docker/linux/build-linux.sh /usr/local/bin/simm-build-linux
-RUN chmod +x /usr/local/bin/simm-build-linux
+COPY docker/linux/build-flatpak.sh /usr/local/bin/simm-build-flatpak
+RUN chmod +x /usr/local/bin/simm-build-linux /usr/local/bin/simm-build-flatpak
 
 ENTRYPOINT ["simm-build-linux"]
 CMD ["build"]

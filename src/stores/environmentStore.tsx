@@ -259,29 +259,17 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             return next;
           });
 
-          // Update environment status based on progress
-          if (data.status === 'completed') {
-            void updateEnvironment(data.downloadId, { status: 'completed' }).catch((err) => {
-              console.error('Failed to apply completed status update from progress event:', err);
-            });
-          } else if (data.status === 'error') {
+          if (data.status === 'error') {
             void updateEnvironment(data.downloadId, { status: 'error' }).catch((err) => {
               console.error('Failed to apply error status update from progress event:', err);
             });
           }
         });
 
-        unlistenComplete = await onComplete(async ({ downloadId, manifestId }: { downloadId: string; manifestId?: string }) => {
-          const updates: any = {
-            status: 'completed',
-            lastUpdated: new Date().toISOString(),
-            updateAvailable: false
-          };
-          if (manifestId) {
-            updates.lastManifestId = manifestId;
-            updates.remoteManifestId = manifestId;
-          }
-          await updateEnvironment(downloadId, updates);
+        unlistenComplete = await onComplete(async ({ downloadId }: { downloadId: string; manifestId?: string }) => {
+          // DepotDownloader persists completion before emitting this event. Refresh
+          // that backend-owned state instead of independently writing manifests here.
+          await refreshEnvironments();
           setProgress(prev => {
             const next = new Map(prev);
             next.delete(downloadId);
@@ -300,12 +288,6 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             console.warn('Failed to auto-extract game version:', err);
           }
 
-          if (!manifestId) {
-            console.info(
-              'Download completed without a manifest ID in the completion event; skipping immediate manifest backfill.',
-              { downloadId },
-            );
-          }
         });
 
         unlistenError = await onError(async ({ downloadId }: { downloadId: string }) => {
@@ -345,7 +327,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       if (unlistenUpdateAvailable) unlistenUpdateAvailable();
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
     };
-  }, [updateEnvironment, applyUpdateResultLocally]);
+  }, [updateEnvironment, applyUpdateResultLocally, refreshEnvironments]);
 
   return (
     <EnvironmentStoreContext.Provider

@@ -1,0 +1,51 @@
+# Mod Telemetry Server Resources
+
+This scaffold keeps SIMM telemetry local and disabled by default. Future server upload must stay anonymous: no machine identifiers, no usernames, no absolute paths, no stable client IDs, and no implicit collection before explicit opt-in.
+
+## Live Event Contract
+
+Live telemetry uses a separate `schemaVersion: 1` export contract rather than the older manual snapshot payload. SIMM records sessions locally while a registered Schedule I environment is running, then produces an inspectable export preview without sending it anywhere.
+
+- A local session holds environment branch/runtime/version and an immutable mod inventory captured when monitoring starts.
+- Each `WARN`, `ERROR`, or `FATAL` occurrence is retained with time, attribution (`mod`, `system`, or `unknown`), source label, line number, and attach/live origin.
+- `fingerprint` is a hash of normalized sanitized text for grouping. It is not a user ID and should not be treated as a privacy guarantee for low-entropy messages.
+- Readable `message` content is absent unless the user separately enables sanitized excerpts.
+- Export creates fresh random session and event IDs. It never exports SIMM's local environment ID, install path, process ID, command line, or database IDs.
+
+The client does not implement HTTP upload, queueing, retries, or endpoint configuration. Server work should consume this versioned batch only after the user has reviewed the local preview.
+
+## Client Payload
+
+The client snapshot payload is intentionally smaller than the local UI model:
+
+- `schemaVersion`: payload contract version.
+- `snapshotId`: local-only random UUID, regenerated per capture.
+- `createdAt`: capture timestamp.
+- `environment`: Schedule I app id, branch, runtime, and optional S1 version.
+- `mods`: installed mod name, file name, version, source, author, managed/disabled flags, and a per-snapshot mod key.
+- `errors`: mod-attributed error level, timestamp, source log label, line number, optional sanitized/truncated excerpt, and optional mod key.
+
+Do not upload local `environmentId`, output directories, storage IDs, usernames, emails, full logs, raw paths, Steam account data, Nexus tokens, or any stable install/client identifier.
+
+## Minimum Server Resources
+
+- `POST /v1/telemetry/snapshots`: accept anonymous snapshot batches. Require schema validation, payload size limits, and rate limiting by IP at the edge only.
+- `GET /v1/telemetry/schema`: expose current accepted schema versions and field constraints so old clients can fail closed.
+- `GET /v1/mods/{source}/{name}/health`: aggregated public mod health summaries for users and developers.
+- `GET /v1/developers/mods/{source}/{name}/errors`: authenticated developer view for aggregated error signatures.
+- `POST /v1/developers/mod-claims`: developer claim workflow for associating source/name pairs with an account.
+
+## Storage Model
+
+- Raw snapshots should have short retention, such as 14-30 days.
+- Aggregates should be keyed by mod source/name/version, runtime, S1 version, and error signature.
+- Error signatures should be derived from sanitized exception type/message/stack frame patterns, not full raw excerpts.
+- Any IP-based rate-limit metadata should be kept outside the analytical dataset and expire quickly.
+
+## Privacy And Abuse Controls
+
+- Upload requires explicit opt-in and must be reversible from settings.
+- A local preview should show the exact upload payload before first upload.
+- Server ingestion should reject payloads containing path-like strings, emails, oversized excerpts, or unexpected identifier fields.
+- Public views should enforce minimum sample thresholds before showing mod-specific error rates.
+- Developer views should show aggregate signatures and counts, not individual user sessions.
