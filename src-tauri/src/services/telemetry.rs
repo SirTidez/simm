@@ -785,4 +785,18 @@ mod tests {
             event_fingerprint("System.Exception", "mod"),
         );
     }
+
+    #[test]
+    fn live_telemetry_v1_fixture_uses_the_documented_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-fixtures/live-telemetry-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["schemaVersion"], 1);
+        assert!(fixture["uploadId"]
+            .as_str()
+            .unwrap()
+            .parse::<uuid::Uuid>()
+            .is_ok());
+    }
 }
