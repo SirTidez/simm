@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use serde_json::Value;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter, Listener};
 use tokio::sync::mpsc;

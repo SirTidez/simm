@@ -744,38 +744,11 @@ mod tests {
     use super::*;
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
+    use crate::test_helpers::EnvVarGuard;
     use crate::types::schedule_i_config;
-    #[cfg(target_os = "windows")]
     use serial_test::serial;
     use tauri::test::mock_app;
-    #[cfg(target_os = "windows")]
     use tempfile::tempdir;
-
-    #[cfg(target_os = "windows")]
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    #[cfg(target_os = "windows")]
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, original }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(value) = &self.original {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
 
     #[cfg(target_os = "windows")]
     struct CurrentDirGuard {
