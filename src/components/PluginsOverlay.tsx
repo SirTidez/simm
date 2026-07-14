@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
@@ -89,33 +89,16 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
   } | null>(null);
   const [togglingPluginKey, setTogglingPluginKey] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!isOpen || !environmentId) {
-      setPlugins([]);
-      setPluginsDirectory('');
-      setEnvironment(null);
-      setError(null);
-      setSearchTerm('');
-      setSelectedPluginKey(null);
-      setContextMenu(null);
-      setPendingDelete(null);
-      return;
-    }
-
-    void loadEnvironment();
-    void loadPlugins();
-  }, [environmentId, isOpen]);
-
-  const loadEnvironment = async () => {
+  const loadEnvironment = useCallback(async () => {
     try {
       const env = await ApiService.getEnvironment(environmentId);
       setEnvironment(env);
     } catch (err) {
       console.error('Failed to load environment:', err);
     }
-  };
+  }, [environmentId]);
 
-  const loadPlugins = async () => {
+  const loadPlugins = useCallback(async () => {
     setLoading(true);
     setError(null);
 
@@ -132,7 +115,24 @@ export function PluginsOverlay({ isOpen, environmentId, onPluginsChanged }: Prop
     } finally {
       setLoading(false);
     }
-  };
+  }, [environmentId]);
+
+  useEffect(() => {
+    if (!isOpen || !environmentId) {
+      setPlugins([]);
+      setPluginsDirectory('');
+      setEnvironment(null);
+      setError(null);
+      setSearchTerm('');
+      setSelectedPluginKey(null);
+      setContextMenu(null);
+      setPendingDelete(null);
+      return;
+    }
+
+    void loadEnvironment();
+    void loadPlugins();
+  }, [environmentId, isOpen, loadEnvironment, loadPlugins]);
 
   const filteredPlugins = useMemo(() => {
     const normalizedQuery = searchTerm.trim().toLowerCase();

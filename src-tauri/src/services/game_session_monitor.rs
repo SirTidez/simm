@@ -6,14 +6,14 @@ use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Listener};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, MissedTickBehavior};
 
 use crate::services::environment::EnvironmentService;
 use crate::services::logs::LogsService;
 use crate::services::telemetry::TelemetryService;
-use crate::types::LiveTelemetrySession;
+use crate::types::{LiveTelemetrySession, TelemetryPreferences};
 
 const PROCESS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
 const LOG_RECONCILIATION_LINES: usize = 500;
@@ -44,6 +44,21 @@ impl GameSessionMonitor {
 
     async fn run(self) -> Result<()> {
         let (change_tx, mut change_rx) = mpsc::unbounded_channel::<String>();
+        let (preferences_tx, mut preferences_rx) = mpsc::unbounded_channel::<TelemetryPreferences>();
+        self.app.listen("telemetry_preferences_changed", move |event| {
+            match serde_json::from_str::<TelemetryPreferences>(event.payload()) {
+                Ok(preferences) => {
+                    let _ = preferences_tx.send(preferences);
+                }
+                Err(error) => log::warn!(
+                    "Ignoring invalid telemetry preference update event: {}",
+                    error
+                ),
+            }
+        });
+
+        let telemetry = TelemetryService::new(self.pool.clone());
+        let mut preferences = telemetry.get_preferences().await?;
         let mut active = HashMap::<String, ActiveSession>::new();
         let mut watchers = HashMap::<String, RecommendedWatcher>::new();
         let mut interval = tokio::time::interval(PROCESS_RECONCILIATION_INTERVAL);
@@ -52,7 +67,7 @@ impl GameSessionMonitor {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    self.reconcile(&mut active, &mut watchers, &change_tx, true).await?;
+                    self.reconcile(&preferences, &mut active, &mut watchers, &change_tx, true).await?;
                 }
                 Some(environment_id) = change_rx.recv() => {
                     let mut changed = HashSet::from([environment_id]);
@@ -60,8 +75,12 @@ impl GameSessionMonitor {
                         changed.insert(next_environment_id);
                     }
                     for environment_id in changed {
-                        self.ingest_environment(&environment_id, &mut active, "live", false).await?;
+                        self.ingest_environment(&environment_id, &mut active, "live", false, &preferences).await?;
                     }
+                }
+                Some(updated_preferences) = preferences_rx.recv() => {
+                    preferences = updated_preferences;
+                    self.reconcile(&preferences, &mut active, &mut watchers, &change_tx, false).await?;
                 }
             }
         }
@@ -69,13 +88,12 @@ impl GameSessionMonitor {
 
     async fn reconcile(
         &self,
+        preferences: &TelemetryPreferences,
         active: &mut HashMap<String, ActiveSession>,
         watchers: &mut HashMap<String, RecommendedWatcher>,
         change_tx: &mpsc::UnboundedSender<String>,
         reconcile_logs: bool,
     ) -> Result<()> {
-        let telemetry = TelemetryService::new(self.pool.clone());
-        let preferences = telemetry.get_preferences().await?;
         if !preferences.collection_enabled {
             self.stop_all(active, watchers).await?;
             return Ok(());
@@ -97,7 +115,9 @@ impl GameSessionMonitor {
             let normalized_output = normalize_path(Path::new(&environment.output_dir));
             let running = running_directories.contains(&normalized_output);
             if running && !active.contains_key(&environment.id) {
-                let session = telemetry.start_live_session(&environment.id).await?;
+                let session = TelemetryService::new(self.pool.clone())
+                    .start_live_session(&environment.id)
+                    .await?;
                 self.emit_status(&session.environment_id, true, Some(&session.session_id));
                 self.start_log_watcher(
                     &environment.id,
@@ -112,7 +132,7 @@ impl GameSessionMonitor {
                         last_line_number: 0,
                     },
                 );
-                self.ingest_environment(&environment.id, active, "attach", true)
+                self.ingest_environment(&environment.id, active, "attach", true, preferences)
                     .await?;
             } else if !running && active.contains_key(&environment.id) {
                 self.stop_environment(&environment.id, active, watchers)
@@ -133,7 +153,7 @@ impl GameSessionMonitor {
         if reconcile_logs {
             let active_ids = active.keys().cloned().collect::<Vec<_>>();
             for environment_id in active_ids {
-                self.ingest_environment(&environment_id, active, "live", false)
+                self.ingest_environment(&environment_id, active, "live", false, preferences)
                     .await?;
             }
         }
@@ -175,6 +195,7 @@ impl GameSessionMonitor {
         active: &mut HashMap<String, ActiveSession>,
         origin: &str,
         attach: bool,
+        preferences: &TelemetryPreferences,
     ) -> Result<()> {
         let Some(active_session) = active.get_mut(environment_id) else {
             return Ok(());
@@ -206,7 +227,7 @@ impl GameSessionMonitor {
             .collect::<Vec<_>>();
         active_session.last_line_number = latest_line.max(active_session.last_line_number);
         let events = TelemetryService::new(self.pool.clone())
-            .record_live_lines(&active_session.session, new_lines, origin)
+            .record_live_lines_with_preferences(&active_session.session, new_lines, origin, preferences)
             .await?;
         for event in events {
             let _ = self.app.emit("live_telemetry_event", &event);

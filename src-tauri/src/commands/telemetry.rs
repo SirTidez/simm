@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::services::telemetry::TelemetryService;
 use crate::types::{
@@ -23,12 +23,19 @@ pub async fn get_telemetry_preferences(
 #[tauri::command]
 pub async fn save_telemetry_preferences(
     db: State<'_, Arc<SqlitePool>>,
+    app: AppHandle,
     updates: TelemetryPreferencesUpdate,
 ) -> Result<TelemetryPreferences, String> {
-    TelemetryService::new(db.inner().clone())
+    let preferences = TelemetryService::new(db.inner().clone())
         .save_preferences(updates)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    if let Err(error) = app.emit("telemetry_preferences_changed", &preferences) {
+        log::warn!("Failed to notify the live telemetry monitor about preference changes: {}", error);
+    }
+
+    Ok(preferences)
 }
 
 #[tauri::command]

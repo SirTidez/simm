@@ -181,13 +181,13 @@ impl TelemetryService {
         Ok(())
     }
 
-    pub async fn record_live_lines(
+    pub async fn record_live_lines_with_preferences(
         &self,
         session: &LiveTelemetrySession,
         lines: Vec<LogLine>,
         origin: &str,
+        preferences: &TelemetryPreferences,
     ) -> Result<Vec<LiveTelemetryEvent>> {
-        let preferences = self.get_preferences().await?;
         if !preferences.collection_enabled {
             return Ok(Vec::new());
         }

@@ -39,6 +39,14 @@ pub async fn backup_database(db: State<'_, Arc<SqlitePool>>) -> Result<String, S
 }
 
 #[tauri::command]
+pub async fn repair_database(db: State<'_, Arc<SqlitePool>>) -> Result<String, String> {
+    let backup_path = crate::db::repair_database(db.inner().as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(backup_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub async fn get_custom_themes(
     db: State<'_, Arc<SqlitePool>>,
 ) -> Result<Vec<CustomThemeDefinition>, String> {

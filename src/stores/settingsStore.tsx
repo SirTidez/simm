@@ -168,7 +168,7 @@ export function SettingsStoreProvider({ children }: { children: React.ReactNode 
       setError(err instanceof Error ? err.message : 'Failed to load custom themes');
       throw err;
     }
-  }, [applyTheme, settings, themesDirectory, customThemes]);
+  }, [applyTheme, settings]);
 
   const refreshDepotDownloader = useCallback(async () => {
     if (refreshDepotDownloaderInFlightRef.current) {

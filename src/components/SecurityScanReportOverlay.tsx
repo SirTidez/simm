@@ -49,6 +49,7 @@ const severityOrder: Record<Severity, number> = {
 };
 
 const filterOptions: Array<Severity | 'All'> = ['All', 'Critical', 'High', 'Medium', 'Low'];
+const emptyFindings: Finding[] = [];
 
 const summaryStyles = {
   verified: {
@@ -216,7 +217,7 @@ export function SecurityScanReportView({
   const files = activeReport?.files || [];
   const activeFile = files[activeFileIndex] || files[0] || null;
   const activeResult = activeFile?.result || null;
-  const findings = activeResult?.findings || [];
+  const findings = activeResult?.findings ?? emptyFindings;
   const families = activeResult?.threatFamilies || [];
 
   const filteredFindings = useMemo(() => {

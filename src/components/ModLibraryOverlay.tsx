@@ -1791,7 +1791,6 @@ export function ModLibraryOverlay({
       steamNetworkLibInstalledVersion,
       steamNetworkLibLatestVersion,
       steamNetworkLibNeedsUpdate,
-      getLatestDownloadedVersionForGroups,
     ],
   );
 
@@ -2231,7 +2230,7 @@ export function ModLibraryOverlay({
 
       return { status: "passthrough" };
     },
-    [],
+    [openSecurityReport],
   );
 
   const clearNexusManualTimeout = useCallback(() => {
@@ -3711,7 +3710,6 @@ export function ModLibraryOverlay({
       downloadThunderstoreWithSecurity,
       findThunderstorePackageForRuntime,
       downloadGithubReleaseWithSecurity,
-      getLatestThunderstorePackageVersion,
       getEffectiveNexusDownloadAccess,
       getEntryVersionLabel,
       loadLibrarySnapshot,
@@ -4456,6 +4454,7 @@ export function ModLibraryOverlay({
       );
     },
     [
+      loadLibrarySnapshot,
       notifyLibraryUpdated,
       promptDownloadedInstallTargets,
       resolveDownloadedEntriesByStorageIds,
@@ -4559,6 +4558,7 @@ export function ModLibraryOverlay({
       });
     },
     [
+      buildInstallNoOpNotice,
       getCompatibleInstallSummary,
       installEntryToEnvironmentIds,
       notifyLibraryUpdated,
@@ -6159,7 +6159,6 @@ export function ModLibraryOverlay({
     }
     return filteredDownloadedGroups;
   }, [
-    downloadedGroups,
     filteredDownloadedGroups,
     isGroupUpdateAvailable,
     libraryTab,

@@ -721,16 +721,16 @@ export function ModsOverlay({
   useEffect(() => {
     navigationChangeHandlerRef.current?.(reportedNavigationState);
   }, [reportedNavigationState]);
-  const loadEnvironment = async () => {
+  const loadEnvironment = useCallback(async () => {
     try {
       const env = await ApiService.getEnvironment(environmentId);
       setEnvironment(env);
     } catch (err) {
       console.error('Failed to load environment:', err);
     }
-  };
+  }, [environmentId]);
 
-  const refreshNexusDownloadAccess = async () => {
+  const refreshNexusDownloadAccess = useCallback(async () => {
     try {
       const status = await ApiService.getNexusOAuthStatus();
       const isConnected = !!status.connected;
@@ -743,7 +743,7 @@ export function ModsOverlay({
       setHasNexusDownloadAccess(false);
       setNexusRequiresSiteConfirmation(true);
     }
-  };
+  }, []);
 
   const clearNexusManualTimeout = () => {
     if (nexusManualTimeoutRef.current !== null) {
@@ -1034,7 +1034,7 @@ export function ModsOverlay({
     }
   };
 
-  const loadInstalledMods = async (showSpinner: boolean = true, refresh: boolean = false) => {
+  const loadInstalledMods = useCallback(async (showSpinner: boolean = true, refresh: boolean = false) => {
     const requestId = ++activeLoadRequestRef.current;
     if (showSpinner) {
       setLoading(true);
@@ -1068,18 +1068,18 @@ export function ModsOverlay({
         setLoading(false);
       }
     }
-  };
+  }, [environmentId]);
 
-  const loadDownloadedLibrary = async () => {
+  const loadDownloadedLibrary = useCallback(async () => {
     try {
       const library = await ApiService.getModLibrary();
       setDownloadedMods(library.downloaded || []);
     } catch (err) {
       console.warn('Failed to load downloaded mod library:', err);
     }
-  };
+  }, []);
 
-  const loadCachedModUpdates = async () => {
+  const loadCachedModUpdates = useCallback(async () => {
     try {
       const summary = await ApiService.getModUpdatesSummary(environmentId);
       const updatesMap = new Map<string, ModUpdateInfo>();
@@ -1095,13 +1095,13 @@ export function ModsOverlay({
     } catch (err) {
       console.warn('Failed to load cached mod update summary:', err);
     }
-  };
+  }, [environmentId, onModUpdatesChecked]);
 
-  const loadModsPanelData = async () => {
+  const loadModsPanelData = useCallback(async () => {
     await loadInstalledMods(true, false);
     await loadDownloadedLibrary();
     void loadCachedModUpdates();
-  };
+  }, [loadCachedModUpdates, loadDownloadedLibrary, loadInstalledMods]);
 
   useEffect(() => {
     if (isOpen && environmentId) {
@@ -1173,7 +1173,16 @@ export function ModsOverlay({
       window.clearTimeout(modsReloadTimerRef.current);
       modsReloadTimerRef.current = null;
     }
-  }, [isOpen, environmentId]);
+  }, [
+    environmentId,
+    isOpen,
+    loadCachedModUpdates,
+    loadEnvironment,
+    loadInstalledMods,
+    loadModsPanelData,
+    onModsChanged,
+    refreshNexusDownloadAccess,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !environmentId) {
@@ -1208,14 +1217,14 @@ export function ModsOverlay({
       unlisten?.();
       metadataRefreshRunningRef.current = false;
     };
-  }, [isOpen, environmentId]);
+  }, [environmentId, isOpen, loadDownloadedLibrary, loadInstalledMods]);
 
-  const openModView = (nextView: ModViewState) => {
+  const openModView = useCallback((nextView: ModViewState) => {
     if (modsScrollContainerRef.current) {
       modsScrollTopRef.current = modsScrollContainerRef.current.scrollTop;
     }
     setActiveModView(nextView);
-  };
+  }, []);
   // Refresh library when notified (e.g. after download in another view) or when opening
   useEffect(() => {
     if (!isOpen || !environmentId) return;
@@ -1227,7 +1236,7 @@ export function ModsOverlay({
       void loadDownloadedLibrary();
     }
     return () => window.removeEventListener('library-updated', handler);
-  }, [isOpen, environmentId]);
+  }, [environmentId, isOpen, loadDownloadedLibrary]);
 
   useEffect(() => {
     const handleManualDownloadResult = async (event: Event) => {
@@ -1292,7 +1301,16 @@ export function ModsOverlay({
       clearNexusManualTimeout();
       window.removeEventListener('nexus-manual-download-result', handleManualDownloadResult as EventListener);
     };
-  }, [environment?.name, environmentId, installingNexusMod, onModsChanged, showToast]);
+  }, [
+    environment?.name,
+    environmentId,
+    installingNexusMod,
+    loadCachedModUpdates,
+    loadDownloadedLibrary,
+    loadInstalledMods,
+    onModsChanged,
+    showToast,
+  ]);
 
   const checkModUpdates = async (showErrors: boolean = false) => {
     try {
@@ -2158,7 +2176,15 @@ export function ModsOverlay({
         error: err instanceof Error ? err.message : 'Failed to link local mod source.',
       } : current);
     }
-  }, [closeLocalSourceLink, environmentId, onModsChanged, showToast]);
+  }, [
+    closeLocalSourceLink,
+    environmentId,
+    loadCachedModUpdates,
+    loadDownloadedLibrary,
+    loadInstalledMods,
+    onModsChanged,
+    showToast,
+  ]);
 
   const prepareLocalOwnershipStep = useCallback(async (
     mod: ModInfo,
@@ -2268,7 +2294,7 @@ export function ModsOverlay({
         || (mod.version || '').toLowerCase().includes(query);
     });
 
-  const openInstalledModView = (mod: ModInfo) => {
+  const openInstalledModView = useCallback((mod: ModInfo) => {
     const update = modUpdates.get(mod.fileName);
     openModView({
       id: `${mod.fileName}-${mod.path}`,
@@ -2290,7 +2316,8 @@ export function ModsOverlay({
       securityScan: mod.securityScan,
       kind: 'installed',
     });
-  };  const selectedInstalledMod = useMemo(() => {
+  }, [modUpdates, openModView]);
+  const selectedInstalledMod = useMemo(() => {
     if (!isOpen || activeModView?.kind !== 'installed') {
       return null;
     }
@@ -2318,7 +2345,7 @@ export function ModsOverlay({
     if (!stillValid) {
       openInstalledModView(filteredMods[0]);
     }
-  }, [activeModView, filteredMods, isOpen]);
+  }, [activeModView, filteredMods, isOpen, openInstalledModView]);
 
   if (!isOpen) return null;
 

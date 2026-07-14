@@ -151,6 +151,7 @@ fn main() {
             commands::settings::get_settings,
             commands::settings::save_settings,
             commands::settings::backup_database,
+            commands::settings::repair_database,
             commands::settings::get_custom_themes,
             commands::settings::get_themes_directory,
             commands::telemetry::get_telemetry_preferences,

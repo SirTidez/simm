@@ -50,6 +50,7 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
 
     let migrator = sqlx::migrate!();
     maybe_create_startup_backup(&pool, &migrator, database_preexisted).await?;
+    reconcile_historical_migration_checksums(&pool, &migrator).await?;
     if let Err(err) = migrator.run(&pool).await {
         match err {
             MigrateError::VersionMismatch(version) => {
@@ -67,6 +68,7 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
         }
     }
 
+    ensure_additive_schema(&pool).await?;
     migrate_from_files(&pool).await?;
     set_app_meta_value(&pool, APP_VERSION_KEY, current_app_version()).await?;
 
@@ -355,6 +357,46 @@ async fn database_requires_migration_backup(
     Ok(applied_migrations != expected_migrations)
 }
 
+/// Normalizes checksums for migrations that are already applied to a database with
+/// SIMM's foundational schema. That allows SQLx to apply later migrations instead
+/// of treating a historical migration-file revision as a permanent startup error.
+async fn reconcile_historical_migration_checksums(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    if !has_expected_schema(pool).await? || !table_exists(pool, "_sqlx_migrations").await? {
+        return Ok(());
+    }
+
+    let applied: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations")
+            .fetch_all(pool)
+            .await
+            .context("Failed to inspect applied migration checksums")?;
+
+    for (version, checksum) in applied {
+        let Some(expected) = migrator.iter().find(|migration| migration.version == version) else {
+            continue;
+        };
+        if checksum == expected.checksum.as_ref() {
+            continue;
+        }
+
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(expected.checksum.as_ref())
+            .bind(version)
+            .execute(pool)
+            .await
+            .with_context(|| format!("Failed to reconcile checksum for migration {version}"))?;
+        log::info!(
+            "Reconciled historical checksum for applied database migration {}",
+            version
+        );
+    }
+
+    Ok(())
+}
+
 async fn maybe_create_startup_backup(
     pool: &SqlitePool,
     migrator: &sqlx::migrate::Migrator,
@@ -429,6 +471,31 @@ pub async fn create_database_backup(pool: &SqlitePool, reason: &str) -> Result<P
         log::warn!("Failed to prune old database backups: {}", error);
     }
 
+    Ok(backup_path)
+}
+
+pub async fn repair_database(pool: &SqlitePool) -> Result<PathBuf> {
+    if !has_expected_schema(pool).await? {
+        anyhow::bail!("The foundational SIMM database tables are missing. Restore a database backup before retrying repair.");
+    }
+
+    let backup_path = create_database_backup(pool, "pre-repair").await?;
+    ensure_additive_schema(pool).await?;
+    let migrator = sqlx::migrate!();
+    reconcile_historical_migration_checksums(pool, &migrator).await?;
+    migrator
+        .run(pool)
+        .await
+        .context("Failed to complete database migrations during repair")?;
+    sqlx::query("PRAGMA optimize")
+        .execute(pool)
+        .await
+        .context("Failed to optimize repaired database")?;
+
+    log::info!(
+        "Database repair completed using backup {}",
+        backup_path.display()
+    );
     Ok(backup_path)
 }
 
@@ -637,6 +704,94 @@ async fn has_expected_schema(pool: &SqlitePool) -> Result<bool> {
         .iter()
         .all(|table| tables.contains(&table.to_string())))
 }
+
+/// Restores additive tables for legacy databases whose historical migration checksum no longer
+/// matches the checked-in migration. Those databases intentionally bypass sqlx's migration
+/// runner, so later profiles and telemetry migrations would otherwise never be applied.
+async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
+    const ADDITIVE_SCHEMA_STATEMENTS: &[&str] = &[
+        "CREATE TABLE IF NOT EXISTS profiles (\
+            id TEXT PRIMARY KEY, \
+            name TEXT NOT NULL, \
+            runtime TEXT NOT NULL CHECK (runtime IN ('IL2CPP', 'Mono')), \
+            is_default INTEGER NOT NULL DEFAULT 0, \
+            manifest TEXT NOT NULL, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_default_runtime \
+            ON profiles(runtime) WHERE is_default = 1",
+        "CREATE INDEX IF NOT EXISTS idx_profiles_runtime ON profiles(runtime)",
+        "CREATE TABLE IF NOT EXISTS environment_profiles (\
+            environment_id TEXT PRIMARY KEY, \
+            active_profile_id TEXT NOT NULL, \
+            last_applied_at TEXT, \
+            FOREIGN KEY(active_profile_id) REFERENCES profiles(id) ON DELETE RESTRICT\
+        )",
+        "CREATE TABLE IF NOT EXISTS telemetry_preferences (\
+            id INTEGER PRIMARY KEY CHECK (id = 1), \
+            data TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE TABLE IF NOT EXISTS telemetry_snapshots (\
+            id TEXT PRIMARY KEY, \
+            environment_id TEXT NOT NULL, \
+            created_at TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            FOREIGN KEY(environment_id) REFERENCES environments(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_snapshots_environment_created \
+            ON telemetry_snapshots(environment_id, created_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_sessions (\
+            id TEXT PRIMARY KEY, \
+            environment_id TEXT NOT NULL, \
+            started_at TEXT NOT NULL, \
+            ended_at TEXT, \
+            data TEXT NOT NULL, \
+            FOREIGN KEY(environment_id) REFERENCES environments(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_sessions_environment_started \
+            ON telemetry_sessions(environment_id, started_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_events (\
+            id TEXT PRIMARY KEY, \
+            session_id TEXT NOT NULL, \
+            environment_id TEXT NOT NULL, \
+            occurred_at TEXT NOT NULL, \
+            severity TEXT NOT NULL, \
+            fingerprint TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            FOREIGN KEY(session_id) REFERENCES telemetry_sessions(id) ON DELETE CASCADE, \
+            FOREIGN KEY(environment_id) REFERENCES environments(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_events_environment_occurred \
+            ON telemetry_events(environment_id, occurred_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_events_session_occurred \
+            ON telemetry_events(session_id, occurred_at ASC)",
+    ];
+
+    for statement in ADDITIVE_SCHEMA_STATEMENTS {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .context("Failed to ensure additive database schema")?;
+    }
+
+    for table in [
+        "profiles",
+        "environment_profiles",
+        "telemetry_preferences",
+        "telemetry_snapshots",
+        "telemetry_sessions",
+        "telemetry_events",
+    ] {
+        if !table_exists(pool, table).await? {
+            anyhow::bail!("Database repair did not restore required table {table}");
+        }
+    }
+
+    Ok(())
+}
+
 async fn migrate_secret_file(
     pool: &SqlitePool,
     dir: &Path,
@@ -948,9 +1103,81 @@ mod tests {
             "mod_metadata",
             "telemetry_preferences",
             "telemetry_snapshots",
+            "telemetry_sessions",
+            "telemetry_events",
         ] {
             assert!(tables.contains(&table.to_string()));
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initialize_pool_repairs_telemetry_schema_after_version_mismatch() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        for table in [
+            "telemetry_events",
+            "telemetry_sessions",
+            "telemetry_snapshots",
+            "telemetry_preferences",
+        ] {
+            sqlx::query(&format!("DROP TABLE {table}"))
+                .execute(&*pool)
+                .await?;
+        }
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(vec![0_u8; 48])
+            .bind(3_i64)
+            .execute(&*pool)
+            .await?;
+        drop(pool);
+
+        let repaired_pool = initialize_pool().await?;
+        for table in [
+            "telemetry_preferences",
+            "telemetry_snapshots",
+            "telemetry_sessions",
+            "telemetry_events",
+        ] {
+            assert!(table_exists(&repaired_pool, table).await?);
+        }
+        let applied: Vec<(i64, Vec<u8>)> =
+            sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&*repaired_pool)
+                .await?;
+        let expected: Vec<(i64, Vec<u8>)> = sqlx::migrate!()
+            .iter()
+            .map(|migration| (migration.version, migration.checksum.as_ref().to_vec()))
+            .collect();
+        assert_eq!(applied, expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn repair_database_creates_a_backup_and_restores_additive_tables() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query("DROP TABLE telemetry_events")
+            .execute(&*pool)
+            .await?;
+        sqlx::query("DROP TABLE telemetry_sessions")
+            .execute(&*pool)
+            .await?;
+
+        let backup_path = repair_database(&pool).await?;
+        assert!(backup_path.exists());
+        assert!(table_exists(&pool, "telemetry_sessions").await?);
+        assert!(table_exists(&pool, "telemetry_events").await?);
 
         Ok(())
     }

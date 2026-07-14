@@ -39,6 +39,8 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
 
   const filteredEvents = useMemo(() => events.filter((event) => severity === 'all' || event.severity === severity), [events, severity]);
   const activeCount = statuses.filter((status) => status.monitoring).length;
+  const hasTelemetryHistory = statuses.length > 0 || events.length > 0;
+  const collectionEnabled = preferences?.collectionEnabled ?? false;
 
   const updatePreferences = async (updates: Partial<TelemetryPreferences>) => {
     setBusy(true);
@@ -67,7 +69,7 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <section className="telemetry-workspace">
+    <section className="telemetry-workspace modal-content workspace-panel">
       <WorkspacePageHeader eyebrow="Diagnostics" title="Live Telemetry" description="Local, opt-in session diagnostics captured while a registered game installation is running.">
         <div className="telemetry-workspace__header-actions">
           <span className={`telemetry-workspace__status ${activeCount > 0 ? 'telemetry-workspace__status--active' : ''}`}>
@@ -112,25 +114,49 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
       </div>
       {feedback && <p className="telemetry-workspace__feedback" role="status">{feedback}</p>}
 
-      <div className="telemetry-workspace__sessions">
-        {statuses.length === 0 ? <p>No telemetry sessions have been recorded yet.</p> : statuses.map((status) => {
-          const environment = environments.find((entry) => entry.id === status.environmentId);
-          return <div key={status.environmentId} className="telemetry-session-row">
-            <div><strong>{environment?.name ?? status.environmentId}</strong><span>{status.monitoring ? 'Monitoring Latest.log' : 'Not running'}</span></div>
-            <span>{status.eventCount} events</span><span>{status.lastEventAt ?? 'No events'}</span>
-          </div>;
-        })}
-      </div>
+      {!hasTelemetryHistory ? (
+        <section className="telemetry-workspace__empty-state" role="status">
+          <div className="telemetry-workspace__empty-icon"><Icon name="waveSquare" /></div>
+          <div className="telemetry-workspace__empty-copy">
+            <span>Local history</span>
+            <h3>{collectionEnabled ? 'No telemetry recorded yet' : 'Local telemetry is off'}</h3>
+            <p>
+              {collectionEnabled
+                ? 'SIMM will begin monitoring when a registered Schedule I environment runs while the application is open or in the tray.'
+                : 'Enable collection to record local warnings and errors while a registered Schedule I environment is running.'}
+            </p>
+            {!collectionEnabled && (
+              <SimmButton className="btn btn-primary btn-small" disabled={busy} onClick={() => void updatePreferences({ collectionEnabled: true })}>
+                <Icon name="waveSquare" /> Enable telemetry
+              </SimmButton>
+            )}
+          </div>
+        </section>
+      ) : (
+        <div className="telemetry-workspace__history">
+          <section className="telemetry-workspace__sessions" aria-label="Telemetry sessions">
+            <header className="telemetry-workspace__section-heading"><span>Monitoring</span><strong>{activeCount > 0 ? `${activeCount} active` : `${statuses.length} tracked`}</strong></header>
+            {statuses.length === 0 ? <p className="telemetry-workspace__empty-copy">No registered environments are being monitored right now.</p> : statuses.map((status) => {
+              const environment = environments.find((entry) => entry.id === status.environmentId);
+              return <div key={status.environmentId} className="telemetry-session-row">
+                <div><strong>{environment?.name ?? status.environmentId}</strong><span>{status.monitoring ? 'Monitoring Latest.log' : 'Not running'}</span></div>
+                <span>{status.eventCount} events</span><span>{status.lastEventAt ?? 'No events'}</span>
+              </div>;
+            })}
+          </section>
 
-      <div className="telemetry-workspace__event-list" aria-live="polite">
-        {filteredEvents.length === 0 ? <p>No matching warnings or errors in local history.</p> : filteredEvents.map((event) => (
-          <article key={event.eventId} className={`telemetry-event telemetry-event--${event.severity.toLowerCase()}`}>
-            <div className="telemetry-event__meta"><strong>{event.severity}</strong><span>{event.modName ?? event.attribution}</span><span>{event.occurredAt}</span></div>
-            <code>{event.fingerprint}</code>
-            {event.message && <pre>{event.message}</pre>}
-          </article>
-        ))}
-      </div>
+          <section className="telemetry-workspace__event-list" aria-live="polite" aria-label="Telemetry event history">
+            <header className="telemetry-workspace__section-heading"><span>Event history</span><strong>{filteredEvents.length} shown</strong></header>
+            {filteredEvents.length === 0 ? <p className="telemetry-workspace__empty-copy">No warnings or errors match the current filters.</p> : filteredEvents.map((event) => (
+              <article key={event.eventId} className={`telemetry-event telemetry-event--${event.severity.toLowerCase()}`}>
+                <div className="telemetry-event__meta"><strong>{event.severity}</strong><span>{event.modName ?? event.attribution}</span><span>{event.occurredAt}</span></div>
+                <code>{event.fingerprint}</code>
+                {event.message && <pre>{event.message}</pre>}
+              </article>
+            ))}
+          </section>
+        </div>
+      )}
     </section>
   );
 }

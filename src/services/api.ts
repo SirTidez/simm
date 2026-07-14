@@ -106,6 +106,11 @@ export class ApiService {
     return { success: true, path };
   }
 
+  static async repairDatabase(): Promise<{ success: boolean; backupPath: string }> {
+    const backupPath = await invoke<string>('repair_database');
+    return { success: true, backupPath };
+  }
+
   static async getCustomThemes(): Promise<CustomThemeDefinition[]> {
     return invoke('get_custom_themes');
   }

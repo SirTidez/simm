@@ -955,7 +955,20 @@ export function EnvironmentList({
       pluginsRefreshTimerMap.clear();
       userLibsRefreshTimerMap.clear();
     };
-  }, [authModal.isOpen, authModal.envId, environments, progress]);
+  }, [
+    authModal.isOpen,
+    authModal.envId,
+    environments,
+    progress,
+    setFeaturedDownloadCounts,
+    setMelonLoaderStatus,
+    setModUpdatesCounts,
+    setModsCounts,
+    setPluginsCounts,
+    setUserLibsCounts,
+    settings?.updateCheckInterval,
+    showMessage,
+  ]);
 
   const handleCancelDownload = async (env: Environment) => {
     try {
@@ -1126,6 +1139,42 @@ export function EnvironmentList({
     }
   };
 
+  const loadMelonLoaderReleases = useCallback(async (envId: string) => {
+    setLoadingMelonLoaderReleases(prev => new Set(prev).add(envId));
+    try {
+      const releases = await ApiService.getMelonLoaderReleases(envId);
+      setMelonLoaderReleases(prev => {
+        const next = new Map(prev);
+        next.set(envId, releases);
+        return next;
+      });
+      const latestStableTag = getLatestStableMelonLoaderTag(releases);
+
+      if (releases.length > 0) {
+        const defaultVersion = latestStableTag ?? releases[0].tag_name;
+        setSelectedMelonLoaderVersion(prev => {
+          const next = new Map(prev);
+          next.set(envId, defaultVersion);
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load MelonLoader releases:', err);
+      setMessageOverlay({
+        isOpen: true,
+        title: 'Error',
+        message: 'Failed to load MelonLoader releases',
+        type: 'error'
+      });
+    } finally {
+      setLoadingMelonLoaderReleases(prev => {
+        const next = new Set(prev);
+        next.delete(envId);
+        return next;
+      });
+    }
+  }, []);
+
   // Load mods count, plugins count, userlibs count, and MelonLoader status for completed environments
   useEffect(() => {
     const loadCounts = async () => {
@@ -1215,7 +1264,19 @@ export function EnvironmentList({
         notifyInitialDetectionComplete();
       });
     }
-  }, [loading, error, environments, notifyInitialDetectionComplete]);
+  }, [
+    error,
+    environments,
+    loadMelonLoaderReleases,
+    loading,
+    notifyInitialDetectionComplete,
+    setFeaturedDownloadCounts,
+    setMelonLoaderStatus,
+    setModUpdatesCounts,
+    setModsCounts,
+    setPluginsCounts,
+    setUserLibsCounts,
+  ]);
 
   const handleOpenModsOverlay = (envId: string) => {
     rememberEnvironment(envId);
@@ -1444,44 +1505,6 @@ export function EnvironmentList({
     setUserLibsOverlay({ isOpen: false, envId: null });
   };
 
-  const loadMelonLoaderReleases = async (envId: string) => {
-    setLoadingMelonLoaderReleases(prev => new Set(prev).add(envId));
-    try {
-      const releases = await ApiService.getMelonLoaderReleases(envId);
-      setMelonLoaderReleases(prev => {
-        const next = new Map(prev);
-        next.set(envId, releases);
-        return next;
-      });
-      const latestStableTag = getLatestStableMelonLoaderTag(releases);
-
-      // Default to the latest stable tag reported by the Lockwire GitHub release API.
-      if (releases.length > 0) {
-        const defaultVersion = latestStableTag ?? releases[0].tag_name;
-
-        setSelectedMelonLoaderVersion(prev => {
-          const next = new Map(prev);
-          next.set(envId, defaultVersion);
-          return next;
-        });
-      }
-    } catch (err) {
-      console.error('Failed to load MelonLoader releases:', err);
-      setMessageOverlay({
-        isOpen: true,
-        title: 'Error',
-        message: 'Failed to load MelonLoader releases',
-        type: 'error'
-      });
-    } finally {
-      setLoadingMelonLoaderReleases(prev => {
-        const next = new Set(prev);
-        next.delete(envId);
-        return next;
-      });
-    }
-  };
-
   const handleInstallMelonLoader = (env: Environment) => {
     // Load releases and show version selector
     loadMelonLoaderReleases(env.id);
@@ -1552,7 +1575,13 @@ export function EnvironmentList({
         return next;
       });
     }
-  }, [melonLoaderStatus, settings?.autoInstallMelonLoader, settings?.melonLoaderVersion, showMessage]);
+  }, [
+    melonLoaderStatus,
+    setMelonLoaderStatus,
+    settings?.autoInstallMelonLoader,
+    settings?.melonLoaderVersion,
+    showMessage,
+  ]);
 
   useEffect(() => {
     autoInstallMelonLoaderRef.current = autoInstallMelonLoader;

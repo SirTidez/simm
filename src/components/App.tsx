@@ -47,6 +47,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SimmBadge, SimmButton, SimmDialogContent, SimmIconButton } from './primitives';
 import type { IconName } from './icons';
@@ -1375,6 +1376,8 @@ function AppContent() {
   const [shellNavCollapsed, setShellNavCollapsed] = useState(readStoredShellNavCollapsed);
   const [shellNavAnimating, setShellNavAnimating] = useState(false);
   const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
+  const [closePrompt, setClosePrompt] = useState({ isOpen: false, remember: false });
+  const closeRequestInFlightRef = useRef(false);
   const appUpdateSettingsRef = useRef(settings?.appUpdate ?? null);
   const updateSettingsRef = useRef(updateSettings);
   const startupSetupCheckedRef = useRef(false);
@@ -1621,32 +1624,67 @@ function AppContent() {
   // Discord Rich Presence - automatically initializes and sets presence
   useDiscordPresence();
 
+  const dismissClosePrompt = useCallback(() => {
+    setClosePrompt({ isOpen: false, remember: false });
+    closeRequestInFlightRef.current = false;
+  }, []);
+
+  const resolveClosePrompt = useCallback(async (behavior: 'tray' | 'quit') => {
+    const remember = closePrompt.remember;
+    setClosePrompt({ isOpen: false, remember: false });
+
+    try {
+      if (remember) {
+        try {
+          await ApiService.saveTelemetryPreferences({ closeBehavior: behavior });
+        } catch (error) {
+          logger.error('Failed to remember SIMM close behavior', {
+            error: getErrorMessage(error, 'unknown error'),
+          });
+        }
+      }
+
+      if (behavior === 'tray') {
+        await ApiService.hideMainWindow();
+      } else {
+        await ApiService.quitSimm();
+      }
+    } catch (error) {
+      logger.error('Failed to apply SIMM close behavior', {
+        error: getErrorMessage(error, 'unknown error'),
+      });
+    } finally {
+      closeRequestInFlightRef.current = false;
+    }
+  }, [closePrompt.remember]);
+
   useEffect(() => {
     let unlistenCloseRequest: (() => void) | undefined;
     void listen('simm_close_requested', async () => {
+      if (closeRequestInFlightRef.current) {
+        return;
+      }
+      closeRequestInFlightRef.current = true;
+      let awaitingChoice = false;
+
       try {
         const preferences = await ApiService.getTelemetryPreferences();
-        let keepRunning = preferences.closeBehavior === 'tray';
         if (preferences.closeBehavior === 'ask') {
-          keepRunning = await confirm(
-            'Keep SIMM running in the system tray? Monitoring and configured update checks will continue.',
-            { title: 'Close SIMM', kind: 'info' },
-          );
-          const remember = await confirm(
-            'Remember this close behavior? You can change it later in Live Telemetry.',
-            { title: 'Remember close behavior', kind: 'info' },
-          );
-          if (remember) {
-            await ApiService.saveTelemetryPreferences({ closeBehavior: keepRunning ? 'tray' : 'quit' });
-          }
+          setClosePrompt({ isOpen: true, remember: false });
+          awaitingChoice = true;
+          return;
         }
-        if (keepRunning) {
+        if (preferences.closeBehavior === 'tray') {
           await ApiService.hideMainWindow();
         } else {
           await ApiService.quitSimm();
         }
       } catch (error) {
         logger.error('Failed to handle SIMM close request', { error: getErrorMessage(error, 'unknown error') });
+      } finally {
+        if (!awaitingChoice) {
+          closeRequestInFlightRef.current = false;
+        }
       }
     }).then((unlisten) => { unlistenCloseRequest = unlisten; });
     return () => unlistenCloseRequest?.();
@@ -1954,7 +1992,7 @@ function AppContent() {
     } finally {
       inFlightNexusCallbackRef.current = null;
     }
-  }, [dispatchNexusOAuthResult]);
+  }, [dispatchNexusOAuthResult, pushWorkspace]);
 
   const handleNexusManualDownloadCallback = useCallback(async (nxmUrl: string) => {
     if (!nxmUrl.startsWith('nxm://')) {
@@ -2696,6 +2734,40 @@ function AppContent() {
           </SimmDialogContent>
         </Dialog>
       )}
+
+      <Dialog open={closePrompt.isOpen} onOpenChange={(open) => {
+        if (!open) {
+          dismissClosePrompt();
+        }
+      }}>
+        <SimmDialogContent className="app-dialog app-dialog--message app-close-behavior-dialog" showCloseButton={false}>
+          <DialogHeader className="modal-header app-dialog__header">
+            <DialogTitle>Close SIMM</DialogTitle>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={dismissClosePrompt} aria-label="Close close behavior dialog">
+              <Icon name="times" />
+            </SimmButton>
+          </DialogHeader>
+          <div className="app-dialog__body">
+            <div className="app-dialog__callout app-dialog__callout--info">
+              <div className="app-dialog__icon"><Icon name="circleQuestion" /></div>
+              <div className="app-dialog__meta">
+                <strong>Keep SIMM available in the tray?</strong>
+                <DialogDescription>Tray mode keeps monitoring and configured update checks running while the window is hidden.</DialogDescription>
+              </div>
+            </div>
+            <label className="app-dialog__option">
+              <Checkbox checked={closePrompt.remember} onCheckedChange={(checked) => setClosePrompt((current) => ({ ...current, remember: Boolean(checked) }))} />
+              <span className="app-dialog__option-copy"><strong>Remember my choice</strong></span>
+            </label>
+          </div>
+          <DialogFooter className="app-dialog__footer">
+            <div className="app-dialog__actions">
+              <SimmButton className="btn btn-secondary" onClick={() => void resolveClosePrompt('quit')}>Quit SIMM</SimmButton>
+              <SimmButton className="btn btn-primary" onClick={() => void resolveClosePrompt('tray')} autoFocus>Hide to Tray</SimmButton>
+            </div>
+          </DialogFooter>
+        </SimmDialogContent>
+      </Dialog>
     </div>
   );
 }

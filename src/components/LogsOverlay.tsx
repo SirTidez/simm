@@ -666,6 +666,13 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const [exporting, setExporting] = useState(false);
   const [isWatching, setIsWatching] = useState(false);
   const [watchedPath, setWatchedPath] = useState<string | null>(null);
+  const isWatchingRef = useRef(isWatching);
+  const watchedPathRef = useRef(watchedPath);
+
+  useEffect(() => {
+    isWatchingRef.current = isWatching;
+    watchedPathRef.current = watchedPath;
+  }, [isWatching, watchedPath]);
   const [autoScroll, setAutoScroll] = useState(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -942,7 +949,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     }
     setToastMessage(null);
 
-    if (isWatching || watchedPath) {
+    if (isWatchingRef.current || watchedPathRef.current) {
       void ApiService.stopWatchingLog().catch((err) => {
         console.error('Failed to stop watching log file during environment switch:', err);
       });

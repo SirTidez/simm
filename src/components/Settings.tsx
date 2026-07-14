@@ -378,6 +378,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const [releaseApiError, setReleaseApiError] = useState<string | null>(null);
   const [checkingReleaseApi, setCheckingReleaseApi] = useState(false);
   const [backingUpDatabase, setBackingUpDatabase] = useState(false);
+  const [repairingDatabase, setRepairingDatabase] = useState(false);
   const [openingBackupsFolder, setOpeningBackupsFolder] = useState(false);
   const [databaseBackupFeedback, setDatabaseBackupFeedback] = useState<{
     tone: "success" | "error";
@@ -803,6 +804,25 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
     } finally {
       setOpeningBackupsFolder(false);
+    }
+  };
+
+  const handleRepairDatabase = async () => {
+    try {
+      setRepairingDatabase(true);
+      setDatabaseBackupFeedback(null);
+      const result = await ApiService.repairDatabase();
+      setDatabaseBackupFeedback({
+        tone: "success",
+        message: `Database repair completed. Backup created at ${result.backupPath}`,
+      });
+    } catch (err) {
+      setDatabaseBackupFeedback({
+        tone: "error",
+        message: err instanceof Error ? err.message : "Failed to repair the database",
+      });
+    } finally {
+      setRepairingDatabase(false);
     }
   };
 
@@ -1590,7 +1610,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       <p>
                         SIMM automatically backs up the SQLite database before
                         app-version upgrades and migration work. You can also
-                        create a manual snapshot at any time.
+                        create a manual snapshot or repair safe additive schema
+                        after switching between installed and development builds.
                       </p>
                     </div>
 
@@ -1598,7 +1619,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       <SimmButton
                         type="button"
                         onClick={() => void handleBackupDatabase()}
-                        disabled={backingUpDatabase}
+                        disabled={backingUpDatabase || repairingDatabase}
                         className="btn btn-secondary"
                       >
                         {backingUpDatabase
@@ -1607,8 +1628,16 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       </SimmButton>
                       <SimmButton
                         type="button"
+                        onClick={() => void handleRepairDatabase()}
+                        disabled={repairingDatabase || backingUpDatabase}
+                        className="btn btn-secondary"
+                      >
+                        <Icon name="wrench" /> {repairingDatabase ? "Repairing..." : "Repair Database"}
+                      </SimmButton>
+                      <SimmButton
+                        type="button"
                         onClick={() => void handleOpenBackupsFolder()}
-                        disabled={openingBackupsFolder}
+                        disabled={openingBackupsFolder || repairingDatabase}
                         className="btn btn-secondary"
                       >
                         {openingBackupsFolder
