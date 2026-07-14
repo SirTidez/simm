@@ -24,7 +24,7 @@ The future upload payload is intentionally smaller than the local UI model:
 - `sessions`: 1-100 anonymous live sessions, each with environment, mod inventory, and at most 5,000 events.
 - `events`: only `WARN`, `ERROR`, and `FATAL` entries, with a fixed-width fingerprint, source label, line number, attribution, and attach/live origin.
 
-All envelopes and nested records reject unknown fields. The server rejects absolute-path-like strings, email addresses, unsupported schema versions, and collections over the documented limits. Raw `message` text may be safety-validated at ingestion but must not be stored or used for aggregation.
+All envelopes and nested records reject unknown fields. The server rejects absolute-path-like strings, email addresses, unsupported schema versions, and collections over the documented limits. Raw `message` text is safety-validated and discarded during ingestion; it must never be stored or used for aggregation.
 
 Do not upload local `environmentId`, output directories, storage IDs, usernames, emails, full logs, raw paths, Steam account data, Nexus tokens, or any stable install/client identifier.
 
@@ -38,8 +38,8 @@ Do not upload local `environmentId`, output directories, storage IDs, usernames,
 
 ## Storage Model
 
-- Raw snapshots should have short retention, such as 14-30 days.
-- Aggregates should be keyed by mod source/name/version, runtime, S1 version, and error signature.
+- Raw telemetry messages are discarded during ingestion. Only normalized short-lived fields and error signatures may persist for the documented 14-30 day retention window.
+- Aggregates persist as documented and are keyed by mod source/name/version, runtime, S1 version, and error signature.
 - Error signatures should be derived from sanitized exception type/message/stack frame patterns, not full raw excerpts.
 - Any IP-based rate-limit metadata should be kept outside the analytical dataset and expire quickly.
 
