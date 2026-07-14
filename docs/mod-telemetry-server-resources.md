@@ -12,7 +12,7 @@ Live telemetry uses a separate `schemaVersion: 1` batch contract rather than the
 - Readable `message` content is absent unless the user separately enables sanitized excerpts.
 - Export creates fresh random session and event IDs. Each opt-in upload attempt must create a random `uploadId` UUID; it is never a stable client or installation identifier. The payload never exports SIMM's local environment ID, install path, process ID, command line, or database IDs.
 
-The client does not implement HTTP upload, queueing, retries, or endpoint configuration. Server work should consume this versioned batch only after the user has reviewed the local preview.
+The client does not implement HTTP upload, queueing, retries, or endpoint configuration. Server work should consume this versioned batch only after the user has reviewed the local preview. The future route must pass its received raw UTF-8 string or bytes through the contract's `telemetryBatchRouteBoundary.parse` before any JSON parsing, so the 1 MiB raw-body ceiling cannot be bypassed with whitespace.
 
 ## Client Batch Payload
 
