@@ -355,6 +355,7 @@ export interface LiveTelemetryExport {
 export type TelemetryUploadState = 'pending' | 'sending' | 'accepted' | 'failed';
 
 export interface TelemetryUploadPreview {
+  uploadId: string;
   payload: string;
   sessionCount: number;
   eventCount: number;

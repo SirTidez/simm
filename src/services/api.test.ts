@@ -177,6 +177,7 @@ describe('ApiService', () => {
 
   it('uses the reviewed telemetry upload IPC contract', async () => {
     const preview = {
+      uploadId: '00000000-0000-4000-8000-000000000001',
       payload: '{"schemaVersion":1,"sessions":[]}',
       sessionCount: 0,
       eventCount: 0,

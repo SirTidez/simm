@@ -555,6 +555,7 @@ pub struct TelemetryUploadEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryUploadPreview {
+    pub upload_id: String,
     pub payload: String,
     pub session_count: u64,
     pub event_count: u64,

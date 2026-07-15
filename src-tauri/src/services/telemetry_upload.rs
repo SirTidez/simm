@@ -5,11 +5,10 @@ use chrono::Utc;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::config::telemetry_upload::upload_base_url;
+use crate::config::telemetry_upload::{upload_base_url, validate_upload_base_url};
 use crate::services::telemetry::TelemetryService;
 use crate::types::{
-    LiveTelemetryExport, TelemetryUploadEnvelope, TelemetryUploadPreview, TelemetryUploadReceipt,
-    TelemetryUploadState,
+    TelemetryUploadEnvelope, TelemetryUploadPreview, TelemetryUploadReceipt, TelemetryUploadState,
 };
 
 const UPLOAD_PATH: &str = "/v1/telemetry/batches";
@@ -61,10 +60,18 @@ impl TelemetryUploadService {
             .iter()
             .map(|session| session.events.len() as u64)
             .sum();
-        let payload = serde_json::to_string_pretty(&export)
+        let envelope = TelemetryUploadEnvelope {
+            schema_version: TELEMETRY_SCHEMA_VERSION,
+            upload_id: Uuid::new_v4().to_string(),
+            exported_at: export.exported_at,
+            sessions: export.sessions,
+        };
+        ensure_upload_envelope_is_safe(&envelope)?;
+        let payload = serde_json::to_string_pretty(&envelope)
             .context("Failed to serialize the local telemetry upload preview")?;
 
         Ok(TelemetryUploadPreview {
+            upload_id: envelope.upload_id,
             payload,
             session_count,
             event_count,
@@ -82,22 +89,34 @@ impl TelemetryUploadService {
         &self,
         environment_id: Option<String>,
     ) -> Result<TelemetryUploadReceipt> {
-        let export = TelemetryService::new(self.pool.clone())
-            .export_live_history(environment_id)
+        let preferences = TelemetryService::new(self.pool.clone())
+            .get_preferences()
             .await?;
-        self.queue_export(export).await
+        if !preferences.collection_enabled || !preferences.upload_enabled {
+            return Err(anyhow!(
+                "Telemetry upload requires collection and upload opt-in before it can be queued"
+            ));
+        }
+        let preview = self.preview_upload(environment_id).await?;
+        self.queue_reviewed_upload(&preview.payload).await
     }
 
     pub async fn queue_reviewed_upload(
         &self,
         preview_payload: &str,
     ) -> Result<TelemetryUploadReceipt> {
-        let export = serde_json::from_str::<LiveTelemetryExport>(preview_payload)
+        let raw_payload = serde_json::from_str::<serde_json::Value>(preview_payload)
             .context("The reviewed telemetry payload is invalid")?;
-        self.queue_export(export).await
-    }
+        if has_unsafe_upload_value(&raw_payload) {
+            return Err(anyhow!("Telemetry upload preview contains a local identifier or path"));
+        }
+        let envelope = serde_json::from_value::<TelemetryUploadEnvelope>(raw_payload.clone())
+            .context("The reviewed telemetry payload is invalid")?;
+        if raw_payload != serde_json::to_value(&envelope)? {
+            return Err(anyhow!("The reviewed telemetry payload contains unsupported fields"));
+        }
+        ensure_upload_envelope_is_safe(&envelope)?;
 
-    async fn queue_export(&self, export: LiveTelemetryExport) -> Result<TelemetryUploadReceipt> {
         let preferences = TelemetryService::new(self.pool.clone())
             .get_preferences()
             .await?;
@@ -107,19 +126,10 @@ impl TelemetryUploadService {
             ));
         }
 
-        ensure_upload_export_is_safe(&export)?;
-        let envelope = TelemetryUploadEnvelope {
-            schema_version: TELEMETRY_SCHEMA_VERSION,
-            upload_id: Uuid::new_v4().to_string(),
-            exported_at: export.exported_at,
-            sessions: export.sessions,
-        };
-        let payload = serde_json::to_string(&envelope)
-            .context("Failed to serialize telemetry upload payload")?;
         let receipt = TelemetryUploadReceipt {
             id: format!("telemetry-upload-{}", Uuid::new_v4().simple()),
             upload_id: envelope.upload_id,
-            payload,
+            payload: preview_payload.to_string(),
             state: TelemetryUploadState::Pending,
             attempts: 0,
             last_error_code: None,
@@ -144,6 +154,7 @@ impl TelemetryUploadService {
     }
 
     pub async fn list_uploads(&self) -> Result<Vec<TelemetryUploadReceipt>> {
+        self.recover_interrupted_uploads().await?;
         let rows = sqlx::query_as::<_, UploadRow>(
             "SELECT id, upload_id, payload, state, attempts, last_error_code, created_at, updated_at \
              FROM telemetry_upload_queue ORDER BY created_at DESC",
@@ -180,13 +191,22 @@ impl TelemetryUploadService {
             return Ok(receipt);
         }
 
+        let base_url = match self.resolve_base_url() {
+            Ok(base_url) => base_url,
+            Err(_) => {
+                self.update_state(
+                    id,
+                    TelemetryUploadState::Failed,
+                    receipt.attempts,
+                    Some("configuration_error".to_string()),
+                )
+                .await?;
+                return self.get_upload(id).await;
+            }
+        };
         let attempts = receipt.attempts.saturating_add(1);
         self.update_state(id, TelemetryUploadState::Sending, attempts, None)
             .await?;
-        let base_url = match &self.base_url {
-            Some(base_url) => base_url.clone(),
-            None => upload_base_url()?,
-        };
         let request_url = format!("{base_url}{UPLOAD_PATH}");
         let result = self
             .client
@@ -242,6 +262,25 @@ impl TelemetryUploadService {
         self.get_upload(id).await
     }
 
+    fn resolve_base_url(&self) -> Result<String> {
+        match &self.base_url {
+            Some(base_url) => validate_upload_base_url(base_url),
+            None => upload_base_url(),
+        }
+    }
+
+    async fn recover_interrupted_uploads(&self) -> Result<()> {
+        sqlx::query(
+            "UPDATE telemetry_upload_queue SET state = 'failed', last_error_code = ?, updated_at = ? WHERE state = 'sending'",
+        )
+        .bind("failed_before_acceptance")
+        .bind(Utc::now().to_rfc3339())
+        .execute(self.pool.as_ref())
+        .await
+        .context("Failed to recover interrupted telemetry uploads")?;
+        Ok(())
+    }
+
     async fn get_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
         let row = sqlx::query_as::<_, UploadRow>(
             "SELECT id, upload_id, payload, state, attempts, last_error_code, created_at, updated_at \
@@ -278,16 +317,37 @@ impl TelemetryUploadService {
     }
 }
 
-fn ensure_upload_export_is_safe(export: &LiveTelemetryExport) -> Result<()> {
-    let serialized = serde_json::to_string(export)?;
-    if serialized.contains("environmentId") || contains_path_shaped_value(&serialized) {
+fn ensure_upload_envelope_is_safe(envelope: &TelemetryUploadEnvelope) -> Result<()> {
+    let value = serde_json::to_value(envelope)?;
+    if has_unsafe_upload_value(&value) {
         return Err(anyhow!("Telemetry upload preview contains a local identifier or path"));
     }
     Ok(())
 }
 
-fn contains_path_shaped_value(value: &str) -> bool {
-    value.contains(":\\") || value.contains("\\\\") || value.contains("\"/")
+fn has_unsafe_upload_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => is_local_path(value),
+        serde_json::Value::Array(values) => values.iter().any(has_unsafe_upload_value),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            matches!(key.as_str(), "environmentId" | "accountId" | "userId" | "token" | "apiKey")
+                || has_unsafe_upload_value(value)
+        }),
+        _ => false,
+    }
+}
+
+fn is_local_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("file://")
+        || value
+            .split_whitespace()
+            .any(|word| word.trim_matches(['"', '\'', '(', ')', ',', ';', ':']).starts_with('/'))
+        || value.as_bytes().windows(3).any(|window| {
+            window[0].is_ascii_alphabetic()
+                && window[1] == b':'
+                && matches!(window[2], b'\\' | b'/')
+        })
 }
 
 #[derive(sqlx::FromRow)]

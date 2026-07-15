@@ -29,3 +29,12 @@ cargo test --manifest-path src-tauri/Cargo.toml  # 364 passed; 6 intentionally i
 ```
 
 The focused Rust upload suite passed 4 tests, covering opt-in enforcement, local-ID/path-free preview, exact reviewed export preservation plus immutable retry identity, and a real local HTTP 202 acceptance response.
+
+## P1 remediation
+
+- Preview now creates the complete envelope, including its one-time `uploadId`, and the exact pretty-serialized bytes shown in the modal are the bytes inserted into the queue and sent. Queueing validates but never re-envelopes or reserializes reviewed data.
+- Logger sanitization now redacts backslash and forward-slash Windows paths, Unix paths, and `file:` URIs. The upload safety boundary rejects those same path forms before they can be stored or transmitted.
+- URL configuration is resolved before the state becomes `sending`; an invalid URL yields the safe `configuration_error` failed state. Listing deterministically converts interrupted `sending` rows into retryable `failed` rows.
+- Added red-to-green coverage for all of the above, including `C:/Users/Alice/...` rejection, exact preview-byte persistence, invalid configuration, and interrupted-send recovery.
+
+Final P1 validation rerun: 309 frontend tests passed; Cargo passed 369 tests with 6 intentionally ignored. Lint remains 0 errors with 20 existing advisory warnings.
