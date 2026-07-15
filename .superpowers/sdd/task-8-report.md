@@ -38,3 +38,17 @@ The focused Rust upload suite passed 4 tests, covering opt-in enforcement, local
 - Added red-to-green coverage for all of the above, including `C:/Users/Alice/...` rejection, exact preview-byte persistence, invalid configuration, and interrupted-send recovery.
 
 Final P1 validation rerun: 309 frontend tests passed; Cargo passed 369 tests with 6 intentionally ignored. Lint remains 0 errors with 20 existing advisory warnings.
+
+## Follow-up contract and delimiter remediation
+
+- The one-time upload envelope now normalizes `exportedAt`, session `startedAt`/`endedAt`, and event `occurredAt` through RFC 3339 parsing into canonical UTC millisecond strings ending in `Z`. The reviewed bytes remain immutable once queued; later validation verifies, rather than reserializes, those bytes.
+- The logger and the upload safety guard both recognize absolute Unix paths after non-whitespace delimiters such as `setting=/home/alice/private.txt`. The logger replaces the path with a safe summary and the upload guard refuses to queue the payload.
+
+Focused validation passed on 2026-07-14:
+
+```text
+cargo test --manifest-path src-tauri/Cargo.toml sanitize_log_text_redacts_unix_paths_after_non_whitespace_delimiters -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml telemetry_upload_tests -- --nocapture
+```
+
+The upload suite passed 11 tests, including canonical strict-UTC timestamp serialization and delimiter-embedded Unix path rejection.

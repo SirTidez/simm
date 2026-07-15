@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -60,12 +60,13 @@ impl TelemetryUploadService {
             .iter()
             .map(|session| session.events.len() as u64)
             .sum();
-        let envelope = TelemetryUploadEnvelope {
+        let mut envelope = TelemetryUploadEnvelope {
             schema_version: TELEMETRY_SCHEMA_VERSION,
             upload_id: Uuid::new_v4().to_string(),
             exported_at: export.exported_at,
             sessions: export.sessions,
         };
+        normalize_upload_envelope_timestamps(&mut envelope)?;
         ensure_upload_envelope_is_safe(&envelope)?;
         let payload = serde_json::to_string_pretty(&envelope)
             .context("Failed to serialize the local telemetry upload preview")?;
@@ -108,12 +109,16 @@ impl TelemetryUploadService {
         let raw_payload = serde_json::from_str::<serde_json::Value>(preview_payload)
             .context("The reviewed telemetry payload is invalid")?;
         if has_unsafe_upload_value(&raw_payload) {
-            return Err(anyhow!("Telemetry upload preview contains a local identifier or path"));
+            return Err(anyhow!(
+                "Telemetry upload preview contains a local identifier or path"
+            ));
         }
         let envelope = serde_json::from_value::<TelemetryUploadEnvelope>(raw_payload.clone())
             .context("The reviewed telemetry payload is invalid")?;
         if raw_payload != serde_json::to_value(&envelope)? {
-            return Err(anyhow!("The reviewed telemetry payload contains unsupported fields"));
+            return Err(anyhow!(
+                "The reviewed telemetry payload contains unsupported fields"
+            ));
         }
         ensure_upload_envelope_is_safe(&envelope)?;
 
@@ -318,9 +323,12 @@ impl TelemetryUploadService {
 }
 
 fn ensure_upload_envelope_is_safe(envelope: &TelemetryUploadEnvelope) -> Result<()> {
+    validate_upload_envelope_timestamps(envelope)?;
     let value = serde_json::to_value(envelope)?;
     if has_unsafe_upload_value(&value) {
-        return Err(anyhow!("Telemetry upload preview contains a local identifier or path"));
+        return Err(anyhow!(
+            "Telemetry upload preview contains a local identifier or path"
+        ));
     }
     Ok(())
 }
@@ -330,8 +338,10 @@ fn has_unsafe_upload_value(value: &serde_json::Value) -> bool {
         serde_json::Value::String(value) => is_local_path(value),
         serde_json::Value::Array(values) => values.iter().any(has_unsafe_upload_value),
         serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
-            matches!(key.as_str(), "environmentId" | "accountId" | "userId" | "token" | "apiKey")
-                || has_unsafe_upload_value(value)
+            matches!(
+                key.as_str(),
+                "environmentId" | "accountId" | "userId" | "token" | "apiKey"
+            ) || has_unsafe_upload_value(value)
         }),
         _ => false,
     }
@@ -340,14 +350,79 @@ fn has_unsafe_upload_value(value: &serde_json::Value) -> bool {
 fn is_local_path(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("file://")
-        || value
-            .split_whitespace()
-            .any(|word| word.trim_matches(['"', '\'', '(', ')', ',', ';', ':']).starts_with('/'))
+        || contains_absolute_unix_path(value)
         || value.as_bytes().windows(3).any(|window| {
             window[0].is_ascii_alphabetic()
                 && window[1] == b':'
                 && matches!(window[2], b'\\' | b'/')
         })
+}
+
+fn contains_absolute_unix_path(value: &str) -> bool {
+    value.char_indices().any(|(index, character)| {
+        if character != '/' {
+            return false;
+        }
+
+        let next_is_path_segment = value[index + character.len_utf8()..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_alphanumeric() || matches!(next, '_' | '.' | '-'));
+        let previous_is_delimiter = value[..index].chars().next_back().map_or(true, |previous| {
+            !previous.is_ascii_alphanumeric() && previous != '_'
+        });
+
+        next_is_path_segment && previous_is_delimiter
+    })
+}
+
+pub(super) fn normalize_upload_envelope_timestamps(
+    envelope: &mut TelemetryUploadEnvelope,
+) -> Result<()> {
+    envelope.exported_at = normalize_zulu_timestamp(&envelope.exported_at, "exportedAt")?;
+    for session in &mut envelope.sessions {
+        session.started_at = normalize_zulu_timestamp(&session.started_at, "startedAt")?;
+        if let Some(ended_at) = &session.ended_at {
+            session.ended_at = Some(normalize_zulu_timestamp(ended_at, "endedAt")?);
+        }
+        for event in &mut session.events {
+            event.occurred_at = normalize_zulu_timestamp(&event.occurred_at, "occurredAt")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_upload_envelope_timestamps(envelope: &TelemetryUploadEnvelope) -> Result<()> {
+    validate_zulu_timestamp(&envelope.exported_at, "exportedAt")?;
+    for session in &envelope.sessions {
+        validate_zulu_timestamp(&session.started_at, "startedAt")?;
+        if let Some(ended_at) = &session.ended_at {
+            validate_zulu_timestamp(ended_at, "endedAt")?;
+        }
+        for event in &session.events {
+            validate_zulu_timestamp(&event.occurred_at, "occurredAt")?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_zulu_timestamp(value: &str, field: &str) -> Result<String> {
+    DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("Telemetry upload {field} must be an ISO-8601 timestamp"))
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+        })
+}
+
+fn validate_zulu_timestamp(value: &str, field: &str) -> Result<()> {
+    if !value.ends_with('Z') {
+        return Err(anyhow!(
+            "Telemetry upload {field} must use a Zulu ISO-8601 timestamp"
+        ));
+    }
+    normalize_zulu_timestamp(value, field).map(|_| ())
 }
 
 #[derive(sqlx::FromRow)]

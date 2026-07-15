@@ -19,11 +19,11 @@ static WINDOWS_PATH_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b[a-z]:[\\/](?:[^\\/:*?"<>|\s]+[\\/])*[^\\/:*?"<>|\s]*"#)
         .expect("windows path regex")
 });
-static FILE_URI_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)\bfile://[^\s"'<>|\r\n]+"#).expect("file URI regex")
-});
+static FILE_URI_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)\bfile://[^\s"'<>|\r\n]+"#).expect("file URI regex"));
 static UNIX_PATH_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?m)(^|[\s"'(])(/(?:[^\s"'<>|\r\n]+/?)+)"#).expect("unix path regex")
+    Regex::new(r#"(?m)(^|[^A-Za-z0-9_.-])(/(?:[^\s"'<>|,;:!?()\[\]{}\r\n]+/?)+)"#)
+        .expect("unix path regex")
 });
 static USERNAME_KEY_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b(username|user|login)\s*[:=]\s*(?:"[^"]*"|[^\s,|]+)"#)
@@ -546,6 +546,17 @@ mod tests {
         assert!(!sanitized.contains("Alice"));
         assert!(!sanitized.contains("/home/alice"));
         assert!(!sanitized.contains("file:///"));
+    }
+
+    #[test]
+    fn sanitize_log_text_redacts_unix_paths_after_non_whitespace_delimiters() {
+        let sanitized = LoggerService::sanitize_log_text(
+            "setting=/home/alice/private.txt; cache=/var/lib/simm/cache.db",
+        );
+
+        assert!(!sanitized.contains("/home/alice"));
+        assert!(!sanitized.contains("/var/lib/simm"));
+        assert!(sanitized.contains("setting=<path:private.txt>"));
     }
 
     #[tokio::test]
