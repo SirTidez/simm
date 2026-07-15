@@ -175,6 +175,31 @@ describe('ApiService', () => {
     });
   });
 
+  it('uses the reviewed telemetry upload IPC contract', async () => {
+    const preview = {
+      payload: '{"schemaVersion":1,"sessions":[]}',
+      sessionCount: 0,
+      eventCount: 0,
+      exclusions: ['Active sessions are excluded.'],
+    };
+    const receipt = {
+      id: 'queue-1', uploadId: '00000000-0000-4000-8000-000000000001', payload: preview.payload,
+      state: 'failed' as const, attempts: 1, lastErrorCode: 'failed_before_acceptance',
+      createdAt: '2026-07-14T00:00:00Z', updatedAt: '2026-07-14T00:00:00Z',
+    };
+    invokeMock.mockResolvedValueOnce(preview).mockResolvedValueOnce(receipt).mockResolvedValueOnce([receipt]).mockResolvedValueOnce(receipt);
+
+    await ApiService.previewTelemetryUpload('env-1');
+    await ApiService.queueTelemetryUpload(preview.payload);
+    await ApiService.listTelemetryUploads();
+    await ApiService.retryTelemetryUpload('queue-1');
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'preview_telemetry_upload', { environmentId: 'env-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'queue_telemetry_upload', { previewPayload: preview.payload });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, 'list_telemetry_uploads');
+    expect(invokeMock).toHaveBeenNthCalledWith(4, 'retry_telemetry_upload', { id: 'queue-1' });
+  });
+
   it('searchNexusMods transforms response fields', async () => {
     invokeMock.mockResolvedValueOnce([
       {

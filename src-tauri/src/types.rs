@@ -545,6 +545,46 @@ pub struct LiveTelemetryExportEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TelemetryUploadEnvelope {
+    pub schema_version: u32,
+    pub upload_id: String,
+    pub exported_at: String,
+    pub sessions: Vec<LiveTelemetryExportSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryUploadPreview {
+    pub payload: String,
+    pub session_count: u64,
+    pub event_count: u64,
+    pub exclusions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TelemetryUploadState {
+    Pending,
+    Sending,
+    Accepted,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryUploadReceipt {
+    pub id: String,
+    pub upload_id: String,
+    pub payload: String,
+    pub state: TelemetryUploadState,
+    pub attempts: u32,
+    pub last_error_code: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModTelemetryCaptureRequest {
     pub environment_id: String,
     pub max_log_lines: Option<usize>,

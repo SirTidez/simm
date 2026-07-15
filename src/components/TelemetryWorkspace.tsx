@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ApiService } from '../services/api';
 import { onLiveTelemetryEvent, onLiveTelemetryStatus } from '../services/events';
 import { useEnvironmentStore } from '../stores/environmentStore';
-import type { LiveTelemetryEvent, LiveTelemetryStatus, TelemetryPreferences } from '../types';
+import type { LiveTelemetryEvent, LiveTelemetryStatus, TelemetryPreferences, TelemetryUploadPreview, TelemetryUploadReceipt } from '../types';
 import { Icon } from './Icon';
-import { SimmButton } from './primitives';
+import { SimmButton, SimmDialogContent } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
 
 export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
@@ -12,20 +13,26 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const [preferences, setPreferences] = useState<TelemetryPreferences | null>(null);
   const [events, setEvents] = useState<LiveTelemetryEvent[]>([]);
   const [statuses, setStatuses] = useState<LiveTelemetryStatus[]>([]);
+  const [uploads, setUploads] = useState<TelemetryUploadReceipt[]>([]);
   const [environmentId, setEnvironmentId] = useState('');
   const [severity, setSeverity] = useState('all');
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [uploadPreview, setUploadPreview] = useState<TelemetryUploadPreview | null>(null);
+  const [previewRead, setPreviewRead] = useState(false);
+  const [uploadConfirmed, setUploadConfirmed] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [nextPreferences, nextStatuses, nextEvents] = await Promise.all([
+    const [nextPreferences, nextStatuses, nextEvents, nextUploads] = await Promise.all([
       ApiService.getTelemetryPreferences(),
       ApiService.getLiveTelemetryStatus(),
       ApiService.listLiveTelemetryEvents(environmentId || null, 500),
+      ApiService.listTelemetryUploads(),
     ]);
     setPreferences(nextPreferences);
     setStatuses(nextStatuses);
     setEvents(nextEvents);
+    setUploads(nextUploads);
   }, [environmentId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -63,8 +70,30 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const previewExport = async () => {
     setBusy(true);
     try {
-      const exported = await ApiService.exportLiveTelemetryHistory(environmentId || null);
-      setFeedback(`Prepared anonymous preview: ${exported.sessions.length} session(s), ${exported.sessions.reduce((total, session) => total + session.events.length, 0)} event(s).`);
+      const preview = await ApiService.previewTelemetryUpload(environmentId || null);
+      setUploadPreview(preview);
+      setPreviewRead(false);
+      setUploadConfirmed(false);
+      setFeedback(`Prepared local review: ${preview.sessionCount} session(s), ${preview.eventCount} event(s).`);
+    } finally { setBusy(false); }
+  };
+
+  const queueReviewedUpload = async () => {
+    setBusy(true);
+    try {
+      if (!uploadPreview) return;
+      const receipt = await ApiService.queueTelemetryUpload(uploadPreview.payload);
+      setFeedback(receiptMessage(receipt));
+      setUploadPreview(null);
+      await refresh();
+    } finally { setBusy(false); }
+  };
+
+  const retryUpload = async (id: string) => {
+    setBusy(true);
+    try {
+      setFeedback(receiptMessage(await ApiService.retryTelemetryUpload(id)));
+      await refresh();
     } finally { setBusy(false); }
   };
 
@@ -88,6 +117,10 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
           <input type="checkbox" checked={preferences?.errorExcerptsEnabled ?? false} disabled={busy || !preferences?.collectionEnabled} onChange={(event) => void updatePreferences({ errorExcerptsEnabled: event.target.checked })} />
           <span>Include sanitized readable excerpts</span>
         </label>
+        <label className="telemetry-workspace__toggle">
+          <input type="checkbox" checked={preferences?.uploadEnabled ?? false} disabled={busy || !preferences?.collectionEnabled} onChange={(event) => void updatePreferences({ uploadEnabled: event.target.checked })} />
+          <span>Allow reviewed telemetry uploads</span>
+        </label>
         <label>Retention
           <select value={preferences?.retentionDays ?? 30} disabled={busy} onChange={(event) => void updatePreferences({ retentionDays: Number(event.target.value) })}>
             <option value={7}>7 days</option><option value={14}>14 days</option><option value={30}>30 days</option><option value={90}>90 days</option>
@@ -109,10 +142,21 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
           <option value="all">All severities</option><option value="WARN">Warnings</option><option value="ERROR">Errors</option><option value="FATAL">Fatal</option>
         </select>
         <div className="telemetry-workspace__spacer" />
-        <SimmButton className="btn btn-secondary btn-small" disabled={busy} onClick={() => void previewExport()}><Icon name="copy" /> Preview export</SimmButton>
+        <SimmButton className="btn btn-secondary btn-small" disabled={busy || !collectionEnabled} onClick={() => void previewExport()}><Icon name="copy" /> Preview export</SimmButton>
         <SimmButton className="btn btn-secondary btn-small" disabled={busy} onClick={() => void clearHistory()}><Icon name="trash" /> Clear history</SimmButton>
       </div>
       {feedback && <p className="telemetry-workspace__feedback" role="status">{feedback}</p>}
+      {uploads.length > 0 && (
+        <section className="telemetry-workspace__uploads" aria-label="Telemetry upload queue">
+          <header className="telemetry-workspace__section-heading"><span>Reviewed uploads</span><strong>{uploads.length} local item(s)</strong></header>
+          {uploads.map((upload) => (
+            <div className="telemetry-upload-row" key={upload.id}>
+              <span>{receiptMessage(upload)}</span>
+              {upload.state === 'failed' && <SimmButton className="btn btn-secondary btn-small" disabled={busy || !preferences?.uploadEnabled} onClick={() => void retryUpload(upload.id)}>Retry</SimmButton>}
+            </div>
+          ))}
+        </section>
+      )}
 
       {!hasTelemetryHistory ? (
         <section className="telemetry-workspace__empty-state" role="status">
@@ -157,6 +201,32 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
           </section>
         </div>
       )}
+      <Dialog open={uploadPreview !== null} onOpenChange={(open) => { if (!open) setUploadPreview(null); }}>
+        <SimmDialogContent className="app-dialog telemetry-upload-review" showCloseButton={false} aria-label="Review telemetry upload">
+          <DialogHeader className="modal-header app-dialog__header">
+            <div className="app-dialog__heading"><span className="app-dialog__eyebrow">Local review</span><DialogTitle>Review anonymous telemetry upload</DialogTitle></div>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setUploadPreview(null)} aria-label="Close telemetry upload review"><Icon name="times" /></SimmButton>
+          </DialogHeader>
+          {uploadPreview && <div className="app-dialog__body">
+            <DialogDescription>This is the exact local export data under review. A fresh anonymous upload ID is created only after you confirm upload; no account, local environment ID, or filesystem path is included.</DialogDescription>
+            <p><strong>{uploadPreview.sessionCount}</strong> ended session(s), <strong>{uploadPreview.eventCount}</strong> event(s).</p>
+            <ul>{uploadPreview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
+            <pre className="telemetry-upload-review__payload" tabIndex={0}>{uploadPreview.payload}</pre>
+            <SimmButton className="btn btn-secondary btn-small" disabled={previewRead} onClick={() => setPreviewRead(true)}>{previewRead ? 'Preview reviewed' : 'I have read this preview'}</SimmButton>
+            <label className="telemetry-workspace__toggle"><input type="checkbox" checked={uploadConfirmed} disabled={!previewRead || busy || !preferences?.uploadEnabled} onChange={(event) => setUploadConfirmed(event.target.checked)} /><span>I confirm this reviewed telemetry may be uploaded now.</span></label>
+          </div>}
+          <DialogFooter className="app-dialog__footer"><div className="app-dialog__actions">
+            <SimmButton className="btn btn-secondary" disabled={busy} onClick={() => setUploadPreview(null)}>Cancel</SimmButton>
+            <SimmButton className="btn btn-primary" disabled={busy || !uploadConfirmed} onClick={() => void queueReviewedUpload()}>Upload reviewed telemetry</SimmButton>
+          </div></DialogFooter>
+        </SimmDialogContent>
+      </Dialog>
     </section>
   );
+}
+
+function receiptMessage(receipt: TelemetryUploadReceipt): string {
+  if (receipt.state === 'accepted') return receipt.lastErrorCode === 'already_accepted' ? 'Already accepted' : 'Accepted';
+  if (receipt.lastErrorCode?.startsWith('rejected_http_')) return `Rejected: HTTP ${receipt.lastErrorCode.replace('rejected_http_', '')}`;
+  return 'Failed before acceptance';
 }

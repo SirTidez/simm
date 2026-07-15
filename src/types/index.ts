@@ -352,6 +352,26 @@ export interface LiveTelemetryExport {
   }>;
 }
 
+export type TelemetryUploadState = 'pending' | 'sending' | 'accepted' | 'failed';
+
+export interface TelemetryUploadPreview {
+  payload: string;
+  sessionCount: number;
+  eventCount: number;
+  exclusions: string[];
+}
+
+export interface TelemetryUploadReceipt {
+  id: string;
+  uploadId: string;
+  payload: string;
+  state: TelemetryUploadState;
+  attempts: number;
+  lastErrorCode?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ModTelemetryCaptureRequest {
   environmentId: string;
   maxLogLines?: number | null;

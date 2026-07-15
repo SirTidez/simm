@@ -20,6 +20,7 @@ pub mod plugins;
 pub mod security_scanner;
 pub mod settings;
 pub mod telemetry;
+pub mod telemetry_upload;
 pub mod thunderstore;
 pub mod tray;
 pub mod update_check;

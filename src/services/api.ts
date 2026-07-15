@@ -41,6 +41,8 @@ import type {
   LiveTelemetryStatus,
   TelemetryPreferences,
   TelemetryPreferencesUpdate,
+  TelemetryUploadPreview,
+  TelemetryUploadReceipt,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -180,6 +182,22 @@ export class ApiService {
 
   static async exportLiveTelemetryHistory(environmentId?: string | null): Promise<LiveTelemetryExport> {
     return invoke('export_live_telemetry_history', { environmentId: environmentId ?? null });
+  }
+
+  static async previewTelemetryUpload(environmentId?: string | null): Promise<TelemetryUploadPreview> {
+    return invoke('preview_telemetry_upload', { environmentId: environmentId ?? null });
+  }
+
+  static async queueTelemetryUpload(previewPayload: string): Promise<TelemetryUploadReceipt> {
+    return invoke('queue_telemetry_upload', { previewPayload });
+  }
+
+  static async listTelemetryUploads(): Promise<TelemetryUploadReceipt[]> {
+    return invoke('list_telemetry_uploads');
+  }
+
+  static async retryTelemetryUpload(id: string): Promise<TelemetryUploadReceipt> {
+    return invoke('retry_telemetry_upload', { id });
   }
 
   // Environments

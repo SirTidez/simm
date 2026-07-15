@@ -24,6 +24,10 @@ pub mod security_scanner;
 pub mod settings;
 pub mod steam;
 pub mod telemetry;
+pub mod telemetry_upload;
+#[cfg(test)]
+#[path = "telemetry_upload.test.rs"]
+mod telemetry_upload_tests;
 pub mod thunderstore;
 pub mod tracked_downloads;
 pub mod update_check;

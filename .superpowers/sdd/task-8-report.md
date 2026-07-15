@@ -1,0 +1,31 @@
+# Task 8: reviewed telemetry upload pipeline
+
+Implemented the durable, user-triggered telemetry upload boundary.
+
+- Migration `0006_telemetry_upload_queue.sql` stores a per-upload UUID and the immutable serialized payload with `pending`, `sending`, `accepted`, and `failed` queue states.
+- Upload preparation excludes active sessions and local environment IDs. The upload envelope contains no SIMM, Nexus Mods, Steam, or other account identifiers.
+- Queueing and retrying require both collection and upload opt-in. There is no automatic upload timer; only the reviewed upload action and explicit Retry send requests.
+- The upload service only uses the configured compile-time base URL and rejects non-HTTPS URLs outside development builds. It records safe status codes only and never returns response bodies to the UI.
+- The telemetry workspace now presents a local payload review dialog, exclusions and totals, a separate review acknowledgement, then a disabled-until-confirmed upload checkbox. It shows safe Accepted, Already accepted, Failed before acceptance, and Rejected HTTP status messages.
+
+## Test-first evidence
+
+- Observed RED: `cargo test --manifest-path src-tauri/Cargo.toml telemetry_upload --no-fail-fast` initially failed because `telemetry_upload` did not exist.
+- Observed RED: API IPC test failed before API wrapper methods were added.
+- Observed RED: the local HTTP acceptance test failed before the service had a test base-URL injection seam.
+
+## Validation
+
+Passed on 2026-07-14:
+
+```text
+bun install
+bunx tsc --noEmit
+bun run lint                 # 0 errors; 20 pre-existing advisory warnings
+bun run test                 # 32 files, 309 tests passed
+bun run build
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml  # 364 passed; 6 intentionally ignored
+```
+
+The focused Rust upload suite passed 4 tests, covering opt-in enforcement, local-ID/path-free preview, exact reviewed export preservation plus immutable retry identity, and a real local HTTP 202 acceptance response.

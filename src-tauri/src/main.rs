@@ -4,6 +4,7 @@
 )]
 
 mod commands;
+mod config;
 mod db;
 mod discord_rpc;
 mod events;
@@ -164,6 +165,10 @@ fn main() {
             commands::telemetry::list_live_telemetry_events,
             commands::telemetry::clear_live_telemetry_history,
             commands::telemetry::export_live_telemetry_history,
+            commands::telemetry_upload::preview_telemetry_upload,
+            commands::telemetry_upload::queue_telemetry_upload,
+            commands::telemetry_upload::list_telemetry_uploads,
+            commands::telemetry_upload::retry_telemetry_upload,
             commands::settings::save_credentials,
             commands::settings::clear_credentials,
             commands::settings::save_nexus_mods_api_key,

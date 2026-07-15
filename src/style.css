@@ -11772,6 +11772,10 @@ body {
 .telemetry-workspace__filters select { min-height: 2rem; background: var(--input-bg, #16202e); color: inherit; border: 1px solid var(--border-color, #344257); border-radius: 4px; padding: 0.2rem 0.45rem; }
 .telemetry-workspace__spacer { flex: 1; }
 .telemetry-workspace__feedback { margin: 0; color: #67c7ff; font-size: 0.84rem; }
+.telemetry-workspace__uploads { display: grid; gap: 0.45rem; padding: 0.76rem 0.86rem; border: 1px solid var(--workspace-stroke-soft); border-radius: var(--workspace-card-radius); background: var(--workspace-surface-muted-soft); }
+.telemetry-upload-row { display: flex; align-items: center; justify-content: space-between; gap: 0.7rem; font-size: 0.82rem; }
+.telemetry-upload-review { width: min(52rem, calc(100vw - 2rem)); }
+.telemetry-upload-review__payload { max-height: 18rem; overflow: auto; margin: 0.8rem 0; padding: 0.7rem; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--workspace-stroke-soft); border-radius: 0.4rem; background: var(--input-bg, #16202e); font-size: 0.75rem; }
 .telemetry-workspace__history {
   display: grid;
   grid-template-columns: minmax(15rem, 0.72fr) minmax(0, 1.28fr);

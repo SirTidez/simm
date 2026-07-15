@@ -361,11 +361,11 @@ impl TelemetryService {
         environment_id: Option<String>,
     ) -> Result<LiveTelemetryExport> {
         let session_rows = if let Some(environment_id) = environment_id {
-            sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_sessions WHERE environment_id = ? ORDER BY started_at ASC")
+            sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_sessions WHERE environment_id = ? AND ended_at IS NOT NULL ORDER BY started_at ASC")
                 .bind(environment_id).fetch_all(self.pool.as_ref()).await?
         } else {
             sqlx::query_scalar::<_, String>(
-                "SELECT data FROM telemetry_sessions ORDER BY started_at ASC",
+                "SELECT data FROM telemetry_sessions WHERE ended_at IS NOT NULL ORDER BY started_at ASC",
             )
             .fetch_all(self.pool.as_ref())
             .await?
