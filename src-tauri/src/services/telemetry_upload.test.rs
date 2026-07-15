@@ -79,15 +79,19 @@ async fn retry_reuses_one_upload_id_and_never_rebuilds_the_payload() -> Result<(
             close_behavior: None,
         })
         .await?;
-    let service = TelemetryUploadService::new(pool);
+    let service = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
 
     let preview = service.preview_upload(None).await?;
     let queued = service.queue_reviewed_upload(&preview.payload).await?;
     let retried = service.retry_upload(&queued.id).await?;
 
     assert_eq!(queued.upload_id, retried.upload_id);
-    assert_eq!(queued.payload, retried.payload);
-    assert_eq!(queued.payload, preview.payload);
+    let stored_payload: String =
+        sqlx::query_scalar("SELECT payload FROM telemetry_upload_queue WHERE id = ?")
+            .bind(&queued.id)
+            .fetch_one(pool.as_ref())
+            .await?;
+    assert_eq!(stored_payload, preview.payload);
     Ok(())
 }
 
@@ -250,14 +254,96 @@ async fn queued_fixture_payload_matches_api_v1_contract_semantics() -> Result<()
         })
         .await?;
 
-    let receipt = TelemetryUploadService::with_base_url(pool, "not a url".to_string())
+    let receipt = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string())
         .queue_reviewed_upload(include_str!(
             "../../../test-fixtures/live-telemetry-v1.json"
         ))
         .await?;
 
     assert_eq!(receipt.state, TelemetryUploadState::Failed);
-    assert_api_v1_fixture_semantics(&receipt.payload)?;
+    let stored_payload: String =
+        sqlx::query_scalar("SELECT payload FROM telemetry_upload_queue WHERE id = ?")
+            .bind(&receipt.id)
+            .fetch_one(pool.as_ref())
+            .await?;
+    assert_api_v1_fixture_semantics(&stored_payload)?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_rejects_noncanonical_timestamps_but_accepts_preview_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            close_behavior: None,
+        })
+        .await?;
+    let service = TelemetryUploadService::with_base_url(pool, "not a url".to_string());
+    let mut noncanonical: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-fixtures/live-telemetry-v1.json"
+    ))?;
+    noncanonical["exportedAt"] = serde_json::Value::String("2026-07-14T18:30:00Z".to_string());
+
+    let error = service
+        .queue_reviewed_upload(&noncanonical.to_string())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("canonical UTC milliseconds"));
+
+    let preview = service.preview_upload(None).await?;
+    let accepted_preview = service.queue_reviewed_upload(&preview.payload).await?;
+    assert_eq!(accepted_preview.state, TelemetryUploadState::Failed);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn renderer_facing_receipts_never_serialize_the_private_payload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            close_behavior: None,
+        })
+        .await?;
+    let service = TelemetryUploadService::with_base_url(pool, "not a url".to_string());
+    let private_message = "private telemetry message that must stay local";
+    let mut payload: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-fixtures/live-telemetry-v1.json"
+    ))?;
+    payload["sessions"][0]["events"][0]["message"] =
+        serde_json::Value::String(private_message.to_string());
+
+    let queued = service.queue_reviewed_upload(&payload.to_string()).await?;
+    let listed = service.list_uploads().await?;
+    let retried = service.retry_upload(&queued.id).await?;
+    for status in [
+        queued,
+        listed.into_iter().next().expect("queued upload"),
+        retried,
+    ] {
+        let rendered = serde_json::to_value(status)?;
+        assert!(rendered.get("payload").is_none());
+        assert!(!rendered.to_string().contains(private_message));
+    }
     Ok(())
 }
 

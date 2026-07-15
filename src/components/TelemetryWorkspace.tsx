@@ -208,7 +208,7 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
             <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setUploadPreview(null)} aria-label="Close telemetry upload review"><Icon name="times" /></SimmButton>
           </DialogHeader>
           {uploadPreview && <div className="app-dialog__body">
-            <DialogDescription>This is the exact local export data under review. A fresh anonymous upload ID is created only after you confirm upload; no account, local environment ID, or filesystem path is included.</DialogDescription>
+            <DialogDescription>This is the exact local export data under review. An anonymous upload ID was created while preparing this preview; no account, local environment ID, or filesystem path is included.</DialogDescription>
             <p><strong>{uploadPreview.sessionCount}</strong> ended session(s), <strong>{uploadPreview.eventCount}</strong> event(s).</p>
             <ul>{uploadPreview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
             <pre className="telemetry-upload-review__payload" tabIndex={0}>{uploadPreview.payload}</pre>

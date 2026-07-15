@@ -52,3 +52,11 @@ cargo test --manifest-path src-tauri/Cargo.toml telemetry_upload_tests -- --noca
 ```
 
 The upload suite passed 11 tests, including canonical strict-UTC timestamp serialization and delimiter-embedded Unix path rejection.
+
+## Final review remediation
+
+- Queue-time validation now requires every upload timestamp to already match the canonical UTC millisecond representation produced for the preview (for example `2026-07-14T00:00:00.000Z`). It rejects equivalent-but-differently-serialized strings such as `2026-07-14T00:00:00Z`, preserving the reviewed bytes exactly.
+- The database-only upload record now owns the serialized payload. Renderer-facing queue, list, and retry receipts expose only opaque IDs, state, attempts, safe error codes, and timestamps; only the pre-confirmation preview DTO includes the reviewed payload.
+- The review modal correctly says its anonymous upload UUID is created when the preview is prepared.
+
+Focused final-remediation validation: `cargo test --manifest-path src-tauri/Cargo.toml telemetry_upload --no-fail-fast` passed 13 tests; `bunx tsc --noEmit` and `bun run test -- src/services/api.test.ts` also passed.

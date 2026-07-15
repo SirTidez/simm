@@ -576,7 +576,6 @@ pub enum TelemetryUploadState {
 pub struct TelemetryUploadReceipt {
     pub id: String,
     pub upload_id: String,
-    pub payload: String,
     pub state: TelemetryUploadState,
     pub attempts: u32,
     pub last_error_code: Option<String>,

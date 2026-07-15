@@ -131,7 +131,7 @@ impl TelemetryUploadService {
             ));
         }
 
-        let receipt = TelemetryUploadReceipt {
+        let upload = UploadRecord {
             id: format!("telemetry-upload-{}", Uuid::new_v4().simple()),
             upload_id: envelope.upload_id,
             payload: preview_payload.to_string(),
@@ -141,9 +141,9 @@ impl TelemetryUploadService {
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };
-        self.insert_receipt(&receipt).await?;
+        self.insert_upload(&upload).await?;
 
-        self.send_upload(&receipt.id).await
+        self.send_upload(&upload.id).await
     }
 
     pub async fn retry_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
@@ -167,23 +167,28 @@ impl TelemetryUploadService {
         .fetch_all(self.pool.as_ref())
         .await
         .context("Failed to list telemetry upload queue")?;
-        rows.into_iter().map(UploadRow::into_receipt).collect()
+        rows.into_iter()
+            .map(UploadRow::into_record)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(UploadRecord::into_receipt)
+            .collect()
     }
 
-    async fn insert_receipt(&self, receipt: &TelemetryUploadReceipt) -> Result<()> {
+    async fn insert_upload(&self, upload: &UploadRecord) -> Result<()> {
         sqlx::query(
             "INSERT INTO telemetry_upload_queue \
              (id, upload_id, payload, state, attempts, last_error_code, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&receipt.id)
-        .bind(&receipt.upload_id)
-        .bind(&receipt.payload)
-        .bind(receipt.state.as_db_value())
-        .bind(receipt.attempts as i64)
-        .bind(&receipt.last_error_code)
-        .bind(&receipt.created_at)
-        .bind(&receipt.updated_at)
+        .bind(&upload.id)
+        .bind(&upload.upload_id)
+        .bind(&upload.payload)
+        .bind(upload.state.as_db_value())
+        .bind(upload.attempts as i64)
+        .bind(&upload.last_error_code)
+        .bind(&upload.created_at)
+        .bind(&upload.updated_at)
         .execute(self.pool.as_ref())
         .await
         .context("Failed to queue telemetry upload")?;
@@ -193,7 +198,7 @@ impl TelemetryUploadService {
     async fn send_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
         let receipt = self.get_upload(id).await?;
         if receipt.state == TelemetryUploadState::Accepted {
-            return Ok(receipt);
+            return receipt.into_receipt();
         }
 
         let base_url = match self.resolve_base_url() {
@@ -206,7 +211,7 @@ impl TelemetryUploadService {
                     Some("configuration_error".to_string()),
                 )
                 .await?;
-                return self.get_upload(id).await;
+                return self.get_upload(id).await?.into_receipt();
             }
         };
         let attempts = receipt.attempts.saturating_add(1);
@@ -264,7 +269,7 @@ impl TelemetryUploadService {
             }
         }
 
-        self.get_upload(id).await
+        self.get_upload(id).await?.into_receipt()
     }
 
     fn resolve_base_url(&self) -> Result<String> {
@@ -286,7 +291,7 @@ impl TelemetryUploadService {
         Ok(())
     }
 
-    async fn get_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
+    async fn get_upload(&self, id: &str) -> Result<UploadRecord> {
         let row = sqlx::query_as::<_, UploadRow>(
             "SELECT id, upload_id, payload, state, attempts, last_error_code, created_at, updated_at \
              FROM telemetry_upload_queue WHERE id = ?",
@@ -296,7 +301,7 @@ impl TelemetryUploadService {
         .await
         .context("Failed to load telemetry upload")?
         .ok_or_else(|| anyhow!("Telemetry upload not found"))?;
-        row.into_receipt()
+        row.into_record()
     }
 
     async fn update_state(
@@ -417,12 +422,13 @@ fn normalize_zulu_timestamp(value: &str, field: &str) -> Result<String> {
 }
 
 fn validate_zulu_timestamp(value: &str, field: &str) -> Result<()> {
-    if !value.ends_with('Z') {
+    let normalized = normalize_zulu_timestamp(value, field)?;
+    if value != normalized {
         return Err(anyhow!(
-            "Telemetry upload {field} must use a Zulu ISO-8601 timestamp"
+            "Telemetry upload {field} must be canonical UTC milliseconds ending in Z"
         ));
     }
-    normalize_zulu_timestamp(value, field).map(|_| ())
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]
@@ -438,7 +444,7 @@ struct UploadRow {
 }
 
 impl UploadRow {
-    fn into_receipt(self) -> Result<TelemetryUploadReceipt> {
+    fn into_record(self) -> Result<UploadRecord> {
         let state = match self.state.as_str() {
             "pending" => TelemetryUploadState::Pending,
             "sending" => TelemetryUploadState::Sending,
@@ -446,12 +452,39 @@ impl UploadRow {
             "failed" => TelemetryUploadState::Failed,
             _ => return Err(anyhow!("Invalid telemetry upload queue state")),
         };
-        Ok(TelemetryUploadReceipt {
+        Ok(UploadRecord {
             id: self.id,
             upload_id: self.upload_id,
             payload: self.payload,
             state,
             attempts: self.attempts.max(0) as u32,
+            last_error_code: self.last_error_code,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+/// Private queue record: the serialized telemetry payload is only ever read
+/// locally for transmission and is never included in renderer-facing DTOs.
+struct UploadRecord {
+    id: String,
+    upload_id: String,
+    payload: String,
+    state: TelemetryUploadState,
+    attempts: u32,
+    last_error_code: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl UploadRecord {
+    fn into_receipt(self) -> Result<TelemetryUploadReceipt> {
+        Ok(TelemetryUploadReceipt {
+            id: self.id,
+            upload_id: self.upload_id,
+            state: self.state,
+            attempts: self.attempts,
             last_error_code: self.last_error_code,
             created_at: self.created_at,
             updated_at: self.updated_at,

@@ -184,7 +184,7 @@ describe('ApiService', () => {
       exclusions: ['Active sessions are excluded.'],
     };
     const receipt = {
-      id: 'queue-1', uploadId: '00000000-0000-4000-8000-000000000001', payload: preview.payload,
+      id: 'queue-1', uploadId: '00000000-0000-4000-8000-000000000001',
       state: 'failed' as const, attempts: 1, lastErrorCode: 'failed_before_acceptance',
       createdAt: '2026-07-14T00:00:00Z', updatedAt: '2026-07-14T00:00:00Z',
     };
@@ -194,6 +194,8 @@ describe('ApiService', () => {
     await ApiService.queueTelemetryUpload(preview.payload);
     await ApiService.listTelemetryUploads();
     await ApiService.retryTelemetryUpload('queue-1');
+
+    expect(receipt).not.toHaveProperty('payload');
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, 'preview_telemetry_upload', { environmentId: 'env-1' });
     expect(invokeMock).toHaveBeenNthCalledWith(2, 'queue_telemetry_upload', { previewPayload: preview.payload });

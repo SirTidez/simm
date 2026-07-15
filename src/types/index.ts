@@ -365,7 +365,6 @@ export interface TelemetryUploadPreview {
 export interface TelemetryUploadReceipt {
   id: string;
   uploadId: string;
-  payload: string;
   state: TelemetryUploadState;
   attempts: number;
   lastErrorCode?: string | null;
