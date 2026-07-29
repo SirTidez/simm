@@ -3,9 +3,9 @@
 ## Goal
 
 Define a declarative package manifest that lets Schedule I mod authors describe
-their package identity, runtime-specific installation layout, dependencies, and
-user-facing instructions. SIMM uses the manifest to produce a safe, previewable,
-and reversible installation plan for archives obtained from Thunderstore, Nexus
+their package identity, runtime-specific installation layout, and user-facing
+instructions. SIMM uses the manifest to produce a safe, previewable, and
+reversible installation plan for archives obtained from Thunderstore, Nexus
 Mods, or local files.
 
 The format is intentionally a SIMM-focused FOMOD alternative, not a scripting
@@ -70,8 +70,7 @@ fallback if a marketplace later rejects the namespaced extension.
             "source": "payload/UserData/ExampleMod",
             "destination": "UserData/ExampleMod"
           }
-        ],
-        "dependencies": []
+        ]
       },
       "mono": {
         "mappings": [
@@ -80,8 +79,7 @@ fallback if a marketplace later rejects the namespaced extension.
             "source": "payload/Mono/Plugins/ExampleMod.dll",
             "destination": "Plugins/ExampleMod.dll"
           }
-        ],
-        "dependencies": []
+        ]
       },
       "il2cpp": {
         "mappings": [
@@ -90,8 +88,7 @@ fallback if a marketplace later rejects the namespaced extension.
             "source": "payload/Il2Cpp/Plugins/ExampleMod.dll",
             "destination": "Plugins/ExampleMod.dll"
           }
-        ],
-        "dependencies": []
+        ]
       }
     }
   }
@@ -108,7 +105,7 @@ and dependency installation.
 
 `cross`, `mono`, and `il2cpp` are the only runtime sections in v1.
 
-- `cross` contains files and dependencies compatible with both runtimes.
+- `cross` contains files compatible with both runtimes.
 - `mono` contains only Mono-specific content.
 - `il2cpp` contains only IL2CPP-specific content.
 - SIMM automatically selects the environment's runtime and applies `cross`
@@ -208,44 +205,17 @@ choice in the install ledger and surfaces it on later update, reinstall, and
 uninstall operations. SIMM must never silently use last-installed-wins
 semantics.
 
-## Dependencies
+## Provider Dependencies
 
-Dependencies are declared within the applicable runtime section so packages can
-depend on different libraries for Mono and IL2CPP:
+The SIMM extension has no dependency declaration or duplicate dependency
+format. SIMM uses the dependency metadata already published by the archive's
+source provider: Thunderstore's native root `dependencies` field and Nexus
+Mods' published dependency metadata. This avoids competing package graphs and
+keeps marketplace-owned dependency vocabulary out of the SIMM namespace.
 
-```json
-{
-  "package_id": "example-author.shared-library",
-  "requirement": ">=2.0.0 <3.0.0",
-  "kind": "required",
-  "sources": [
-    {
-      "provider": "thunderstore",
-      "namespace": "ExampleAuthor",
-      "name": "SharedLibrary"
-    },
-    {
-      "provider": "nexus",
-      "game_domain": "schedule-i",
-      "mod_id": 456
-    }
-  ]
-}
-```
-
-`kind` is either `required` or `recommended`.
-
-- Required dependencies block the normal installation flow until SIMM installs
-  or resolves them, unless the user deliberately chooses a clearly labeled
-  bypass.
-- Recommended dependencies are shown with an optional install action.
-- When a declared Thunderstore or Nexus source is valid and SIMM can access it,
-  SIMM offers to install the dependency automatically.
-- SIMM verifies canonical package ID, runtime compatibility, and version
-  requirement before considering a dependency satisfied.
-- Thunderstore's native `dependencies` list is retained for Thunderstore's own
-  ecosystem. SIMM dependency declarations add source-neutral identity, runtime,
-  and alternate-provider information.
+When provider metadata is available, SIMM may present it in the package preview
+and offer the provider's existing dependency-install path. Provider dependency
+resolution is intentionally separate from validation of a SIMM manifest.
 
 ## User-Facing Information
 
@@ -263,8 +233,9 @@ An invalid SIMM extension does not make an otherwise valid archive unusable by
 existing installation paths. SIMM reports why enhanced installation is
 unavailable and falls back to its existing archive/FOMOD behavior when that
 path can safely continue. A package that starts a SIMM-managed install cannot
-partially apply mappings: validation, dependency resolution, conflict review,
-and base-file backup completion happen before the installation transaction.
+partially apply mappings: validation, provider-dependency preflight, conflict
+review, and base-file backup completion happen before the installation
+transaction.
 
 ## Explicitly Deferred
 
@@ -288,8 +259,8 @@ The following are outside v1:
    version comparison.
 4. File and directory mappings install only beneath the game root and reject
    traversal, missing archive entries, and unsafe links.
-5. SIMM offers automatic installation for valid declared Thunderstore and Nexus
-   dependencies, while preserving required and recommended behavior.
+5. SIMM uses published Thunderstore or Nexus dependency metadata without
+   requiring a duplicate SIMM dependency declaration.
 6. Base-game changes require a separate confirmation, create recoverable
    backups, and can be restored through uninstall.
 7. Conflicts always require a user decision; the default guidance is one
