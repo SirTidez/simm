@@ -56,6 +56,9 @@ fallback if a marketplace later rejects the namespaced extension.
       "install": "Install into a supported Schedule I environment.",
       "after_install": "Configure the mod after launching the game once."
     },
+    "compatibility": {
+      "schedule_i_versions": ["0.4.3f2-0.4.6", "0.4.6f6"]
+    },
     "runtimes": {
       "cross": { "mappings": [], "dependencies": [] },
       "mono": { "mappings": [], "dependencies": [] },
@@ -86,6 +89,31 @@ and dependency installation.
 There are no author-defined install options, conditional pages, scripts, or
 runtime-selection prompts in v1. A package has one deterministic install plan
 for each supported runtime.
+
+## Schedule I Game-Version Compatibility
+
+`simm.compatibility.schedule_i_versions` is an optional list of supported
+Schedule I game-version selectors. It applies to the entire package in v1,
+regardless of runtime. Omitting the field means the author has not declared a
+game-version compatibility restriction.
+
+Each selector uses one of these inclusive forms:
+
+- `0.4.6f6` means exactly that build.
+- `0.4.6` means the entire `0.4.6` update family, including its `f` builds.
+- `0.4.3-0.4.6` means every build from the `0.4.3` update family through the
+  `0.4.6` update family.
+- `0.4.3f2-0.4.6` means every build from `0.4.3f2` through any `f` build in
+  the `0.4.6` update family.
+
+SIMM parses versions as numeric update components plus an optional numeric `f`
+build component; it must not compare version strings lexicographically. A
+package is compatible when the environment's detected game version matches at
+least one selector. When the game version is unavailable or cannot be parsed,
+SIMM reports that compatibility cannot be verified. When it is known to be
+outside every declared selector, SIMM clearly warns the user and requires an
+explicit override before continuing the installation. The preview always shows
+the detected game version, declared selectors, and compatibility result.
 
 ## Mapping Model
 
@@ -225,14 +253,17 @@ The following are outside v1:
    deterministic preview for Mono, IL2CPP, and cross-runtime mappings.
 2. A dual-runtime archive selects the current environment automatically and
    combines `cross` with exactly one runtime section.
-3. File and directory mappings install only beneath the game root and reject
+3. Exact builds, update-family selectors, and inclusive Schedule I version
+   ranges produce the correct compatibility result without lexicographic
+   version comparison.
+4. File and directory mappings install only beneath the game root and reject
    traversal, missing archive entries, and unsafe links.
-4. SIMM offers automatic installation for valid declared Thunderstore and Nexus
+5. SIMM offers automatic installation for valid declared Thunderstore and Nexus
    dependencies, while preserving required and recommended behavior.
-5. Base-game changes require a separate confirmation, create recoverable
+6. Base-game changes require a separate confirmation, create recoverable
    backups, and can be restored through uninstall.
-6. Conflicts always require a user decision; the default guidance is one
+7. Conflicts always require a user decision; the default guidance is one
    enabled package, with explicit overwrite precedence available as an
    alternative.
-7. Existing archive, Nexus, and FOMOD flows remain usable when no valid SIMM
+8. Existing archive, Nexus, and FOMOD flows remain usable when no valid SIMM
    extension is present.
