@@ -19,7 +19,10 @@ file. Nexus and local archives use the same file unchanged.
 
 Thunderstore owns its existing top-level fields such as `name`,
 `version_number`, `description`, `website_url`, and `dependencies`. SIMM owns
-only the `simm` object. The SIMM extension must be continuously checked against
+only the `simm` object. Every SIMM-specific field, including future additions,
+must be a descendant of `simm`; SIMM must not reserve or add another top-level
+manifest key. This leaves Thunderstore's root namespace available for future
+platform fields. The SIMM extension must be continuously checked against
 Thunderstore upload validation because it is not a documented Thunderstore
 extension contract.
 
@@ -60,9 +63,36 @@ fallback if a marketplace later rejects the namespaced extension.
       "schedule_i_versions": ["0.4.3f2-0.4.6", "0.4.6f6"]
     },
     "runtimes": {
-      "cross": { "mappings": [], "dependencies": [] },
-      "mono": { "mappings": [], "dependencies": [] },
-      "il2cpp": { "mappings": [], "dependencies": [] }
+      "cross": {
+        "mappings": [
+          {
+            "kind": "directory",
+            "source": "payload/UserData/ExampleMod",
+            "destination": "UserData/ExampleMod"
+          }
+        ],
+        "dependencies": []
+      },
+      "mono": {
+        "mappings": [
+          {
+            "kind": "file",
+            "source": "payload/Mono/Plugins/ExampleMod.dll",
+            "destination": "Plugins/ExampleMod.dll"
+          }
+        ],
+        "dependencies": []
+      },
+      "il2cpp": {
+        "mappings": [
+          {
+            "kind": "file",
+            "source": "payload/Il2Cpp/Plugins/ExampleMod.dll",
+            "destination": "Plugins/ExampleMod.dll"
+          }
+        ],
+        "dependencies": []
+      }
     }
   }
 }
