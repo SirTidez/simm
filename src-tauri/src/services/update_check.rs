@@ -30,8 +30,27 @@ impl UpdateCheckService {
         env: &Environment,
     ) -> Result<UpdateCheckResult> {
         let mut effective_env = env.clone();
-        Self::restore_installed_manifest_baseline(&mut effective_env);
         let env_service = crate::services::environment::EnvironmentService::new(self.pool.clone())?;
+        if Self::restore_installed_manifest_baseline(&mut effective_env) {
+            if let Some(installed_manifest_id) = effective_env.last_manifest_id.as_ref() {
+                if let Err(err) = env_service
+                    .update_environment(
+                        &effective_env.id,
+                        vec![(
+                            "lastManifestId".to_string(),
+                            serde_json::json!(installed_manifest_id),
+                        )],
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "Failed to persist installed manifest baseline for {}: {}",
+                        effective_env.id,
+                        err
+                    );
+                }
+            }
+        }
         if let Err(err) = env_service
             .reconcile_steam_env_branch_runtime_from_disk(&mut effective_env)
             .await
@@ -95,7 +114,8 @@ impl UpdateCheckService {
             return Ok(result);
         }
 
-        // For Steam environments, skip DepotDownloader and only check version
+        // Steam installs use their on-disk appmanifest as the installed baseline.
+        // DepotDownloader only resolves the remote target and never downloads here.
         if effective_env.environment_type == Some(crate::types::EnvironmentType::Steam) {
             log::info!("Steam environment detected, skipping DepotDownloader update check");
 
@@ -154,18 +174,38 @@ impl UpdateCheckService {
         Ok(result)
     }
 
-    fn restore_installed_manifest_baseline(env: &mut Environment) {
-        if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
-            return;
+    fn restore_installed_manifest_baseline(env: &mut Environment) -> bool {
+        let installed_manifest =
+            if env.environment_type == Some(crate::types::EnvironmentType::Steam) {
+                Self::read_steam_installed_manifest_id(env)
+            } else {
+                Self::read_depot_downloader_installed_manifest_id(env)
+            };
+
+        let Some(installed_manifest) = installed_manifest else {
+            return false;
+        };
+
+        if env.last_manifest_id.as_deref() != Some(installed_manifest.as_str()) {
+            log::info!(
+                "Restoring installed manifest baseline for {} from {} to {}",
+                env.name,
+                env.last_manifest_id.as_deref().unwrap_or("none"),
+                installed_manifest
+            );
+            env.last_manifest_id = Some(installed_manifest);
+            return true;
         }
 
+        false
+    }
+
+    fn read_depot_downloader_installed_manifest_id(env: &Environment) -> Option<String> {
         let manifest_dir = std::path::Path::new(&env.output_dir).join(".DepotDownloader");
         let manifest_name = Regex::new(r"^\d+_(\d+)\.manifest$")
             .expect("installed DepotDownloader manifest regex is valid");
-        let installed_manifest = std::fs::read_dir(&manifest_dir)
-            .ok()
-            .into_iter()
-            .flatten()
+        std::fs::read_dir(&manifest_dir)
+            .ok()?
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let file_name = entry.file_name().to_string_lossy().to_string();
@@ -178,21 +218,70 @@ impl UpdateCheckService {
                 Some((modified, manifest_id))
             })
             .max_by_key(|(modified, _)| *modified)
-            .map(|(_, manifest_id)| manifest_id);
+            .map(|(_, manifest_id)| manifest_id)
+    }
 
-        let Some(installed_manifest) = installed_manifest else {
-            return;
-        };
+    fn read_steam_installed_manifest_id(env: &Environment) -> Option<String> {
+        let manifest_path = Self::steam_appmanifest_path(env)?;
+        let content = std::fs::read_to_string(manifest_path).ok()?;
+        let mut depth = 0usize;
+        let mut installed_depots_depth = None;
+        let mut entering_installed_depots = false;
+        let key_value =
+            Regex::new(r#"^\s*\"([^\"]+)\"\s*\"([^\"]+)\""#).expect("VDF key-value regex is valid");
 
-        if env.last_manifest_id.as_deref() != Some(installed_manifest.as_str()) {
-            log::info!(
-                "Restoring installed manifest baseline for {} from {} to {}",
-                env.name,
-                env.last_manifest_id.as_deref().unwrap_or("none"),
-                installed_manifest
-            );
-            env.last_manifest_id = Some(installed_manifest);
+        for line in content.lines() {
+            let key = line.split('"').nth(1).map(str::trim);
+            let in_installed_depots =
+                installed_depots_depth.is_some_and(|section_depth| depth >= section_depth);
+            if in_installed_depots && key.is_some_and(|key| key.eq_ignore_ascii_case("manifest")) {
+                if let Some(captures) = key_value.captures(line) {
+                    return captures.get(2).map(|value| value.as_str().to_string());
+                }
+            }
+
+            if key.is_some_and(|key| key.eq_ignore_ascii_case("InstalledDepots")) {
+                entering_installed_depots = true;
+            }
+
+            let opening_braces = line.matches('{').count();
+            if opening_braces > 0 {
+                depth += opening_braces;
+                if entering_installed_depots {
+                    installed_depots_depth = Some(depth);
+                    entering_installed_depots = false;
+                }
+            }
+
+            let closing_braces = line.matches('}').count();
+            if closing_braces > 0 {
+                if installed_depots_depth.is_some_and(|section_depth| depth <= section_depth) {
+                    installed_depots_depth = None;
+                }
+                depth = depth.saturating_sub(closing_braces);
+            }
         }
+
+        None
+    }
+
+    fn steam_appmanifest_path(env: &Environment) -> Option<std::path::PathBuf> {
+        if let Some(path) = env.steam_manifest_path.as_deref() {
+            return Some(std::path::PathBuf::from(path));
+        }
+        if let Some(steamapps_dir) = env.steamapps_dir.as_deref() {
+            return Some(
+                std::path::Path::new(steamapps_dir).join(format!("appmanifest_{}.acf", env.app_id)),
+            );
+        }
+
+        std::path::Path::new(&env.output_dir)
+            .ancestors()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("steamapps"))
+            })
+            .map(|steamapps_dir| steamapps_dir.join(format!("appmanifest_{}.acf", env.app_id)))
     }
 
     pub async fn check_all_environments(
@@ -916,9 +1005,79 @@ mod tests {
             environment_type: Some(EnvironmentType::DepotDownloader),
         };
 
-        UpdateCheckService::restore_installed_manifest_baseline(&mut env);
+        assert!(UpdateCheckService::restore_installed_manifest_baseline(
+            &mut env
+        ));
 
         assert_eq!(env.last_manifest_id.as_deref(), Some("2624148878279466820"));
+        Ok(())
+    }
+
+    #[test]
+    fn restore_installed_manifest_baseline_reads_the_steam_appmanifest() -> Result<()> {
+        let temp = tempdir()?;
+        let manifest_path = temp.path().join("appmanifest_3164500.acf");
+        std::fs::write(
+            &manifest_path,
+            r#""AppState"
+{
+    "InstalledDepots"
+    {
+        "3164501"
+        {
+            "manifest" "3260909537147661748"
+        }
+    }
+    "PrivateDepots"
+    {
+        "3164501"
+        {
+            "manifests"
+            {
+                "closed-beta"
+                {
+                    "gid" "5738443694136269112"
+                }
+            }
+        }
+    }
+}
+"#,
+        )?;
+
+        let mut env = Environment {
+            id: "steam-installation".to_string(),
+            name: "Steam Installation".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "beta".to_string(),
+            output_dir: temp.path().join("Schedule I").to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: Some("5738443694136269112".to_string()),
+            last_update_check: None,
+            update_available: Some(true),
+            remote_manifest_id: Some("3260909537147661748".to_string()),
+            remote_build_id: None,
+            current_game_version: Some("0.4.6f11".to_string()),
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: Some(manifest_path.to_string_lossy().to_string()),
+            environment_type: Some(EnvironmentType::Steam),
+        };
+
+        assert!(UpdateCheckService::restore_installed_manifest_baseline(
+            &mut env
+        ));
+        assert_eq!(env.last_manifest_id.as_deref(), Some("3260909537147661748"));
+        assert!(!UpdateCheckService::compare_manifest_ids(
+            &env,
+            "3260909537147661748",
+            "Steam environment"
+        ));
         Ok(())
     }
 
