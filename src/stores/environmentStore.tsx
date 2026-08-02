@@ -68,17 +68,22 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       ?? environments.find((environment) => environment.status === 'downloading')?.id
       ?? null;
   }, [environments, progress]);
+  const hasLoadedEnvironmentsRef = useRef(false);
 
   const refreshEnvironments = useCallback(async () => {
     if (refreshEnvironmentsInFlightRef.current) {
       return refreshEnvironmentsInFlightRef.current;
     }
 
+    const isInitialLoad = !hasLoadedEnvironmentsRef.current;
     const request = (async () => {
-      setLoading(true);
+      if (isInitialLoad) {
+        setLoading(true);
+      }
       setError(null);
       const envs = await ApiService.getEnvironments();
       setEnvironments(envs);
+      hasLoadedEnvironmentsRef.current = true;
 
       // Automatically extract versions for completed environments that don't have one
       const envsNeedingVersion = envs.filter(env =>
@@ -121,7 +126,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       if (refreshEnvironmentsInFlightRef.current === operation) {
         refreshEnvironmentsInFlightRef.current = null;
       }
-      setLoading(false);
+      if (isInitialLoad) {
+        setLoading(false);
+      }
     });
 
     refreshEnvironmentsInFlightRef.current = operation;

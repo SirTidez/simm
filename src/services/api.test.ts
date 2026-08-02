@@ -35,6 +35,38 @@ describe('ApiService', () => {
     });
   });
 
+  it('uses explicit commands for Schedule I save backup status and creation', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        available: true,
+        sourcePath: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves',
+        backupRoot: 'C:/Users/Test/SIMM/backups/schedule-i-saves',
+        profiles: [],
+        backups: [],
+        message: null,
+      })
+      .mockResolvedValueOnce({
+        steamId: '76561198000000000',
+        slotNumber: 1,
+        backup: {
+          path: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/backups/SaveGame_1',
+          sizeBytes: 64,
+          lastModified: '2026-07-25T12:00:00Z',
+        },
+        prunedBackupCount: 0,
+      });
+
+    await ApiService.getGameSaveBackupStatus();
+    await ApiService.createGameSaveBackup('76561198000000000', 1, 10);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'get_game_save_backup_status');
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'create_game_save_backup', {
+      steamId: '76561198000000000',
+      slotNumber: 1,
+      retentionLimit: 10,
+    });
+  });
+
   it('coalesces concurrent mod library requests', async () => {
     let resolveLibrary: (value: { downloaded: [] }) => void = () => {};
     invokeMock.mockReturnValueOnce(new Promise((resolve) => {

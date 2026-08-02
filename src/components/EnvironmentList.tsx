@@ -414,9 +414,16 @@ export function EnvironmentList({
     localStorage.setItem('simm-preferred-launch-method', JSON.stringify(obj));
   }, [preferredLaunchMethod]);
   const initialDetectionNotifiedRef = useRef(false);
+  const lastHandledFocusRequestIdRef = useRef(0);
 
   useEffect(() => {
-    if (!focusedEnvironmentId || compactMode || loading || error) {
+    if (
+      !focusedEnvironmentId
+      || focusedEnvironmentRequestId <= lastHandledFocusRequestIdRef.current
+      || compactMode
+      || loading
+      || error
+    ) {
       return;
     }
 
@@ -425,9 +432,10 @@ export function EnvironmentList({
       return;
     }
 
+    lastHandledFocusRequestIdRef.current = focusedEnvironmentRequestId;
     card.scrollIntoView({ block: 'center', behavior: 'smooth' });
     card.focus({ preventScroll: true });
-  }, [compactMode, error, focusedEnvironmentId, focusedEnvironmentRequestId, loading, environments]);
+  }, [compactMode, error, focusedEnvironmentId, focusedEnvironmentRequestId, loading]);
 
   const notifyInitialDetectionComplete = useCallback(() => {
     if (initialDetectionNotifiedRef.current) {

@@ -285,6 +285,46 @@ describe('EnvironmentList', () => {
     });
   });
 
+  it('only scrolls to a focused environment for a new focus request', async () => {
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      const { rerender } = render(
+        <EnvironmentList focusedEnvironmentId="env-1" focusedEnvironmentRequestId={1} />,
+      );
+
+      await screen.findByText('Env One');
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+      const currentStore = storeMocks.useEnvironmentStore.mock.results[
+        storeMocks.useEnvironmentStore.mock.results.length - 1
+      ]?.value;
+      storeMocks.useEnvironmentStore.mockReturnValue({
+        ...currentStore,
+        environments: [{ ...completedEnv, lastUpdateCheck: '2026-08-01T00:00:00Z' }],
+      });
+      rerender(<EnvironmentList focusedEnvironmentId="env-1" focusedEnvironmentRequestId={1} />);
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+      rerender(<EnvironmentList focusedEnvironmentId="env-1" focusedEnvironmentRequestId={2} />);
+
+      await waitFor(() => {
+        expect(scrollIntoView).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+        configurable: true,
+        value: originalScrollIntoView,
+      });
+    }
+  });
+
   it('refreshes mod counts when mods_changed event fires for a completed environment', async () => {
     render(<EnvironmentList />);
 

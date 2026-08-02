@@ -226,6 +226,40 @@ describe('EnvironmentStore', () => {
     );
   });
 
+  it('keeps the existing environment list visible during a completion refresh', async () => {
+    let resolveCompletionRefresh: (value: Environment[]) => void = () => {};
+    apiMocks.getEnvironments
+      .mockResolvedValueOnce([baseEnv])
+      .mockReturnValueOnce(new Promise<Environment[]>((resolve) => {
+        resolveCompletionRefresh = resolve;
+      }));
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+      expect(completeHandler).not.toBeNull();
+    });
+
+    void completeHandler?.({ downloadId: 'env-1' });
+
+    await waitFor(() => {
+      expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByTestId('loading').textContent).toBe('false');
+    expect(screen.getByTestId('env-status').textContent).toBe('completed');
+
+    resolveCompletionRefresh([{ ...baseEnv, currentGameVersion: '2.0.0' }]);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('env-version').textContent).toBe('2.0.0');
+    });
+  });
+
   it('refreshes completion state even when the completion payload omits a manifest', async () => {
     apiMocks.getEnvironments.mockResolvedValue([baseEnv]);
     apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({

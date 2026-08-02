@@ -3,4 +3,5 @@
  * deliberately off unless the Tauri process is launched with
  * `SIMM_ENABLE_TELEMETRY=1` (or `true`).
  */
-export const telemetryFeatureEnabled = __SIMM_TELEMETRY_ENABLED__;
+export const telemetryFeatureEnabled =
+  typeof __SIMM_TELEMETRY_ENABLED__ !== 'undefined' && __SIMM_TELEMETRY_ENABLED__;
