@@ -1,5 +1,5 @@
-use crate::services::telemetry::TelemetryService;
-use crate::types::TelemetryCloseBehavior;
+use crate::services::settings::SettingsService;
+use crate::types::WindowCloseBehavior;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
@@ -11,22 +11,32 @@ enum CloseAction {
     AskFrontend,
 }
 
-fn close_action_for_behavior(behavior: &TelemetryCloseBehavior) -> CloseAction {
+fn close_action_for_behavior(behavior: &WindowCloseBehavior) -> CloseAction {
     match behavior {
-        TelemetryCloseBehavior::Tray => CloseAction::HideToTray,
-        TelemetryCloseBehavior::Quit => CloseAction::Quit,
-        TelemetryCloseBehavior::Ask => CloseAction::AskFrontend,
+        WindowCloseBehavior::Tray => CloseAction::HideToTray,
+        WindowCloseBehavior::Quit => CloseAction::Quit,
+        WindowCloseBehavior::Ask => CloseAction::AskFrontend,
     }
 }
 
 pub async fn handle_main_window_close(app: AppHandle) {
     let action = if let Some(pool) = app.try_state::<Arc<SqlitePool>>() {
-        let service = TelemetryService::new(pool.inner().clone());
-        match service.get_preferences().await {
-            Ok(preferences) => close_action_for_behavior(&preferences.close_behavior),
+        match SettingsService::new(pool.inner().clone()) {
+            Ok(mut service) => match service.load_settings().await {
+                Ok(settings) => {
+                    close_action_for_behavior(&settings.window_close_behavior.unwrap_or_default())
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Failed to load close behavior; hiding SIMM to the tray: {:#}",
+                        error
+                    );
+                    CloseAction::HideToTray
+                }
+            },
             Err(error) => {
                 log::warn!(
-                    "Failed to load close behavior; hiding SIMM to the tray: {:#}",
+                    "Failed to initialize settings for close behavior; hiding SIMM to the tray: {:#}",
                     error
                 );
                 CloseAction::HideToTray
@@ -77,20 +87,20 @@ pub fn quit_simm(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{close_action_for_behavior, CloseAction};
-    use crate::types::TelemetryCloseBehavior;
+    use crate::types::WindowCloseBehavior;
 
     #[test]
     fn close_behavior_maps_to_the_expected_runtime_action() {
         assert_eq!(
-            close_action_for_behavior(&TelemetryCloseBehavior::Tray),
+            close_action_for_behavior(&WindowCloseBehavior::Tray),
             CloseAction::HideToTray
         );
         assert_eq!(
-            close_action_for_behavior(&TelemetryCloseBehavior::Quit),
+            close_action_for_behavior(&WindowCloseBehavior::Quit),
             CloseAction::Quit
         );
         assert_eq!(
-            close_action_for_behavior(&TelemetryCloseBehavior::Ask),
+            close_action_for_behavior(&WindowCloseBehavior::Ask),
             CloseAction::AskFrontend
         );
     }

@@ -77,6 +77,77 @@ export interface Environment {
   environmentType?: 'Steam' | 'DepotDownloader' | 'steam' | 'depotDownloader' | 'local';
 }
 
+export interface GameSaveSlot {
+  slotNumber: number;
+  organizationName: string | null;
+  cashBalance: number | null;
+  onlineBalance: number | null;
+  netWorth: number | null;
+  rank: number | null;
+  tier: number | null;
+  totalXp: number | null;
+  createdAt: string | null;
+  lastPlayedAt: string | null;
+  lastSaveVersion: string | null;
+  path: string;
+  exists: boolean;
+  sizeBytes: number;
+  lastModified: string | null;
+  backup: GameSaveBackup | null;
+  backups: GameSaveBackup[];
+}
+
+export interface GameSaveBackup {
+  path: string;
+  sizeBytes: number;
+  lastModified: string | null;
+}
+
+export interface GameSaveAccount {
+  steamId: string;
+  displayName: string | null;
+  path: string;
+  backupPath: string;
+  slots: GameSaveSlot[];
+}
+
+export interface GameSaveBackupStatus {
+  available: boolean;
+  sourcePath: string;
+  accounts: GameSaveAccount[];
+  message: string | null;
+}
+
+export interface GameSaveBackupResult {
+  steamId: string;
+  slotNumber: number;
+  backup: GameSaveBackup;
+  prunedBackupCount: number;
+}
+
+export interface GameSaveBackupExportResult {
+  steamId: string;
+  slotNumber: number;
+  path: string;
+  sizeBytes: number;
+}
+
+export interface GameSaveRestoreResult {
+  steamId: string;
+  slotNumber: number;
+  path: string;
+  sizeBytes: number;
+}
+
+export interface GameSaveRestorePreview {
+  steamId: string;
+  slotNumber: number;
+  sourceLabel: string;
+  sourcePath: string;
+  current: GameSaveSlot;
+  restored: GameSaveSlot;
+}
+
 export interface LinuxMelonLoaderRequirements {
   appId: string;
   protontricksInstalled: boolean;
@@ -213,6 +284,7 @@ export interface Settings {
   appUpdate?: AppUpdatePreferences | null;
   experienceMode?: ExperienceMode | null;
   showAdvancedGameTools?: boolean | null;
+  windowCloseBehavior?: 'ask' | 'tray' | 'quit' | null;
   setupGuideCompleted?: boolean | null;
 }
 
@@ -292,7 +364,7 @@ export interface TelemetryPreferences {
   uploadEnabled: boolean;
   errorExcerptsEnabled: boolean;
   retentionDays: number;
-  closeBehavior: 'ask' | 'tray' | 'quit';
+  protectLocalMods: boolean;
   updatedAt?: string | null;
 }
 
@@ -301,7 +373,24 @@ export interface TelemetryPreferencesUpdate {
   uploadEnabled?: boolean | null;
   errorExcerptsEnabled?: boolean | null;
   retentionDays?: number | null;
-  closeBehavior?: 'ask' | 'tray' | 'quit' | null;
+  protectLocalMods?: boolean | null;
+}
+
+export type TelemetryModCaptureMode = 'share' | 'local_only' | 'ignore';
+
+export interface TelemetryModPolicyItem {
+  modEntry: ModTelemetryModEntry;
+  automaticMode: TelemetryModCaptureMode;
+  automaticReason?: string | null;
+  effectiveMode: TelemetryModCaptureMode;
+  globalOverride?: TelemetryModCaptureMode | null;
+  environmentOverride?: TelemetryModCaptureMode | null;
+}
+
+export interface TelemetryModRuleUpdate {
+  modKey: string;
+  environmentId?: string | null;
+  mode?: TelemetryModCaptureMode | null;
 }
 
 export interface LiveTelemetrySession {
@@ -324,6 +413,8 @@ export interface LiveTelemetryEvent {
   modKey?: string | null;
   modName?: string | null;
   fingerprint: string;
+  errorClass: string;
+  errorCode?: string | null;
   message?: string | null;
   source: string;
   lineNumber?: number | null;
@@ -350,6 +441,26 @@ export interface LiveTelemetryExport {
     mods: ModTelemetryModEntry[];
     events: Array<Omit<LiveTelemetryEvent, 'sessionId' | 'environmentId'>>;
   }>;
+}
+
+export type TelemetryUploadState = 'pending' | 'sending' | 'accepted' | 'failed';
+
+export interface TelemetryUploadPreview {
+  uploadId: string;
+  payload: string;
+  sessionCount: number;
+  eventCount: number;
+  exclusions: string[];
+}
+
+export interface TelemetryUploadReceipt {
+  id: string;
+  uploadId: string;
+  state: TelemetryUploadState;
+  attempts: number;
+  lastErrorCode?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ModTelemetryCaptureRequest {
@@ -379,6 +490,8 @@ export interface ModTelemetrySourceError {
   modKey?: string | null;
   modName: string;
   level: string;
+  errorClass: string;
+  errorCode?: string | null;
   message?: string | null;
   timestamp?: string | null;
   source?: string | null;
@@ -488,6 +601,26 @@ export interface NexusModFile {
   file_name: string;
   uploaded_timestamp: number;
   mod_version: string;
+}
+
+export interface NexusDependencyCandidate {
+  modId: string;
+  modName: string;
+  modFileId: string;
+  modFileName: string;
+  versionId: string;
+  versionGameScopedId: string;
+  version: string;
+}
+
+export interface NexusDependencyRequirement {
+  id: string;
+  candidates: NexusDependencyCandidate[];
+}
+
+export interface NexusModFileDependencies {
+  sourceVersionId: string;
+  requirements: NexusDependencyRequirement[];
 }
 
 export interface ModLibraryEntry {

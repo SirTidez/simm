@@ -5,6 +5,23 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 const STEAM_SHORTCUT_TAG: &str = "SIMM";
+const STEAM_SHORTCUT_MANAGED_KEYS: &[&str] = &[
+    "appid",
+    "appname",
+    "exe",
+    "StartDir",
+    "icon",
+    "ShortcutPath",
+    "LaunchOptions",
+    "IsHidden",
+    "AllowDesktopConfig",
+    "AllowOverlay",
+    "OpenVR",
+    "Devkit",
+    "DevkitGameID",
+    "FlatpakAppID",
+    "tags",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 enum BinaryVdfValue {
@@ -1331,12 +1348,11 @@ fn upsert_shortcut_entry(
             get_vdf_string(entry, "appname").or_else(|| get_vdf_string(entry, "AppName"));
         let exe = get_vdf_string(entry, "exe");
         if app_name == Some(shortcut.app_name.as_str()) || exe == Some(shortcut.exe.as_str()) {
-            let updated_entry = shortcut.to_vdf_entry();
-            if *entry == updated_entry {
+            if steam_shortcut_entry_matches(entry, shortcut) {
                 return SteamShortcutStatus::Unchanged;
             }
 
-            *entry = updated_entry;
+            update_managed_steam_shortcut_fields(entry, shortcut);
             return SteamShortcutStatus::Updated;
         }
     }
@@ -1351,6 +1367,54 @@ fn upsert_shortcut_entry(
         BinaryVdfValue::Object(shortcut.to_vdf_entry()),
     ));
     SteamShortcutStatus::Inserted
+}
+
+fn steam_shortcut_entry_matches(
+    entry: &[(String, BinaryVdfValue)],
+    shortcut: &SteamShortcut,
+) -> bool {
+    let expected = shortcut.to_vdf_entry();
+    STEAM_SHORTCUT_MANAGED_KEYS.iter().all(|key| {
+        let actual_value = get_vdf_value(entry, key);
+        let expected_value = get_vdf_value(&expected, key);
+        actual_value == expected_value
+    })
+}
+
+fn update_managed_steam_shortcut_fields(
+    entry: &mut Vec<(String, BinaryVdfValue)>,
+    shortcut: &SteamShortcut,
+) {
+    for (key, value) in shortcut
+        .to_vdf_entry()
+        .into_iter()
+        .filter(|(key, _)| is_managed_steam_shortcut_key(key))
+    {
+        if let Some((_, existing_value)) = entry
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key.eq_ignore_ascii_case(&key))
+        {
+            *existing_value = value;
+        } else {
+            entry.push((key, value));
+        }
+    }
+}
+
+fn is_managed_steam_shortcut_key(key: &str) -> bool {
+    STEAM_SHORTCUT_MANAGED_KEYS
+        .iter()
+        .any(|managed_key| key.eq_ignore_ascii_case(managed_key))
+}
+
+fn get_vdf_value<'a>(
+    entries: &'a [(String, BinaryVdfValue)],
+    wanted_key: &str,
+) -> Option<&'a BinaryVdfValue> {
+    entries
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(wanted_key))
+        .map(|(_, value)| value)
 }
 
 fn get_vdf_string<'a>(
@@ -1769,6 +1833,14 @@ mod tests {
             "0".to_string(),
             BinaryVdfValue::Object(original.to_vdf_entry()),
         )];
+        let BinaryVdfValue::Object(existing_entry) = &mut shortcuts[0].1 else {
+            panic!("expected object");
+        };
+        let (_, last_play_time) = existing_entry
+            .iter_mut()
+            .find(|(key, _)| key == "LastPlayTime")
+            .expect("LastPlayTime field");
+        *last_play_time = BinaryVdfValue::Int32(123);
 
         let status = upsert_shortcut_entry(&mut shortcuts, &updated);
 
@@ -1778,6 +1850,10 @@ mod tests {
             panic!("expected object");
         };
         assert_eq!(get_vdf_string(entry, "appname"), Some("SIMM - Schedule I"));
+        assert_eq!(
+            get_vdf_value(entry, "LastPlayTime"),
+            Some(&BinaryVdfValue::Int32(123))
+        );
     }
 
     #[test]
@@ -1798,6 +1874,40 @@ mod tests {
 
         assert_eq!(status, SteamShortcutStatus::Unchanged);
         assert_eq!(shortcuts.len(), 1);
+    }
+
+    #[test]
+    fn upsert_shortcut_entry_ignores_steam_last_play_time_changes() {
+        let shortcut = SteamShortcut {
+            app_name: "SIMM - Schedule I".to_string(),
+            exe: "\"C:\\Games\\Schedule I\\Schedule I.exe\"".to_string(),
+            start_dir: "\"C:\\Games\\Schedule I\"".to_string(),
+            icon: "C:\\Games\\Schedule I\\Schedule I.exe".to_string(),
+            launch_options: String::new(),
+        };
+        let mut shortcuts = vec![(
+            "0".to_string(),
+            BinaryVdfValue::Object(shortcut.to_vdf_entry()),
+        )];
+        let BinaryVdfValue::Object(entry) = &mut shortcuts[0].1 else {
+            panic!("expected object");
+        };
+        let (_, last_play_time) = entry
+            .iter_mut()
+            .find(|(key, _)| key == "LastPlayTime")
+            .expect("LastPlayTime field");
+        *last_play_time = BinaryVdfValue::Int32(456);
+
+        let status = upsert_shortcut_entry(&mut shortcuts, &shortcut);
+
+        assert_eq!(status, SteamShortcutStatus::Unchanged);
+        let BinaryVdfValue::Object(entry) = &shortcuts[0].1 else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            get_vdf_value(entry, "LastPlayTime"),
+            Some(&BinaryVdfValue::Int32(456))
+        );
     }
 
     #[test]

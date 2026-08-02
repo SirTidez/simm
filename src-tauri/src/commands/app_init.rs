@@ -59,6 +59,22 @@ pub async fn prepare_app(
 
     app.manage(db_pool.clone());
 
+    match crate::services::mods::ModsService::new(db_pool.clone())
+        .migrate_s1api_author_metadata_once()
+        .await
+    {
+        Ok(repaired) if repaired > 0 => {
+            log::info!(
+                "Repaired author metadata for {} existing S1API record(s)",
+                repaired
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("Failed to migrate historical S1API metadata: {}", error);
+        }
+    }
+
     let startup_state = crate::types::AppStartupState {
         simm_directory_created: simm_was_created,
         database_created: database_was_created,

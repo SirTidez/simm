@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { Environment, DownloadProgress, ExtractGameVersionResult } from '../types';
 
 function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partial<Environment> {
@@ -22,6 +22,7 @@ interface EnvironmentStoreContextValue {
   loading: boolean;
   error: string | null;
   progress: Map<string, DownloadProgress>;
+  activeGameDownloadId: string | null;
   refreshEnvironments: () => Promise<void>;
   createEnvironment: (data: { appId: string; branch: string; outputDir: string; name?: string; description?: string }) => Promise<Environment>;
   updateEnvironment: (id: string, updates: Partial<Environment>) => Promise<void>;
@@ -57,6 +58,16 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Map<string, DownloadProgress>>(new Map());
   const refreshEnvironmentsInFlightRef = useRef<Promise<void> | null>(null);
+  const startingGameDownloadRef = useRef<string | null>(null);
+
+  const activeGameDownloadId = useMemo(() => {
+    const activeProgress = Array.from(progress.values()).find(
+      (entry) => entry.status === 'downloading' || entry.status === 'validating',
+    );
+    return activeProgress?.downloadId
+      ?? environments.find((environment) => environment.status === 'downloading')?.id
+      ?? null;
+  }, [environments, progress]);
 
   const refreshEnvironments = useCallback(async () => {
     if (refreshEnvironmentsInFlightRef.current) {
@@ -151,13 +162,23 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   }, [refreshEnvironments]);
 
   const startDownload = useCallback(async (environmentId: string) => {
+    const activeDownloadId = activeGameDownloadId ?? startingGameDownloadRef.current;
+    if (activeDownloadId && activeDownloadId !== environmentId) {
+      throw new Error(`Another game download or update is already running for ${activeDownloadId}.`);
+    }
+
+    startingGameDownloadRef.current = environmentId;
     try {
       await ApiService.startDownload(environmentId);
       await updateEnvironment(environmentId, { status: 'downloading' });
     } catch (err) {
       throw err;
+    } finally {
+      if (startingGameDownloadRef.current === environmentId) {
+        startingGameDownloadRef.current = null;
+      }
     }
-  }, [updateEnvironment]);
+  }, [activeGameDownloadId, updateEnvironment]);
 
   const cancelDownload = useCallback(async (downloadId: string) => {
     try {
@@ -336,6 +357,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         loading,
         error,
         progress,
+        activeGameDownloadId,
         refreshEnvironments,
         createEnvironment,
         updateEnvironment,

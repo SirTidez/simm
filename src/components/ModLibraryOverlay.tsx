@@ -65,7 +65,10 @@ import type {
   Environment,
   ModLibraryEntry,
   ModLibraryResult,
+  NexusDependencyCandidate,
+  NexusDependencyRequirement,
   NexusMod,
+  NexusModFileDependencies,
   NexusModFile,
   SecurityScanReport,
   SecurityScanSummary,
@@ -996,6 +999,166 @@ const getNexusFileTags = (file: Pick<NexusModFile, "file_id" | "file_name" | "na
   return tags;
 };
 
+const isMelonLoaderDependency = (candidate: NexusDependencyCandidate): boolean => {
+  const normalized = `${candidate.modName} ${candidate.modFileName}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  return normalized.includes("melonloader");
+};
+
+const getVisibleNexusDependencyCandidates = (
+  requirement: NexusDependencyRequirement,
+): NexusDependencyCandidate[] =>
+  requirement.candidates.filter((candidate) => !isMelonLoaderDependency(candidate));
+
+const getMissingNexusDependencies = (
+  dependencies: NexusModFileDependencies,
+  downloadedGroups: DownloadedModGroup[],
+): NexusDependencyRequirement[] => {
+  const downloadedFileIds = new Set(
+    downloadedGroups.flatMap((group) =>
+      group.entries
+        .filter((entry) => entry.source === "nexusmods")
+        .map((entry) => getNexusFileIdFromTags(entry.tags))
+        .filter(Boolean),
+    ),
+  );
+
+  return dependencies.requirements.filter((requirement) => {
+    const candidates = getVisibleNexusDependencyCandidates(requirement);
+    return (
+      candidates.length > 0 &&
+      !candidates.some((candidate) =>
+        downloadedFileIds.has(candidate.versionGameScopedId),
+      )
+    );
+  });
+};
+
+const formatNexusDependencyCandidates = (
+  requirement: NexusDependencyRequirement,
+): string => {
+  const candidates = getVisibleNexusDependencyCandidates(requirement);
+  const labels = Array.from(
+    new Set(
+      candidates.map((candidate) => {
+        const version = candidate.version ? ` ${formatVersionTag(candidate.version)}` : "";
+        return `${candidate.modName || candidate.modFileName}${version}`.trim();
+      }),
+    ),
+  );
+  return labels.join(" or ");
+};
+
+interface ThunderstoreDependencyRequirement {
+  raw: string;
+  packageKey: string;
+  minimumVersion: string;
+}
+
+const normalizeThunderstoreDependencyKey = (value: string): string =>
+  value.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const parseThunderstoreDependency = (
+  value: string,
+): ThunderstoreDependencyRequirement | null => {
+  const raw = value.trim();
+  if (!raw) {
+    return null;
+  }
+
+  // Thunderstore encodes direct dependencies as namespace-package-version.
+  // The namespace and package can both contain punctuation, so split only at
+  // the final semver-like version suffix.
+  const versionMatch = raw.match(
+    /-(v?\d+(?:\.\d+)*(?:-[0-9A-Za-z.+-]+)?)$/,
+  );
+  if (!versionMatch || versionMatch.index === undefined) {
+    return { raw, packageKey: raw, minimumVersion: "" };
+  }
+
+  return {
+    raw,
+    packageKey: raw.slice(0, versionMatch.index),
+    minimumVersion: versionMatch[1],
+  };
+};
+
+const isMelonLoaderThunderstoreDependency = (
+  dependency: ThunderstoreDependencyRequirement,
+): boolean =>
+  normalizeThunderstoreDependencyKey(dependency.packageKey).includes(
+    "melonloader",
+  );
+
+const getThunderstoreDependenciesForRuntime = (
+  version: ThunderstoreVersionOption | null | undefined,
+  runtime: ThunderstoreRuntime | "Both",
+): ThunderstoreDependencyRequirement[] => {
+  if (!version) {
+    return [];
+  }
+
+  const runtimes: ThunderstoreRuntime[] =
+    runtime === "Both" ? ["IL2CPP", "Mono"] : [runtime];
+  const requirements = runtimes.flatMap((targetRuntime) =>
+    (version.versionsByRuntime[targetRuntime]?.dependencies || [])
+      .map(parseThunderstoreDependency)
+      .filter((dependency): dependency is ThunderstoreDependencyRequirement =>
+        Boolean(dependency),
+      ),
+  );
+
+  return Array.from(
+    new Map(
+      requirements
+        .filter(
+          (dependency) => !isMelonLoaderThunderstoreDependency(dependency),
+        )
+        .map((dependency) => [
+          `${normalizeThunderstoreDependencyKey(dependency.packageKey)}:${normalizeVersionToken(dependency.minimumVersion)}`,
+          dependency,
+        ]),
+    ).values(),
+  );
+};
+
+const getMissingThunderstoreDependencies = (
+  dependencies: ThunderstoreDependencyRequirement[],
+  downloadedGroups: DownloadedModGroup[],
+): ThunderstoreDependencyRequirement[] =>
+  dependencies.filter((dependency) => {
+    const expectedPackageKey = normalizeThunderstoreDependencyKey(
+      dependency.packageKey,
+    );
+    return !downloadedGroups.some((group) =>
+      group.entries.some((entry) => {
+        if (entry.source !== "thunderstore") {
+          return false;
+        }
+
+        const source = parseThunderstoreSourceId(entry.sourceId);
+        const installedPackageKey = normalizeThunderstoreDependencyKey(
+          `${source.owner}-${source.name}`,
+        );
+        if (installedPackageKey !== expectedPackageKey) {
+          return false;
+        }
+
+        if (!dependency.minimumVersion) {
+          return true;
+        }
+
+        const installedVersion = entry.sourceVersion || entry.installedVersion || "";
+        return (
+          normalizeVersionToken(installedVersion).length > 0 &&
+          compareVersionTokensDesc(installedVersion, dependency.minimumVersion) <=
+            0
+        );
+      }),
+    );
+  });
+
 const sortNexusFilesNewestFirst = (files: NexusModFile[]): NexusModFile[] => {
   return [...files].sort((left, right) => {
     if (Boolean(left.is_primary) !== Boolean(right.is_primary)) {
@@ -1453,6 +1616,12 @@ export function ModLibraryOverlay({
   const [nexusModsLoading, setNexusModsLoading] = useState<Set<number>>(
     new Set(),
   );
+  const [nexusDependencyState, setNexusDependencyState] = useState<{
+    key: string | null;
+    loading: boolean;
+    report: NexusModFileDependencies | null;
+    error: string | null;
+  }>({ key: null, loading: false, report: null, error: null });
 
   const [downloading, setDownloading] = useState<string | null>(null);
   const [, setDeleting] = useState<string | null>(null);
@@ -1520,6 +1689,9 @@ export function ModLibraryOverlay({
   const activeNexusModIdsRef = useRef<Set<number>>(new Set());
   const nexusModsFileRequestTokenRef = useRef(new Map<number, number>());
   const nexusModsFileRequestSeqRef = useRef(0);
+  const nexusDependencyRequestRef = useRef(
+    new Map<string, Promise<NexusModFileDependencies | null>>(),
+  );
   const pendingSecurityGateResolutionRef = useRef<
     ((result?: any) => void) | null
   >(null);
@@ -1913,6 +2085,68 @@ export function ModLibraryOverlay({
       }
     }
   }, []);
+
+  const loadNexusDependencyReport = useCallback(
+    async (modId: number, fileId: number): Promise<NexusModFileDependencies | null> => {
+      const key = `${modId}:${fileId}`;
+      if (nexusDependencyState.key === key && nexusDependencyState.report) {
+        return nexusDependencyState.report;
+      }
+      if (nexusDependencyState.key === key && nexusDependencyState.error) {
+        return null;
+      }
+      const pendingRequest = nexusDependencyRequestRef.current.get(key);
+      if (pendingRequest) {
+        return pendingRequest;
+      }
+
+      const access = await ApiService.getNexusOAuthStatus();
+      if (!access.connected) {
+        setNexusDependencyState({
+          key,
+          loading: false,
+          report: null,
+          error: "Connect Nexus to check this file's dependencies.",
+        });
+        return null;
+      }
+
+      setNexusDependencyState({
+        key,
+        loading: true,
+        report: null,
+        error: null,
+      });
+      const request = ApiService.getNexusModFileDependencies(
+        "schedule1",
+        modId,
+        fileId,
+      )
+        .then((report) => {
+          setNexusDependencyState({ key, loading: false, report, error: null });
+          return report;
+        })
+        .catch((error) => {
+          const message = getErrorMessage(
+            error,
+            "Nexus did not provide dependency information for this file.",
+          );
+          setNexusDependencyState({
+            key,
+            loading: false,
+            report: null,
+            error: message,
+          });
+          return null;
+        })
+        .finally(() => {
+          nexusDependencyRequestRef.current.delete(key);
+        });
+      nexusDependencyRequestRef.current.set(key, request);
+      return request;
+    },
+    [nexusDependencyState],
+  );
 
   const selectedNexusModId = useMemo(() => {
     if (activeModView?.kind !== "nexusmods") {
@@ -5038,7 +5272,34 @@ export function ModLibraryOverlay({
       selectedVersionOption || buildThunderstoreVersionOptions(pkg)[0] || null;
     const hasIl2cpp = Boolean(resolvedVersionOption?.versionsByRuntime.IL2CPP);
     const hasMono = Boolean(resolvedVersionOption?.versionsByRuntime.Mono);
-    const runDownload = async (runtime: "IL2CPP" | "Mono" | "Both") => {
+    const runDownload = async (
+      runtime: "IL2CPP" | "Mono" | "Both",
+      skipDependencyWarning = false,
+    ) => {
+      const missingDependencies = getMissingThunderstoreDependencies(
+        getThunderstoreDependenciesForRuntime(resolvedVersionOption, runtime),
+        downloadedGroups,
+      );
+      if (!skipDependencyWarning && missingDependencies.length > 0) {
+        showLibraryNotice(
+          "Required Dependencies Missing",
+          `${pkg.name} requires the following Thunderstore package${missingDependencies.length === 1 ? "" : "s"} before it can work correctly:\n\n${missingDependencies
+            .map(
+              (dependency) =>
+                `• ${dependency.packageKey}${dependency.minimumVersion ? ` ${formatVersionTag(dependency.minimumVersion)} or newer` : ""}`,
+            )
+            .join("\n")}\n\nMelonLoader is managed separately. You can still add this mod to your library now.`,
+          {
+            label: "Download anyway",
+            cancelText: "Cancel",
+            onAction: () => {
+              void runDownload(runtime, true);
+            },
+          },
+        );
+        return;
+      }
+
       setDownloading(pkg.key);
       try {
         const results: SuccessfulLibraryDownload[] = [];
@@ -5287,11 +5548,39 @@ export function ModLibraryOverlay({
   const handleDownloadNexusMod = async (
     modId: number,
     selectedFile?: NexusModFile | null,
+    skipDependencyWarning = false,
   ) => {
     const files = nexusModsFiles.get(modId) || [];
     if (files.length === 0) {
       await handleLoadNexusModFiles(modId);
       return;
+    }
+
+    if (!skipDependencyWarning && selectedFile?.file_id) {
+      const dependencyReport = await loadNexusDependencyReport(
+        modId,
+        selectedFile.file_id,
+      );
+      const missingRequirements = dependencyReport
+        ? getMissingNexusDependencies(dependencyReport, downloadedGroups)
+        : [];
+      if (missingRequirements.length > 0) {
+        const missingLabels = missingRequirements
+          .map(formatNexusDependencyCandidates)
+          .filter(Boolean);
+        showLibraryNotice(
+          "Required Dependencies Missing",
+          `SIMM could not find a compatible downloaded version of ${missingLabels.join(", ")}. You can download this file anyway, but it may not work until its required mods are added to your library and installed.`,
+          {
+            label: "Download anyway",
+            cancelText: "Cancel",
+            onAction: () => {
+              void handleDownloadNexusMod(modId, selectedFile, true);
+            },
+          },
+        );
+        return;
+      }
     }
 
     const fileNames = files.map((file) =>
@@ -6222,6 +6511,14 @@ export function ModLibraryOverlay({
     selectedThunderstoreVersionOptions,
   ]);
 
+  const selectedThunderstoreDependencies =
+    getThunderstoreDependenciesForRuntime(selectedThunderstoreVersion, "Both");
+  const missingSelectedThunderstoreDependencies =
+    getMissingThunderstoreDependencies(
+      selectedThunderstoreDependencies,
+      downloadedGroups,
+    );
+
   const selectedNexusResult = useMemo(() => {
     if (activeModView?.kind !== "nexusmods") {
       return null;
@@ -6253,6 +6550,39 @@ export function ModLibraryOverlay({
       null
     );
   }, [selectedNexusFileByModId, selectedNexusFiles, selectedNexusResult]);
+
+  useEffect(() => {
+    if (!selectedNexusResult || !selectedNexusFile?.file_id) {
+      setNexusDependencyState({
+        key: null,
+        loading: false,
+        report: null,
+        error: null,
+      });
+      return;
+    }
+
+    void loadNexusDependencyReport(
+      selectedNexusResult.mod_id,
+      selectedNexusFile.file_id,
+    );
+  }, [loadNexusDependencyReport, selectedNexusFile?.file_id, selectedNexusResult]);
+
+  const selectedNexusDependencyKey =
+    selectedNexusResult && selectedNexusFile?.file_id
+      ? `${selectedNexusResult.mod_id}:${selectedNexusFile.file_id}`
+      : null;
+  const selectedNexusDependencies =
+    nexusDependencyState.key === selectedNexusDependencyKey
+      ? nexusDependencyState.report
+      : null;
+  const visibleSelectedNexusRequirements =
+    selectedNexusDependencies?.requirements.filter(
+      (requirement) => getVisibleNexusDependencyCandidates(requirement).length > 0,
+    ) || [];
+  const missingSelectedNexusRequirements = selectedNexusDependencies
+    ? getMissingNexusDependencies(selectedNexusDependencies, downloadedGroups)
+    : [];
 
   const downloadedGroupForSelectedThunderstore = useMemo(() => {
     if (!selectedThunderstorePackage) {
@@ -7326,6 +7656,76 @@ export function ModLibraryOverlay({
                     </strong>
                   </div>
                 </div>
+                <section
+                  className="workspace-inspector-card__subsection workspace-inspector-card__subsection--dependencies"
+                  aria-labelledby="nexus-inspector-dependencies"
+                >
+                  <div className="workspace-inspector-card__subsection-header">
+                    <div>
+                      <h4 id="nexus-inspector-dependencies">
+                        Required dependencies
+                      </h4>
+                      <p>
+                        Compatibility is checked for the selected Nexus file. MelonLoader is managed separately.
+                      </p>
+                    </div>
+                    {visibleSelectedNexusRequirements.length > 0 && (
+                      <WorkspaceBadge className="workspace-inspector-card__subsection-count">
+                        {visibleSelectedNexusRequirements.length} required
+                      </WorkspaceBadge>
+                    )}
+                  </div>
+                  {selectedNexusDependencyKey === nexusDependencyState.key &&
+                  nexusDependencyState.loading ? (
+                    <InspectorCardEmpty>
+                      Checking published Nexus dependencies…
+                    </InspectorCardEmpty>
+                  ) : nexusDependencyState.error &&
+                    selectedNexusDependencyKey === nexusDependencyState.key ? (
+                    <InspectorCardEmpty>
+                      Dependency information is unavailable for this file. Connect Nexus and try again before downloading if you need a compatibility check.
+                    </InspectorCardEmpty>
+                  ) : selectedNexusDependencies ? (
+                    visibleSelectedNexusRequirements.length > 0 ? (
+                      <div className="workspace-dependency-list">
+                        {visibleSelectedNexusRequirements.map((requirement) => {
+                          const isMissing = missingSelectedNexusRequirements.some(
+                            (missingRequirement) =>
+                              missingRequirement.id === requirement.id,
+                          );
+                          return (
+                            <div
+                              className="workspace-dependency-row"
+                              key={requirement.id}
+                            >
+                              <div>
+                                <strong>
+                                  {formatNexusDependencyCandidates(requirement)}
+                                </strong>
+                                <span>
+                                  Any listed version satisfies this requirement.
+                                </span>
+                              </div>
+                              <WorkspaceBadge
+                                tone={isMissing ? "warning" : "success"}
+                              >
+                                {isMissing ? "Missing" : "In library"}
+                              </WorkspaceBadge>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <InspectorCardEmpty>
+                        No additional Nexus mod dependencies are declared for this file.
+                      </InspectorCardEmpty>
+                    )
+                  ) : (
+                    <InspectorCardEmpty>
+                      Select a file to check its published dependencies.
+                    </InspectorCardEmpty>
+                  )}
+                </section>
                 <div className="workspace-inspector-card__field">
                   <label
                     htmlFor={`mod-library-version-${selectedDownloadedGroup.key}`}
@@ -7630,6 +8030,69 @@ export function ModLibraryOverlay({
                     </>
                   );
                 })()}
+                <section
+                  className="workspace-inspector-card__subsection"
+                  aria-labelledby="thunderstore-inspector-dependencies"
+                >
+                  <div className="workspace-inspector-card__subsection-header">
+                    <div>
+                      <h4 id="thunderstore-inspector-dependencies">
+                        Required dependencies
+                      </h4>
+                      <p>
+                        Checked against the selected version in your library.
+                        MelonLoader is managed separately.
+                      </p>
+                    </div>
+                    <WorkspaceBadge className="workspace-inspector-card__subsection-count">
+                      {selectedThunderstoreDependencies.length} required
+                    </WorkspaceBadge>
+                  </div>
+                  {!selectedThunderstoreVersion ? (
+                    <p className="workspace-inspector-card__empty">
+                      Select a version to review its dependencies.
+                    </p>
+                  ) : selectedThunderstoreDependencies.length === 0 ? (
+                    <p className="workspace-inspector-card__empty">
+                      No additional Thunderstore dependencies are declared for
+                      this version.
+                    </p>
+                  ) : (
+                    <div className="workspace-dependency-list">
+                      {selectedThunderstoreDependencies.map((dependency) => {
+                        const isMissing =
+                          missingSelectedThunderstoreDependencies.some(
+                            (missing) => missing.raw === dependency.raw,
+                          );
+                        return (
+                          <div
+                            key={dependency.raw}
+                            className="workspace-dependency-row"
+                          >
+                            <div>
+                              <strong>
+                                {dependency.packageKey}
+                                {dependency.minimumVersion
+                                  ? ` ${formatVersionTag(dependency.minimumVersion)}`
+                                  : ""}
+                              </strong>
+                              <span>
+                                {dependency.minimumVersion
+                                  ? "Requires this version or newer."
+                                  : "Version requirement unavailable."}
+                              </span>
+                            </div>
+                            <WorkspaceBadge
+                              tone={isMissing ? "warning" : "success"}
+                            >
+                              {isMissing ? "Missing" : "In library"}
+                            </WorkspaceBadge>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
                 <div className="workspace-inspector-card__actions workspace-inspector-card__actions--grouped">
                   <div className="workspace-inspector-card__action-row workspace-inspector-card__action-row--primary">
                     <SimmButton

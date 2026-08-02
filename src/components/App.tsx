@@ -31,6 +31,7 @@ import {
 } from '../utils/uxSettings';
 import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
+import { telemetryFeatureEnabled } from '../utils/featureFlags';
 import type {
   Environment,
   ExperienceMode,
@@ -171,6 +172,10 @@ const UserLibsOverlay = lazyNamed(
 const LogsOverlay = lazyNamed(
   () => import('./LogsOverlay'),
   (module) => module.LogsOverlay,
+);
+const SaveBackupsWorkspace = lazyNamed(
+  () => import('./SaveBackupsWorkspace'),
+  (module) => module.SaveBackupsWorkspace,
 );
 const ConfigurationOverlay = lazyNamed(
   () => import('./ConfigurationOverlay'),
@@ -965,6 +970,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenHome,
   onOpenLibrary,
   onOpenProfiles,
+  onOpenSaveBackups,
   onShellNavTransitionEnd,
   onToggleShellNavigation,
   shellNavAnimating,
@@ -982,6 +988,7 @@ const AppShellSidebar = memo(function AppShellSidebar({
   onOpenHome: () => void;
   onOpenLibrary: () => void;
   onOpenProfiles: () => void;
+  onOpenSaveBackups: () => void;
   onShellNavTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
   onToggleShellNavigation: () => void;
   shellNavAnimating: boolean;
@@ -1056,6 +1063,13 @@ const AppShellSidebar = memo(function AppShellSidebar({
       icon: 'fileLines',
       active: activeWorkspace.view === 'logs',
       onClick: () => onOpenEnvironmentWorkspace('logs'),
+    },
+    {
+      key: 'saveBackups',
+      label: 'Save Management',
+      icon: 'boxArchive',
+      active: activeWorkspace.view === 'saveBackups',
+      onClick: onOpenSaveBackups,
     },
   ] as const;
 
@@ -1636,7 +1650,7 @@ function AppContent() {
     try {
       if (remember) {
         try {
-          await ApiService.saveTelemetryPreferences({ closeBehavior: behavior });
+          await updateSettings({ windowCloseBehavior: behavior });
         } catch (error) {
           logger.error('Failed to remember SIMM close behavior', {
             error: getErrorMessage(error, 'unknown error'),
@@ -1656,7 +1670,7 @@ function AppContent() {
     } finally {
       closeRequestInFlightRef.current = false;
     }
-  }, [closePrompt.remember]);
+  }, [closePrompt.remember, updateSettings]);
 
   useEffect(() => {
     let unlistenCloseRequest: (() => void) | undefined;
@@ -1668,17 +1682,8 @@ function AppContent() {
       let awaitingChoice = false;
 
       try {
-        const preferences = await ApiService.getTelemetryPreferences();
-        if (preferences.closeBehavior === 'ask') {
-          setClosePrompt({ isOpen: true, remember: false });
-          awaitingChoice = true;
-          return;
-        }
-        if (preferences.closeBehavior === 'tray') {
-          await ApiService.hideMainWindow();
-        } else {
-          await ApiService.quitSimm();
-        }
+        setClosePrompt({ isOpen: true, remember: false });
+        awaitingChoice = true;
       } catch (error) {
         logger.error('Failed to handle SIMM close request', { error: getErrorMessage(error, 'unknown error') });
       } finally {
@@ -2248,11 +2253,13 @@ function AppContent() {
           />
         );
       case 'telemetry':
-        return <TelemetryWorkspace onClose={onCloseHandler} />;
+        return telemetryFeatureEnabled ? <TelemetryWorkspace onClose={onCloseHandler} /> : null;
       case 'profiles':
         return (
           <ProfilesWorkspace preferredEnvironmentId={selectedEnvironmentId} />
         );
+      case 'saveBackups':
+        return <SaveBackupsWorkspace onClose={onCloseHandler} />;
       case 'welcome':
         return (
           <WelcomeOverlay
@@ -2516,7 +2523,17 @@ function AppContent() {
       setLaunchingEnvironmentId(null);
     }
   }, [currentEnvironment, currentEnvironmentId, openWorkspace, verifyShellMelonLoaderLaunch]);
-  const utilityActions = [
+  const telemetryUtilityAction: ShellUtilityAction = {
+    key: 'telemetry',
+    label: 'Telemetry',
+    icon: 'waveSquare',
+    active: activeWorkspace.view === 'telemetry',
+    variant: 'btn-secondary',
+    onClick: () => openWorkspace({ view: 'telemetry' }),
+    disabled: false,
+    title: 'Open live telemetry diagnostics',
+  };
+  const utilityActions: readonly ShellUtilityAction[] = [
     {
       key: 'launch',
       label: isShellLaunchInProgress ? 'Launching...' : 'Launch Game',
@@ -2559,16 +2576,7 @@ function AppContent() {
       disabled: false,
       title: 'Open help and troubleshooting guidance',
     },
-    {
-      key: 'telemetry',
-      label: 'Telemetry',
-      icon: 'waveSquare',
-      active: activeWorkspace.view === 'telemetry',
-      variant: 'btn-secondary' as const,
-      onClick: () => openWorkspace({ view: 'telemetry' }),
-      disabled: false,
-      title: 'Open live telemetry diagnostics',
-    },
+    ...(telemetryFeatureEnabled ? [telemetryUtilityAction] : []),
     {
       key: 'settings',
       label: 'Settings',
@@ -2579,7 +2587,7 @@ function AppContent() {
       disabled: false,
       title: 'Open application settings',
     },
-  ] as const;
+  ];
 
   return (
     <div className="app app-desktop-shell">
@@ -2598,6 +2606,7 @@ function AppContent() {
             onOpenHome={goHome}
             onOpenLibrary={openLibraryWorkspaceFromShell}
             onOpenProfiles={() => openWorkspace({ view: 'profiles' })}
+            onOpenSaveBackups={() => openWorkspace({ view: 'saveBackups' })}
             onShellNavTransitionEnd={handleShellNavTransitionEnd}
             onToggleShellNavigation={toggleShellNavigation}
             shellNavAnimating={shellNavAnimating}

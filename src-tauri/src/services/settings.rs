@@ -14,13 +14,21 @@ use aes_gcm::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::types::{AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings};
+use crate::types::{
+    AppUpdateChannel, AppUpdateSettings, CustomThemeDefinition, Settings, WindowCloseBehavior,
+};
 
 pub struct SettingsService {
     pool: Arc<SqlitePool>,
 }
 
 const SETTINGS_ID: i64 = 1;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyTelemetryPreferences {
+    close_behavior: Option<WindowCloseBehavior>,
+}
 const STEAM_CREDENTIALS_KEY: &str = "steam_credentials";
 const NEXUS_MODS_API_KEY: &str = "nexus_mods_api_key";
 const NEXUS_OAUTH_SESSION_KEY: &str = "nexus_oauth_session";
@@ -406,6 +414,7 @@ impl SettingsService {
         if let Some(data) = stored {
             if let Ok(mut settings) = serde_json::from_str::<Settings>(&data) {
                 settings.theme = Self::normalize_theme_selection(&settings.theme);
+                self.migrate_window_close_behavior(&mut settings).await?;
                 return Ok(settings);
             }
 
@@ -413,6 +422,7 @@ impl SettingsService {
                 let sanitized = Self::sanitize_legacy_settings_value(raw_value);
                 if let Ok(mut settings) = serde_json::from_value::<Settings>(sanitized) {
                     settings.theme = Self::normalize_theme_selection(&settings.theme);
+                    self.migrate_window_close_behavior(&mut settings).await?;
                     log::warn!("Recovered persisted settings through legacy sanitization");
                     return Ok(settings);
                 }
@@ -474,10 +484,39 @@ impl SettingsService {
             }),
             experience_mode: Some(crate::types::ExperienceMode::Player),
             show_advanced_game_tools: Some(false),
+            window_close_behavior: Some(WindowCloseBehavior::Ask),
             setup_guide_completed: Some(false),
         };
 
         Ok(default_settings)
+    }
+
+    async fn migrate_window_close_behavior(&self, settings: &mut Settings) -> Result<()> {
+        if settings.window_close_behavior.is_some() {
+            return Ok(());
+        }
+
+        let legacy =
+            sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_preferences WHERE id = ?")
+                .bind(1_i64)
+                .fetch_optional(&*self.pool)
+                .await
+                .context("Failed to load legacy telemetry close behavior")?
+                .and_then(|data| serde_json::from_str::<LegacyTelemetryPreferences>(&data).ok())
+                .and_then(|preferences| preferences.close_behavior)
+                .unwrap_or_default();
+
+        settings.window_close_behavior = Some(legacy);
+        let content = serde_json::to_string(settings)
+            .context("Failed to serialize migrated application settings")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(content)
+            .bind(SETTINGS_ID)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to migrate window close behavior into application settings")?;
+
+        Ok(())
     }
 
     pub async fn save_settings(&mut self, updates: serde_json::Value) -> Result<()> {
@@ -816,6 +855,50 @@ mod tests {
         assert_eq!(loaded.database_backup_count, Some(12));
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn migrates_legacy_telemetry_close_behavior_into_application_settings() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool.clone())?;
+        let mut legacy_settings = service.load_settings().await?;
+        legacy_settings.window_close_behavior = None;
+
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&legacy_settings)?)
+            .execute(&*pool)
+            .await?;
+        sqlx::query("INSERT INTO telemetry_preferences (id, data, updated_at) VALUES (?, ?, ?)")
+            .bind(1_i64)
+            .bind(r#"{"closeBehavior":"tray"}"#)
+            .bind("2026-07-24T00:00:00Z")
+            .execute(&*pool)
+            .await?;
+
+        let migrated = service.load_settings().await?;
+        assert_eq!(
+            migrated.window_close_behavior,
+            Some(WindowCloseBehavior::Tray)
+        );
+
+        let persisted = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<Settings>(&persisted)?.window_close_behavior,
+            Some(WindowCloseBehavior::Tray)
+        );
 
         Ok(())
     }

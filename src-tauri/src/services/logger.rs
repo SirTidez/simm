@@ -16,8 +16,14 @@ static SESSION_LOG_FILENAME: Lazy<String> = Lazy::new(|| {
 static SHARED_LOG_LEVEL: Lazy<RwLock<LogLevel>> = Lazy::new(|| RwLock::new(LogLevel::Warn));
 static SHARED_RETENTION_DAYS: Lazy<RwLock<u32>> = Lazy::new(|| RwLock::new(7));
 static WINDOWS_PATH_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)\b[a-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]*"#)
+    Regex::new(r#"(?i)\b[a-z]:[\\/](?:[^\\/:*?"<>|\s]+[\\/])*[^\\/:*?"<>|\s]*"#)
         .expect("windows path regex")
+});
+static FILE_URI_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)\bfile://[^\s"'<>|\r\n]+"#).expect("file URI regex"));
+static UNIX_PATH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?m)(^|[^A-Za-z0-9_.-])(/(?:[^\s"'<>|,;:!?()\[\]{}\r\n]+/?)+)"#)
+        .expect("unix path regex")
 });
 static USERNAME_KEY_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b(username|user|login)\s*[:=]\s*(?:"[^"]*"|[^\s,|]+)"#)
@@ -110,9 +116,23 @@ impl LoggerService {
     pub fn sanitize_log_text(input: &str) -> String {
         let mut sanitized = input.replace("\r\n", "\n");
 
+        sanitized = FILE_URI_RE
+            .replace_all(&sanitized, |caps: &Captures| {
+                Self::summarize_path(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
         sanitized = WINDOWS_PATH_RE
             .replace_all(&sanitized, |caps: &Captures| {
                 Self::summarize_path(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
+        sanitized = UNIX_PATH_RE
+            .replace_all(&sanitized, |caps: &Captures| {
+                format!(
+                    "{}{}",
+                    caps.get(1).map(|m| m.as_str()).unwrap_or_default(),
+                    Self::summarize_path(caps.get(2).map(|m| m.as_str()).unwrap_or_default())
+                )
             })
             .to_string();
         sanitized = EMAIL_RE
@@ -515,6 +535,28 @@ mod tests {
         assert!(LoggerService::should_log(LogLevel::Debug, LogLevel::Debug));
         assert!(!LoggerService::should_log(LogLevel::Debug, LogLevel::Info));
         assert!(!LoggerService::should_log(LogLevel::Info, LogLevel::Warn));
+    }
+
+    #[test]
+    fn sanitize_log_text_redacts_windows_unix_and_file_uri_paths() {
+        let sanitized = LoggerService::sanitize_log_text(
+            "C:/Users/Alice/secret.txt C:\\Users\\Alice\\secret.txt /home/alice/secret.txt file:///tmp/secret.txt",
+        );
+
+        assert!(!sanitized.contains("Alice"));
+        assert!(!sanitized.contains("/home/alice"));
+        assert!(!sanitized.contains("file:///"));
+    }
+
+    #[test]
+    fn sanitize_log_text_redacts_unix_paths_after_non_whitespace_delimiters() {
+        let sanitized = LoggerService::sanitize_log_text(
+            "setting=/home/alice/private.txt; cache=/var/lib/simm/cache.db",
+        );
+
+        assert!(!sanitized.contains("/home/alice"));
+        assert!(!sanitized.contains("/var/lib/simm"));
+        assert!(sanitized.contains("setting=<path:private.txt>"));
     }
 
     #[tokio::test]

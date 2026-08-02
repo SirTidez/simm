@@ -48,9 +48,13 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         }
     };
 
-    crate::services::game_session_monitor::GameSessionMonitor::new(pool.clone(), app.clone())
-        .start();
-    log::info!("Live telemetry game-session monitor initialized");
+    if crate::services::telemetry::telemetry_feature_enabled() {
+        crate::services::game_session_monitor::GameSessionMonitor::new(pool.clone(), app.clone())
+            .start();
+        log::info!("Live telemetry game-session monitor initialized");
+    } else {
+        log::info!("Live telemetry is disabled by the SIMM_ENABLE_TELEMETRY feature flag");
+    }
     crate::services::runtime_update_scheduler::start(pool.clone(), app.clone());
     log::info!("Background update scheduler initialized");
 

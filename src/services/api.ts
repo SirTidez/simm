@@ -41,6 +41,16 @@ import type {
   LiveTelemetryStatus,
   TelemetryPreferences,
   TelemetryPreferencesUpdate,
+  TelemetryModPolicyItem,
+  TelemetryModRuleUpdate,
+  TelemetryUploadPreview,
+  TelemetryUploadReceipt,
+  GameSaveBackupExportResult,
+  GameSaveBackupResult,
+  GameSaveBackupStatus,
+  GameSaveRestorePreview,
+  GameSaveRestoreResult,
+  NexusModFileDependencies,
 } from '../types';
 
 type SecurityGateResponse = {
@@ -106,6 +116,46 @@ export class ApiService {
     return { success: true, path };
   }
 
+  static async getGameSaveBackupStatus(): Promise<GameSaveBackupStatus> {
+    return invoke('get_game_save_backup_status');
+  }
+
+  static async createGameSaveBackup(
+    steamId: string,
+    slotNumber: number,
+    retentionLimit?: number | null,
+  ): Promise<GameSaveBackupResult> {
+    return invoke('create_game_save_backup', { steamId, slotNumber, retentionLimit: retentionLimit ?? null });
+  }
+
+  static async exportGameSaveBackup(steamId: string, slotNumber: number, destinationPath: string): Promise<GameSaveBackupExportResult> {
+    return invoke('export_game_save_backup', { steamId, slotNumber, destinationPath });
+  }
+
+  static async restoreGameSaveBackup(
+    steamId: string,
+    slotNumber: number,
+    backupPath?: string | null,
+  ): Promise<GameSaveRestoreResult> {
+    return invoke('restore_game_save_backup', { steamId, slotNumber, backupPath: backupPath ?? null });
+  }
+
+  static async restoreGameSaveFromZip(steamId: string, slotNumber: number, zipPath: string): Promise<GameSaveRestoreResult> {
+    return invoke('restore_game_save_from_zip', { steamId, slotNumber, zipPath });
+  }
+
+  static async previewGameSaveBackupRestore(
+    steamId: string,
+    slotNumber: number,
+    backupPath?: string | null,
+  ): Promise<GameSaveRestorePreview> {
+    return invoke('preview_game_save_backup_restore', { steamId, slotNumber, backupPath: backupPath ?? null });
+  }
+
+  static async previewGameSaveZipRestore(steamId: string, slotNumber: number, zipPath: string): Promise<GameSaveRestorePreview> {
+    return invoke('preview_game_save_zip_restore', { steamId, slotNumber, zipPath });
+  }
+
   static async repairDatabase(): Promise<{ success: boolean; backupPath: string }> {
     const backupPath = await invoke<string>('repair_database');
     return { success: true, backupPath };
@@ -136,6 +186,14 @@ export class ApiService {
     updates: TelemetryPreferencesUpdate,
   ): Promise<TelemetryPreferences> {
     return invoke('save_telemetry_preferences', { updates });
+  }
+
+  static async listTelemetryModPolicies(environmentId: string): Promise<TelemetryModPolicyItem[]> {
+    return invoke('list_telemetry_mod_policies', { environmentId });
+  }
+
+  static async saveTelemetryModRule(update: TelemetryModRuleUpdate): Promise<void> {
+    await invoke('save_telemetry_mod_rule', { update });
   }
 
   static async captureModTelemetrySnapshot(
@@ -180,6 +238,26 @@ export class ApiService {
 
   static async exportLiveTelemetryHistory(environmentId?: string | null): Promise<LiveTelemetryExport> {
     return invoke('export_live_telemetry_history', { environmentId: environmentId ?? null });
+  }
+
+  static async previewTelemetryUpload(environmentId?: string | null): Promise<TelemetryUploadPreview> {
+    return invoke('preview_telemetry_upload', { environmentId: environmentId ?? null });
+  }
+
+  static async queueTelemetryUpload(previewPayload: string): Promise<TelemetryUploadReceipt> {
+    return invoke('queue_telemetry_upload', { previewPayload });
+  }
+
+  static async listTelemetryUploads(): Promise<TelemetryUploadReceipt[]> {
+    return invoke('list_telemetry_uploads');
+  }
+
+  static async flushQueuedTelemetryUploads(): Promise<TelemetryUploadReceipt[]> {
+    return invoke('flush_queued_telemetry_uploads');
+  }
+
+  static async retryTelemetryUpload(id: string): Promise<TelemetryUploadReceipt> {
+    return invoke('retry_telemetry_upload', { id });
   }
 
   // Environments
@@ -1157,6 +1235,14 @@ export class ApiService {
 
   static async getNexusModsModFiles(gameId: string, modId: number): Promise<any[]> {
     return invoke('get_nexus_mods_mod_files', { gameId, modId });
+  }
+
+  static async getNexusModFileDependencies(
+    gameId: string,
+    modId: number,
+    fileId: number,
+  ): Promise<NexusModFileDependencies> {
+    return invoke('get_nexus_mod_file_dependencies', { gameId, modId, fileId });
   }
 
   static async installNexusModsMod(

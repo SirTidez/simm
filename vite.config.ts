@@ -19,6 +19,9 @@ const isWindowsBuild =
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const enableReactScan = env.VITE_REACT_SCAN === 'true' || env.REACT_SCAN === 'true'
+  const telemetryFeatureEnabled = ['1', 'true'].includes(
+    (env.SIMM_ENABLE_TELEMETRY ?? '').trim().toLowerCase(),
+  )
 
   return {
     plugins: [
@@ -44,6 +47,7 @@ export default defineConfig(({ mode }) => {
     },
     define: {
       __APP_VERSION__: JSON.stringify(packageJson.version),
+      __SIMM_TELEMETRY_ENABLED__: JSON.stringify(telemetryFeatureEnabled),
     },
     // Tauri expects a fixed port, fail if that port is not available
     server: {

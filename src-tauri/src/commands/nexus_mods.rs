@@ -2162,6 +2162,27 @@ pub async fn get_nexus_mods_mod_files(
 }
 
 #[tauri::command]
+pub async fn get_nexus_mod_file_dependencies(
+    db: State<'_, Arc<SqlitePool>>,
+    game_id: String,
+    mod_id: u32,
+    file_id: u32,
+) -> Result<crate::types::NexusModFileDependencies, String> {
+    let access_token = get_valid_nexus_access_token(db.inner().clone())
+        .await
+        .map_err(nexus_error)?;
+    let service = get_nexus_mods_service().await?;
+    service
+        .get_mod_file_dependencies(&access_token, &game_id, mod_id, file_id)
+        .await
+        .map_err(|error| {
+            nexus_error(format!(
+                "Failed to resolve Nexus dependencies for mod {mod_id} file {file_id}: {error}"
+            ))
+        })
+}
+
+#[tauri::command]
 pub async fn download_nexus_mods_mod_file(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
