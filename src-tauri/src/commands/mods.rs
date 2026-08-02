@@ -195,7 +195,7 @@ fn build_s1api_library_metadata(version_tag: &str) -> serde_json::Value {
         "sourceVersion": version_tag,
         "sourceUrl": "https://github.com/ifBars/S1API",
         "modName": "S1API",
-        "author": "ScheduleI-Dev",
+        "author": "ifBars",
     })
 }
 
@@ -1808,6 +1808,10 @@ mod tests {
         assert_eq!(
             metadata.get("sourceVersion").and_then(|v| v.as_str()),
             Some("v1.2.3")
+        );
+        assert_eq!(
+            metadata.get("author").and_then(|v| v.as_str()),
+            Some("ifBars")
         );
     }
 

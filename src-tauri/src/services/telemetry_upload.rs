@@ -52,8 +52,83 @@ impl TelemetryUploadService {
         }
 
         let export = TelemetryService::new(self.pool.clone())
-            .export_live_history(environment_id)
+            .export_shareable_live_history(environment_id)
             .await?;
+        self.preview_export(export, &preferences)
+    }
+
+    pub async fn queue_finished_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TelemetryUploadReceipt>> {
+        let preferences = TelemetryService::new(self.pool.clone())
+            .get_preferences()
+            .await?;
+        if !preferences.collection_enabled || !preferences.upload_enabled {
+            return Ok(None);
+        }
+        if self.session_is_already_queued(session_id).await? {
+            return Ok(None);
+        }
+
+        let export = TelemetryService::new(self.pool.clone())
+            .export_shareable_live_session(session_id)
+            .await?;
+        let preview = self.preview_export(export, &preferences)?;
+        if preview.session_count == 0 {
+            return Ok(None);
+        }
+
+        self.queue_reviewed_upload(&preview.payload).await.map(Some)
+    }
+
+    async fn queue_unqueued_finished_sessions(&self) -> Result<()> {
+        let session_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM telemetry_sessions WHERE ended_at IS NOT NULL ORDER BY ended_at ASC",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to load completed telemetry sessions")?;
+
+        for session_id in session_ids {
+            self.queue_finished_session(&session_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn session_is_already_queued(&self, session_id: &str) -> Result<bool> {
+        let payloads =
+            sqlx::query_scalar::<_, String>("SELECT payload FROM telemetry_upload_queue")
+                .fetch_all(self.pool.as_ref())
+                .await
+                .context("Failed to load queued telemetry payloads")?;
+
+        Ok(payloads.into_iter().any(|payload| {
+            serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .is_some_and(|envelope| {
+                    envelope["sessions"].as_array().is_some_and(|sessions| {
+                        sessions
+                            .iter()
+                            .any(|session| session["sessionId"].as_str() == Some(session_id))
+                    })
+                })
+        }))
+    }
+
+    fn preview_export(
+        &self,
+        filtered_export: crate::services::telemetry::ShareableTelemetryExport,
+        preferences: &crate::types::TelemetryPreferences,
+    ) -> Result<TelemetryUploadPreview> {
+        let mut export = filtered_export.export;
+        if !preferences.error_excerpts_enabled {
+            for session in &mut export.sessions {
+                for event in &mut session.events {
+                    event.message = None;
+                }
+            }
+        }
         let session_count = export.sessions.len() as u64;
         let event_count = export
             .sessions
@@ -64,6 +139,7 @@ impl TelemetryUploadService {
             schema_version: TELEMETRY_SCHEMA_VERSION,
             upload_id: Uuid::new_v4().to_string(),
             exported_at: export.exported_at,
+            diagnostic_text_consent: preferences.error_excerpts_enabled,
             sessions: export.sessions,
         };
         normalize_upload_envelope_timestamps(&mut envelope)?;
@@ -76,13 +152,61 @@ impl TelemetryUploadService {
             payload,
             session_count,
             event_count,
-            exclusions: vec![
-                "Active sessions are excluded.".to_string(),
-                "Local environment IDs and filesystem paths are excluded.".to_string(),
-                "No SIMM, Nexus Mods, Steam, or other account identifiers are included."
-                    .to_string(),
-            ],
+            exclusions: {
+                let mut exclusions = vec![
+                    "Active sessions are excluded.".to_string(),
+                    "Local environment IDs and filesystem paths are excluded.".to_string(),
+                    "No SIMM, Nexus Mods, Steam, or other account identifiers are included."
+                        .to_string(),
+                ];
+                if filtered_export.excluded_mod_count > 0 {
+                    exclusions.push(format!(
+                        "{} mod entr{} excluded by your development-data rules.",
+                        filtered_export.excluded_mod_count,
+                        if filtered_export.excluded_mod_count == 1 {
+                            "y was"
+                        } else {
+                            "ies were"
+                        },
+                    ));
+                }
+                if filtered_export.excluded_event_count > 0 {
+                    exclusions.push(format!(
+                        "{} warning{} or error{} excluded by your development-data rules.",
+                        filtered_export.excluded_event_count,
+                        if filtered_export.excluded_event_count == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        if filtered_export.excluded_event_count == 1 {
+                            " was"
+                        } else {
+                            "s were"
+                        },
+                    ));
+                }
+                if filtered_export.excluded_session_count > 0 {
+                    exclusions.push(format!(
+                        "{} completed session{} contained only excluded data and will not be uploaded.",
+                        filtered_export.excluded_session_count,
+                        if filtered_export.excluded_session_count == 1 { "" } else { "s" },
+                    ));
+                }
+                exclusions
+            },
         })
+    }
+
+    /// Pending payloads are rebuilt after the privacy policy changes. Accepted uploads are
+    /// immutable receipts, and an in-flight upload is left alone to avoid racing the sender.
+    pub async fn discard_unaccepted_uploads(&self) -> Result<u64> {
+        let result =
+            sqlx::query("DELETE FROM telemetry_upload_queue WHERE state IN ('pending', 'failed')")
+                .execute(self.pool.as_ref())
+                .await
+                .context("Failed to discard queued telemetry uploads after rule changes")?;
+        Ok(result.rows_affected())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -130,6 +254,11 @@ impl TelemetryUploadService {
                 "Telemetry upload requires collection and upload opt-in before it can be queued"
             ));
         }
+        if envelope.diagnostic_text_consent && !preferences.error_excerpts_enabled {
+            return Err(anyhow!(
+                "Readable diagnostic excerpts must remain enabled to upload this preview"
+            ));
+        }
 
         let upload = UploadRecord {
             id: format!("telemetry-upload-{}", Uuid::new_v4().simple()),
@@ -142,8 +271,7 @@ impl TelemetryUploadService {
             updated_at: Utc::now().to_rfc3339(),
         };
         self.insert_upload(&upload).await?;
-
-        self.send_upload(&upload.id).await
+        upload.into_receipt()
     }
 
     pub async fn retry_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
@@ -156,6 +284,31 @@ impl TelemetryUploadService {
             ));
         }
         self.send_upload(id).await
+    }
+
+    pub async fn flush_queued_uploads(&self) -> Result<Vec<TelemetryUploadReceipt>> {
+        let preferences = TelemetryService::new(self.pool.clone())
+            .get_preferences()
+            .await?;
+        if !preferences.collection_enabled || !preferences.upload_enabled {
+            return Ok(Vec::new());
+        }
+
+        self.queue_unqueued_finished_sessions().await?;
+        self.recover_interrupted_uploads().await?;
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM telemetry_upload_queue \
+             WHERE state IN ('pending', 'failed') ORDER BY created_at ASC",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to load queued telemetry uploads")?;
+
+        let mut receipts = Vec::with_capacity(ids.len());
+        for id in ids {
+            receipts.push(self.send_upload(&id).await?);
+        }
+        Ok(receipts)
     }
 
     pub async fn list_uploads(&self) -> Result<Vec<TelemetryUploadReceipt>> {
@@ -333,6 +486,17 @@ fn ensure_upload_envelope_is_safe(envelope: &TelemetryUploadEnvelope) -> Result<
     if has_unsafe_upload_value(&value) {
         return Err(anyhow!(
             "Telemetry upload preview contains a local identifier or path"
+        ));
+    }
+    if !envelope.diagnostic_text_consent
+        && envelope
+            .sessions
+            .iter()
+            .flat_map(|session| &session.events)
+            .any(|event| event.message.is_some())
+    {
+        return Err(anyhow!(
+            "Telemetry upload contains readable diagnostics without consent"
         ));
     }
     Ok(())

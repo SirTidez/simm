@@ -6,6 +6,7 @@ use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
+use crate::services::telemetry_upload::TelemetryUploadService;
 use crate::services::thunderstore::ThunderStoreService;
 use crate::services::update_check::UpdateCheckService;
 use crate::types::{ModMetadata, ModSource, UpdateCheckResult};
@@ -24,6 +25,27 @@ static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+
+async fn flush_queued_telemetry_uploads(pool: Arc<SqlitePool>) {
+    match TelemetryUploadService::new(pool)
+        .flush_queued_uploads()
+        .await
+    {
+        Ok(receipts) if !receipts.is_empty() => {
+            log::info!(
+                "[TelemetryUpload] Processed {} queued upload(s) during update check",
+                receipts.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!(
+                "[TelemetryUpload] Could not process the queued uploads during update check: {:#}",
+                error
+            );
+        }
+    }
+}
 
 fn build_environment_update_fields_from_result(
     result: &UpdateCheckResult,
@@ -145,10 +167,11 @@ pub async fn run_background_update_checks(
     if due.is_empty() {
         return Ok(());
     }
-    let results = UpdateCheckService::new(pool)
+    let results = UpdateCheckService::new(pool.clone())
         .check_all_environments(&due)
         .await
         .map_err(|error| error.to_string())?;
+    flush_queued_telemetry_uploads(pool.clone()).await;
     for (environment_id, result) in results {
         let result =
             normalize_result_for_current_environment(env_service.as_ref(), &environment_id, result)
@@ -594,6 +617,8 @@ pub async fn check_update(
         let _ = events::emit_update_available(&app, environment_id, result.clone());
     }
 
+    flush_queued_telemetry_uploads(db.inner().clone()).await;
+
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
@@ -638,6 +663,9 @@ pub async fn check_all_updates(
         .check_all_environments(&envs_to_check)
         .await
         .map_err(|e| e.to_string())?;
+    if !envs_to_check.is_empty() {
+        flush_queued_telemetry_uploads(db.inner().clone()).await;
+    }
 
     // Persist and emit environment update-check results before running the slower mod update scan.
     let environment_ids = results.keys().cloned().collect::<Vec<_>>();

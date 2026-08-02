@@ -184,6 +184,13 @@ describe("Settings", () => {
     apiMocks.openPath.mockResolvedValue(undefined);
   });
 
+  it("hides telemetry controls while the telemetry feature flag is disabled", async () => {
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    expect(screen.queryByText("Live Telemetry")).toBeNull();
+    expect(screen.queryByRole("switch", { name: /collect local telemetry/i })).toBeNull();
+  });
+
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();

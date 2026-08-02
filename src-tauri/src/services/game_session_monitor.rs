@@ -13,6 +13,7 @@ use tokio::time::{Duration, MissedTickBehavior};
 use crate::services::environment::EnvironmentService;
 use crate::services::logs::LogsService;
 use crate::services::telemetry::TelemetryService;
+use crate::services::telemetry_upload::TelemetryUploadService;
 use crate::types::{LiveTelemetrySession, TelemetryPreferences};
 
 const PROCESS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
@@ -44,9 +45,11 @@ impl GameSessionMonitor {
 
     async fn run(self) -> Result<()> {
         let (change_tx, mut change_rx) = mpsc::unbounded_channel::<String>();
-        let (preferences_tx, mut preferences_rx) = mpsc::unbounded_channel::<TelemetryPreferences>();
-        self.app.listen("telemetry_preferences_changed", move |event| {
-            match serde_json::from_str::<TelemetryPreferences>(event.payload()) {
+        let (preferences_tx, mut preferences_rx) =
+            mpsc::unbounded_channel::<TelemetryPreferences>();
+        self.app.listen(
+            "telemetry_preferences_changed",
+            move |event| match serde_json::from_str::<TelemetryPreferences>(event.payload()) {
                 Ok(preferences) => {
                     let _ = preferences_tx.send(preferences);
                 }
@@ -54,8 +57,8 @@ impl GameSessionMonitor {
                     "Ignoring invalid telemetry preference update event: {}",
                     error
                 ),
-            }
-        });
+            },
+        );
 
         let telemetry = TelemetryService::new(self.pool.clone());
         let mut preferences = telemetry.get_preferences().await?;
@@ -226,8 +229,17 @@ impl GameSessionMonitor {
             .filter(|line| attach || line.line_number > active_session.last_line_number)
             .collect::<Vec<_>>();
         active_session.last_line_number = latest_line.max(active_session.last_line_number);
-        let events = TelemetryService::new(self.pool.clone())
-            .record_live_lines_with_preferences(&active_session.session, new_lines, origin, preferences)
+        let telemetry_service = TelemetryService::new(self.pool.clone());
+        telemetry_service
+            .enrich_live_session_mod_metadata(&mut active_session.session, &new_lines)
+            .await?;
+        let events = telemetry_service
+            .record_live_lines_with_preferences(
+                &active_session.session,
+                new_lines,
+                origin,
+                preferences,
+            )
             .await?;
         for event in events {
             let _ = self.app.emit("live_telemetry_event", &event);
@@ -245,6 +257,19 @@ impl GameSessionMonitor {
             TelemetryService::new(self.pool.clone())
                 .end_live_session(&active_session.session.session_id)
                 .await?;
+            match TelemetryUploadService::new(self.pool.clone())
+                .queue_finished_session(&active_session.session.session_id)
+                .await
+            {
+                Ok(Some(receipt)) => {
+                    let _ = self.app.emit("live_telemetry_upload", &receipt);
+                }
+                Ok(None) => {}
+                Err(error) => log::warn!(
+                    "Failed to automatically upload finished telemetry session: {}",
+                    error
+                ),
+            }
             watchers.remove(environment_id);
             self.emit_status(environment_id, false, None);
         }

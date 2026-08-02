@@ -1789,6 +1789,7 @@ mod tests {
             app_update: None,
             experience_mode: None,
             show_advanced_game_tools: None,
+            window_close_behavior: None,
             setup_guide_completed: None,
         }
     }

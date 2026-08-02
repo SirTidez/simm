@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -15,16 +18,63 @@ use crate::types::{
     LiveTelemetryEvent, LiveTelemetryExport, LiveTelemetryExportEvent, LiveTelemetryExportSession,
     LiveTelemetrySession, LiveTelemetryStatus, ModSource, ModTelemetryCaptureRequest,
     ModTelemetryEnvironment, ModTelemetryModEntry, ModTelemetrySnapshot,
-    ModTelemetrySnapshotSummary, ModTelemetrySourceError, TelemetryPreferences,
+    ModTelemetrySnapshotSummary, ModTelemetrySourceError, TelemetryModCaptureMode,
+    TelemetryModPolicyItem, TelemetryModRuleUpdate, TelemetryPreferences,
     TelemetryPreferencesUpdate,
 };
 
 const TELEMETRY_SCHEMA_VERSION: u32 = 1;
 const TELEMETRY_PREFERENCES_ID: i64 = 1;
+const TELEMETRY_FEATURE_FLAG: &str = "SIMM_ENABLE_TELEMETRY";
 const DEFAULT_MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_LINES: usize = 10_000;
 const MAX_ERROR_EXCERPT_CHARS: usize = 600;
 const LIVE_TELEMETRY_SCHEMA_VERSION: u32 = 1;
+static ERROR_CLASS_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b([A-Za-z_][A-Za-z0-9_.]{0,119}(?:Exception|Error|Fault))\b")
+        .expect("error class regex should compile")
+});
+static ERROR_CODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(0x[0-9a-f]{4,16}|ERR[_-][A-Z0-9]{2,32}|HRESULT[_-]?[A-Z0-9]{2,32})\b")
+        .expect("error code regex should compile")
+});
+static MELON_MOD_VERSION_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?<name>.+?)\s+v(?<version>\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?)\s*$")
+        .expect("MelonLoader mod version regex should compile")
+});
+static MELON_MOD_AUTHOR_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^by\s+(?<author>.+?)\s*$")
+        .expect("MelonLoader mod author regex should compile")
+});
+static MELON_MOD_ASSEMBLY_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^Assembly:\s*(?:.*[\\/])?(?<file>[^\\/]+\.dll)\s*$")
+        .expect("MelonLoader mod assembly regex should compile")
+});
+static KNOWN_IL2CPP_INTEROP_WARNING_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\[il2cppinterop\]\s+class::init signatures have been exhausted,\s*using a substitute!?")
+        .expect("known Il2CppInterop warning regex should compile")
+});
+
+pub fn telemetry_feature_enabled() -> bool {
+    telemetry_feature_enabled_from_value(std::env::var(TELEMETRY_FEATURE_FLAG).ok().as_deref())
+}
+
+fn telemetry_feature_enabled_from_value(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some(value) if value == "1" || value.eq_ignore_ascii_case("true")
+    )
+}
+
+pub fn ensure_telemetry_feature_enabled() -> Result<()> {
+    if telemetry_feature_enabled() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "Telemetry is disabled. Launch SIMM with {TELEMETRY_FEATURE_FLAG}=1 to enable it."
+    ))
+}
 
 pub struct TelemetryService {
     pool: Arc<SqlitePool>,
@@ -55,6 +105,32 @@ struct StoredTelemetrySnapshot {
     #[serde(flatten)]
     snapshot: ModTelemetrySnapshot,
     environment_id: String,
+}
+
+#[derive(Debug, Default)]
+struct MelonLoaderModMetadata {
+    version: Option<String>,
+    author: Option<String>,
+}
+
+#[derive(Debug)]
+struct PendingMelonLoaderMetadata {
+    version: String,
+    author: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct TelemetryModRules {
+    global: HashMap<String, TelemetryModCaptureMode>,
+    environment: HashMap<(String, String), TelemetryModCaptureMode>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ShareableTelemetryExport {
+    pub export: LiveTelemetryExport,
+    pub excluded_mod_count: usize,
+    pub excluded_event_count: usize,
+    pub excluded_session_count: usize,
 }
 
 impl TelemetryService {
@@ -95,7 +171,9 @@ impl TelemetryService {
                 .retention_days
                 .unwrap_or(current.retention_days)
                 .clamp(1, 365),
-            close_behavior: updates.close_behavior.unwrap_or(current.close_behavior),
+            protect_local_mods: updates
+                .protect_local_mods
+                .unwrap_or(current.protect_local_mods),
             updated_at: Some(now.clone()),
         };
 
@@ -181,6 +259,54 @@ impl TelemetryService {
         Ok(())
     }
 
+    /// Fills metadata that MelonLoader prints during startup for unmanaged local mods.
+    ///
+    /// The session snapshot is persisted again before upload, but only missing values are
+    /// supplemented. This never retains the source log line or changes explicit metadata that
+    /// SIMM already knows about the installed mod.
+    pub async fn enrich_live_session_mod_metadata(
+        &self,
+        session: &mut LiveTelemetrySession,
+        lines: &[LogLine],
+    ) -> Result<()> {
+        let metadata_by_file = melonloader_mod_metadata(lines);
+        if metadata_by_file.is_empty() {
+            return Ok(());
+        }
+
+        let mut changed = false;
+        for entry in &mut session.mods {
+            let Some(metadata) = metadata_by_file.get(&normalize_mod_file_name(&entry.file_name))
+            else {
+                continue;
+            };
+
+            if entry.version.is_none() {
+                if let Some(version) = &metadata.version {
+                    entry.version = Some(version.clone());
+                    changed = true;
+                }
+            }
+            if entry.author.is_none() {
+                if let Some(author) = &metadata.author {
+                    entry.author = Some(author.clone());
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            sqlx::query("UPDATE telemetry_sessions SET data = ? WHERE id = ?")
+                .bind(serde_json::to_string(session)?)
+                .bind(&session.session_id)
+                .execute(self.pool.as_ref())
+                .await
+                .context("Failed to persist MelonLoader metadata for telemetry session")?;
+        }
+
+        Ok(())
+    }
+
     pub async fn record_live_lines_with_preferences(
         &self,
         session: &LiveTelemetrySession,
@@ -192,8 +318,12 @@ impl TelemetryService {
             return Ok(Vec::new());
         }
 
+        let rules = self.load_mod_rules().await?;
         let mut events = Vec::new();
         for line in lines {
+            if should_ignore_telemetry_line(&line.content) {
+                continue;
+            }
             let severity = line
                 .level
                 .unwrap_or_else(|| "INFO".to_string())
@@ -202,6 +332,7 @@ impl TelemetryService {
                 continue;
             }
             let sanitized = truncate_excerpt(&LoggerService::sanitize_log_text(&line.content));
+            let (error_class, error_code) = error_identity(&sanitized);
             let mod_name = line.mod_tag.clone();
             let matching_mod = mod_name.as_ref().and_then(|name| {
                 session
@@ -209,6 +340,12 @@ impl TelemetryService {
                     .iter()
                     .find(|entry| names_match(&entry.name, name))
             });
+            if matching_mod.is_some_and(|entry| {
+                effective_capture_mode(entry, &session.environment_id, preferences, &rules)
+                    == TelemetryModCaptureMode::Ignore
+            }) {
+                continue;
+            }
             let attribution = if matching_mod.is_some() {
                 "mod"
             } else if mod_name.is_some() {
@@ -230,6 +367,8 @@ impl TelemetryService {
                 mod_key: matching_mod.map(|entry| entry.mod_key.clone()),
                 mod_name,
                 fingerprint: event_fingerprint(&sanitized, attribution),
+                error_class,
+                error_code,
                 message: preferences.error_excerpts_enabled.then_some(sanitized),
                 source: "Latest.log".to_string(),
                 line_number: Some(line.line_number as u32),
@@ -370,6 +509,196 @@ impl TelemetryService {
             .fetch_all(self.pool.as_ref())
             .await?
         };
+        self.export_session_rows(session_rows).await
+    }
+
+    pub async fn export_live_session(&self, session_id: &str) -> Result<LiveTelemetryExport> {
+        let session_rows = sqlx::query_scalar::<_, String>(
+            "SELECT data FROM telemetry_sessions WHERE id = ? AND ended_at IS NOT NULL",
+        )
+        .bind(session_id)
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        self.export_session_rows(session_rows).await
+    }
+
+    pub async fn export_shareable_live_history(
+        &self,
+        environment_id: Option<String>,
+    ) -> Result<ShareableTelemetryExport> {
+        let export = self.export_live_history(environment_id).await?;
+        self.filter_export_for_upload(export).await
+    }
+
+    pub async fn export_shareable_live_session(
+        &self,
+        session_id: &str,
+    ) -> Result<ShareableTelemetryExport> {
+        let export = self.export_live_session(session_id).await?;
+        self.filter_export_for_upload(export).await
+    }
+
+    async fn filter_export_for_upload(
+        &self,
+        mut export: LiveTelemetryExport,
+    ) -> Result<ShareableTelemetryExport> {
+        let preferences = self.get_preferences().await?;
+        let rules = self.load_mod_rules().await?;
+        let session_environment_ids = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, environment_id FROM telemetry_sessions",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to resolve telemetry session environments")?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+        let mut excluded_mods = HashSet::new();
+        let mut excluded_event_count = 0;
+        let mut excluded_session_count = 0;
+        let mut shareable_sessions = Vec::with_capacity(export.sessions.len());
+
+        for mut session in export.sessions.drain(..) {
+            let session_environment_id = session_environment_ids
+                .get(&session.session_id)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let all_session_mods = session.mods.clone();
+            let protected_mod_keys = session
+                .mods
+                .iter()
+                .filter(|entry| {
+                    effective_capture_mode(entry, session_environment_id, &preferences, &rules)
+                        != TelemetryModCaptureMode::Share
+                })
+                .map(|entry| entry.mod_key.clone())
+                .collect::<HashSet<_>>();
+            excluded_mods.extend(protected_mod_keys.iter().cloned());
+            session
+                .mods
+                .retain(|entry| !protected_mod_keys.contains(&entry.mod_key));
+
+            let initial_event_count = session.events.len();
+            session.events.retain(|event| {
+                event_capture_mode(
+                    event,
+                    &all_session_mods,
+                    session_environment_id,
+                    &preferences,
+                    &rules,
+                ) == TelemetryModCaptureMode::Share
+            });
+            excluded_event_count += initial_event_count.saturating_sub(session.events.len());
+
+            if session.mods.is_empty() && session.events.is_empty() {
+                excluded_session_count += 1;
+            } else {
+                shareable_sessions.push(session);
+            }
+        }
+        export.sessions = shareable_sessions;
+
+        Ok(ShareableTelemetryExport {
+            export,
+            excluded_mod_count: excluded_mods.len(),
+            excluded_event_count,
+            excluded_session_count,
+        })
+    }
+
+    pub async fn list_mod_policies(
+        &self,
+        environment_id: &str,
+    ) -> Result<Vec<TelemetryModPolicyItem>> {
+        let environment = EnvironmentService::new(self.pool.clone())?
+            .get_environment(environment_id)
+            .await?
+            .ok_or_else(|| anyhow!("Environment not found"))?;
+        let raw_mods = ModsService::new(self.pool.clone())
+            .list_mods(&environment.output_dir)
+            .await
+            .context("Failed to list installed mods for telemetry rules")?;
+        let preferences = self.get_preferences().await?;
+        let rules = self.load_mod_rules().await?;
+
+        Ok(self
+            .telemetry_mods_from_value(raw_mods)?
+            .into_iter()
+            .map(|mod_entry| {
+                let automatic_mode = automatic_capture_mode(&mod_entry, &preferences);
+                let automatic_reason = automatic_capture_reason(&mod_entry, &preferences);
+                let global_override = rules.global.get(&mod_entry.mod_key).copied();
+                let environment_override = rules
+                    .environment
+                    .get(&(environment_id.to_string(), mod_entry.mod_key.clone()))
+                    .copied();
+                let effective_mode = environment_override
+                    .or(global_override)
+                    .unwrap_or(automatic_mode);
+                TelemetryModPolicyItem {
+                    mod_entry,
+                    automatic_mode,
+                    automatic_reason,
+                    effective_mode,
+                    global_override,
+                    environment_override,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn save_mod_rule(&self, update: TelemetryModRuleUpdate) -> Result<()> {
+        let mod_key = update.mod_key.trim();
+        if mod_key.is_empty() {
+            return Err(anyhow!("A telemetry mod rule needs a mod identifier"));
+        }
+        let environment_id = update.environment_id.unwrap_or_default();
+        if let Some(mode) = update.mode {
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO telemetry_mod_rules (id, mod_key, environment_id, mode, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(mod_key, environment_id) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at",
+            )
+            .bind(format!("telemetry-rule-{}", Uuid::new_v4().simple()))
+            .bind(mod_key)
+            .bind(&environment_id)
+            .bind(telemetry_capture_mode_value(mode))
+            .bind(&now)
+            .bind(&now)
+            .execute(self.pool.as_ref())
+            .await
+            .context("Failed to save telemetry mod rule")?;
+        } else {
+            sqlx::query("DELETE FROM telemetry_mod_rules WHERE mod_key = ? AND environment_id = ?")
+                .bind(mod_key)
+                .bind(environment_id)
+                .execute(self.pool.as_ref())
+                .await
+                .context("Failed to remove telemetry mod rule")?;
+        }
+        Ok(())
+    }
+
+    async fn load_mod_rules(&self) -> Result<TelemetryModRules> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT mod_key, environment_id, mode FROM telemetry_mod_rules",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to load telemetry mod rules")?;
+        let mut rules = TelemetryModRules::default();
+        for (mod_key, environment_id, mode) in rows {
+            let mode = parse_telemetry_capture_mode(&mode)?;
+            if environment_id.is_empty() {
+                rules.global.insert(mod_key, mode);
+            } else {
+                rules.environment.insert((environment_id, mod_key), mode);
+            }
+        }
+        Ok(rules)
+    }
+
+    async fn export_session_rows(&self, session_rows: Vec<String>) -> Result<LiveTelemetryExport> {
         let mut sessions = Vec::new();
         for data in session_rows {
             let session: LiveTelemetrySession = serde_json::from_str(&data)?;
@@ -384,13 +713,19 @@ impl TelemetryService {
                 .map(|data| -> Result<LiveTelemetryExportEvent> {
                     let event: LiveTelemetryEvent = serde_json::from_str(&data)?;
                     Ok(LiveTelemetryExportEvent {
-                        event_id: format!("event-{}", Uuid::new_v4().simple()),
+                        event_id: event.event_id,
                         occurred_at: event.occurred_at,
                         severity: event.severity,
                         attribution: event.attribution,
                         mod_key: event.mod_key,
                         mod_name: event.mod_name,
                         fingerprint: event.fingerprint,
+                        error_class: if event.error_class.trim().is_empty() {
+                            "unclassified".to_string()
+                        } else {
+                            event.error_class
+                        },
+                        error_code: event.error_code,
                         message: event.message,
                         source: event.source,
                         line_number: event.line_number,
@@ -399,7 +734,7 @@ impl TelemetryService {
                 })
                 .collect::<Result<Vec<_>>>()?;
             sessions.push(LiveTelemetryExportSession {
-                session_id: format!("session-{}", Uuid::new_v4().simple()),
+                session_id: session.session_id,
                 started_at: session.started_at,
                 ended_at: session.ended_at,
                 environment: session.environment,
@@ -616,6 +951,9 @@ impl TelemetryService {
 
         let mut errors = Vec::new();
         for line in lines {
+            if should_ignore_telemetry_line(&line.content) {
+                continue;
+            }
             let level = line.level.unwrap_or_else(|| "INFO".to_string());
             let normalized_level = level.to_ascii_uppercase();
             if !matches!(normalized_level.as_str(), "ERROR" | "FATAL") {
@@ -630,13 +968,16 @@ impl TelemetryService {
                 .iter()
                 .find(|entry| names_match(&entry.name, &mod_name))
                 .map(|entry| entry.mod_key.clone());
+            let sanitized = truncate_excerpt(&LoggerService::sanitize_log_text(&line.content));
+            let (error_class, error_code) = error_identity(&sanitized);
 
             errors.push(ModTelemetrySourceError {
                 mod_key,
                 mod_name,
                 level: normalized_level,
-                message: include_excerpts
-                    .then(|| truncate_excerpt(&LoggerService::sanitize_log_text(&line.content))),
+                error_class,
+                error_code,
+                message: include_excerpts.then_some(sanitized),
                 timestamp: line.timestamp,
                 source: Some("Latest.log".to_string()),
                 line_number: Some(line.line_number as u32),
@@ -645,6 +986,90 @@ impl TelemetryService {
 
         Ok(errors)
     }
+}
+
+fn telemetry_capture_mode_value(mode: TelemetryModCaptureMode) -> &'static str {
+    match mode {
+        TelemetryModCaptureMode::Share => "share",
+        TelemetryModCaptureMode::LocalOnly => "local_only",
+        TelemetryModCaptureMode::Ignore => "ignore",
+    }
+}
+
+fn parse_telemetry_capture_mode(value: &str) -> Result<TelemetryModCaptureMode> {
+    match value {
+        "share" => Ok(TelemetryModCaptureMode::Share),
+        "local_only" => Ok(TelemetryModCaptureMode::LocalOnly),
+        "ignore" => Ok(TelemetryModCaptureMode::Ignore),
+        _ => Err(anyhow!("Unknown telemetry mod capture mode")),
+    }
+}
+
+fn automatic_capture_mode(
+    entry: &ModTelemetryModEntry,
+    preferences: &TelemetryPreferences,
+) -> TelemetryModCaptureMode {
+    if preferences.protect_local_mods
+        && (matches!(&entry.source, Some(ModSource::Local)) || !entry.managed)
+    {
+        TelemetryModCaptureMode::LocalOnly
+    } else {
+        TelemetryModCaptureMode::Share
+    }
+}
+
+fn automatic_capture_reason(
+    entry: &ModTelemetryModEntry,
+    preferences: &TelemetryPreferences,
+) -> Option<String> {
+    if preferences.protect_local_mods
+        && (matches!(&entry.source, Some(ModSource::Local)) || !entry.managed)
+    {
+        Some("Locally sourced or unmanaged mods stay on this device by default.".to_string())
+    } else {
+        None
+    }
+}
+
+fn effective_capture_mode(
+    entry: &ModTelemetryModEntry,
+    environment_id: &str,
+    preferences: &TelemetryPreferences,
+    rules: &TelemetryModRules,
+) -> TelemetryModCaptureMode {
+    rules
+        .environment
+        .get(&(environment_id.to_string(), entry.mod_key.clone()))
+        .copied()
+        .or_else(|| rules.global.get(&entry.mod_key).copied())
+        .unwrap_or_else(|| automatic_capture_mode(entry, preferences))
+}
+
+fn event_capture_mode(
+    event: &LiveTelemetryExportEvent,
+    session_mods: &[ModTelemetryModEntry],
+    environment_id: &str,
+    preferences: &TelemetryPreferences,
+    rules: &TelemetryModRules,
+) -> TelemetryModCaptureMode {
+    let matched_mod = event
+        .mod_key
+        .as_ref()
+        .and_then(|mod_key| session_mods.iter().find(|entry| entry.mod_key == *mod_key))
+        .or_else(|| {
+            event.mod_name.as_ref().and_then(|name| {
+                session_mods
+                    .iter()
+                    .find(|entry| names_match(&entry.name, name))
+            })
+        });
+    matched_mod
+        .map(|entry| effective_capture_mode(entry, environment_id, preferences, rules))
+        .unwrap_or(TelemetryModCaptureMode::Share)
+}
+
+fn should_ignore_telemetry_line(content: &str) -> bool {
+    KNOWN_IL2CPP_INTEROP_WARNING_PATTERN.is_match(content)
 }
 
 fn mod_key(name: &str, file_name: &str, source: Option<&ModSource>) -> String {
@@ -673,6 +1098,64 @@ fn normalize_mod_name(value: &str) -> String {
         .trim_end_matches(".DLL")
         .replace(['-', '_', ' '], "")
         .to_ascii_lowercase()
+}
+
+fn normalize_mod_file_name(value: &str) -> String {
+    value
+        .rsplit(|character| matches!(character, '\\' | '/'))
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_matches(['\'', '"'])
+        .trim_end_matches(".dll")
+        .trim_end_matches(".DLL")
+        .to_ascii_lowercase()
+}
+
+fn melonloader_mod_metadata(lines: &[LogLine]) -> HashMap<String, MelonLoaderModMetadata> {
+    let mut metadata_by_file = HashMap::new();
+    let mut pending = None::<PendingMelonLoaderMetadata>;
+
+    for line in lines {
+        let content = line.content.trim();
+        if is_melonloader_separator(content) {
+            pending = None;
+            continue;
+        }
+
+        if let Some(captures) = MELON_MOD_VERSION_PATTERN.captures(content) {
+            pending = Some(PendingMelonLoaderMetadata {
+                version: captures["version"].to_string(),
+                author: None,
+            });
+            continue;
+        }
+
+        if let (Some(pending_metadata), Some(captures)) =
+            (pending.as_mut(), MELON_MOD_AUTHOR_PATTERN.captures(content))
+        {
+            pending_metadata.author = Some(captures["author"].trim().to_string());
+            continue;
+        }
+
+        if let (Some(pending_metadata), Some(captures)) =
+            (pending.take(), MELON_MOD_ASSEMBLY_PATTERN.captures(content))
+        {
+            metadata_by_file.insert(
+                normalize_mod_file_name(&captures["file"]),
+                MelonLoaderModMetadata {
+                    version: Some(pending_metadata.version),
+                    author: pending_metadata.author,
+                },
+            );
+        }
+    }
+
+    metadata_by_file
+}
+
+fn is_melonloader_separator(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|character| character == '-')
 }
 
 fn truncate_excerpt(value: &str) -> String {
@@ -709,8 +1192,19 @@ fn event_fingerprint(sanitized: &str, attribution: &str) -> String {
 mod tests {
     use super::*;
     use crate::db::initialize_pool;
+    use crate::services::logs::LogCategory;
     use crate::test_helpers::EnvVarGuard;
+    use crate::types::Runtime;
     use serial_test::serial;
+
+    #[test]
+    fn telemetry_feature_flag_requires_an_explicit_opt_in() {
+        assert!(!telemetry_feature_enabled_from_value(None));
+        assert!(!telemetry_feature_enabled_from_value(Some("")));
+        assert!(!telemetry_feature_enabled_from_value(Some("false")));
+        assert!(telemetry_feature_enabled_from_value(Some("1")));
+        assert!(telemetry_feature_enabled_from_value(Some(" true ")));
+    }
 
     #[tokio::test]
     #[serial]
@@ -729,6 +1223,7 @@ mod tests {
         assert!(!preferences.upload_enabled);
         assert!(!preferences.error_excerpts_enabled);
         assert_eq!(preferences.retention_days, 30);
+        assert!(preferences.protect_local_mods);
         assert!(preferences.updated_at.is_none());
 
         Ok(())
@@ -751,7 +1246,7 @@ mod tests {
                 upload_enabled: Some(true),
                 error_excerpts_enabled: Some(true),
                 retention_days: None,
-                close_behavior: None,
+                protect_local_mods: None,
             })
             .await?;
         assert!(enabled.collection_enabled);
@@ -763,7 +1258,7 @@ mod tests {
                 upload_enabled: None,
                 error_excerpts_enabled: None,
                 retention_days: None,
-                close_behavior: None,
+                protect_local_mods: None,
             })
             .await?;
 
@@ -787,6 +1282,248 @@ mod tests {
     }
 
     #[test]
+    fn error_identity_retains_exception_class_and_optional_code_without_excerpt_text() {
+        assert_eq!(
+            error_identity("NullReferenceException while loading slot 42 (0x80131500)"),
+            (
+                "NullReferenceException".to_string(),
+                Some("0X80131500".to_string())
+            )
+        );
+        assert_eq!(
+            error_identity("ordinary error line"),
+            ("unclassified".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn ignores_the_known_melonloader_il2cppinterop_signature_warning() {
+        assert!(should_ignore_telemetry_line(
+            "[Il2CppInterop] Class::Init signatures have been exhausted, using a substitute!"
+        ));
+        assert!(!should_ignore_telemetry_line(
+            "[Il2CppInterop] Could not initialize a custom native type"
+        ));
+    }
+
+    #[test]
+    fn local_or_unmanaged_mods_default_to_local_only_but_can_be_shared() {
+        let local_mod = ModTelemetryModEntry {
+            mod_key: "mod-local".to_string(),
+            name: "Development Mod".to_string(),
+            file_name: "Development.Mod.dll".to_string(),
+            version: None,
+            source: Some(ModSource::Local),
+            author: None,
+            managed: false,
+            disabled: false,
+        };
+        assert_eq!(
+            automatic_capture_mode(&local_mod, &TelemetryPreferences::default()),
+            TelemetryModCaptureMode::LocalOnly
+        );
+        let preferences = TelemetryPreferences {
+            protect_local_mods: false,
+            ..TelemetryPreferences::default()
+        };
+        assert_eq!(
+            automatic_capture_mode(&local_mod, &preferences),
+            TelemetryModCaptureMode::Share
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn locally_sourced_mod_events_are_removed_from_the_public_export() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let service = TelemetryService::new(pool.clone());
+        let environment_id = "development-environment";
+        let session_id = "development-session";
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind(environment_id)
+            .bind("C:\\telemetry-test")
+            .bind("{}")
+            .execute(pool.as_ref())
+            .await?;
+        sqlx::query(
+            "INSERT INTO telemetry_sessions (id, environment_id, started_at, ended_at, data) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind(environment_id)
+        .bind("2026-07-28T00:00:00Z")
+        .bind("2026-07-28T00:01:00Z")
+        .bind("{}")
+        .execute(pool.as_ref())
+        .await?;
+
+        let local_mod = ModTelemetryModEntry {
+            mod_key: "mod-development".to_string(),
+            name: "Development Mod".to_string(),
+            file_name: "Development.Mod.dll".to_string(),
+            version: None,
+            source: Some(ModSource::Local),
+            author: None,
+            managed: false,
+            disabled: false,
+        };
+        let export = LiveTelemetryExport {
+            schema_version: LIVE_TELEMETRY_SCHEMA_VERSION,
+            exported_at: "2026-07-28T00:01:00Z".to_string(),
+            sessions: vec![LiveTelemetryExportSession {
+                session_id: session_id.to_string(),
+                started_at: "2026-07-28T00:00:00Z".to_string(),
+                ended_at: Some("2026-07-28T00:01:00Z".to_string()),
+                environment: ModTelemetryEnvironment {
+                    app_id: "3164500".to_string(),
+                    branch: "main".to_string(),
+                    runtime: Runtime::Il2cpp,
+                    s1_version: None,
+                },
+                mods: vec![local_mod.clone()],
+                events: vec![LiveTelemetryExportEvent {
+                    event_id: "local-event".to_string(),
+                    occurred_at: "2026-07-28T00:00:30Z".to_string(),
+                    severity: "WARN".to_string(),
+                    attribution: "mod".to_string(),
+                    mod_key: Some(local_mod.mod_key),
+                    mod_name: Some(local_mod.name),
+                    fingerprint: "sig-local".to_string(),
+                    error_class: "unclassified".to_string(),
+                    error_code: None,
+                    message: None,
+                    source: "Latest.log".to_string(),
+                    line_number: Some(1),
+                    origin: "live".to_string(),
+                }],
+            }],
+        };
+
+        let filtered = service.filter_export_for_upload(export).await?;
+        assert!(filtered.export.sessions.is_empty());
+        assert_eq!(filtered.excluded_mod_count, 1);
+        assert_eq!(filtered.excluded_event_count, 1);
+        assert_eq!(filtered.excluded_session_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn melonloader_metadata_links_version_and_author_to_the_assembly() {
+        let lines = vec![
+            telemetry_log_line("------------------------------"),
+            telemetry_log_line("Example Mod v1.2.3-beta.4"),
+            telemetry_log_line("by Example Creator"),
+            telemetry_log_line("Assembly: Example-Mod.Mono.dll"),
+            telemetry_log_line("------------------------------"),
+        ];
+
+        let metadata = melonloader_mod_metadata(&lines);
+        let entry = metadata
+            .get(&normalize_mod_file_name("Example-Mod.Mono.dll"))
+            .expect("metadata should be keyed by the emitted assembly file name");
+
+        assert_eq!(entry.version.as_deref(), Some("1.2.3-beta.4"));
+        assert_eq!(entry.author.as_deref(), Some("Example Creator"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_log_metadata_only_fills_missing_session_values() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let service = TelemetryService::new(pool.clone());
+        let mut session = LiveTelemetrySession {
+            session_id: "session-melonloader-metadata".to_string(),
+            environment_id: "environment-melonloader-metadata".to_string(),
+            started_at: "2026-07-25T00:00:00Z".to_string(),
+            ended_at: None,
+            environment: ModTelemetryEnvironment {
+                app_id: "3164500".to_string(),
+                branch: "main".to_string(),
+                runtime: Runtime::Mono,
+                s1_version: None,
+            },
+            mods: vec![
+                ModTelemetryModEntry {
+                    mod_key: "mod-missing".to_string(),
+                    name: "Example Mod".to_string(),
+                    file_name: "Example-Mod.Mono.dll".to_string(),
+                    version: None,
+                    source: None,
+                    author: None,
+                    managed: false,
+                    disabled: false,
+                },
+                ModTelemetryModEntry {
+                    mod_key: "mod-explicit".to_string(),
+                    name: "Explicit Mod".to_string(),
+                    file_name: "Explicit-Mod.dll".to_string(),
+                    version: Some("9.9.9".to_string()),
+                    source: None,
+                    author: Some("Explicit Creator".to_string()),
+                    managed: false,
+                    disabled: false,
+                },
+            ],
+            monitoring: true,
+        };
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind(&session.environment_id)
+            .bind("C:\\telemetry-test")
+            .bind("{}")
+            .execute(pool.as_ref())
+            .await?;
+        sqlx::query(
+            "INSERT INTO telemetry_sessions (id, environment_id, started_at, ended_at, data) VALUES (?, ?, ?, NULL, ?)",
+        )
+        .bind(&session.session_id)
+        .bind(&session.environment_id)
+        .bind(&session.started_at)
+        .bind(serde_json::to_string(&session)?)
+        .execute(pool.as_ref())
+        .await?;
+
+        service
+            .enrich_live_session_mod_metadata(
+                &mut session,
+                &[
+                    telemetry_log_line("Example Mod v1.2.3"),
+                    telemetry_log_line("by Example Creator"),
+                    telemetry_log_line("Assembly: Example-Mod.Mono.dll"),
+                    telemetry_log_line("Explicit Mod v2.0.0"),
+                    telemetry_log_line("by Different Creator"),
+                    telemetry_log_line("Assembly: Explicit-Mod.dll"),
+                ],
+            )
+            .await?;
+
+        assert_eq!(session.mods[0].version.as_deref(), Some("1.2.3"));
+        assert_eq!(session.mods[0].author.as_deref(), Some("Example Creator"));
+        assert_eq!(session.mods[1].version.as_deref(), Some("9.9.9"));
+        assert_eq!(session.mods[1].author.as_deref(), Some("Explicit Creator"));
+
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_sessions WHERE id = ?")
+                .bind(&session.session_id)
+                .fetch_one(pool.as_ref())
+                .await?;
+        let persisted: LiveTelemetrySession = serde_json::from_str(&stored)?;
+        assert_eq!(persisted.mods[0].version.as_deref(), Some("1.2.3"));
+        assert_eq!(persisted.mods[0].author.as_deref(), Some("Example Creator"));
+
+        Ok(())
+    }
+
+    #[test]
     fn live_telemetry_v1_fixture_uses_the_documented_contract() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../test-fixtures/live-telemetry-v1.json"
@@ -799,4 +1536,28 @@ mod tests {
             .parse::<uuid::Uuid>()
             .is_ok());
     }
+
+    fn telemetry_log_line(content: &str) -> LogLine {
+        LogLine {
+            line_number: 1,
+            content: content.to_string(),
+            level: None,
+            timestamp: None,
+            mod_tag: None,
+            category: LogCategory::MelonLoader,
+        }
+    }
+}
+
+fn error_identity(sanitized: &str) -> (String, Option<String>) {
+    let error_class = ERROR_CLASS_PATTERN
+        .captures(sanitized)
+        .and_then(|captures| captures.get(1))
+        .map(|capture| capture.as_str().to_string())
+        .unwrap_or_else(|| "unclassified".to_string());
+    let error_code = ERROR_CODE_PATTERN
+        .captures(sanitized)
+        .and_then(|captures| captures.get(1))
+        .map(|capture| capture.as_str().to_ascii_uppercase());
+    (error_class, error_code)
 }

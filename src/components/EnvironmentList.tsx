@@ -253,6 +253,7 @@ export type WorkspaceRoute =
   | { view: 'home' }
   | { view: 'environments' }
   | { view: 'profiles' }
+  | { view: 'saveBackups' }
   | { view: 'library'; initialTab?: 'discover' | 'library' | 'updates' }
   | { view: 'securityReport' }
   | { view: 'mods'; environmentId: string; initialTab?: 'installed' | 'updates' }
@@ -276,7 +277,7 @@ export function EnvironmentList({
   onOpenWorkspace,
   onSelectEnvironment
 }: EnvironmentListProps) {
-  const { environments, loading, error, progress, startDownload, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
+  const { environments, loading, error, progress, activeGameDownloadId, startDownload, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
   const { settings } = useSettingsStore();
   const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
   const [, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
@@ -403,6 +404,9 @@ export function EnvironmentList({
     }
     return new Map();
   });
+  const activeGameDownloadName = activeGameDownloadId
+    ? environments.find((environment) => environment.id === activeGameDownloadId)?.name ?? 'another environment'
+    : null;
 
   // Save preferred launch method to localStorage when it changes
   useEffect(() => {
@@ -535,6 +539,10 @@ export function EnvironmentList({
 
   const handleStartDownload = async (env: Environment) => {
     try {
+      if (activeGameDownloadId && activeGameDownloadId !== env.id) {
+        showMessage('Game Operation In Progress', `${activeGameDownloadName ?? 'Another environment'} is already downloading or updating. Wait for it to finish before starting ${env.name}.`, 'info');
+        return;
+      }
       rememberEnvironment(env.id);
       // Check if we have credentials
       const hasCredentials = settings?.steamUsername;
@@ -569,7 +577,7 @@ export function EnvironmentList({
       // Authentication is handled in the modal's handleSubmit, so by the time we get here,
       // authentication should be complete. Now start the download.
       setAuthModal(prev => ({ ...prev, waiting: true, message: 'Starting download...' }));
-      await ApiService.startDownload(authModal.envId);
+      await startDownload(authModal.envId);
       // Close modal - download started
       setAuthModal({ isOpen: false, envId: null, waiting: false });
       setAuthCredentials(null);
@@ -1012,6 +1020,11 @@ export function EnvironmentList({
 
   const handleUpdateAction = async (env: Environment) => {
     if (checkingEnvironments.has(env.id)) {
+      return;
+    }
+
+    if (activeGameDownloadId && activeGameDownloadId !== env.id) {
+      showMessage('Game Operation In Progress', `${activeGameDownloadName ?? 'Another environment'} is already downloading or updating. Wait for it to finish before starting ${env.name}.`, 'info');
       return;
     }
 
@@ -1831,6 +1844,10 @@ export function EnvironmentList({
   const renderEnvironmentCard = (env: Environment) => {
     const prog = progress.get(env.id);
     const isDownloading = env.status === 'downloading' || prog?.status === 'downloading';
+    const gameOperationInProgress = Boolean(activeGameDownloadId) && activeGameDownloadId !== env.id;
+    const gameOperationTitle = activeGameDownloadName
+      ? `${activeGameDownloadName} is already downloading or updating.`
+      : 'Another game download or update is already running.';
     const isSteam = isSteamEnvironment(env);
     const isCheckingUpdate = checkingEnvironments.has(env.id);
     const isCompleted = env.status === 'completed';
@@ -2077,7 +2094,7 @@ export function EnvironmentList({
         <div className="environment-card__action-group">
           {!isDownloading && !isCompleted && (
             <div className="environment-card__action-row environment-card__action-row--single">
-              <SimmButton onClick={() => handleStartDownload(env)} className="btn btn-primary">
+              <SimmButton onClick={() => handleStartDownload(env)} className="btn btn-primary" disabled={gameOperationInProgress} title={gameOperationInProgress ? gameOperationTitle : 'Download this environment'}>
                 <Icon name="fas fa-download" />
                 <span>Download</span>
               </SimmButton>
@@ -2144,8 +2161,8 @@ export function EnvironmentList({
                   variant="secondary"
                   onClick={() => handleUpdateAction(env)}
                   className={`btn btn-secondary environment-card__command-btn ${env.updateAvailable && !isSteam ? 'environment-card__command-btn--warning' : ''}`}
-                  disabled={isCheckingUpdate}
-                  title={isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
+                  disabled={isCheckingUpdate || gameOperationInProgress}
+                  title={gameOperationInProgress ? gameOperationTitle : isSteam ? 'Steam manages updates for this installation' : 'Check for updates and install if available'}
                 >
                   <Icon name={isCheckingUpdate ? 'fas fa-spinner fa-spin' : isSteam ? 'fab fa-steam' : 'fas fa-rotate'} />
                   <span>{isCheckingUpdate ? 'Checking…' : 'Update'}</span>

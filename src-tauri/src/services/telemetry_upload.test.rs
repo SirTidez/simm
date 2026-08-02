@@ -43,9 +43,9 @@ async fn preview_excludes_local_environment_ids_and_paths() -> Result<()> {
         .save_preferences(TelemetryPreferencesUpdate {
             collection_enabled: Some(true),
             upload_enabled: Some(true),
-            error_excerpts_enabled: Some(false),
+            error_excerpts_enabled: Some(true),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::new(pool);
@@ -74,15 +74,16 @@ async fn retry_reuses_one_upload_id_and_never_rebuilds_the_payload() -> Result<(
         .save_preferences(TelemetryPreferencesUpdate {
             collection_enabled: Some(true),
             upload_enabled: Some(true),
-            error_excerpts_enabled: Some(false),
+            error_excerpts_enabled: Some(true),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
 
     let preview = service.preview_upload(None).await?;
     let queued = service.queue_reviewed_upload(&preview.payload).await?;
+    assert_eq!(queued.state, TelemetryUploadState::Pending);
     let retried = service.retry_upload(&queued.id).await?;
 
     assert_eq!(queued.upload_id, retried.upload_id);
@@ -110,7 +111,7 @@ async fn rejects_forward_slash_windows_paths_before_they_can_be_queued() -> Resu
             upload_enabled: Some(true),
             error_excerpts_enabled: Some(false),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::new(pool.clone());
@@ -155,7 +156,7 @@ async fn rejects_unix_and_file_uri_paths_embedded_in_an_excerpt() -> Result<()> 
             upload_enabled: Some(true),
             error_excerpts_enabled: Some(false),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let payload = serde_json::json!({
@@ -192,7 +193,7 @@ async fn rejects_unix_paths_after_non_whitespace_delimiters_before_queueing() ->
             upload_enabled: Some(true),
             error_excerpts_enabled: Some(false),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let mut payload: serde_json::Value = serde_json::from_str(include_str!(
@@ -248,9 +249,9 @@ async fn queued_fixture_payload_matches_api_v1_contract_semantics() -> Result<()
         .save_preferences(TelemetryPreferencesUpdate {
             collection_enabled: Some(true),
             upload_enabled: Some(true),
-            error_excerpts_enabled: Some(false),
+            error_excerpts_enabled: Some(true),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
 
@@ -260,7 +261,7 @@ async fn queued_fixture_payload_matches_api_v1_contract_semantics() -> Result<()
         ))
         .await?;
 
-    assert_eq!(receipt.state, TelemetryUploadState::Failed);
+    assert_eq!(receipt.state, TelemetryUploadState::Pending);
     let stored_payload: String =
         sqlx::query_scalar("SELECT payload FROM telemetry_upload_queue WHERE id = ?")
             .bind(&receipt.id)
@@ -285,7 +286,7 @@ async fn queue_rejects_noncanonical_timestamps_but_accepts_preview_bytes() -> Re
             upload_enabled: Some(true),
             error_excerpts_enabled: Some(false),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::with_base_url(pool, "not a url".to_string());
@@ -302,7 +303,7 @@ async fn queue_rejects_noncanonical_timestamps_but_accepts_preview_bytes() -> Re
 
     let preview = service.preview_upload(None).await?;
     let accepted_preview = service.queue_reviewed_upload(&preview.payload).await?;
-    assert_eq!(accepted_preview.state, TelemetryUploadState::Failed);
+    assert_eq!(accepted_preview.state, TelemetryUploadState::Pending);
     Ok(())
 }
 
@@ -319,9 +320,9 @@ async fn renderer_facing_receipts_never_serialize_the_private_payload() -> Resul
         .save_preferences(TelemetryPreferencesUpdate {
             collection_enabled: Some(true),
             upload_enabled: Some(true),
-            error_excerpts_enabled: Some(false),
+            error_excerpts_enabled: Some(true),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::with_base_url(pool, "not a url".to_string());
@@ -352,7 +353,7 @@ fn assert_api_v1_fixture_semantics(payload: &str) -> Result<()> {
     let batch = batch
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("batch must be an object"))?;
-    assert_eq!(batch.len(), 4, "the API TelemetryBatchSchema is strict");
+    assert_eq!(batch.len(), 5, "the API TelemetryBatchSchema is strict");
     assert_eq!(
         batch
             .get("schemaVersion")
@@ -370,6 +371,12 @@ fn assert_api_v1_fixture_semantics(payload: &str) -> Result<()> {
             .get("exportedAt")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing exportedAt"))?,
+    );
+    assert_eq!(
+        batch
+            .get("diagnosticTextConsent")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
     );
     let sessions = batch
         .get("sessions")
@@ -412,7 +419,7 @@ fn assert_api_v1_fixture_semantics(payload: &str) -> Result<()> {
             let event = event
                 .as_object()
                 .ok_or_else(|| anyhow::anyhow!("event must be an object"))?;
-            assert_eq!(event.len(), 11, "the API EventSchema is strict");
+            assert_eq!(event.len(), 13, "the API EventSchema is strict");
             let event_id = event
                 .get("eventId")
                 .and_then(serde_json::Value::as_str)
@@ -459,7 +466,7 @@ fn assert_api_zulu_datetime(value: &str) {
 
 #[tokio::test]
 #[serial]
-async fn config_failure_marks_the_queued_item_failed_without_entering_sending() -> Result<()> {
+async fn update_check_flush_marks_a_misconfigured_queued_item_failed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let _guard = EnvVarGuard::set(
         "SIMMRUST_DATA_DIR",
@@ -472,13 +479,20 @@ async fn config_failure_marks_the_queued_item_failed_without_entering_sending() 
             upload_enabled: Some(true),
             error_excerpts_enabled: Some(false),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::with_base_url(pool, "not a url".to_string());
     let preview = service.preview_upload(None).await?;
 
-    let receipt = service.queue_reviewed_upload(&preview.payload).await?;
+    let queued = service.queue_reviewed_upload(&preview.payload).await?;
+    assert_eq!(queued.state, TelemetryUploadState::Pending);
+    let receipt = service
+        .flush_queued_uploads()
+        .await?
+        .into_iter()
+        .next()
+        .expect("queued item should be processed");
 
     assert_eq!(receipt.state, TelemetryUploadState::Failed);
     assert_eq!(
@@ -537,14 +551,208 @@ async fn a_successful_http_response_marks_the_local_item_accepted() -> Result<()
             upload_enabled: Some(true),
             error_excerpts_enabled: Some(false),
             retention_days: None,
-            close_behavior: None,
+            protect_local_mods: Some(false),
         })
         .await?;
     let service = TelemetryUploadService::with_base_url(pool, base_url);
 
-    let receipt = service.queue_upload(None).await?;
+    let queued = service.queue_upload(None).await?;
+    assert_eq!(queued.state, TelemetryUploadState::Pending);
+    let receipt = service
+        .flush_queued_uploads()
+        .await?
+        .into_iter()
+        .next()
+        .expect("queued item should be uploaded");
 
     assert_eq!(receipt.state, crate::types::TelemetryUploadState::Accepted);
     server.await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn a_finished_session_is_queued_then_uploaded_during_a_flush() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 8192];
+        let _ = stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+    let session_id = "captured-session";
+    sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+        .bind("local-environment-id")
+        .bind("C:\\telemetry-test")
+        .bind("{}")
+        .execute(pool.as_ref())
+        .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_sessions (id, environment_id, started_at, ended_at, data) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(session_id)
+    .bind("local-environment-id")
+    .bind("2026-07-14T00:00:00Z")
+    .bind("2026-07-14T00:01:00Z")
+    .bind(serde_json::json!({
+        "sessionId": session_id,
+        "environmentId": "local-environment-id",
+        "startedAt": "2026-07-14T00:00:00Z",
+        "endedAt": "2026-07-14T00:01:00Z",
+        "environment": { "appId": "3164500", "branch": "default", "runtime": "Mono", "s1Version": null },
+        "mods": [],
+        "monitoring": false
+    }).to_string())
+    .execute(pool.as_ref())
+    .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_events (id, session_id, environment_id, occurred_at, severity, fingerprint, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("captured-event")
+    .bind(session_id)
+    .bind("local-environment-id")
+    .bind("2026-07-14T00:00:30Z")
+    .bind("ERROR")
+    .bind("a".repeat(64))
+    .bind(serde_json::json!({
+        "eventId": "captured-event",
+        "sessionId": session_id,
+        "environmentId": "local-environment-id",
+        "occurredAt": "2026-07-14T00:00:30Z",
+        "severity": "ERROR",
+        "attribution": "system",
+        "modKey": null,
+        "modName": null,
+        "fingerprint": "a".repeat(64),
+        "errorClass": "NullReferenceException",
+        "errorCode": null,
+        "message": null,
+        "source": "Latest.log",
+        "lineNumber": 1,
+        "origin": "live"
+    }).to_string())
+    .execute(pool.as_ref())
+    .await?;
+
+    let service = TelemetryUploadService::with_base_url(pool.clone(), base_url);
+    let receipt = service
+        .queue_finished_session(session_id)
+        .await?
+        .expect("finished sessions with events should queue");
+
+    assert_eq!(receipt.state, TelemetryUploadState::Pending);
+    let payload: String =
+        sqlx::query_scalar("SELECT payload FROM telemetry_upload_queue WHERE id = ?")
+            .bind(&receipt.id)
+            .fetch_one(pool.as_ref())
+            .await?;
+    assert!(!payload.contains("local-environment-id"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload)?["sessions"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let flushed = service.flush_queued_uploads().await?;
+    assert_eq!(flushed.len(), 1);
+    assert_eq!(flushed[0].state, TelemetryUploadState::Accepted);
+    server.await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn a_finished_session_without_events_queues_its_mod_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+
+    let environment_id = "empty-event-environment";
+    let session_id = "empty-event-session";
+    sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+        .bind(environment_id)
+        .bind("C:\\telemetry-test")
+        .bind("{}")
+        .execute(pool.as_ref())
+        .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_sessions (id, environment_id, started_at, ended_at, data) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(session_id)
+    .bind(environment_id)
+    .bind("2026-07-14T00:00:00Z")
+    .bind("2026-07-14T00:01:00Z")
+    .bind(serde_json::json!({
+        "sessionId": session_id,
+        "environmentId": environment_id,
+        "startedAt": "2026-07-14T00:00:00Z",
+        "endedAt": "2026-07-14T00:01:00Z",
+        "environment": { "appId": "3164500", "branch": "default", "runtime": "Mono", "s1Version": null },
+        "mods": [{
+            "modKey": "mod-example", "name": "Example Mod", "fileName": "Example.Mod.dll",
+            "version": "1.0.0", "source": "local", "author": null, "managed": false, "disabled": false
+        }],
+        "monitoring": false
+    }).to_string())
+    .execute(pool.as_ref())
+    .await?;
+
+    let service = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
+    let receipt = service
+        .queue_finished_session(session_id)
+        .await?
+        .expect("an ended session with a mod snapshot should queue without events");
+
+    assert_eq!(receipt.state, TelemetryUploadState::Pending);
+    let payload: serde_json::Value = serde_json::from_str(
+        &sqlx::query_scalar::<_, String>("SELECT payload FROM telemetry_upload_queue WHERE id = ?")
+            .bind(&receipt.id)
+            .fetch_one(pool.as_ref())
+            .await?,
+    )?;
+    assert_eq!(
+        payload["sessions"][0]["events"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        payload["sessions"][0]["mods"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(service.queue_finished_session(session_id).await?.is_none());
+    let queued_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM telemetry_upload_queue")
+        .fetch_one(pool.as_ref())
+        .await?;
+    assert_eq!(queued_count, 1);
     Ok(())
 }

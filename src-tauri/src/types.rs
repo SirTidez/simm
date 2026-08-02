@@ -112,6 +112,93 @@ pub struct Environment {
     pub environment_type: Option<EnvironmentType>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveSlot {
+    pub slot_number: u8,
+    pub organization_name: Option<String>,
+    pub cash_balance: Option<f64>,
+    pub online_balance: Option<f64>,
+    pub net_worth: Option<f64>,
+    pub rank: Option<u32>,
+    pub tier: Option<u32>,
+    pub total_xp: Option<u64>,
+    pub created_at: Option<String>,
+    pub last_played_at: Option<String>,
+    pub last_save_version: Option<String>,
+    pub path: String,
+    pub exists: bool,
+    pub size_bytes: u64,
+    pub last_modified: Option<String>,
+    pub backup: Option<GameSaveBackup>,
+    pub backups: Vec<GameSaveBackup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveBackup {
+    pub path: String,
+    pub size_bytes: u64,
+    pub last_modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveAccount {
+    pub steam_id: String,
+    pub display_name: Option<String>,
+    pub path: String,
+    pub backup_path: String,
+    pub slots: Vec<GameSaveSlot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveBackupStatus {
+    pub available: bool,
+    pub source_path: String,
+    pub accounts: Vec<GameSaveAccount>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveBackupResult {
+    pub steam_id: String,
+    pub slot_number: u8,
+    pub backup: GameSaveBackup,
+    pub pruned_backup_count: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveBackupExportResult {
+    pub steam_id: String,
+    pub slot_number: u8,
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveRestoreResult {
+    pub steam_id: String,
+    pub slot_number: u8,
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSaveRestorePreview {
+    pub steam_id: String,
+    pub slot_number: u8,
+    pub source_label: String,
+    pub source_path: String,
+    pub current: GameSaveSlot,
+    pub restored: GameSaveSlot,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Runtime {
     #[serde(
@@ -266,6 +353,8 @@ pub struct Settings {
     pub app_update: Option<AppUpdateSettings>,
     pub experience_mode: Option<ExperienceMode>,
     pub show_advanced_game_tools: Option<bool>,
+    #[serde(default)]
+    pub window_close_behavior: Option<WindowCloseBehavior>,
     pub setup_guide_completed: Option<bool>,
 }
 
@@ -278,6 +367,32 @@ pub struct NexusRateLimits {
     pub hourly_remaining: Option<u32>,
     pub daily_used: Option<u32>,
     pub hourly_used: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusDependencyCandidate {
+    pub mod_id: String,
+    pub mod_name: String,
+    pub mod_file_id: String,
+    pub mod_file_name: String,
+    pub version_id: String,
+    pub version_game_scoped_id: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusDependencyRequirement {
+    pub id: String,
+    pub candidates: Vec<NexusDependencyCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NexusModFileDependencies {
+    pub source_version_id: String,
+    pub requirements: Vec<NexusDependencyRequirement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,8 +541,8 @@ pub struct TelemetryPreferences {
     pub error_excerpts_enabled: bool,
     #[serde(default = "default_telemetry_retention_days")]
     pub retention_days: u32,
-    #[serde(default)]
-    pub close_behavior: TelemetryCloseBehavior,
+    #[serde(default = "default_protect_local_mods")]
+    pub protect_local_mods: bool,
     pub updated_at: Option<String>,
 }
 
@@ -435,9 +550,13 @@ fn default_telemetry_retention_days() -> u32 {
     30
 }
 
+fn default_protect_local_mods() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub enum TelemetryCloseBehavior {
+pub enum WindowCloseBehavior {
     Tray,
     #[default]
     Ask,
@@ -451,7 +570,7 @@ impl Default for TelemetryPreferences {
             upload_enabled: false,
             error_excerpts_enabled: false,
             retention_days: default_telemetry_retention_days(),
-            close_behavior: TelemetryCloseBehavior::Ask,
+            protect_local_mods: default_protect_local_mods(),
             updated_at: None,
         }
     }
@@ -464,7 +583,36 @@ pub struct TelemetryPreferencesUpdate {
     pub upload_enabled: Option<bool>,
     pub error_excerpts_enabled: Option<bool>,
     pub retention_days: Option<u32>,
-    pub close_behavior: Option<TelemetryCloseBehavior>,
+    pub protect_local_mods: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryModCaptureMode {
+    #[default]
+    Share,
+    LocalOnly,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryModPolicyItem {
+    pub mod_entry: ModTelemetryModEntry,
+    pub automatic_mode: TelemetryModCaptureMode,
+    pub automatic_reason: Option<String>,
+    pub effective_mode: TelemetryModCaptureMode,
+    pub global_override: Option<TelemetryModCaptureMode>,
+    pub environment_override: Option<TelemetryModCaptureMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryModRuleUpdate {
+    pub mod_key: String,
+    pub environment_id: Option<String>,
+    /// None removes the override at the supplied scope and returns to automatic handling.
+    pub mode: Option<TelemetryModCaptureMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,6 +639,10 @@ pub struct LiveTelemetryEvent {
     pub mod_key: Option<String>,
     pub mod_name: Option<String>,
     pub fingerprint: String,
+    #[serde(default)]
+    pub error_class: String,
+    #[serde(default)]
+    pub error_code: Option<String>,
     pub message: Option<String>,
     pub source: String,
     pub line_number: Option<u32>,
@@ -537,6 +689,10 @@ pub struct LiveTelemetryExportEvent {
     pub mod_key: Option<String>,
     pub mod_name: Option<String>,
     pub fingerprint: String,
+    #[serde(default)]
+    pub error_class: String,
+    #[serde(default)]
+    pub error_code: Option<String>,
     pub message: Option<String>,
     pub source: String,
     pub line_number: Option<u32>,
@@ -549,6 +705,8 @@ pub struct TelemetryUploadEnvelope {
     pub schema_version: u32,
     pub upload_id: String,
     pub exported_at: String,
+    #[serde(default)]
+    pub diagnostic_text_consent: bool,
     pub sessions: Vec<LiveTelemetryExportSession>,
 }
 
@@ -618,6 +776,8 @@ pub struct ModTelemetrySourceError {
     pub mod_key: Option<String>,
     pub mod_name: String,
     pub level: String,
+    pub error_class: String,
+    pub error_code: Option<String>,
     pub message: Option<String>,
     pub timestamp: Option<String>,
     pub source: Option<String>,

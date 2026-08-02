@@ -17,6 +17,7 @@ pub mod mod_update;
 pub mod mods;
 pub mod nexus_mods;
 pub mod plugins;
+pub mod save_backups;
 pub mod security_scanner;
 pub mod settings;
 pub mod telemetry;

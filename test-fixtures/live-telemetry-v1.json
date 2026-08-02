@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "uploadId": "3e7baf0c-9392-4a57-87d8-f99859397e8e",
   "exportedAt": "2026-07-14T18:30:00.000Z",
+  "diagnosticTextConsent": true,
   "sessions": [
     {
       "sessionId": "session-1a2b3c4d5e6f7890a1b2c3d4e5f60708",
@@ -34,6 +35,8 @@
           "modKey": "mod-1a2b3c4d5e6f7890",
           "modName": "Example Mod",
           "fingerprint": "2f5ed08d6cc08918781a50c95cda51a6a85cb4c70b901b079c3a7cc8ac522a12",
+          "errorClass": "NullReferenceException",
+          "errorCode": null,
           "message": "NullReferenceException in Example Mod",
           "source": "Latest.log",
           "lineNumber": 42,

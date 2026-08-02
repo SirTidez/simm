@@ -96,7 +96,7 @@ function getParentPath(currentPath: string): string | null {
 }
 
 export function EnvironmentCreationWizard({ onClose }: Props) {
-  const { createEnvironment, startDownload, refreshEnvironments, environments } = useEnvironmentStore();
+  const { createEnvironment, startDownload, refreshEnvironments, environments, activeGameDownloadId } = useEnvironmentStore();
   const { settings, refreshDepotDownloader } = useSettingsStore();
 
   const [wizardMode, setWizardMode] = useState<WizardMode>('landing');
@@ -108,6 +108,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeGameDownloadName = activeGameDownloadId
+    ? environments.find((environment) => environment.id === activeGameDownloadId)?.name ?? 'another environment'
+    : null;
+  const gameOperationInProgress = Boolean(activeGameDownloadId);
 
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [directoryPurpose, setDirectoryPurpose] = useState<DirectoryPurpose>('download');
@@ -411,6 +415,10 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
   };
 
   const handleCreate = async () => {
+    if (gameOperationInProgress) {
+      setError(`${activeGameDownloadName} is already downloading or updating. Wait for it to finish before creating another game environment.`);
+      return;
+    }
     if (!appConfig || !selectedBranch || !outputDir) {
       setError('Please fill in all required fields');
       return;
@@ -778,7 +786,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                 {appConfig.branches.map((branch) => {
                   const authRequired = branch.requiresAuth && !isSteamAuthenticated;
                   const depotRequired = depotDownloaderInstalled !== true || !!depotDownloaderDetectionError;
-                  const disabled = authRequired || depotRequired;
+                  const disabled = authRequired || depotRequired || gameOperationInProgress;
 
                   return (
                     <div key={branch.name} role="listitem">
@@ -815,7 +823,7 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
                           </div>
                         </div>
                         <div className="wizard-branch-card__footer">
-                          <span>{authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
+                          <span>{gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating. Wait for it to finish first.` : authRequired ? 'Authenticate with Steam in Accounts to authorize SIMM for this install.' : depotRequired ? (depotDownloaderDetectionError ? 'Fix DepotDownloader detection before adding this branch.' : 'Install DepotDownloader to unlock branch installs.') : 'Continue to environment configuration.'}</span>
                         </div>
                       </SimmButton>
                     </div>
@@ -919,9 +927,9 @@ export function EnvironmentCreationWizard({ onClose }: Props) {
               <SimmButton type="button" variant="secondary" className="btn btn-secondary" onClick={() => setWizardMode('download-select')}>
                 Back
               </SimmButton>
-              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir}>
-                <Icon name={loading ? 'fas fa-spinner fa-spin' : 'fas fa-plus'} />
-                {loading ? 'Creating…' : 'Create Environment'}
+              <SimmButton type="button" className="btn btn-primary" onClick={() => void handleCreate()} disabled={loading || !outputDir || gameOperationInProgress} title={gameOperationInProgress ? `${activeGameDownloadName} is already downloading or updating.` : undefined}>
+                <Icon name={loading ? 'fas fa-spinner fa-spin' : gameOperationInProgress ? 'lock' : 'fas fa-plus'} />
+                {loading ? 'Creating…' : gameOperationInProgress ? 'Game operation active' : 'Create Environment'}
               </SimmButton>
             </div>
           </section>

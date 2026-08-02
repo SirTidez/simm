@@ -25,6 +25,20 @@ pub struct DepotDownloaderService {
     download_progress: Arc<RwLock<HashMap<String, DownloadProgress>>>,
 }
 
+fn ensure_no_active_game_download(
+    active_download_id: Option<&str>,
+    requested_download_id: &str,
+) -> Result<()> {
+    if let Some(active_download_id) = active_download_id {
+        return Err(anyhow::anyhow!(
+            "Another game download or update is already running for {}. Wait for it to finish before starting {}.",
+            active_download_id,
+            requested_download_id
+        ));
+    }
+    Ok(())
+}
+
 impl DepotDownloaderService {
     pub fn new() -> Self {
         Self {
@@ -440,17 +454,6 @@ impl DepotDownloaderService {
         options: DepotDownloadOptions,
         app: AppHandle<R>,
     ) -> Result<()> {
-        // Check if download already exists
-        {
-            let map = self.active_downloads.read().await;
-            if map.contains_key(&download_id) {
-                return Err(anyhow::anyhow!(
-                    "Download {} is already in progress",
-                    download_id
-                ));
-            }
-        }
-
         // Detect DepotDownloader
         let detector_info = detect_depot_downloader().await?;
         if !detector_info.installed || detector_info.path.is_none() {
@@ -461,26 +464,6 @@ impl DepotDownloaderService {
 
         let executable_path = detector_info.path.unwrap();
 
-        // Initialize progress
-        {
-            let mut map = self.download_progress.write().await;
-            map.insert(
-                download_id.clone(),
-                DownloadProgress {
-                    download_id: download_id.clone(),
-                    status: DownloadStatus::Downloading,
-                    progress: 0.0,
-                    downloaded_files: None,
-                    total_files: None,
-                    speed: None,
-                    eta: None,
-                    message: None,
-                    error: None,
-                    manifest_id: None,
-                },
-            );
-        }
-
         let output_dir = options.output_dir.clone();
 
         // Build command
@@ -490,7 +473,17 @@ impl DepotDownloaderService {
         let depots_dir = crate::utils::directory_init::get_depots_dir()
             .context("Failed to get depots directory")?;
 
-        // Spawn process with working directory set to depots folder
+        // DepotDownloader maintains shared on-disk state, so only one game
+        // install or update process may run at a time. Keep the check and
+        // process insertion in one write-locked critical section to avoid a
+        // second environment racing past this guard.
+        let mut active_downloads = self.active_downloads.write().await;
+        ensure_no_active_game_download(
+            active_downloads.keys().next().map(String::as_str),
+            &download_id,
+        )?;
+
+        // Spawn process with working directory set to depots folder.
         #[cfg(target_os = "windows")]
         let mut child = Command::new(&executable_path)
             .args(&args)
@@ -511,6 +504,27 @@ impl DepotDownloaderService {
             .stderr(Stdio::piped())
             .spawn()
             .context("Failed to spawn DepotDownloader process")?;
+
+        // The process is now reserved by the global gate. Only publish the
+        // active progress entry after it has spawned successfully.
+        {
+            let mut progress = self.download_progress.write().await;
+            progress.insert(
+                download_id.clone(),
+                DownloadProgress {
+                    download_id: download_id.clone(),
+                    status: DownloadStatus::Downloading,
+                    progress: 0.0,
+                    downloaded_files: None,
+                    total_files: None,
+                    speed: None,
+                    eta: None,
+                    message: None,
+                    error: None,
+                    manifest_id: None,
+                },
+            );
+        }
 
         let _app_clone = app.clone();
         let _download_id_clone = download_id.clone();
@@ -561,10 +575,8 @@ impl DepotDownloaderService {
         }
 
         // Store child process
-        self.active_downloads
-            .write()
-            .await
-            .insert(download_id.clone(), child);
+        active_downloads.insert(download_id.clone(), child);
+        drop(active_downloads);
 
         // Handle process completion
         let app_complete = app.clone();
@@ -696,8 +708,10 @@ impl DepotDownloaderService {
         app: &AppHandle<R>,
     ) -> Result<bool> {
         let mut map = self.active_downloads.write().await;
-        if let Some(mut child) = map.remove(download_id) {
+        if let Some(child) = map.get_mut(download_id) {
             child.kill().await?;
+            map.remove(download_id);
+            drop(map);
 
             let mut progress_map = self.download_progress.write().await;
             if let Some(progress) = progress_map.get_mut(download_id) {
@@ -749,6 +763,17 @@ mod tests {
     use serial_test::serial;
     use tauri::test::mock_app;
     use tempfile::tempdir;
+
+    #[test]
+    fn active_game_download_blocks_every_other_depot_operation() {
+        assert!(ensure_no_active_game_download(None, "second-environment").is_ok());
+
+        let error = ensure_no_active_game_download(Some("first-environment"), "second-environment")
+            .expect_err("an active game operation must block the next one");
+
+        assert!(error.to_string().contains("first-environment"));
+        assert!(error.to_string().contains("second-environment"));
+    }
 
     #[cfg(target_os = "windows")]
     struct CurrentDirGuard {

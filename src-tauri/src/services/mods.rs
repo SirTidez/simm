@@ -43,6 +43,7 @@ const RUNTIME_MONO: &str = "Mono";
 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024;
 const ICON_FETCH_TIMEOUT_SECONDS: u64 = 15;
 const IMAGE_FILE_DLL: u16 = 0x2000;
+const S1API_AUTHOR_MIGRATION_KEY: &str = "s1api_author_metadata_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FomodDestinationKind {
@@ -214,6 +215,31 @@ pub struct ModsService {
     pool: Arc<SqlitePool>,
 }
 
+fn is_s1api_source_id(source_id: Option<&str>) -> bool {
+    matches!(
+        source_id.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if value == "ifbars/s1api" || value == "ifbars/s1api_forked"
+    )
+}
+
+fn canonical_mod_author(source_id: Option<&str>, author: Option<String>) -> Option<String> {
+    if is_s1api_source_id(source_id) {
+        return Some("ifBars".to_string());
+    }
+    author
+}
+
+fn repair_s1api_author(metadata: &mut ModMetadata) -> bool {
+    if !is_s1api_source_id(metadata.source_id.as_deref())
+        || metadata.author.as_deref() == Some("ifBars")
+    {
+        return false;
+    }
+
+    metadata.author = Some("ifBars".to_string());
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModInfo {
@@ -250,6 +276,111 @@ struct ModsListResult {
 impl ModsService {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
+    }
+
+    /// Repairs the incorrect historical S1API author without changing the source,
+    /// version, storage ID, or managed paths that keep updates working.
+    pub async fn migrate_s1api_author_metadata_once(&self) -> Result<usize> {
+        let completed = sqlx::query_scalar::<_, String>("SELECT value FROM app_meta WHERE key = ?")
+            .bind(S1API_AUTHOR_MIGRATION_KEY)
+            .fetch_optional(&*self.pool)
+            .await
+            .context("Failed to check S1API metadata migration state")?;
+        if completed.as_deref() == Some("complete") {
+            return Ok(0);
+        }
+
+        let mut repaired = 0;
+        let storage_root = self.get_mods_storage_dir().await?;
+        let mut storage_entries = fs::read_dir(&storage_root)
+            .await
+            .context("Failed to list mod storage for S1API metadata migration")?;
+        while let Some(entry) = storage_entries.next_entry().await? {
+            let storage_path = entry.path();
+            if !storage_path.is_dir() {
+                continue;
+            }
+            let Some(mut metadata) = self.load_storage_metadata(&storage_path).await? else {
+                continue;
+            };
+            if repair_s1api_author(&mut metadata) {
+                self.save_storage_metadata(&storage_path, &metadata).await?;
+                repaired += 1;
+            }
+        }
+
+        let environments =
+            sqlx::query_as::<_, (String, String)>("SELECT id, output_dir FROM environments")
+                .fetch_all(&*self.pool)
+                .await
+                .context("Failed to list environments for S1API metadata migration")?;
+        for (environment_id, output_dir) in environments {
+            let mods_directory = self.get_mods_directory(&output_dir);
+            // Read the stored rows directly instead of `load_mod_metadata`: that loader
+            // intentionally prunes records whose managed file is currently absent. This
+            // migration must leave those records intact so their source/version/update
+            // identity is preserved when an environment is restored or repaired.
+            let rows = sqlx::query_as::<_, (String, String)>(
+                "SELECT file_name, data FROM mod_metadata WHERE environment_id = ? AND kind = 'mods'",
+            )
+            .bind(&environment_id)
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to load environment mod metadata for S1API migration")?;
+            for (file_name, data) in rows {
+                let Ok(mut metadata) = serde_json::from_str::<ModMetadata>(&data) else {
+                    continue;
+                };
+                if repair_s1api_author(&mut metadata) {
+                    let serialized = serde_json::to_string(&metadata)
+                        .context("Failed to serialize migrated S1API environment metadata")?;
+                    sqlx::query(
+                        "UPDATE mod_metadata SET data = ? \
+                         WHERE environment_id = ? AND kind = 'mods' AND file_name = ?",
+                    )
+                    .bind(serialized)
+                    .bind(&environment_id)
+                    .bind(&file_name)
+                    .execute(&*self.pool)
+                    .await
+                    .context("Failed to persist migrated S1API environment metadata")?;
+                    repaired += 1;
+                }
+            }
+
+            // Older installations may still have the legacy JSON mirror without a
+            // database row. Keep it correct too; it will be imported normally when
+            // the environment is next read.
+            let metadata_file = mods_directory.join(".mods-metadata.json");
+            if metadata_file.exists() {
+                let mut metadata = self.load_mod_metadata_from_file(&mods_directory).await?;
+                let mut changed = false;
+                for entry in metadata.values_mut() {
+                    if repair_s1api_author(entry) {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let serialized = serde_json::to_string(&metadata)
+                        .context("Failed to serialize legacy S1API environment metadata")?;
+                    fs::write(&metadata_file, serialized)
+                        .await
+                        .context("Failed to persist legacy S1API environment metadata")?;
+                }
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(S1API_AUTHOR_MIGRATION_KEY)
+        .bind("complete")
+        .execute(&*self.pool)
+        .await
+        .context("Failed to record S1API metadata migration completion")?;
+
+        Ok(repaired)
     }
 
     fn get_mods_directory(&self, output_dir: &str) -> PathBuf {
@@ -4622,6 +4753,17 @@ impl ModsService {
                         .as_ref()
                         .and_then(|meta| meta.author.clone())
                 });
+            let author = canonical_mod_author(
+                display_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.source_id.as_deref())
+                    .or_else(|| {
+                        confident_hint_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_id.as_deref())
+                    }),
+                author,
+            );
             let summary = display_metadata
                 .as_ref()
                 .and_then(|m| m.summary.clone())
@@ -9395,7 +9537,7 @@ exit 1
             "sourceVersion": version,
             "sourceUrl": "https://github.com/ifBars/S1API",
             "modName": "S1API",
-            "author": "ScheduleI-Dev",
+            "author": "ifBars",
         });
 
         // Install S1API using the ZIP mod installation method with metadata for duplicate detection
@@ -9632,6 +9774,107 @@ mod tests {
                 "defaultDownloadDir": download_dir.to_string_lossy().to_string()
             }))
             .await
+    }
+
+    #[test]
+    fn canonical_s1api_author_replaces_stale_installer_metadata() {
+        assert_eq!(
+            canonical_mod_author(Some("ifBars/S1API"), Some("ScheduleI-Dev".to_string())),
+            Some("ifBars".to_string())
+        );
+        assert_eq!(
+            canonical_mod_author(
+                Some("someone-else/Example"),
+                Some("Example Author".to_string())
+            ),
+            Some("Example Author".to_string())
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn s1api_author_migration_repairs_existing_storage_and_environment_metadata() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let environment_service = EnvironmentService::new(pool.clone())?;
+        let download_dir = temp.path().join("downloads");
+        set_test_download_dir(pool.clone(), &download_dir).await?;
+
+        let output_dir = temp.path().join("envs").join("s1api-existing-install");
+        environment_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "alternate".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mut stale_metadata = sample_metadata(
+            Some("s1api-existing-storage"),
+            Some("ifBars/S1API"),
+            Some("v3.0.6"),
+        );
+        stale_metadata.author = Some("ScheduleI-Dev".to_string());
+        stale_metadata.mod_name = Some("S1API".to_string());
+
+        let storage_path = download_dir.join("Mods").join("s1api-existing-storage");
+        fs::create_dir_all(&storage_path).await?;
+        service
+            .save_storage_metadata(&storage_path, &stale_metadata)
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        let mut environment_metadata = HashMap::new();
+        environment_metadata.insert("S1API.Mono.MelonLoader.dll".to_string(), stale_metadata);
+        service
+            .save_mod_metadata(&mods_dir, &environment_metadata)
+            .await?;
+        fs::write(
+            mods_dir.join(".mods-metadata.json"),
+            serde_json::to_string(&environment_metadata)?,
+        )
+        .await?;
+
+        assert_eq!(service.migrate_s1api_author_metadata_once().await?, 2);
+
+        let storage_metadata = service
+            .load_storage_metadata(&storage_path)
+            .await?
+            .expect("storage metadata");
+        assert_eq!(storage_metadata.author.as_deref(), Some("ifBars"));
+        assert_eq!(storage_metadata.source_id.as_deref(), Some("ifBars/S1API"));
+        assert_eq!(storage_metadata.source_version.as_deref(), Some("v3.0.6"));
+
+        let repaired_entry = service
+            .load_raw_mod_metadata_entry(
+                output_dir.to_string_lossy().as_ref(),
+                "S1API.Mono.MelonLoader.dll",
+            )
+            .await?
+            .expect("environment metadata");
+        assert_eq!(repaired_entry.author.as_deref(), Some("ifBars"));
+        assert_eq!(
+            repaired_entry.mod_storage_id.as_deref(),
+            Some("s1api-existing-storage")
+        );
+        let legacy_metadata: HashMap<String, ModMetadata> =
+            serde_json::from_str(&fs::read_to_string(mods_dir.join(".mods-metadata.json")).await?)?;
+        assert_eq!(
+            legacy_metadata
+                .get("S1API.Mono.MelonLoader.dll")
+                .and_then(|metadata| metadata.author.as_deref()),
+            Some("ifBars")
+        );
+        assert_eq!(service.migrate_s1api_author_metadata_once().await?, 0);
+
+        Ok(())
     }
 
     #[test]

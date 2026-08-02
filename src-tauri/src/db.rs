@@ -375,7 +375,10 @@ async fn reconcile_historical_migration_checksums(
             .context("Failed to inspect applied migration checksums")?;
 
     for (version, checksum) in applied {
-        let Some(expected) = migrator.iter().find(|migration| migration.version == version) else {
+        let Some(expected) = migrator
+            .iter()
+            .find(|migration| migration.version == version)
+        else {
             continue;
         };
         if checksum == expected.checksum.as_ref() {
@@ -767,6 +770,29 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
             ON telemetry_events(environment_id, occurred_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_telemetry_events_session_occurred \
             ON telemetry_events(session_id, occurred_at ASC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_upload_queue (\
+            id TEXT PRIMARY KEY, \
+            upload_id TEXT NOT NULL UNIQUE, \
+            payload TEXT NOT NULL, \
+            state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'accepted', 'failed')), \
+            attempts INTEGER NOT NULL DEFAULT 0, \
+            last_error_code TEXT, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_upload_queue_state_created \
+            ON telemetry_upload_queue(state, created_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_mod_rules (\
+            id TEXT PRIMARY KEY, \
+            mod_key TEXT NOT NULL, \
+            environment_id TEXT NOT NULL DEFAULT '', \
+            mode TEXT NOT NULL CHECK (mode IN ('share', 'local_only', 'ignore')), \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL, \
+            UNIQUE(mod_key, environment_id)\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_mod_rules_environment \
+            ON telemetry_mod_rules(environment_id, mod_key)",
     ];
 
     for statement in ADDITIVE_SCHEMA_STATEMENTS {
@@ -783,6 +809,8 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
         "telemetry_snapshots",
         "telemetry_sessions",
         "telemetry_events",
+        "telemetry_upload_queue",
+        "telemetry_mod_rules",
     ] {
         if !table_exists(pool, table).await? {
             anyhow::bail!("Database repair did not restore required table {table}");
@@ -951,6 +979,7 @@ mod tests {
             app_update: None,
             experience_mode: None,
             show_advanced_game_tools: None,
+            window_close_behavior: None,
             setup_guide_completed: None,
         }
     }
@@ -1105,6 +1134,8 @@ mod tests {
             "telemetry_snapshots",
             "telemetry_sessions",
             "telemetry_events",
+            "telemetry_upload_queue",
+            "telemetry_mod_rules",
         ] {
             assert!(tables.contains(&table.to_string()));
         }
@@ -1125,6 +1156,8 @@ mod tests {
             "telemetry_sessions",
             "telemetry_snapshots",
             "telemetry_preferences",
+            "telemetry_upload_queue",
+            "telemetry_mod_rules",
         ] {
             sqlx::query(&format!("DROP TABLE {table}"))
                 .execute(&*pool)
@@ -1143,6 +1176,8 @@ mod tests {
             "telemetry_snapshots",
             "telemetry_sessions",
             "telemetry_events",
+            "telemetry_upload_queue",
+            "telemetry_mod_rules",
         ] {
             assert!(table_exists(&repaired_pool, table).await?);
         }

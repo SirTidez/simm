@@ -409,6 +409,13 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
   });
 
+  it('hides telemetry navigation while the telemetry feature flag is disabled', async () => {
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    expect(screen.queryByRole('button', { name: 'Telemetry' })).toBeNull();
+  });
+
   it('shows a release and changelog feed on the Home dashboard', async () => {
     render(<App />);
 
