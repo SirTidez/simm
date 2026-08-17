@@ -1,7 +1,7 @@
 use crate::services::depot_downloader::DepotDownloaderService;
 use crate::services::game_version::GameVersionService;
 use crate::services::settings::SettingsService;
-use crate::types::{Environment, UpdateCheckResult};
+use crate::types::{Environment, Settings, UpdateCheckResult};
 use crate::utils::depot_downloader_detector::detect_depot_downloader;
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -15,6 +15,7 @@ use tempfile::tempdir_in;
 pub struct UpdateCheckService {
     game_version_service: GameVersionService,
     pool: Arc<SqlitePool>,
+    runtime_settings: Option<Settings>,
 }
 
 impl UpdateCheckService {
@@ -22,7 +23,16 @@ impl UpdateCheckService {
         Self {
             game_version_service: GameVersionService::new(),
             pool,
+            runtime_settings: None,
         }
+    }
+
+    /// Supplies the already-loaded application settings for a background run.
+    /// Secrets remain deliberately outside this snapshot and continue to be
+    /// read through `SettingsService` from the separate encrypted table.
+    pub fn with_runtime_settings(mut self, settings: Settings) -> Self {
+        self.runtime_settings = Some(settings);
+        self
     }
 
     pub async fn check_update_for_environment(
@@ -31,6 +41,12 @@ impl UpdateCheckService {
     ) -> Result<UpdateCheckResult> {
         let mut effective_env = env.clone();
         let env_service = crate::services::environment::EnvironmentService::new(self.pool.clone())?;
+        let env_service = match &self.runtime_settings {
+            Some(settings) => env_service.with_runtime_settings(settings.clone()),
+            // Kept for direct unit construction; managed command and scheduler
+            // paths always attach their RuntimeSettingsState snapshot.
+            None => env_service,
+        };
         if Self::restore_installed_manifest_baseline(&mut effective_env) {
             if let Some(installed_manifest_id) = effective_env.last_manifest_id.as_ref() {
                 if let Err(err) = env_service
@@ -626,10 +642,13 @@ impl UpdateCheckService {
         // Get credentials from settings for authentication
         let mut settings_service =
             SettingsService::new(self.pool.clone()).context("Failed to create settings service")?;
-        let settings = settings_service
-            .load_settings()
-            .await
-            .context("Failed to load settings")?;
+        let settings = match self.runtime_settings.as_ref() {
+            Some(settings) => settings.clone(),
+            None => settings_service
+                .load_settings()
+                .await
+                .context("Failed to load settings")?,
+        };
 
         let credentials = settings_service
             .get_credentials()

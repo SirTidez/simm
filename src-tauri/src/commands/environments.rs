@@ -6,7 +6,7 @@ use crate::utils::validation::{
 };
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::Mutex as AsyncMutex;
 
 fn normalize_path(path: &str) -> String {
@@ -146,6 +146,7 @@ async fn start_watchers_for_env(
 pub async fn get_environments(
     db: State<'_, Arc<SqlitePool>>,
     watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
+    app: AppHandle,
 ) -> Result<Vec<Environment>, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let mut envs = service
@@ -346,6 +347,7 @@ pub async fn get_environments(
                 let watcher_guard = watcher.lock().await;
                 start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
                 envs.push(env);
+                crate::services::runtime_update_scheduler::request_reschedule(&app);
             }
         }
     }
@@ -385,6 +387,7 @@ pub async fn create_environment(
     output_dir: String,
     name: Option<String>,
     description: Option<String>,
+    app: AppHandle,
 ) -> Result<Environment, String> {
     let env = create_environment_impl(
         db.inner().clone(),
@@ -398,6 +401,7 @@ pub async fn create_environment(
 
     let watcher_guard = watcher.lock().await;
     start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
+    crate::services::runtime_update_scheduler::request_reschedule(&app);
 
     Ok(env)
 }
@@ -407,8 +411,11 @@ pub async fn update_environment(
     db: State<'_, Arc<SqlitePool>>,
     id: String,
     updates: serde_json::Value,
+    app: AppHandle,
 ) -> Result<Environment, String> {
-    update_environment_impl(db.inner().clone(), id, updates).await
+    let environment = update_environment_impl(db.inner().clone(), id, updates).await?;
+    crate::services::runtime_update_scheduler::request_reschedule(&app);
+    Ok(environment)
 }
 
 #[tauri::command]
@@ -417,6 +424,7 @@ pub async fn delete_environment(
     watcher: State<'_, Arc<AsyncMutex<FileSystemWatcherService>>>,
     id: String,
     delete_files: Option<bool>,
+    app: AppHandle,
 ) -> Result<bool, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let existing_env = service
@@ -453,6 +461,8 @@ pub async fn delete_environment(
         }
     }
 
+    crate::services::runtime_update_scheduler::request_reschedule(&app);
+
     Ok(deleted)
 }
 
@@ -481,6 +491,7 @@ pub async fn create_steam_environment(
     steam_path: String,
     name: Option<String>,
     description: Option<String>,
+    app: AppHandle,
 ) -> Result<Environment, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = service
@@ -490,6 +501,7 @@ pub async fn create_steam_environment(
 
     let watcher_guard = watcher.lock().await;
     start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
+    crate::services::runtime_update_scheduler::request_reschedule(&app);
 
     Ok(env)
 }
@@ -501,6 +513,7 @@ pub async fn import_local_environment(
     local_path: String,
     name: Option<String>,
     description: Option<String>,
+    app: AppHandle,
 ) -> Result<Environment, String> {
     let service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let env = service
@@ -510,6 +523,7 @@ pub async fn import_local_environment(
 
     let watcher_guard = watcher.lock().await;
     start_watchers_for_env(&watcher_guard, &env.id, &env.output_dir).await;
+    crate::services::runtime_update_scheduler::request_reschedule(&app);
 
     Ok(env)
 }

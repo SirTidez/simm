@@ -1,7 +1,5 @@
-use crate::services::settings::SettingsService;
+use crate::services::settings::RuntimeSettingsState;
 use crate::types::WindowCloseBehavior;
-use sqlx::SqlitePool;
-use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,30 +18,13 @@ fn close_action_for_behavior(behavior: &WindowCloseBehavior) -> CloseAction {
 }
 
 pub async fn handle_main_window_close(app: AppHandle) {
-    let action = if let Some(pool) = app.try_state::<Arc<SqlitePool>>() {
-        match SettingsService::new(pool.inner().clone()) {
-            Ok(mut service) => match service.load_settings().await {
-                Ok(settings) => {
-                    close_action_for_behavior(&settings.window_close_behavior.unwrap_or_default())
-                }
-                Err(error) => {
-                    log::warn!(
-                        "Failed to load close behavior; hiding SIMM to the tray: {:#}",
-                        error
-                    );
-                    CloseAction::HideToTray
-                }
-            },
-            Err(error) => {
-                log::warn!(
-                    "Failed to initialize settings for close behavior; hiding SIMM to the tray: {:#}",
-                    error
-                );
-                CloseAction::HideToTray
-            }
-        }
+    let action = if let Some(runtime_settings) = app.try_state::<RuntimeSettingsState>() {
+        let settings = runtime_settings.snapshot().await;
+        close_action_for_behavior(&settings.window_close_behavior.unwrap_or_default())
     } else {
-        log::warn!("SIMM database is not ready during a close request; hiding to the tray");
+        log::warn!(
+            "Runtime settings are not ready during a close request; hiding SIMM to the tray"
+        );
         CloseAction::HideToTray
     };
 

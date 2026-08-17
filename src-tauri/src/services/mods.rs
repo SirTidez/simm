@@ -213,6 +213,7 @@ static RUNTIME_SUFFIX_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 #[derive(Clone)]
 pub struct ModsService {
     pool: Arc<SqlitePool>,
+    runtime_settings: Option<crate::types::Settings>,
 }
 
 fn is_s1api_source_id(source_id: Option<&str>) -> bool {
@@ -275,7 +276,17 @@ struct ModsListResult {
 
 impl ModsService {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            runtime_settings: None,
+        }
+    }
+
+    /// Supplies the process-owned public-settings snapshot for interactive or
+    /// background work. Tests and explicit durable maintenance may omit it.
+    pub fn with_runtime_settings(mut self, settings: crate::types::Settings) -> Self {
+        self.runtime_settings = Some(settings);
+        self
     }
 
     /// Repairs the incorrect historical S1API author without changing the source,
@@ -2035,14 +2046,16 @@ impl ModsService {
 
     async fn enforce_mod_icon_cache_limit(&self) -> Result<()> {
         let cache_dir = self.get_mod_icon_cache_dir().await?;
-        let mut settings_service = SettingsService::new(self.pool.clone())
-            .context("Failed to create settings service for icon cache limit")?;
-        let settings = settings_service
-            .load_settings()
-            .await
-            .context("Failed to load settings for icon cache limit")?;
-
-        let max_mb = settings.mod_icon_cache_limit_mb.unwrap_or(500) as u64;
+        // Icon downloads can arrive in bursts. Normal managed command paths
+        // inject the app-owned snapshot, so enforcement must not turn each
+        // downloaded icon into a singleton settings query. Legacy/test callers
+        // retain the documented default rather than silently reintroducing a
+        // durable read on this hot path.
+        let max_mb = self
+            .runtime_settings
+            .as_ref()
+            .and_then(|settings| settings.mod_icon_cache_limit_mb)
+            .unwrap_or(500) as u64;
         let max_bytes = max_mb.saturating_mul(1024).saturating_mul(1024);
 
         let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
@@ -3678,12 +3691,21 @@ impl ModsService {
 
     /// Get the mods storage directory from settings
     async fn get_mods_storage_dir(&self) -> Result<PathBuf> {
-        let mut settings_service =
-            SettingsService::new(self.pool.clone()).context("Failed to create settings service")?;
-        let settings = settings_service
-            .load_settings()
-            .await
-            .context("Failed to load settings")?;
+        let settings = match &self.runtime_settings {
+            Some(settings) => {
+                log::debug!("[Settings] ModsService using cached public settings snapshot");
+                settings.clone()
+            }
+            None => {
+                log::debug!("[Settings] ModsService durable settings fallback");
+                let mut settings_service = SettingsService::new(self.pool.clone())
+                    .context("Failed to create settings service")?;
+                settings_service
+                    .load_settings()
+                    .await
+                    .context("Failed to load settings")?
+            }
+        };
 
         let storage_dir = PathBuf::from(settings.default_download_dir).join("Mods");
         fs::create_dir_all(&storage_dir)
@@ -4143,6 +4165,37 @@ impl ModsService {
     }
 
     pub async fn reconcile_tracked_mod_state(&self) -> Result<Vec<String>> {
+        let storage_root = self.get_mods_storage_dir().await?;
+        self.reconcile_tracked_mod_state_at(&storage_root).await
+    }
+
+    /// Reconciles against a caller-provided storage directory. Long-lived
+    /// background work supplies the runtime settings snapshot here instead of
+    /// reloading the singleton settings row from SQLite.
+    pub async fn reconcile_tracked_mod_state_at(&self, storage_root: &Path) -> Result<Vec<String>> {
+        self.reconcile_tracked_mod_state_for_environment_at_inner(storage_root, None)
+            .await
+    }
+
+    /// Reconciles just one environment after a watcher event, retaining the
+    /// shared-library ownership checks while avoiding a full metadata sweep.
+    pub async fn reconcile_tracked_mod_state_for_environment_at(
+        &self,
+        environment_id: &str,
+        storage_root: &Path,
+    ) -> Result<Vec<String>> {
+        self.reconcile_tracked_mod_state_for_environment_at_inner(
+            storage_root,
+            Some(environment_id),
+        )
+        .await
+    }
+
+    async fn reconcile_tracked_mod_state_for_environment_at_inner(
+        &self,
+        storage_root: &Path,
+        environment_filter: Option<&str>,
+    ) -> Result<Vec<String>> {
         #[derive(Clone)]
         struct ReconcileEntry {
             environment_id: String,
@@ -4151,11 +4204,20 @@ impl ModsService {
             managed_paths: Option<Vec<String>>,
         }
 
-        let rows = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT environment_id, file_name, data FROM mod_metadata WHERE kind = 'mods'",
-        )
-        .fetch_all(&*self.pool)
-        .await
+        let rows = if let Some(environment_id) = environment_filter {
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT environment_id, file_name, data FROM mod_metadata WHERE kind = 'mods' AND environment_id = ?",
+            )
+            .bind(environment_id)
+            .fetch_all(&*self.pool)
+            .await
+        } else {
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT environment_id, file_name, data FROM mod_metadata WHERE kind = 'mods'",
+            )
+            .fetch_all(&*self.pool)
+            .await
+        }
         .context("Failed to load mod metadata for reconciliation")?;
 
         if rows.is_empty() {
@@ -4178,10 +4240,17 @@ impl ModsService {
             return Ok(Vec::new());
         }
 
-        let env_rows = sqlx::query_as::<_, (String, String)>("SELECT id, data FROM environments")
-            .fetch_all(&*self.pool)
-            .await
-            .context("Failed to load environments for reconciliation")?;
+        let env_rows = if let Some(environment_id) = environment_filter {
+            sqlx::query_as::<_, (String, String)>("SELECT id, data FROM environments WHERE id = ?")
+                .bind(environment_id)
+                .fetch_all(&*self.pool)
+                .await
+        } else {
+            sqlx::query_as::<_, (String, String)>("SELECT id, data FROM environments")
+                .fetch_all(&*self.pool)
+                .await
+        }
+        .context("Failed to load environments for reconciliation")?;
 
         let mut env_output_dirs: HashMap<String, String> = HashMap::new();
         for (env_id, data) in env_rows {
@@ -4200,7 +4269,6 @@ impl ModsService {
             }
         }
 
-        let storage_root = self.get_mods_storage_dir().await?;
         let mut broken_storage_ids: HashSet<String> = HashSet::new();
         for (storage_id, storage_entries) in &entries_by_storage {
             let storage_path = storage_root.join(storage_id);
@@ -4260,7 +4328,7 @@ impl ModsService {
                         &entry.file_name,
                         storage_id,
                         entry.managed_paths.as_ref(),
-                        &storage_root,
+                        storage_root,
                     )
                     .await;
                 if !entry_owned {
@@ -4313,7 +4381,12 @@ impl ModsService {
         Ok(affected)
     }
 
-    pub async fn migrate_legacy_symlink_installs_to_managed_copies(&self) -> Result<Vec<String>> {
+    /// Startup migration variant that accepts the already-loaded settings
+    /// location. It is intentionally not used by periodic maintenance.
+    pub async fn migrate_legacy_symlink_installs_to_managed_copies_at(
+        &self,
+        storage_root: &Path,
+    ) -> Result<Vec<String>> {
         let rows = sqlx::query_as::<_, (String, String, String)>(
             "SELECT environment_id, file_name, data FROM mod_metadata WHERE kind = 'mods'",
         )
@@ -4339,7 +4412,6 @@ impl ModsService {
             }
         }
 
-        let storage_root = self.get_mods_storage_dir().await?;
         let mut metadata_by_env: HashMap<String, HashMap<String, ModMetadata>> = HashMap::new();
         let mut affected_env_ids: HashSet<String> = HashSet::new();
 
@@ -4370,7 +4442,7 @@ impl ModsService {
             let mut converted_paths = Vec::new();
             for candidate_path in candidate_paths {
                 if self
-                    .infer_storage_id_from_legacy_symlink(&candidate_path, &storage_root)
+                    .infer_storage_id_from_legacy_symlink(&candidate_path, storage_root)
                     .await
                     .as_deref()
                     != Some(storage_id.as_str())
@@ -10674,7 +10746,9 @@ mod tests {
         );
         service.save_mod_metadata(&mods_dir, &metadata).await?;
 
-        let affected = service.reconcile_tracked_mod_state().await?;
+        let affected = service
+            .reconcile_tracked_mod_state_for_environment_at(&env.id, &download_dir.join("Mods"))
+            .await?;
         assert_eq!(affected, vec![env.id.clone()]);
 
         let loaded = service.load_mod_metadata(&mods_dir).await?;
@@ -11198,7 +11272,7 @@ mod tests {
         service.save_mod_metadata(&mods_dir, &metadata).await?;
 
         let affected = service
-            .migrate_legacy_symlink_installs_to_managed_copies()
+            .migrate_legacy_symlink_installs_to_managed_copies_at(&storage_root)
             .await?;
 
         assert_eq!(affected, vec![env.id.clone()]);
@@ -11239,6 +11313,14 @@ mod tests {
                 .file_type()
                 .is_symlink(),
             "symlink pointing at another storage id must be left alone"
+        );
+
+        assert!(
+            service
+                .migrate_legacy_symlink_installs_to_managed_copies_at(&storage_root)
+                .await?
+                .is_empty(),
+            "startup-only migration should be idempotent after managed copies are materialized"
         );
 
         let loaded = service.load_mod_metadata(&mods_dir).await?;

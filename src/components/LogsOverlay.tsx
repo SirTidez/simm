@@ -17,6 +17,7 @@ import type { Environment } from '../types';
 import { Icon } from './Icon';
 import { SimmBadge, SimmButton } from './primitives';
 import { WorkspacePageHeader } from './WorkspacePageHeader';
+import { useModLibraryStore } from '../stores/modLibraryStore';
 
 const INSPECTOR_COLLAPSE_BREAKPOINT = 1240;
 const INITIAL_LOG_LINE_LIMIT = 4000;
@@ -649,6 +650,7 @@ const LogStream = memo(function LogStream({
 });
 
 export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibraryView }: Props) {
+  const { library: sharedLibrary, ensureLibrary } = useModLibraryStore();
   const [logFiles, setLogFiles] = useState<LogFile[]>([]);
   const [selectedLogPath, setSelectedLogPath] = useState<string | null>(null);
   const [logLines, setLogLines] = useState<LogLine[]>([]);
@@ -1305,7 +1307,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
 
     try {
       setOpeningModView(true);
-      const library = await ApiService.getModLibrary();
+      const library = sharedLibrary ?? await ensureLibrary();
       const normalizedTag = normalizeModTag(modTag);
       const remoteSources = new Set(['thunderstore', 'nexusmods', 'github']);
       const matches = library.downloaded.filter((entry) => {

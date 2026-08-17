@@ -1,5 +1,5 @@
 use crate::services::auth::AuthService;
-use crate::services::settings::SettingsService;
+use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::utils::logging::error_with_location;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -25,6 +25,7 @@ pub async fn authenticate(
     password: Option<String>,
     steam_guard: Option<String>,
     save_credentials: Option<bool>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<serde_json::Value, String> {
     let auth_service = get_auth_service().await?;
     let result = auth_service
@@ -42,7 +43,7 @@ pub async fn authenticate(
         // Save credentials if requested
         if save_credentials.unwrap_or(false) {
             if let Some(pwd) = password {
-                let mut settings_service =
+                let settings_service =
                     SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
                 settings_service
                     .save_credentials(username.clone(), pwd)
@@ -57,8 +58,8 @@ pub async fn authenticate(
 
                 let mut updates = serde_json::Map::new();
                 updates.insert("steamUsername".to_string(), serde_json::json!(username));
-                settings_service
-                    .save_settings(serde_json::Value::Object(updates))
+                runtime_settings
+                    .save_settings(db.inner().as_ref(), serde_json::Value::Object(updates))
                     .await
                     .map_err(|e| {
                         error_with_location(format!(
@@ -88,6 +89,7 @@ pub async fn authenticate_qr(
     db: State<'_, Arc<SqlitePool>>,
     app: AppHandle,
     save_credentials: Option<bool>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<serde_json::Value, String> {
     let auth_service = get_auth_service().await?;
     let result = auth_service.authenticate_qr(app).await.map_err(|e| {
@@ -101,15 +103,13 @@ pub async fn authenticate_qr(
         })?;
 
         if save_credentials.unwrap_or(true) {
-            let mut settings_service =
-                SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
             let mut updates = serde_json::Map::new();
             updates.insert(
                 "steamUsername".to_string(),
                 serde_json::json!(username.clone()),
             );
-            settings_service
-                .save_settings(serde_json::Value::Object(updates))
+            runtime_settings
+                .save_settings(db.inner().as_ref(), serde_json::Value::Object(updates))
                 .await
                 .map_err(|e| {
                     error_with_location(format!(

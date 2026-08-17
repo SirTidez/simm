@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { logger } from '../services/logger';
-import { ApiService } from '../services/api';
 import { onModMetadataRefreshStatus, onModUpdatesChecked } from '../services/events';
 import { batchUpdateCheckRef, lastUpdateCheckTimeRef, notifyBatchUpdateCheckStarted } from '../services/updateCheckCoordinator';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
-import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
+import { useModLibraryStore } from '../stores/modLibraryStore';
 import { Icon } from './Icon';
 import { SimmButton } from './primitives';
 
@@ -26,6 +25,7 @@ interface FooterProps {
 
 export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenAppUpdate }: FooterProps) {
   const { environments, checkAllUpdates } = useEnvironmentStore();
+  const { library, ensureLibrary } = useModLibraryStore();
   const [checkingAll, setCheckingAll] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [modUpdatesByEnv, setModUpdatesByEnv] = useState<Map<string, ModUpdatesEntry>>(new Map());
@@ -62,12 +62,10 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
     }
 
     const request = (async () => {
-      const library = await normalizeLibraryFeaturedDownloads(
-        await ApiService.getModLibrary(),
-      );
+      const librarySnapshot = library ?? await ensureLibrary();
       const map = new Map<string, ModUpdatesEntry>();
       for (const env of completedEnvironments) {
-        const snapshot = buildEnvironmentModSnapshot(library, env.id);
+        const snapshot = buildEnvironmentModSnapshot(librarySnapshot, env.id);
         map.set(env.id, {
           count: snapshot.updateCount,
           updates: snapshot.updates.map((update) => ({
@@ -92,7 +90,7 @@ export function Footer({ onOpenModUpdates, appUpdateAvailable = false, onOpenApp
 
     modUpdatesSummaryRequestRef.current = { key: requestKey, promise: operation };
     return operation;
-  }, [environments]);
+  }, [environments, ensureLibrary, library]);
 
   useEffect(() => {
     const completedCount = environments.filter(env => env.status === 'completed').length;

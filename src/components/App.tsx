@@ -19,6 +19,7 @@ import appIcon256 from '../assets/app-icon-256.png';
 import { AppUpdateToast } from './AppUpdateToast';
 import { Footer } from './Footer';
 import { EnvironmentStoreProvider } from '../stores/environmentStore';
+import { ModLibraryStoreProvider } from '../stores/modLibraryStore';
 import { DownloadStatusStoreProvider, useDownloadStatusStore } from '../stores/downloadStatusStore';
 import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
@@ -2849,9 +2850,11 @@ export function App() {
   const appContent = (
     <SettingsStoreProvider>
       <EnvironmentStoreProvider>
-        <DownloadStatusStoreProvider>
-          <AppContent />
-        </DownloadStatusStoreProvider>
+        <ModLibraryStoreProvider>
+          <DownloadStatusStoreProvider>
+            <AppContent />
+          </DownloadStatusStoreProvider>
+        </ModLibraryStoreProvider>
       </EnvironmentStoreProvider>
     </SettingsStoreProvider>
   );

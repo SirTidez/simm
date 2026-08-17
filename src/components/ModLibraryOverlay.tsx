@@ -29,8 +29,9 @@ import {
   resolveImageSource,
   safeExternalUrl,
 } from "./modCardHelpers";
-import { onModMetadataRefreshStatus } from "../services/events";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useEnvironmentStore } from "../stores/environmentStore";
+import { useModLibraryStore } from "../stores/modLibraryStore";
 import {
   SecurityScanReportOverlay,
   type SecurityScanReportOption,
@@ -60,7 +61,6 @@ import {
   parseThunderstoreSourceId,
   type DownloadedModGroup,
 } from "../services/modLibrarySummary";
-import { normalizeLibraryFeaturedDownloads } from "../services/featuredDownloads";
 import type {
   Environment,
   ModLibraryEntry,
@@ -1559,10 +1559,15 @@ export function ModLibraryOverlay({
       return "nexusmods";
     }
   }, [navigationState?.searchSource]);
-  const [library, setLibrary] = useState<ModLibraryResult | null>(null);
-  const [loadingLibrary, setLoadingLibrary] = useState(false);
+  const {
+    library,
+    loading: loadingLibrary,
+    ensureLibrary,
+    refreshLibrary: refreshModLibrary,
+    invalidateLibrary,
+  } = useModLibraryStore();
+  const { environments, refreshEnvironments, ensureEnvironments } = useEnvironmentStore();
   const [, setSelectedModIds] = useState<Set<string>>(new Set());
-  const [environments, setEnvironments] = useState<Environment[]>([]);
   const [confirmOverlay, setConfirmOverlay] = useState<{
     isOpen: boolean;
     title: string;
@@ -1684,7 +1689,6 @@ export function ModLibraryOverlay({
   });
   const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const libraryScrollTopRef = useRef(0);
-  const metadataRefreshRunningRef = useRef(false);
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const activeNexusModIdsRef = useRef<Set<number>>(new Set());
   const nexusModsFileRequestTokenRef = useRef(new Map<number, number>());
@@ -2185,33 +2189,13 @@ export function ModLibraryOverlay({
   }, [activeModView, downloadedGroups, nexusModsSearchResults, selectedStorageByGroup]);
 
   const loadLibrarySnapshot = useCallback(async () => {
-    try {
-      const data = await normalizeLibraryFeaturedDownloads(
-        await ApiService.getModLibrary(),
-      );
-      return data ?? { downloaded: [] };
-    } catch (error) {
-      logger.error("Failed to load mod library snapshot", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-  }, []);
+    invalidateLibrary();
+    return refreshModLibrary();
+  }, [invalidateLibrary, refreshModLibrary]);
 
   const refreshLibrary = useCallback(async () => {
-    const data = await loadLibrarySnapshot();
-    setLibrary(data);
+    await loadLibrarySnapshot();
   }, [loadLibrarySnapshot]);
-
-  const refreshEnvironments = useCallback(async () => {
-    try {
-      const data = await ApiService.getEnvironments();
-      setEnvironments(data);
-    } catch (error) {
-      console.warn("Failed to load environments for install targets:", error);
-      setEnvironments([]);
-    }
-  }, []);
 
   const closeConfirmOverlay = useCallback(() => {
     setConfirmOverlay({
@@ -2246,7 +2230,6 @@ export function ModLibraryOverlay({
   );
 
   const handleRefreshLibrary = useCallback(async () => {
-    setLoadingLibrary(true);
     try {
       await ApiService.refreshThunderstorePackageCache("schedule-i");
       await refreshLibrary();
@@ -2261,8 +2244,6 @@ export function ModLibraryOverlay({
           ? error.message
           : "SIMM could not refresh Thunderstore right now. Local library data is still available.",
       );
-    } finally {
-      setLoadingLibrary(false);
     }
   }, [refreshEnvironments, refreshLibrary, showLibraryNotice]);
 
@@ -2638,19 +2619,14 @@ export function ModLibraryOverlay({
   useEffect(() => {
     if (!isOpen) return;
     const loadLibrary = async () => {
-      setLoadingLibrary(true);
       try {
-        await refreshLibrary();
-        await refreshEnvironments();
+        await ensureLibrary();
       } catch (err) {
         console.error("Failed to load mod library:", err);
-        setLibrary({ downloaded: [] });
-      } finally {
-        setLoadingLibrary(false);
       }
     };
     loadLibrary();
-  }, [isOpen, refreshEnvironments, refreshLibrary]);
+  }, [ensureLibrary, isOpen]);
 
   useEffect(() => {
     const activeModIds = new Set(
@@ -2737,42 +2713,6 @@ export function ModLibraryOverlay({
     handleLoadNexusModFiles,
   ]);
 
-  useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void onModMetadataRefreshStatus((data) => {
-      const running = Boolean(data.running) || (data.activeCount || 0) > 0;
-      const wasRunning = metadataRefreshRunningRef.current;
-      metadataRefreshRunningRef.current = running;
-
-      if (wasRunning && !running) {
-        void refreshLibrary();
-      }
-    })
-      .then((fn) => {
-        if (disposed) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-      })
-      .catch((error) => {
-        console.warn(
-          "Failed to register mod metadata refresh listener:",
-          error,
-        );
-      });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-      metadataRefreshRunningRef.current = false;
-    };
-  }, [isOpen, refreshLibrary]);
   const runThunderstoreSearch = useCallback(
     async (query: string) => {
       const trimmedQuery = query.trim();
@@ -3718,7 +3658,6 @@ export function ModLibraryOverlay({
                   }
 
                   const nextLibrary = await loadLibrarySnapshot();
-                  setLibrary(nextLibrary);
                   notifyLibraryUpdated();
 
                   const refreshedGroup = buildDownloadedGroups(
@@ -3853,7 +3792,6 @@ export function ModLibraryOverlay({
         }
 
         const nextLibrary = await loadLibrarySnapshot();
-        setLibrary(nextLibrary);
         notifyLibraryUpdated();
 
         const refreshedGroups = buildDownloadedGroups(nextLibrary.downloaded);
@@ -4567,19 +4505,13 @@ export function ModLibraryOverlay({
       const availableEnvironments =
         environmentOverride && environmentOverride.length > 0
           ? environmentOverride
-          : environments.length > 0
-            ? environments
-            : await ApiService.getEnvironments().catch((error) => {
-                console.warn(
-                  "Failed to load environments for post-download install prompt:",
-                  error,
-                );
-                return [];
-              });
-
-      if (environments.length === 0 && availableEnvironments.length > 0) {
-        setEnvironments(availableEnvironments);
-      }
+          : await ensureEnvironments().catch((error) => {
+              console.warn(
+                "Failed to load environments for post-download install prompt:",
+                error,
+              );
+              return [];
+            });
 
       const installEntries = entries
         .map((entry) => getInstallableEntry(entry))
@@ -4653,7 +4585,7 @@ export function ModLibraryOverlay({
       });
     },
     [
-      environments,
+      ensureEnvironments,
       formatDownloadBatchNote,
       getInstallableEntry,
       showLibraryNotice,
@@ -4669,9 +4601,8 @@ export function ModLibraryOverlay({
       resolveFallbackEntries?: (library: ModLibraryResult) => ModLibraryEntry[],
     ) => {
       const nextLibrary = await loadLibrarySnapshot();
-      setLibrary(nextLibrary);
       notifyLibraryUpdated();
-      const availableEnvironments = await ApiService.getEnvironments().catch(
+      const availableEnvironments = await ensureEnvironments().catch(
         (error) => {
           console.warn(
             "Failed to load environments for post-download install prompt:",
@@ -4680,7 +4611,6 @@ export function ModLibraryOverlay({
           return [];
         },
       );
-      setEnvironments(availableEnvironments);
 
       const matchedEntries = resolveDownloadedEntriesByStorageIds(
         nextLibrary.downloaded || [],
@@ -4713,6 +4643,7 @@ export function ModLibraryOverlay({
       );
     },
     [
+      ensureEnvironments,
       loadLibrarySnapshot,
       notifyLibraryUpdated,
       promptDownloadedInstallTargets,
@@ -5667,7 +5598,6 @@ export function ModLibraryOverlay({
               runtime,
               async () => {
                 const nextLibrary = await loadLibrarySnapshot();
-                setLibrary(nextLibrary);
                 notifyLibraryUpdated();
                 const refreshedGroup = findDownloadedGroupForNexusMod(
                   modId,
@@ -5757,7 +5687,6 @@ export function ModLibraryOverlay({
               inferredRuntime === "Unknown" ? undefined : inferredRuntime,
               async () => {
                 const nextLibrary = await loadLibrarySnapshot();
-                setLibrary(nextLibrary);
                 notifyLibraryUpdated();
                 const refreshedGroup = findDownloadedGroupForNexusMod(
                   modId,
@@ -5796,7 +5725,6 @@ export function ModLibraryOverlay({
             runtime,
             async () => {
               const nextLibrary = await loadLibrarySnapshot();
-              setLibrary(nextLibrary);
               notifyLibraryUpdated();
               const refreshedGroup = findDownloadedGroupForNexusMod(
                 modId,
@@ -6101,7 +6029,6 @@ export function ModLibraryOverlay({
             undefined,
             async () => {
               const nextLibrary = await loadLibrarySnapshot();
-              setLibrary(nextLibrary);
               notifyLibraryUpdated();
               const refreshedGroup = findDownloadedGroupForNexusMod(
                 modId,

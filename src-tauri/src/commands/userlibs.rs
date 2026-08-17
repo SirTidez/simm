@@ -2,6 +2,7 @@ use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::mod_profiles::ModProfilesService;
 use crate::services::mods::ModsService;
+use crate::services::settings::RuntimeSettingsState;
 use crate::services::userlibs::UserLibsService;
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -153,6 +154,7 @@ fn installed_files_from_storage_install(result: &serde_json::Value) -> Vec<Strin
 
 async fn upload_user_lib_impl(
     db: Arc<SqlitePool>,
+    settings: &crate::types::Settings,
     environment_id: String,
     file_path: String,
     original_file_name: String,
@@ -179,7 +181,7 @@ async fn upload_user_lib_impl(
     }
 
     let requested_runtime = parse_userlib_runtime(&runtime, &env.runtime)?;
-    let mods_service = ModsService::new(db);
+    let mods_service = ModsService::new(db).with_runtime_settings(settings.clone());
     let store_result = mods_service
         .store_mod_archive(
             &file_path,
@@ -351,14 +353,17 @@ pub async fn open_user_libs_folder(
 pub async fn upload_user_lib(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     file_path: String,
     original_file_name: String,
     runtime: String,
     metadata: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    let settings = runtime_settings.snapshot().await;
     let result = upload_user_lib_impl(
         db.inner().clone(),
+        &settings,
         environment_id.clone(),
         file_path,
         original_file_name,
@@ -373,6 +378,7 @@ pub async fn upload_user_lib(
         .unwrap_or(false)
     {
         if let Err(error) = ModProfilesService::new(db.inner().clone())
+            .with_runtime_settings(settings)
             .sync_active_profile_from_environment(&environment_id)
             .await
         {
@@ -562,6 +568,7 @@ mod tests {
                 "defaultDownloadDir": download_dir.to_string_lossy().to_string()
             }))
             .await?;
+        let settings = settings_service.load_settings().await?;
 
         let env_root = tempdir()?;
         let output_dir = env_root.path().join("env-userlib-dll");
@@ -581,6 +588,7 @@ mod tests {
 
         let result = upload_user_lib_impl(
             pool.clone(),
+            &settings,
             env.id,
             source_dll.to_string_lossy().to_string(),
             "UploadedUserLib.dll".to_string(),
@@ -634,6 +642,7 @@ mod tests {
                 "defaultDownloadDir": download_dir.to_string_lossy().to_string()
             }))
             .await?;
+        let settings = settings_service.load_settings().await?;
 
         let env_root = tempdir()?;
         let output_dir = env_root.path().join("env-userlib-zip");
@@ -659,6 +668,7 @@ mod tests {
 
         let result = upload_user_lib_impl(
             pool,
+            &settings,
             env.id,
             zip_path.to_string_lossy().to_string(),
             "LooseUserLib.zip".to_string(),

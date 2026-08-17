@@ -1,5 +1,5 @@
 use crate::services::nexus_mods::NexusModsService;
-use crate::services::settings::SettingsService;
+use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::utils::http_identity;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use once_cell::sync::Lazy;
@@ -1321,6 +1321,7 @@ fn build_nexus_mod_metadata(
 async fn complete_pending_nxm_download(
     app: &AppHandle,
     db: Arc<SqlitePool>,
+    settings: &crate::types::Settings,
     pending: Option<&PendingNexusManualDownload>,
     nxm: &ParsedNxmUrl,
     runtime_override: Option<crate::types::Runtime>,
@@ -1372,7 +1373,7 @@ async fn complete_pending_nxm_download(
     let runtime = runtime_override
         .or_else(|| pending.and_then(|value| parse_runtime_label(value.runtime.as_deref())))
         .or_else(|| infer_runtime_from_file_name(original_filename));
-    let mods_service = ModsService::new(db.clone());
+    let mods_service = ModsService::new(db.clone()).with_runtime_settings(settings.clone());
 
     let install_target = pending.and_then(|value| {
         let same_mod = value.mod_id == nxm.mod_id;
@@ -1989,12 +1990,13 @@ pub async fn begin_nexus_manual_download_session(
 pub async fn complete_nexus_manual_download_session(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     nxm_url: String,
     runtime_override: Option<String>,
 ) -> Result<Value, String> {
-    let settings = SettingsService::new(db.inner().clone())
+    let settings_service = SettingsService::new(db.inner().clone())
         .map_err(|e| nexus_error(format!("Failed to create Nexus settings service: {}", e)))?;
-    let pending = settings
+    let pending = settings_service
         .get_nexus_nxm_pending_download()
         .await
         .map_err(|e| {
@@ -2018,9 +2020,11 @@ pub async fn complete_nexus_manual_download_session(
             "SIMM only handles Schedule I Nexus downloads while it is open. Close SIMM to download Nexus mods for other games."
         ));
     }
+    let settings = runtime_settings.snapshot().await;
     let result = complete_pending_nxm_download(
         &app,
         db.inner().clone(),
+        &settings,
         pending.as_ref(),
         &nxm,
         parse_runtime_label(runtime_override.as_deref()),
@@ -2293,6 +2297,7 @@ pub async fn check_nexus_mods_for_updates(
 pub async fn download_nexus_mod_to_library(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, crate::services::settings::RuntimeSettingsState>,
     game_id_param: Option<String>,
     mod_id: u32,
     file_id: u32,
@@ -2306,17 +2311,10 @@ pub async fn download_nexus_mod_to_library(
         .map_err(nexus_error)?;
 
     let db_pool = db.inner().clone();
+    let settings = runtime_settings.snapshot().await;
     let game_id = if let Some(ref id) = game_id_param {
         normalize_nexus_game_id(Some(id))
     } else {
-        let mut settings_service = SettingsService::new(db_pool.clone())
-            .map_err(|e| nexus_error(format!("Failed to create settings service: {}", e)))?;
-        let settings = settings_service.load_settings().await.map_err(|e| {
-            nexus_error(format!(
-                "Failed to load settings for Nexus library download: {}",
-                e
-            ))
-        })?;
         normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
     };
 
@@ -2346,7 +2344,7 @@ pub async fn download_nexus_mod_to_library(
         .unwrap_or("1.0.0")
         .to_string();
 
-    let mods_service = ModsService::new(db_pool.clone());
+    let mods_service = ModsService::new(db_pool.clone()).with_runtime_settings(settings.clone());
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2452,8 +2450,8 @@ pub async fn download_nexus_mod_to_library(
         file_id,
         &version,
     );
-    let security_scan = match crate::commands::mods::prepare_security_scan(
-        db_pool.clone(),
+    let security_scan = match crate::commands::mods::prepare_security_scan_with_settings(
+        &settings,
         &zip_path_str,
         Some(metadata),
         security_override.unwrap_or(false),
@@ -2519,6 +2517,7 @@ pub async fn download_nexus_mod_to_library(
 pub async fn install_nexus_mods_mod(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, crate::services::settings::RuntimeSettingsState>,
     environment_id: String,
     game_id_param: Option<String>,
     mod_id: u32,
@@ -2533,14 +2532,10 @@ pub async fn install_nexus_mods_mod(
         .map_err(nexus_error)?;
 
     let db_pool = db.inner().clone();
+    let settings = runtime_settings.snapshot().await;
     let game_id = if let Some(ref id) = game_id_param {
         normalize_nexus_game_id(Some(id))
     } else {
-        let mut settings_service = SettingsService::new(db_pool.clone())
-            .map_err(|e| nexus_error(format!("Failed to create settings service: {}", e)))?;
-        let settings = settings_service.load_settings().await.map_err(|e| {
-            nexus_error(format!("Failed to load settings for Nexus install: {}", e))
-        })?;
         normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref())
     };
 
@@ -2586,7 +2581,7 @@ pub async fn install_nexus_mods_mod(
         .unwrap_or("1.0.0")
         .to_string();
 
-    let mods_service = ModsService::new(db_pool.clone());
+    let mods_service = ModsService::new(db_pool.clone()).with_runtime_settings(settings.clone());
 
     let links = match nexus_service
         .get_oauth_download_links(&access_token, &game_id, mod_id, file_id)
@@ -2767,8 +2762,8 @@ pub async fn install_nexus_mods_mod(
 
     let metadata = Value::Object(metadata_obj);
 
-    let security_scan = match crate::commands::mods::prepare_security_scan(
-        db_pool.clone(),
+    let security_scan = match crate::commands::mods::prepare_security_scan_with_settings(
+        &settings,
         &zip_path_str,
         Some(metadata),
         security_override.unwrap_or(false),

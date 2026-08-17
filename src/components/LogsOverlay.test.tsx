@@ -17,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
 
 const listenMock = vi.hoisted(() => vi.fn(async () => () => {}));
 const saveMock = vi.hoisted(() => vi.fn());
+const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
@@ -29,6 +30,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   save: saveMock,
 }));
+vi.mock('../stores/modLibraryStore', () => ({ useModLibraryStore: modLibraryStoreMocks.useModLibraryStore }));
 
 const environment: Environment = {
   id: 'env-1',
@@ -90,6 +92,11 @@ describe('LogsOverlay', () => {
   const originalInnerWidth = window.innerWidth;
 
   beforeEach(() => {
+    modLibraryStoreMocks.useModLibraryStore.mockReset();
+    modLibraryStoreMocks.useModLibraryStore.mockReturnValue({
+      library: null,
+      ensureLibrary: apiMocks.getModLibrary,
+    });
     Object.defineProperty(window, 'innerWidth', {
       configurable: true,
       writable: true,

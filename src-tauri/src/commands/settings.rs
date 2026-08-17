@@ -1,14 +1,34 @@
 use crate::services::logger::LoggerService;
-use crate::services::settings::SettingsService;
+use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::types::{CustomThemeDefinition, Settings};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::State;
 
+/// Refreshes process-owned public settings only after a durable operation has
+/// succeeded. This keeps repair from leaving runtime behavior on an obsolete
+/// snapshot when migrations or recovery changed the settings row.
+async fn reload_runtime_settings_from_database(
+    pool: Arc<SqlitePool>,
+    runtime_settings: &RuntimeSettingsState,
+) -> Result<Settings, String> {
+    let mut service = SettingsService::new(pool).map_err(|error| error.to_string())?;
+    let settings = service
+        .load_settings()
+        .await
+        .map_err(|error| error.to_string())?;
+    runtime_settings.replace(settings.clone()).await;
+    LoggerService::apply_settings(&settings);
+    log::info!("[Settings] Reloaded cached public settings after durable database repair");
+    Ok(settings)
+}
+
 #[tauri::command]
-pub async fn get_settings(db: State<'_, Arc<SqlitePool>>) -> Result<Settings, String> {
-    let mut service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let settings = service.load_settings().await.map_err(|e| e.to_string())?;
+pub async fn get_settings(
+    _db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
+) -> Result<Settings, String> {
+    let settings = runtime_settings.snapshot().await;
     LoggerService::apply_settings(&settings);
     Ok(settings)
 }
@@ -16,15 +36,13 @@ pub async fn get_settings(db: State<'_, Arc<SqlitePool>>) -> Result<Settings, St
 #[tauri::command]
 pub async fn save_settings(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     updates: serde_json::Value,
 ) -> Result<(), String> {
-    let mut service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service
-        .save_settings(updates)
+    let settings = runtime_settings
+        .save_settings(db.inner().as_ref(), updates)
         .await
         .map_err(|e| e.to_string())?;
-
-    let settings = service.load_settings().await.map_err(|e| e.to_string())?;
     LoggerService::apply_settings(&settings);
 
     Ok(())
@@ -39,10 +57,14 @@ pub async fn backup_database(db: State<'_, Arc<SqlitePool>>) -> Result<String, S
 }
 
 #[tauri::command]
-pub async fn repair_database(db: State<'_, Arc<SqlitePool>>) -> Result<String, String> {
+pub async fn repair_database(
+    db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
+) -> Result<String, String> {
     let backup_path = crate::db::repair_database(db.inner().as_ref())
         .await
         .map_err(|e| e.to_string())?;
+    reload_runtime_settings_from_database(db.inner().clone(), runtime_settings.inner()).await?;
     Ok(backup_path.to_string_lossy().to_string())
 }
 
@@ -123,4 +145,58 @@ pub async fn clear_nexus_mods_api_key(db: State<'_, Arc<SqlitePool>>) -> Result<
         .clear_nexus_mods_api_key()
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::initialize_pool;
+    use crate::services::settings::SettingsService;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(value: &str) -> Self {
+            let original = std::env::var("SIMMRUST_DATA_DIR").ok();
+            std::env::set_var("SIMMRUST_DATA_DIR", value);
+            Self { original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var("SIMMRUST_DATA_DIR", value);
+            } else {
+                std::env::remove_var("SIMMRUST_DATA_DIR");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn durable_reload_replaces_runtime_settings_only_when_invoked() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let _guard = EnvVarGuard::set(temp.path().to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool.clone())?;
+        let original = service.load_settings().await?;
+        let runtime = RuntimeSettingsState::new(original.clone());
+
+        service
+            .save_settings(serde_json::json!({ "language": "de" }))
+            .await?;
+        assert_ne!(runtime.snapshot().await.language, "de");
+
+        let reloaded = reload_runtime_settings_from_database(pool, &runtime)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(reloaded.language, "de");
+        assert_eq!(runtime.snapshot().await.language, "de");
+        Ok(())
+    }
 }

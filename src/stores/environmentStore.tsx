@@ -24,6 +24,7 @@ interface EnvironmentStoreContextValue {
   progress: Map<string, DownloadProgress>;
   activeGameDownloadId: string | null;
   refreshEnvironments: () => Promise<void>;
+  ensureEnvironments: () => Promise<Environment[]>;
   createEnvironment: (data: { appId: string; branch: string; outputDir: string; name?: string; description?: string }) => Promise<Environment>;
   updateEnvironment: (id: string, updates: Partial<Environment>) => Promise<void>;
   deleteEnvironment: (id: string, deleteFiles?: boolean) => Promise<void>;
@@ -65,6 +66,17 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const [progress, setProgress] = useState<Map<string, DownloadProgress>>(new Map());
   const refreshEnvironmentsInFlightRef = useRef<Promise<void> | null>(null);
   const startingGameDownloadRef = useRef<string | null>(null);
+  const environmentsRef = useRef<Environment[]>([]);
+  const snapshotGenerationRef = useRef(0);
+  const commitEnvironmentSnapshot = useCallback((updater: (current: Environment[]) => Environment[]) => {
+    const next = updater(environmentsRef.current);
+    snapshotGenerationRef.current += 1;
+    environmentsRef.current = next;
+    setEnvironments(next);
+  }, []);
+  const invalidateEnvironmentSnapshot = useCallback(() => {
+    snapshotGenerationRef.current += 1;
+  }, []);
 
   const activeGameDownloadId = useMemo(() => {
     const activeProgress = Array.from(progress.values()).find(
@@ -82,13 +94,19 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
 
     const isInitialLoad = !hasLoadedEnvironmentsRef.current;
+    const requestGeneration = snapshotGenerationRef.current;
+    let appliedFetchedSnapshot = false;
     const request = (async () => {
       if (isInitialLoad) {
         setLoading(true);
       }
       setError(null);
       const envs = await ApiService.getEnvironments();
-      setEnvironments(envs);
+      if (snapshotGenerationRef.current !== requestGeneration) {
+        return;
+      }
+      commitEnvironmentSnapshot(() => envs);
+      appliedFetchedSnapshot = true;
       hasLoadedEnvironmentsRef.current = true;
 
       // Steam installs are also refreshed here even when their game version is known,
@@ -124,7 +142,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         );
 
         if (patchMap.size > 0) {
-          setEnvironments(prev => prev.map(env => {
+          commitEnvironmentSnapshot(current => current.map(env => {
             const patch = patchMap.get(env.id);
             return patch ? { ...env, ...patch } : env;
           }));
@@ -138,6 +156,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       if (refreshEnvironmentsInFlightRef.current === operation) {
         refreshEnvironmentsInFlightRef.current = null;
       }
+      if (!appliedFetchedSnapshot && snapshotGenerationRef.current !== requestGeneration) {
+        void refreshEnvironments();
+      }
       if (isInitialLoad) {
         setLoading(false);
       }
@@ -145,26 +166,34 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
     refreshEnvironmentsInFlightRef.current = operation;
     return operation;
-  }, []);
+  }, [commitEnvironmentSnapshot]);
+
+  const ensureEnvironments = useCallback(async () => {
+    if (hasLoadedEnvironmentsRef.current) {
+      return environmentsRef.current;
+    }
+    await refreshEnvironments();
+    return environmentsRef.current;
+  }, [refreshEnvironments]);
 
   const createEnvironment = useCallback(async (data: { appId: string; branch: string; outputDir: string; name?: string; description?: string }) => {
     try {
       const env = await ApiService.createEnvironment(data);
-      setEnvironments(prev => [...prev, env]);
+      commitEnvironmentSnapshot(current => [...current, env]);
       return env;
     } catch (err) {
       throw err;
     }
-  }, []);
+  }, [commitEnvironmentSnapshot]);
 
   const updateEnvironment = useCallback(async (id: string, updates: Partial<Environment>) => {
     try {
       const updated = await ApiService.updateEnvironment(id, updates);
-      setEnvironments(prev => prev.map(env => env.id === id ? updated : env));
+      commitEnvironmentSnapshot(current => current.map(env => env.id === id ? updated : env));
     } catch (err) {
       throw err;
     }
-  }, []);
+  }, [commitEnvironmentSnapshot]);
 
   const deleteEnvironment = useCallback(async (id: string, deleteFiles?: boolean) => {
     try {
@@ -216,13 +245,13 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const checkUpdate = useCallback(async (environmentId: string, manual: boolean = false) => {
     try {
       const result = await ApiService.checkUpdate(environmentId, manual);
-      setEnvironments(prev => prev.map(env => (
+      commitEnvironmentSnapshot(current => current.map(env => (
         env.id === environmentId ? mergeUpdateResultIntoEnvironment(env, result) : env
       )));
     } catch (err) {
       throw err;
     }
-  }, []);
+  }, [commitEnvironmentSnapshot]);
 
   const refreshGameVersion = useCallback(async (environmentId: string) => {
     try {
@@ -245,16 +274,13 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
       // Update environments in place without triggering loading state
       // This prevents the page from appearing to refresh
-      setEnvironments(prev => {
-        const updated = prev.map(env => {
+      commitEnvironmentSnapshot(current => current.map(env => {
           const result = results.find(r => r.environmentId === env.id);
           if (result) {
             return mergeUpdateResultIntoEnvironment(env, result);
           }
           return env;
-        });
-        return updated;
-      });
+        }));
 
       console.log('EnvironmentStore: Environments updated in place');
     } catch (err) {
@@ -265,17 +291,17 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       });
       throw err;
     }
-  }, []);
+  }, [commitEnvironmentSnapshot]);
 
   const applyUpdateResultLocally = useCallback((environmentId: string, updateResult: import('../types').UpdateCheckResult) => {
-    setEnvironments(prev => prev.map(env => {
+    commitEnvironmentSnapshot(current => current.map(env => {
       if (env.id !== environmentId) {
         return env;
       }
 
       return mergeUpdateResultIntoEnvironment(env, updateResult);
     }));
-  }, []);
+  }, [commitEnvironmentSnapshot]);
 
   // Load environments on mount
   useEffect(() => {
@@ -310,6 +336,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         unlistenComplete = await onComplete(async ({ downloadId }: { downloadId: string; manifestId?: string }) => {
           // DepotDownloader persists completion before emitting this event. Refresh
           // that backend-owned state instead of independently writing manifests here.
+          // A response already in flight predates the completion, so discard it
+          // and let its completion schedule one fresh snapshot.
+          invalidateEnvironmentSnapshot();
           await refreshEnvironments();
           setProgress(prev => {
             const next = new Map(prev);
@@ -356,10 +385,10 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         });
 
         unlistenRuntimeSwitch = await onRuntimeSwitch((result) => {
-          setEnvironments(prev => prev.map(env => env.id === result.environmentId ? {
+          commitEnvironmentSnapshot(current => current.map(env => env.id === result.environmentId ? {
             ...env,
             branch: result.branch,
-            runtime: result.runtime === 'Mono' || result.runtime === 'MONO' ? 'Mono' : 'IL2CPP',
+            runtime: (result.runtime === 'Mono' || result.runtime === 'MONO' ? 'Mono' : 'IL2CPP') as Environment['runtime'],
           } : env));
         });
       } catch (error) {
@@ -377,7 +406,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
       if (unlistenRuntimeSwitch) unlistenRuntimeSwitch();
     };
-  }, [updateEnvironment, applyUpdateResultLocally, refreshEnvironments]);
+  }, [updateEnvironment, applyUpdateResultLocally, commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
 
   return (
     <EnvironmentStoreContext.Provider
@@ -388,6 +417,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         progress,
         activeGameDownloadId,
         refreshEnvironments,
+        ensureEnvironments,
         createEnvironment,
         updateEnvironment,
         deleteEnvironment,

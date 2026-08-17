@@ -1,5 +1,6 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::game_version::GameVersionService;
+use crate::services::settings::RuntimeSettingsState;
 use crate::types::{EnvironmentType, Runtime};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -42,9 +43,12 @@ fn runtime_for_response(r: &Runtime) -> String {
 pub async fn extract_game_version(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
 ) -> Result<ExtractGameVersionResponse, String> {
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env_service = EnvironmentService::new(db.inner().clone())
+        .map_err(|e| e.to_string())?
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let mut env = env_service
         .get_environment(&environment_id)
         .await

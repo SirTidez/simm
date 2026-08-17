@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde_json;
 use sqlx::SqlitePool;
 use tokio::fs;
+use tokio::sync::{watch, Mutex, RwLock};
 
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
@@ -20,6 +21,86 @@ use crate::types::{
 
 pub struct SettingsService {
     pool: Arc<SqlitePool>,
+}
+
+/// The process-local settings snapshot used by long-lived backend services.
+///
+/// SQLite remains the durable source across launches. Keeping this snapshot in
+/// process prevents background jobs from deserializing the same singleton row
+/// on every wake-up, while `save_lock` makes read/merge/write updates atomic
+/// within SIMM's single-instance process.
+#[derive(Clone)]
+pub struct RuntimeSettingsState {
+    settings: Arc<RwLock<Settings>>,
+    save_lock: Arc<Mutex<()>>,
+    changes: watch::Sender<u64>,
+}
+
+impl RuntimeSettingsState {
+    pub fn new(settings: Settings) -> Self {
+        Self {
+            settings: Arc::new(RwLock::new(settings)),
+            save_lock: Arc::new(Mutex::new(())),
+            changes: watch::channel(0).0,
+        }
+    }
+
+    pub async fn snapshot(&self) -> Settings {
+        self.settings.read().await.clone()
+    }
+
+    /// Replaces the runtime snapshot after startup migration/loading.
+    pub async fn replace(&self, settings: Settings) {
+        *self.settings.write().await = settings;
+        self.bump_change_version();
+    }
+
+    /// Subscribe before calculating a wait deadline. Unlike `Notify`, the
+    /// watch version retains a change that happens just before `changed()` is
+    /// awaited, so schedulers cannot lose a reschedule request.
+    pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    pub fn notify_changed(&self) {
+        self.bump_change_version();
+    }
+
+    fn bump_change_version(&self) {
+        self.changes
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    pub async fn save_settings(
+        &self,
+        pool: &SqlitePool,
+        updates: serde_json::Value,
+    ) -> Result<Settings> {
+        let _save_guard = self.save_lock.lock().await;
+        let current = self.snapshot().await;
+        let current_json = serde_json::to_value(&current)?;
+        let merged = SettingsService::sanitize_legacy_settings_value(SettingsService::merge_json(
+            &current_json,
+            &updates,
+        ));
+        let mut updated: Settings = serde_json::from_value(merged)?;
+        updated.theme = SettingsService::normalize_theme_selection(&updated.theme);
+
+        let content = serde_json::to_string(&updated).context("Failed to serialize settings")?;
+        sqlx::query(
+            "INSERT INTO settings (id, data) VALUES (?, ?) \
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+        )
+        .bind(SETTINGS_ID)
+        .bind(content)
+        .execute(pool)
+        .await
+        .context("Failed to save settings")?;
+
+        *self.settings.write().await = updated.clone();
+        self.bump_change_version();
+        Ok(updated)
+    }
 }
 
 const SETTINGS_ID: i64 = 1;
@@ -52,6 +133,65 @@ struct CustomThemeFile {
 impl SettingsService {
     pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
         Ok(Self { pool })
+    }
+
+    pub fn default_settings() -> Settings {
+        let platform = if cfg!(target_os = "windows") {
+            crate::types::Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            crate::types::Platform::Macos
+        } else {
+            crate::types::Platform::Linux
+        };
+
+        Settings {
+            default_download_dir: dirs::home_dir()
+                .map(|p| {
+                    let mut path = p.to_path_buf();
+                    path.push("SIMM");
+                    path.to_string_lossy().to_string()
+                })
+                .unwrap_or_else(|| ".".to_string()),
+            depot_downloader_path: None,
+            steam_username: None,
+            max_concurrent_downloads: 2,
+            platform,
+            language: "english".to_string(),
+            theme: "modern-blue".to_string(),
+            melon_loader_version: None,
+            auto_install_melon_loader: Some(true),
+            enable_security_scanner: Some(true),
+            auto_install_security_scanner: Some(true),
+            block_critical_scans: Some(true),
+            prompt_on_high_scans: Some(true),
+            show_security_scan_badges: Some(true),
+            update_check_interval: Some(60),
+            auto_check_updates: Some(true),
+            log_level: Some(crate::types::LogLevel::Warn),
+            nexus_mods_api_key: None,
+            nexus_mods_rate_limits: None,
+            nexus_mods_game_id: Some("schedule1".to_string()),
+            nexus_mods_app_slug: None,
+            thunderstore_game_id: Some("schedule-i".to_string()),
+            auto_update_mods: None,
+            mod_update_check_interval: None,
+            mod_icon_cache_limit_mb: Some(500),
+            database_backup_count: Some(10),
+            log_retention_days: Some(7),
+            app_update: Some(AppUpdateSettings {
+                last_checked_at: None,
+                last_seen_version_raw: None,
+                last_seen_version_normalized: None,
+                last_resolved_url: None,
+                snoozed_until: None,
+                skipped_version_normalized: None,
+                channel: Some(AppUpdateChannel::Beta),
+            }),
+            experience_mode: Some(crate::types::ExperienceMode::Player),
+            show_advanced_game_tools: Some(false),
+            window_close_behavior: Some(WindowCloseBehavior::Ask),
+            setup_guide_completed: Some(false),
+        }
     }
 
     fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
@@ -431,64 +571,7 @@ impl SettingsService {
             log::warn!("Stored settings could not be parsed; falling back to defaults");
         }
 
-        let platform = if cfg!(target_os = "windows") {
-            crate::types::Platform::Windows
-        } else if cfg!(target_os = "macos") {
-            crate::types::Platform::Macos
-        } else {
-            crate::types::Platform::Linux
-        };
-
-        let default_settings = Settings {
-            default_download_dir: dirs::home_dir()
-                .map(|p| {
-                    let mut path = p.to_path_buf();
-                    path.push("SIMM");
-                    path.to_string_lossy().to_string()
-                })
-                .unwrap_or_else(|| ".".to_string()),
-            depot_downloader_path: None,
-            steam_username: None,
-            max_concurrent_downloads: 2,
-            platform,
-            language: "english".to_string(),
-            theme: "modern-blue".to_string(),
-            melon_loader_version: None,
-            auto_install_melon_loader: Some(true),
-            enable_security_scanner: Some(true),
-            auto_install_security_scanner: Some(true),
-            block_critical_scans: Some(true),
-            prompt_on_high_scans: Some(true),
-            show_security_scan_badges: Some(true),
-            update_check_interval: Some(60),
-            auto_check_updates: Some(true),
-            log_level: Some(crate::types::LogLevel::Warn),
-            nexus_mods_api_key: None,
-            nexus_mods_rate_limits: None,
-            nexus_mods_game_id: Some("schedule1".to_string()),
-            nexus_mods_app_slug: None,
-            thunderstore_game_id: Some("schedule-i".to_string()),
-            auto_update_mods: None,
-            mod_update_check_interval: None,
-            mod_icon_cache_limit_mb: Some(500),
-            database_backup_count: Some(10),
-            log_retention_days: Some(7),
-            app_update: Some(AppUpdateSettings {
-                last_checked_at: None,
-                last_seen_version_raw: None,
-                last_seen_version_normalized: None,
-                last_resolved_url: None,
-                snoozed_until: None,
-                skipped_version_normalized: None,
-                channel: Some(AppUpdateChannel::Beta),
-            }),
-            experience_mode: Some(crate::types::ExperienceMode::Player),
-            show_advanced_game_tools: Some(false),
-            window_close_behavior: Some(WindowCloseBehavior::Ask),
-            setup_guide_completed: Some(false),
-        };
-
-        Ok(default_settings)
+        Ok(Self::default_settings())
     }
 
     async fn migrate_window_close_behavior(&self, settings: &mut Settings) -> Result<()> {
@@ -519,6 +602,7 @@ impl SettingsService {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn save_settings(&mut self, updates: serde_json::Value) -> Result<()> {
         let current = self.load_settings().await?;
 
@@ -857,6 +941,93 @@ mod tests {
         assert_eq!(loaded.auto_check_updates, Some(false));
 
         Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn runtime_settings_serializes_concurrent_partial_updates() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let mut service = SettingsService::new(pool.clone())?;
+        let state = RuntimeSettingsState::new(service.load_settings().await?);
+
+        let first = state.save_settings(
+            &pool,
+            serde_json::json!({
+                "maxConcurrentDownloads": 7
+            }),
+        );
+        let second = state.save_settings(
+            &pool,
+            serde_json::json!({
+                "autoCheckUpdates": false
+            }),
+        );
+        let (first, second) = tokio::join!(first, second);
+        first?;
+        second?;
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.max_concurrent_downloads, 7);
+        assert_eq!(snapshot.auto_check_updates, Some(false));
+
+        let persisted = service.load_settings().await?;
+        assert_eq!(persisted.max_concurrent_downloads, 7);
+        assert_eq!(persisted.auto_check_updates, Some(false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn runtime_settings_snapshot_is_not_changed_by_direct_database_mutation() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+
+        let pool = initialize_pool().await?;
+        let state = RuntimeSettingsState::new(SettingsService::default_settings());
+        let mut externally_written = SettingsService::default_settings();
+        externally_written.max_concurrent_downloads = 99;
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&externally_written)?)
+            .execute(&*pool)
+            .await?;
+
+        assert_eq!(state.snapshot().await.max_concurrent_downloads, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_runtime_settings_write_does_not_publish_snapshot() -> Result<()> {
+        let pool = SqlitePool::connect("sqlite::memory:").await?;
+        let state = RuntimeSettingsState::new(SettingsService::default_settings());
+
+        assert!(state
+            .save_settings(&pool, serde_json::json!({"maxConcurrentDownloads": 9}))
+            .await
+            .is_err());
+        assert_eq!(state.snapshot().await.max_concurrent_downloads, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_change_version_is_retained_for_late_waiter() {
+        let state = RuntimeSettingsState::new(SettingsService::default_settings());
+        let mut changes = state.subscribe_changes();
+        state.notify_changed();
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), changes.changed())
+            .await
+            .expect("retained change should wake a late waiter")
+            .expect("sender remains alive");
     }
 
     #[tokio::test]

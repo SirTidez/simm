@@ -8,16 +8,39 @@ use tokio::time::{sleep, Duration};
 
 use crate::types::{
     schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime,
-    RuntimeSwitchResult,
+    RuntimeSwitchResult, Settings,
 };
+
+fn notify_scheduler_of_environment_change() {
+    crate::services::runtime_update_scheduler::notify_environment_changed();
+}
 
 pub struct EnvironmentService {
     pool: Arc<SqlitePool>,
+    runtime_settings: Option<Settings>,
 }
 
 impl EnvironmentService {
     pub fn new(pool: Arc<SqlitePool>) -> Result<Self> {
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            runtime_settings: None,
+        })
+    }
+
+    /// Supplies public settings for runtime-switch profile operations. The
+    /// ordinary constructor remains for tests and environment-only callers.
+    pub fn with_runtime_settings(mut self, settings: Settings) -> Self {
+        self.runtime_settings = Some(settings);
+        self
+    }
+
+    fn mod_profiles_service(&self) -> crate::services::mod_profiles::ModProfilesService {
+        let service = crate::services::mod_profiles::ModProfilesService::new(self.pool.clone());
+        match &self.runtime_settings {
+            Some(settings) => service.with_runtime_settings(settings.clone()),
+            None => service,
+        }
     }
 
     pub fn infer_runtime_from_installation_path(path: &Path) -> Runtime {
@@ -112,7 +135,8 @@ impl EnvironmentService {
         let previous_runtime = env.runtime.clone();
         let runtime_changed = previous_runtime != detected_runtime;
         let previous_manifest = if runtime_changed {
-            match crate::services::mod_profiles::ModProfilesService::new(self.pool.clone())
+            match self
+                .mod_profiles_service()
                 .export_environment_profile_with_options(&env.id, false)
                 .await
             {
@@ -174,7 +198,8 @@ impl EnvironmentService {
         };
 
         if let Some(manifest) = previous_manifest {
-            let summary = crate::services::mod_profiles::ModProfilesService::new(self.pool.clone())
+            let summary = self
+                .mod_profiles_service()
                 .switch_environment_runtime_items(manifest, env)
                 .await;
             result.disabled_items = summary.disabled_items;
@@ -396,7 +421,10 @@ impl EnvironmentService {
         };
 
         match upsert_with_normalized {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                notify_scheduler_of_environment_change();
+                Ok(())
+            }
             Err(err) if Self::is_missing_normalized_output_dir_column(&err) => {
                 if self.ensure_normalized_output_dir_column().await.is_ok() {
                     sqlx::query(
@@ -411,6 +439,7 @@ impl EnvironmentService {
                     .await
                     .context("Failed to save environment")?;
 
+                    notify_scheduler_of_environment_change();
                     return Ok(());
                 }
 
@@ -427,6 +456,7 @@ impl EnvironmentService {
                 .await
                 .context("Failed to save environment")?;
 
+                notify_scheduler_of_environment_change();
                 Ok(())
             }
             Err(err)
@@ -446,6 +476,7 @@ impl EnvironmentService {
 
                 if let Ok(updated) = update_by_normalized {
                     if updated.rows_affected() > 0 {
+                        notify_scheduler_of_environment_change();
                         return Ok(());
                     }
                 }
@@ -459,6 +490,7 @@ impl EnvironmentService {
                         .context("Failed to resolve environment save conflict by output_dir")?;
 
                 if update_by_output_dir.rows_affected() > 0 {
+                    notify_scheduler_of_environment_change();
                     return Ok(());
                 }
 
@@ -477,6 +509,7 @@ impl EnvironmentService {
             .await
             .context("Failed to hard delete environment")?;
 
+        notify_scheduler_of_environment_change();
         Ok(())
     }
 
@@ -951,6 +984,7 @@ impl EnvironmentService {
                 .context("Failed to delete environment")?;
 
             self.clear_environment_metadata(id).await?;
+            notify_scheduler_of_environment_change();
             Ok(true)
         } else {
             Ok(false)
@@ -1009,6 +1043,7 @@ impl Clone for EnvironmentService {
     fn clone(&self) -> Self {
         Self {
             pool: Arc::clone(&self.pool),
+            runtime_settings: self.runtime_settings.clone(),
         }
     }
 }

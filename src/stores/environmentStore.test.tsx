@@ -44,7 +44,8 @@ const baseEnv: Environment = {
 };
 
 function Consumer() {
-  const { environments, loading, progress, startDownload, checkAllUpdates } = useEnvironmentStore();
+  const { environments, loading, progress, startDownload, checkAllUpdates, ensureEnvironments, createEnvironment } = useEnvironmentStore();
+  const [cachedRuntime, setCachedRuntime] = React.useState('none');
   return (
     <div>
       <div data-testid="loading">{String(loading)}</div>
@@ -54,6 +55,7 @@ function Consumer() {
       <div data-testid="env-runtime">{environments[0]?.runtime ?? 'none'}</div>
       <div data-testid="update-available">{String(environments[0]?.updateAvailable ?? false)}</div>
       <div data-testid="progress-count">{progress.size}</div>
+      <div data-testid="cached-runtime">{cachedRuntime}</div>
       <button
         data-testid="start-download"
         onClick={() => environments[0] && startDownload(environments[0].id)}
@@ -62,6 +64,20 @@ function Consumer() {
       </button>
       <button data-testid="check-all" onClick={() => checkAllUpdates(true)}>
         CheckAll
+      </button>
+      <button
+        data-testid="ensure-environments"
+        onClick={() => void ensureEnvironments().then((snapshot) => {
+          setCachedRuntime(snapshot[0]?.runtime ?? 'none');
+        })}
+      >
+        Ensure environments
+      </button>
+      <button
+        data-testid="create-environment"
+        onClick={() => void createEnvironment({ appId: '3164500', branch: 'main', outputDir: 'C:/env' })}
+      >
+        Create environment
       </button>
     </div>
   );
@@ -363,6 +379,12 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
     });
     expect(apiMocks.extractGameVersion).toHaveBeenCalledWith('env-1');
+
+    fireEvent.click(screen.getByTestId('ensure-environments'));
+    await waitFor(() => {
+      expect(screen.getByTestId('cached-runtime').textContent).toBe('Mono');
+    });
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
   });
 
   it('applies a launch-time Steam runtime switch event immediately', async () => {
@@ -392,6 +414,66 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('env-branch').textContent).toBe('main');
       expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
     });
+
+    fireEvent.click(screen.getByTestId('ensure-environments'));
+    await waitFor(() => {
+      expect(screen.getByTestId('cached-runtime').textContent).toBe('Mono');
+    });
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an in-flight environment fetch overwrite a newer mutation', async () => {
+    let resolveInitialFetch: (value: Environment[]) => void = () => {};
+    apiMocks.getEnvironments
+      .mockReturnValueOnce(new Promise<Environment[]>((resolve) => {
+        resolveInitialFetch = resolve;
+      }))
+      .mockResolvedValueOnce([{ ...baseEnv, runtime: 'Mono' }]);
+    apiMocks.createEnvironment.mockResolvedValueOnce({ ...baseEnv, runtime: 'Mono' });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId('create-environment'));
+    await waitFor(() => expect(screen.getByTestId('env-runtime').textContent).toBe('Mono'));
+
+    resolveInitialFetch([{ ...baseEnv, runtime: 'IL2CPP' }]);
+    await waitFor(() => expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
+  });
+
+  it('retries once when a completion event invalidates an in-flight environment fetch', async () => {
+    let resolveInitialFetch: (value: Environment[]) => void = () => {};
+    apiMocks.getEnvironments
+      .mockReturnValueOnce(new Promise<Environment[]>((resolve) => {
+        resolveInitialFetch = resolve;
+      }))
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'completed', currentGameVersion: '2.0.0' }]);
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
+      expect(completeHandler).not.toBeNull();
+    });
+
+    void completeHandler?.({ downloadId: 'env-1' });
+    resolveInitialFetch([{ ...baseEnv, status: 'downloading', currentGameVersion: '1.0.0' }]);
+
+    await waitFor(() => {
+      expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('env-status').textContent).toBe('completed');
+      expect(screen.getByTestId('env-version').textContent).toBe('2.0.0');
+    });
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
   });
 
   it('cleans up all event listeners on unmount', async () => {

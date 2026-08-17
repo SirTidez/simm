@@ -30,6 +30,7 @@ const eventMocks = vi.hoisted(() => ({
   onModsSnapshotUpdated: vi.fn(),
   onModMetadataRefreshStatus: vi.fn(),
 }));
+const modLibraryStoreMocks = vi.hoisted(() => ({ useModLibraryStore: vi.fn() }));
 
 vi.mock('../services/api', () => ({
   ApiService: apiMocks,
@@ -40,6 +41,7 @@ vi.mock('../services/events', () => ({
   onModsSnapshotUpdated: eventMocks.onModsSnapshotUpdated,
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
+vi.mock('../stores/modLibraryStore', () => ({ useModLibraryStore: modLibraryStoreMocks.useModLibraryStore }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
@@ -60,7 +62,28 @@ const baseEnvironment: Environment = {
 };
 
 describe('ModsOverlay', () => {
+  let modsSnapshotHandler: ((data: {
+    environmentId: string;
+    snapshot: {
+      mods: Array<{
+        name: string;
+        fileName: string;
+        path: string;
+        source?: string;
+      }>;
+      modsDirectory: string;
+      count: number;
+    };
+  }) => void) | null = null;
+
   beforeEach(() => {
+    modsSnapshotHandler = null;
+    modLibraryStoreMocks.useModLibraryStore.mockReset();
+    modLibraryStoreMocks.useModLibraryStore.mockReturnValue({
+      library: null,
+      ensureLibrary: apiMocks.getModLibrary,
+      refreshLibrary: apiMocks.getModLibrary,
+    });
     window.localStorage.clear();
     apiMocks.getEnvironment.mockReset();
     apiMocks.getMods.mockReset();
@@ -149,7 +172,10 @@ describe('ModsOverlay', () => {
     apiMocks.saveModProfileFile.mockResolvedValue(undefined);
     saveMock.mockResolvedValue('C:\\Profiles\\test-env.json');
     eventMocks.onModsChanged.mockResolvedValue(() => {});
-    eventMocks.onModsSnapshotUpdated.mockResolvedValue(() => {});
+    eventMocks.onModsSnapshotUpdated.mockImplementation(async (handler) => {
+      modsSnapshotHandler = handler;
+      return () => {};
+    });
     eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
   });
 
@@ -183,6 +209,42 @@ describe('ModsOverlay', () => {
     );
 
     expect((await screen.findAllByText('S1API.Mono.MelonLoader.dll')).length).toBeGreaterThan(0);
+  });
+
+  it('uses one installed-mod snapshot projection for a watcher batch', async () => {
+    render(
+      <ModsOverlay
+        isOpen={true}
+        onClose={() => {}}
+        environmentId="env-1"
+      />
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+      expect(modsSnapshotHandler).not.toBeNull();
+    });
+    expect(eventMocks.onModsChanged).not.toHaveBeenCalled();
+
+    modsSnapshotHandler?.({
+      environmentId: 'env-1',
+      snapshot: {
+        mods: [{
+          name: 'Watched Mod',
+          fileName: 'Watched.Mod.dll',
+          path: 'C:/env/Mods/Watched.Mod.dll',
+          source: 'local',
+        }],
+        modsDirectory: 'C:/env/Mods',
+        count: 1,
+      },
+    });
+
+    expect((await screen.findAllByText('Watched.Mod.dll')).length).toBeGreaterThan(0);
+    expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(apiMocks.getModUpdatesSummary).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('renders MLVScan disposition badges for installed mods', async () => {

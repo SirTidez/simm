@@ -5,7 +5,7 @@ use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mod_update::ModUpdateService;
 use crate::services::mods::ModsService;
 use crate::services::nexus_mods::NexusModsService;
-use crate::services::settings::SettingsService;
+use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::services::telemetry_upload::TelemetryUploadService;
 use crate::services::thunderstore::ThunderStoreService;
 use crate::services::update_check::UpdateCheckService;
@@ -25,6 +25,15 @@ static NEXUS_MODS_SERVICE: Lazy<AsyncMutex<Option<Arc<NexusModsService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 static GITHUB_SERVICE: Lazy<AsyncMutex<Option<Arc<GitHubReleasesService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
+static UPDATE_CHECK_RUN_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+
+async fn acquire_update_check_run(kind: &str) -> tokio::sync::MutexGuard<'static, ()> {
+    if let Ok(guard) = UPDATE_CHECK_RUN_LOCK.try_lock() {
+        return guard;
+    }
+    log::debug!("[UpdateCheck] {} check joined the active run queue", kind);
+    UPDATE_CHECK_RUN_LOCK.lock().await
+}
 
 async fn flush_queued_telemetry_uploads(pool: Arc<SqlitePool>) {
     match TelemetryUploadService::new(pool)
@@ -132,27 +141,31 @@ async fn normalize_result_for_current_environment(
     }
 }
 
+fn background_checks_enabled(settings: &crate::types::Settings, manual: bool) -> bool {
+    manual || settings.auto_check_updates != Some(false)
+}
+
 pub async fn run_background_update_checks(
     pool: Arc<SqlitePool>,
     app: AppHandle,
     manual: bool,
+    settings: crate::types::Settings,
 ) -> Result<(), String> {
+    let _run_guard = acquire_update_check_run("background/tray").await;
+    let started_at = std::time::Instant::now();
+    if !background_checks_enabled(&settings, manual) {
+        log::debug!("[UpdateCheck] Background run skipped because automatic checks are disabled");
+        return Ok(());
+    }
+
     let env_service =
         Arc::new(EnvironmentService::new(pool.clone()).map_err(|error| error.to_string())?);
     let environments = env_service
         .get_environments()
         .await
         .map_err(|error| error.to_string())?;
-    let mut settings_service =
-        SettingsService::new(pool.clone()).map_err(|error| error.to_string())?;
-    let settings = settings_service
-        .load_settings()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !manual && settings.auto_check_updates == Some(false) {
-        return Ok(());
-    }
-    let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
+    let environment_count = environments.len();
+    let interval_minutes = settings.update_check_interval.unwrap_or(60).max(1) as i64;
     let now = chrono::Utc::now();
     let due = environments
         .into_iter()
@@ -165,9 +178,15 @@ pub async fn run_background_update_checks(
         })
         .collect::<Vec<_>>();
     if due.is_empty() {
+        log::debug!(
+            "[UpdateCheck] Background run found no due environments (loaded={}, elapsed_ms={})",
+            environment_count,
+            started_at.elapsed().as_millis()
+        );
         return Ok(());
     }
     let results = UpdateCheckService::new(pool.clone())
+        .with_runtime_settings(settings.clone())
         .check_all_environments(&due)
         .await
         .map_err(|error| error.to_string())?;
@@ -200,7 +219,30 @@ pub async fn run_background_update_checks(
             let _ = events::emit_update_available(&app, environment_id, result);
         }
     }
+    log::info!(
+        "[UpdateCheck] Background run completed (checked={}, loaded={}, manual={}, elapsed_ms={})",
+        due.len(),
+        environment_count,
+        manual,
+        started_at.elapsed().as_millis()
+    );
+    crate::services::runtime_update_scheduler::request_reschedule(&app);
     Ok(())
+}
+
+#[cfg(test)]
+mod background_scheduler_tests {
+    use super::*;
+    use crate::services::settings::SettingsService;
+
+    #[test]
+    fn disabled_automatic_checks_are_rejected_before_environment_loading() {
+        let mut settings = SettingsService::default_settings();
+        settings.auto_check_updates = Some(false);
+
+        assert!(!background_checks_enabled(&settings, false));
+        assert!(background_checks_enabled(&settings, true));
+    }
 }
 
 fn extract_mod_name_for_event(result: &serde_json::Value) -> String {
@@ -540,10 +582,12 @@ async fn get_github_service(db: Arc<SqlitePool>) -> Result<Arc<GitHubReleasesSer
 #[tauri::command]
 pub async fn check_update(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     app: AppHandle,
     environment_id: String,
     manual: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let _run_guard = acquire_update_check_run("single manual").await;
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     let manual = manual.unwrap_or(false);
     let env = env_service
@@ -553,12 +597,7 @@ pub async fn check_update(
         .ok_or_else(|| "Environment not found".to_string())?;
 
     if !manual {
-        let mut settings_service =
-            SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-        let settings = settings_service
-            .load_settings()
-            .await
-            .map_err(|e| e.to_string())?;
+        let settings = runtime_settings.snapshot().await;
         let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
         let now = chrono::Utc::now();
         if let Some(last_check) = env.last_update_check {
@@ -585,7 +624,9 @@ pub async fn check_update(
         }
     }
 
-    let update_service = UpdateCheckService::new(db.inner().clone());
+    let settings = runtime_settings.snapshot().await;
+    let update_service =
+        UpdateCheckService::new(db.inner().clone()).with_runtime_settings(settings);
     // A direct update action still needs the Steam installation as a version
     // witness. Steam and managed environments can share a manifest while the
     // managed copy is on an older game version.
@@ -639,9 +680,11 @@ pub async fn check_update(
 #[tauri::command]
 pub async fn check_all_updates(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     app: AppHandle,
     manual: Option<bool>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    let _run_guard = acquire_update_check_run("all/manual").await;
     let env_service =
         Arc::new(EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?);
     let envs = env_service
@@ -650,12 +693,7 @@ pub async fn check_all_updates(
         .map_err(|e| e.to_string())?;
 
     let manual = manual.unwrap_or(false);
-    let mut settings_service =
-        SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let settings = settings_service
-        .load_settings()
-        .await
-        .map_err(|e| e.to_string())?;
+    let settings = runtime_settings.snapshot().await;
     let interval_minutes = settings.update_check_interval.unwrap_or(60) as i64;
     let nexus_game_id = normalize_nexus_game_id(settings.nexus_mods_game_id.as_deref());
     let now = chrono::Utc::now();
@@ -672,7 +710,8 @@ pub async fn check_all_updates(
             .collect()
     };
 
-    let update_service = UpdateCheckService::new(db.inner().clone());
+    let update_service =
+        UpdateCheckService::new(db.inner().clone()).with_runtime_settings(settings.clone());
     let mut results = update_service
         .check_all_environments(&envs_to_check)
         .await
@@ -717,7 +756,8 @@ pub async fn check_all_updates(
 
     // Also check tracked library mod updates once, then project the result to installed environments.
     let mod_update_service = get_mod_update_service().await?;
-    let mods_service = Arc::new(ModsService::new(db.inner().clone()));
+    let mods_service =
+        Arc::new(ModsService::new(db.inner().clone()).with_runtime_settings(settings.clone()));
     let thunderstore_service = get_thunderstore_service(db.inner().clone()).await?;
     let nexus_mods_service = get_nexus_mods_service(db.inner().clone()).await?;
     let github_service = get_github_service(db.inner().clone()).await?;
@@ -995,12 +1035,34 @@ mod tests {
     use crate::types::UpdateCheckResult;
     use chrono::Utc;
     use serial_test::serial;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
 
     struct EnvVarGuard {
         key: &'static str,
         original: Option<String>,
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn update_check_coordinator_serializes_overlapping_runs() {
+        let first = super::acquire_update_check_run("test first").await;
+        let entered_second = Arc::new(AtomicBool::new(false));
+        let entered_second_clone = entered_second.clone();
+        let second = tokio::spawn(async move {
+            let _second = super::acquire_update_check_run("test second").await;
+            entered_second_clone.store(true, Ordering::SeqCst);
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !entered_second.load(Ordering::SeqCst),
+            "a second run must wait for the active run instead of overlapping it"
+        );
+        drop(first);
+        second.await.expect("second update check task");
+        assert!(entered_second.load(Ordering::SeqCst));
     }
 
     impl EnvVarGuard {

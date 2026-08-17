@@ -113,10 +113,22 @@ fn main() {
                     if let Some(pool) = app.try_state::<Arc<SqlitePool>>() {
                         let pool = pool.inner().clone();
                         let app = app.clone();
+                        let runtime_settings = app
+                            .try_state::<crate::services::settings::RuntimeSettingsState>()
+                            .map(|state| state.inner().clone());
                         tauri::async_runtime::spawn(async move {
+                            let Some(runtime_settings) = runtime_settings else {
+                                log::warn!(
+                                    "Runtime settings state is not ready for tray update check"
+                                );
+                                return;
+                            };
                             if let Err(error) =
                                 crate::commands::update_check::run_background_update_checks(
-                                    pool, app, true,
+                                    pool,
+                                    app,
+                                    true,
+                                    runtime_settings.snapshot().await,
                                 )
                                 .await
                             {

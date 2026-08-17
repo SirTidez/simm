@@ -12,6 +12,8 @@ import {
   type ModLibraryNavigationState,
 } from "./ModLibraryOverlay";
 import type { ModLibraryEntry } from "../types";
+import { EnvironmentStoreProvider } from "../stores/environmentStore";
+import { ModLibraryStoreProvider } from "../stores/modLibraryStore";
 
 const apiMocks = vi.hoisted(() => ({
   getModLibrary: vi.fn(),
@@ -51,6 +53,17 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 const eventMocks = vi.hoisted(() => ({
+  onProgress: vi.fn(),
+  onComplete: vi.fn(),
+  onError: vi.fn(),
+  onUpdateAvailable: vi.fn(),
+  onUpdateCheckComplete: vi.fn(),
+  onRuntimeSwitch: vi.fn(),
+  onModsChanged: vi.fn(),
+  onModsSnapshotUpdated: vi.fn(),
+  onPluginsChanged: vi.fn(),
+  onUserLibsChanged: vi.fn(),
+  onModUpdatesChecked: vi.fn(),
   onModMetadataRefreshStatus: vi.fn(),
 }));
 
@@ -162,15 +175,19 @@ function renderLibraryOverlay({
   onNavigationStateChange?: (state: ModLibraryNavigationState) => void;
 } = {}) {
   return render(
-    <ModLibraryOverlay
-      isOpen={true}
-      onClose={() => {}}
-      onOpenSecurityReport={onOpenSecurityReport}
-      onNavigationStateChange={onNavigationStateChange}
-      navigationState={
-        navigationState ?? (libraryTab ? { libraryTab } : undefined)
-      }
-    />,
+    <EnvironmentStoreProvider>
+      <ModLibraryStoreProvider>
+        <ModLibraryOverlay
+          isOpen={true}
+          onClose={() => {}}
+          onOpenSecurityReport={onOpenSecurityReport}
+          onNavigationStateChange={onNavigationStateChange}
+          navigationState={
+            navigationState ?? (libraryTab ? { libraryTab } : undefined)
+          }
+        />
+      </ModLibraryStoreProvider>
+    </EnvironmentStoreProvider>,
   );
 }
 
@@ -180,6 +197,17 @@ async function chooseAvailableLibraryVersion(optionName: RegExp) {
 }
 
 vi.mock("../services/events", () => ({
+  onProgress: eventMocks.onProgress,
+  onComplete: eventMocks.onComplete,
+  onError: eventMocks.onError,
+  onUpdateAvailable: eventMocks.onUpdateAvailable,
+  onUpdateCheckComplete: eventMocks.onUpdateCheckComplete,
+  onRuntimeSwitch: eventMocks.onRuntimeSwitch,
+  onModsChanged: eventMocks.onModsChanged,
+  onModsSnapshotUpdated: eventMocks.onModsSnapshotUpdated,
+  onPluginsChanged: eventMocks.onPluginsChanged,
+  onUserLibsChanged: eventMocks.onUserLibsChanged,
+  onModUpdatesChecked: eventMocks.onModUpdatesChecked,
   onModMetadataRefreshStatus: eventMocks.onModMetadataRefreshStatus,
 }));
 
@@ -215,11 +243,23 @@ describe("ModLibraryOverlay", () => {
     apiMocks.getModSecurityScanReport.mockReset();
     apiMocks.storeModArchive.mockReset();
     apiMocks.refreshThunderstorePackageCache.mockReset();
+    eventMocks.onProgress.mockReset();
+    eventMocks.onComplete.mockReset();
+    eventMocks.onError.mockReset();
+    eventMocks.onUpdateAvailable.mockReset();
+    eventMocks.onUpdateCheckComplete.mockReset();
+    eventMocks.onRuntimeSwitch.mockReset();
+    eventMocks.onModsChanged.mockReset();
+    eventMocks.onModsSnapshotUpdated.mockReset();
+    eventMocks.onPluginsChanged.mockReset();
+    eventMocks.onUserLibsChanged.mockReset();
+    eventMocks.onModUpdatesChecked.mockReset();
     eventMocks.onModMetadataRefreshStatus.mockReset();
     settingsStoreMocks.useSettingsStore.mockReset();
 
     apiMocks.getS1APIReleases.mockResolvedValue([]);
     apiMocks.getMLVScanReleases.mockResolvedValue([]);
+    apiMocks.getModLibrary.mockResolvedValue({ downloaded: [] });
     apiMocks.getEnvironments.mockResolvedValue([]);
     apiMocks.downloadS1APIToLibrary.mockResolvedValue({ success: true });
     apiMocks.deleteDownloadedMod.mockResolvedValue({ deleted: true, removedFrom: [] });
@@ -310,7 +350,20 @@ describe("ModLibraryOverlay", () => {
         rateLimitedResponses: 0,
       },
     });
-    eventMocks.onModMetadataRefreshStatus.mockResolvedValue(() => {});
+    [
+      eventMocks.onProgress,
+      eventMocks.onComplete,
+      eventMocks.onError,
+      eventMocks.onUpdateAvailable,
+      eventMocks.onUpdateCheckComplete,
+      eventMocks.onRuntimeSwitch,
+      eventMocks.onModsChanged,
+      eventMocks.onModsSnapshotUpdated,
+      eventMocks.onPluginsChanged,
+      eventMocks.onUserLibsChanged,
+      eventMocks.onModUpdatesChecked,
+      eventMocks.onModMetadataRefreshStatus,
+    ].forEach((listener) => listener.mockResolvedValue(() => {}));
     settingsStoreMocks.useSettingsStore.mockReturnValue({
       settings: {
         showSecurityScanBadges: true,
@@ -601,23 +654,31 @@ describe("ModLibraryOverlay", () => {
     });
 
     rerender(
-      <ModLibraryOverlay
-        isOpen={true}
-        onClose={() => {}}
-        navigationState={baseNavigationState}
-        onNavigationStateChange={secondHandler}
-      />,
+      <EnvironmentStoreProvider>
+        <ModLibraryStoreProvider>
+          <ModLibraryOverlay
+            isOpen={true}
+            onClose={() => {}}
+            navigationState={baseNavigationState}
+            onNavigationStateChange={secondHandler}
+          />
+        </ModLibraryStoreProvider>
+      </EnvironmentStoreProvider>,
     );
 
     expect(secondHandler).not.toHaveBeenCalled();
 
     rerender(
-      <ModLibraryOverlay
-        isOpen={true}
-        onClose={() => {}}
-        navigationState={baseNavigationState}
-        onNavigationStateChange={thirdHandler}
-      />,
+      <EnvironmentStoreProvider>
+        <ModLibraryStoreProvider>
+          <ModLibraryOverlay
+            isOpen={true}
+            onClose={() => {}}
+            navigationState={baseNavigationState}
+            onNavigationStateChange={thirdHandler}
+          />
+        </ModLibraryStoreProvider>
+      </EnvironmentStoreProvider>,
     );
 
     expect(firstHandler).toHaveBeenCalledTimes(1);
@@ -1302,6 +1363,7 @@ describe("ModLibraryOverlay", () => {
     expect(
       screen.getByText("Choose where to install this downloaded mod."),
     ).toBeTruthy();
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
     expect(apiMocks.installDownloadedMod).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("checkbox", { name: /Alternate/i }));

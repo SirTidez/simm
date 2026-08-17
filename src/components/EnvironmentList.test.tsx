@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { EnvironmentList } from './EnvironmentList';
 import type { Environment } from '../types';
+import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 
 const storeMocks = vi.hoisted(() => ({
   useEnvironmentStore: vi.fn(),
   useSettingsStore: vi.fn(),
+  useModLibraryStore: vi.fn(),
 }));
 
 const apiMocks = vi.hoisted(() => ({
@@ -57,6 +59,10 @@ vi.mock('../stores/environmentStore', () => ({
 
 vi.mock('../stores/settingsStore', () => ({
   useSettingsStore: storeMocks.useSettingsStore,
+}));
+
+vi.mock('../stores/modLibraryStore', () => ({
+  useModLibraryStore: storeMocks.useModLibraryStore,
 }));
 
 vi.mock('../services/api', () => ({
@@ -115,12 +121,10 @@ const secondCompletedEnv: Environment = {
 
 describe('EnvironmentList', () => {
   const unlistenFns: Array<ReturnType<typeof vi.fn>> = [];
-  let modsChangedHandler: ((data: { environmentId: string }) => void) | null = null;
   let completeHandler: ((data: { downloadId: string; manifestId?: string }) => Promise<void> | void) | null = null;
 
   beforeEach(() => {
     unlistenFns.length = 0;
-    modsChangedHandler = null;
     completeHandler = null;
     localStorage.clear();
 
@@ -133,9 +137,7 @@ describe('EnvironmentList', () => {
     for (const key of Object.keys(eventMocks) as Array<keyof typeof eventMocks>) {
       eventMocks[key].mockReset();
       eventMocks[key].mockImplementation(async (...args: any[]) => {
-        if (key === 'onModsChanged') {
-          modsChangedHandler = args[0] as (data: { environmentId: string }) => void;
-        } else if (key === 'onComplete') {
+        if (key === 'onComplete') {
           completeHandler = args[0] as (data: { downloadId: string; manifestId?: string }) => Promise<void> | void;
         }
         return mkUnlisten();
@@ -240,6 +242,15 @@ describe('EnvironmentList', () => {
       checkAllUpdates: vi.fn().mockResolvedValue(undefined),
       updateEnvironment: vi.fn().mockResolvedValue(undefined),
       refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+      ensureEnvironments: vi.fn().mockResolvedValue([completedEnv]),
+    });
+
+    storeMocks.useModLibraryStore.mockReturnValue({
+      library: null,
+      ensureLibrary: async () =>
+        normalizeLibraryFeaturedDownloads(await apiMocks.getModLibrary()),
+      refreshLibrary: async () =>
+        normalizeLibraryFeaturedDownloads(await apiMocks.getModLibrary()),
     });
 
     storeMocks.useSettingsStore.mockReturnValue({
@@ -325,21 +336,13 @@ describe('EnvironmentList', () => {
     }
   });
 
-  it('refreshes mod counts when mods_changed event fires for a completed environment', async () => {
+  it('does not register an independent mods_changed projection listener', async () => {
     render(<EnvironmentList />);
 
     await waitFor(() => {
-      expect(eventMocks.onModsChanged).toHaveBeenCalled();
-      expect(modsChangedHandler).not.toBeNull();
+      expect(screen.getByText('Env One')).toBeTruthy();
     });
-
-    const initialLibraryCalls = apiMocks.getModLibrary.mock.calls.length;
-    modsChangedHandler?.({ environmentId: 'env-1' });
-
-    await waitFor(() => {
-      expect(apiMocks.getModLibrary.mock.calls.length).toBeGreaterThan(initialLibraryCalls);
-      expect(screen.getByText('1 (1 Update)')).toBeTruthy();
-    }, { timeout: 2000 });
+    expect(eventMocks.onModsChanged).not.toHaveBeenCalled();
   });
 
   it('counts S1API alongside other mods on the home card instead of as a separate tool', async () => {
@@ -705,7 +708,6 @@ describe('EnvironmentList', () => {
     const { unmount } = render(<EnvironmentList />);
 
     await waitFor(() => {
-      expect(eventMocks.onModsChanged).toHaveBeenCalled();
       expect(eventMocks.onUpdateAvailable).toHaveBeenCalled();
     });
 

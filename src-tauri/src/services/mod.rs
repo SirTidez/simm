@@ -17,6 +17,7 @@ pub mod mod_profiles;
 pub mod mod_update;
 pub mod mods;
 pub mod mods_snapshot_cache;
+pub mod mods_snapshot_refresh;
 pub mod nexus_mods;
 pub mod plugins;
 pub mod runtime_update_scheduler;

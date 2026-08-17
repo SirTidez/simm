@@ -6,6 +6,7 @@ use tauri::{AppHandle, Runtime, State};
 
 use crate::events;
 use crate::services::mod_profiles::ModProfilesService;
+use crate::services::settings::RuntimeSettingsState;
 use crate::types::{
     ModProfileApplyRequest, ModProfileApplyResult, ModProfileCaptureRequest,
     ModProfileExportRequest, ModProfileImportPlan, ModProfileManifest, ModProfileSaveRequest,
@@ -30,11 +31,20 @@ fn emit_profile_apply_events<R: Runtime>(app: &AppHandle<R>, environment_id: Str
     }
 }
 
+async fn managed_mod_profiles_service(
+    db: Arc<SqlitePool>,
+    runtime_settings: &RuntimeSettingsState,
+) -> ModProfilesService {
+    ModProfilesService::new(db).with_runtime_settings(runtime_settings.snapshot().await)
+}
+
 #[tauri::command]
 pub async fn list_mod_profiles(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<Vec<StoredModProfile>, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .list_profiles()
         .await
         .map_err(|error| error.to_string())
@@ -43,9 +53,11 @@ pub async fn list_mod_profiles(
 #[tauri::command]
 pub async fn get_mod_profile(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     profile_id: String,
 ) -> Result<StoredModProfile, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .get_profile(&profile_id)
         .await
         .map_err(|error| error.to_string())
@@ -54,9 +66,11 @@ pub async fn get_mod_profile(
 #[tauri::command]
 pub async fn save_mod_profile(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     request: ModProfileSaveRequest,
 ) -> Result<StoredModProfile, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .save_profile(request)
         .await
         .map_err(|error| error.to_string())
@@ -65,9 +79,11 @@ pub async fn save_mod_profile(
 #[tauri::command]
 pub async fn capture_mod_profile(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     request: ModProfileCaptureRequest,
 ) -> Result<StoredModProfile, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .capture_profile(request)
         .await
         .map_err(|error| error.to_string())
@@ -76,9 +92,11 @@ pub async fn capture_mod_profile(
 #[tauri::command]
 pub async fn import_mod_profile_to_library(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     manifest: ModProfileManifest,
 ) -> Result<StoredModProfile, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .import_profile_manifest(manifest)
         .await
         .map_err(|error| error.to_string())
@@ -87,9 +105,11 @@ pub async fn import_mod_profile_to_library(
 #[tauri::command]
 pub async fn export_mod_profile_from_library(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     request: ModProfileExportRequest,
 ) -> Result<ModProfileManifest, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .export_profile_manifest(request)
         .await
         .map_err(|error| error.to_string())
@@ -98,9 +118,11 @@ pub async fn export_mod_profile_from_library(
 #[tauri::command]
 pub async fn delete_mod_profile(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     profile_id: String,
 ) -> Result<(), String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .delete_profile(&profile_id)
         .await
         .map_err(|error| error.to_string())
@@ -109,10 +131,12 @@ pub async fn delete_mod_profile(
 #[tauri::command]
 pub async fn preview_mod_profile_apply(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     profile_id: String,
     target_environment_id: String,
 ) -> Result<ModProfileImportPlan, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .preview_profile_apply(&profile_id, target_environment_id)
         .await
         .map_err(|error| error.to_string())
@@ -122,10 +146,12 @@ pub async fn preview_mod_profile_apply(
 pub async fn apply_mod_profile<R: Runtime>(
     app: AppHandle<R>,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     profile_id: String,
     target_environment_id: String,
 ) -> Result<ModProfileApplyResult, String> {
-    let result = ModProfilesService::new(db.inner().clone())
+    let result = managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .apply_profile(&profile_id, target_environment_id.clone())
         .await
         .map_err(|error| error.to_string())?;
@@ -137,9 +163,11 @@ pub async fn apply_mod_profile<R: Runtime>(
 #[tauri::command]
 pub async fn export_environment_profile(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
 ) -> Result<ModProfileManifest, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .export_environment_profile(&environment_id)
         .await
         .map_err(|error| error.to_string())
@@ -148,10 +176,12 @@ pub async fn export_environment_profile(
 #[tauri::command]
 pub async fn save_mod_profile_file(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     manifest: ModProfileManifest,
     destination: String,
 ) -> Result<(), String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .save_manifest_to_file(manifest, PathBuf::from(destination))
         .await
         .map_err(|error| error.to_string())
@@ -160,9 +190,11 @@ pub async fn save_mod_profile_file(
 #[tauri::command]
 pub async fn read_mod_profile_file(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     source: String,
 ) -> Result<ModProfileManifest, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .read_manifest_from_file(PathBuf::from(source))
         .await
         .map_err(|error| error.to_string())
@@ -171,10 +203,12 @@ pub async fn read_mod_profile_file(
 #[tauri::command]
 pub async fn preview_mod_profile_import(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     manifest: ModProfileManifest,
     target_environment_id: Option<String>,
 ) -> Result<ModProfileImportPlan, String> {
-    ModProfilesService::new(db.inner().clone())
+    managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .preview_import(manifest, target_environment_id)
         .await
         .map_err(|error| error.to_string())
@@ -184,10 +218,12 @@ pub async fn preview_mod_profile_import(
 pub async fn apply_mod_profile_import<R: Runtime>(
     app: AppHandle<R>,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     request: ModProfileApplyRequest,
 ) -> Result<ModProfileApplyResult, String> {
     let target_environment_id = request.target_environment_id.clone();
-    let result = ModProfilesService::new(db.inner().clone())
+    let result = managed_mod_profiles_service(db.inner().clone(), runtime_settings.inner())
+        .await
         .apply_import(request)
         .await
         .map_err(|error| error.to_string())?;

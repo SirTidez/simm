@@ -1,18 +1,201 @@
 use crate::events;
-use crate::services::environment::EnvironmentService;
 use crate::services::mods::ModsService;
-use crate::services::mods_snapshot_cache;
+use crate::services::mods_snapshot_refresh;
+use crate::services::settings::RuntimeSettingsState;
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
+
+const WATCHER_EVENT_DEBOUNCE_MS: u64 = 350;
+
+#[derive(Debug, Default)]
+struct PendingRefresh {
+    /// Incremented for every event. A worker only starts a refresh after this
+    /// generation remains unchanged for a full quiet window.
+    generation: u64,
+}
+
+#[derive(Default)]
+struct WatcherRefreshDebouncer {
+    pending: Mutex<std::collections::HashMap<String, PendingRefresh>>,
+}
+
+impl WatcherRefreshDebouncer {
+    /// Returns the initial generation only for the event that must spawn a
+    /// worker. Later events advance the retained generation, resetting that
+    /// worker's quiet-window deadline without spawning another task.
+    async fn reserve(&self, key: &str) -> Option<u64> {
+        let mut pending = self.pending.lock().await;
+        match pending.get_mut(key) {
+            Some(state) => {
+                state.generation = state.generation.wrapping_add(1);
+                None
+            }
+            None => {
+                pending.insert(key.to_string(), PendingRefresh::default());
+                Some(0)
+            }
+        }
+    }
+
+    /// Returns the latest generation when an event arrived during the quiet
+    /// window or refresh pass. Callers must wait through a new quiet window
+    /// before processing it. A clean pass releases the key.
+    async fn complete_pass(&self, key: &str, completed_generation: u64) -> Option<u64> {
+        let mut pending = self.pending.lock().await;
+        let Some(state) = pending.get_mut(key) else {
+            return None;
+        };
+
+        if state.generation != completed_generation {
+            Some(state.generation)
+        } else {
+            pending.remove(key);
+            None
+        }
+    }
+
+    async fn latest_generation(&self, key: &str) -> Option<u64> {
+        self.pending
+            .lock()
+            .await
+            .get(key)
+            .map(|state| state.generation)
+    }
+
+    async fn schedule(
+        self: Arc<Self>,
+        app: tauri::AppHandle,
+        environment_id: String,
+        watch_type: String,
+    ) {
+        let key = format!("{}-{}", environment_id, watch_type);
+        let Some(mut generation) = self.reserve(&key).await else {
+            log::debug!(
+                "Reset filesystem watcher quiet window for {} ({})",
+                environment_id,
+                watch_type
+            );
+            return;
+        };
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(WATCHER_EVENT_DEBOUNCE_MS))
+                    .await;
+
+                // A new event during the quiet window restarts the timer. This
+                // is deliberately trailing-edge debounce rather than a fixed
+                // delay from the first event in a burst.
+                // If a later event won the race, wait through its full quiet
+                // window before doing any refresh work.
+                let Some(current_generation) = self.latest_generation(&key).await else {
+                    return;
+                };
+                if current_generation != generation {
+                    generation = current_generation;
+                    continue;
+                }
+
+                let batch_started = std::time::Instant::now();
+                let event_count = generation.saturating_add(1);
+                let mut outcome = "event emitted";
+
+                let emit_result = match watch_type.as_str() {
+                    "mods" => events::emit_mods_changed(&app, environment_id.clone()),
+                    "plugins" => events::emit_plugins_changed(&app, environment_id.clone()),
+                    "userlibs" => events::emit_userlibs_changed(&app, environment_id.clone()),
+                    _ => Ok(()),
+                };
+                if let Err(error) = emit_result {
+                    log::warn!(
+                        "Failed to emit debounced {} watcher event for {}: {}",
+                        watch_type,
+                        environment_id,
+                        error
+                    );
+                }
+
+                if watch_type == "mods" {
+                    let pool = app
+                        .try_state::<Arc<SqlitePool>>()
+                        .map(|pool_state| pool_state.inner().clone());
+                    if let Some(pool) = pool {
+                        let reconciliation: Result<Vec<String>> = if let Some(runtime_settings) =
+                            app.try_state::<RuntimeSettingsState>()
+                        {
+                            let settings = runtime_settings.snapshot().await;
+                            let storage_dir =
+                                PathBuf::from(settings.default_download_dir).join("Mods");
+                            let service = ModsService::new(pool.clone());
+                            service
+                                .reconcile_tracked_mod_state_for_environment_at(
+                                    &environment_id,
+                                    &storage_dir,
+                                )
+                                .await
+                        } else {
+                            Ok(Vec::new())
+                        };
+                        match reconciliation {
+                            Ok(affected) => {
+                                outcome = if affected.is_empty() {
+                                    "event emitted; targeted reconcile clean"
+                                } else {
+                                    "event emitted; targeted reconcile updated"
+                                };
+                            }
+                            Err(error) => {
+                                outcome = "event emitted; targeted reconcile failed";
+                                log::warn!(
+                                    "Failed to reconcile watcher metadata for {}: {}",
+                                    environment_id,
+                                    error
+                                );
+                            }
+                        }
+                        mods_snapshot_refresh::request_mods_snapshot_refresh(
+                            app.clone(),
+                            pool,
+                            environment_id.clone(),
+                            "filesystem watcher",
+                        )
+                        .await;
+                    }
+                }
+
+                log::debug!(
+                    "[Watcher] batch environment={} kind={} generation={} events={} duration_ms={} outcome={}",
+                    environment_id,
+                    watch_type,
+                    generation,
+                    event_count,
+                    batch_started.elapsed().as_millis(),
+                    outcome,
+                );
+
+                if self.complete_pass(&key, generation).await.is_none() {
+                    break;
+                }
+
+                log::debug!(
+                    "Running retained trailing filesystem watcher refresh for {} ({})",
+                    environment_id,
+                    watch_type
+                );
+            }
+        });
+    }
+}
 
 pub struct FileSystemWatcherService {
     watchers: Arc<RwLock<std::collections::HashMap<String, RecommendedWatcher>>>,
     app_handle: Option<Arc<tauri::AppHandle>>,
+    refresh_debouncer: Arc<WatcherRefreshDebouncer>,
 }
 
 impl FileSystemWatcherService {
@@ -20,6 +203,7 @@ impl FileSystemWatcherService {
         Self {
             watchers: Arc::new(RwLock::new(std::collections::HashMap::new())),
             app_handle: None,
+            refresh_debouncer: Arc::new(WatcherRefreshDebouncer::default()),
         }
     }
 
@@ -52,86 +236,29 @@ impl FileSystemWatcherService {
         let app_handle_clone = self.app_handle.clone();
         let environment_id_clone = environment_id.to_string();
         let watch_type_clone = watch_type.to_string();
+        let refresh_debouncer = self.refresh_debouncer.clone();
 
-        let mut watcher = notify::recommended_watcher(move |res: std::result::Result<notify::Event, notify::Error>| {
-            match res {
-                Ok(_event) => {
-                    // Emit Tauri event for file changes using event emitter functions
-                    if let Some(app_arc) = app_handle_clone.as_ref() {
-                        // Use Arc::as_ref() to get &AppHandle
-                        let app_ref: &tauri::AppHandle = app_arc.as_ref();
-                        let _ = match watch_type_clone.as_str() {
-                            "mods" => events::emit_mods_changed(app_ref, environment_id_clone.clone()),
-                            "plugins" => events::emit_plugins_changed(app_ref, environment_id_clone.clone()),
-                            "userlibs" => events::emit_userlibs_changed(app_ref, environment_id_clone.clone()),
-                            _ => Ok(()),
-                        };
-
-                        if watch_type_clone == "mods" {
-                            let app_for_refresh = app_ref.clone();
-                            let environment_id_for_refresh = environment_id_clone.clone();
+        let mut watcher = notify::recommended_watcher(
+            move |res: std::result::Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(_event) => {
+                        if let Some(app_arc) = app_handle_clone.as_ref() {
+                            let app = app_arc.as_ref().clone();
+                            let environment_id = environment_id_clone.clone();
+                            let watch_type = watch_type_clone.clone();
+                            let debouncer = refresh_debouncer.clone();
                             // Spawn on Tokio runtime via handle - callback runs in notify's thread, not Tokio.
                             let _ = rt_handle.spawn(async move {
-                                let Some(pool_state) = app_for_refresh.try_state::<Arc<SqlitePool>>() else {
-                                    return;
-                                };
-                                let pool = pool_state.inner().clone();
-
-                                let env_service = match EnvironmentService::new(pool.clone()) {
-                                    Ok(service) => service,
-                                    Err(err) => {
-                                        log::warn!("Failed to create EnvironmentService during mods snapshot refresh: {}", err);
-                                        return;
-                                    }
-                                };
-
-                                let environment = match env_service.get_environment(&environment_id_for_refresh).await {
-                                    Ok(Some(env)) => env,
-                                    Ok(None) => return,
-                                    Err(err) => {
-                                        log::warn!(
-                                            "Failed to load environment {} during mods snapshot refresh: {}",
-                                            environment_id_for_refresh,
-                                            err
-                                        );
-                                        return;
-                                    }
-                                };
-
-                                if environment.output_dir.is_empty() {
-                                    return;
-                                }
-
-                                let mods_service = ModsService::new(pool);
-                                match mods_service.list_mods(&environment.output_dir).await {
-                                    Ok(snapshot) => {
-                                        mods_snapshot_cache::set(
-                                            environment_id_for_refresh.clone(),
-                                            snapshot.clone(),
-                                        )
-                                        .await;
-
-                                        if let Err(err) = events::emit_mods_snapshot_updated(
-                                            &app_for_refresh,
-                                            environment_id_for_refresh,
-                                            snapshot,
-                                        ) {
-                                            log::warn!("Failed to emit mods_snapshot_updated event: {}", err);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        log::warn!("Failed to refresh mods snapshot from watcher event: {}", err);
-                                    }
-                                }
+                                debouncer.schedule(app, environment_id, watch_type).await;
                             });
                         }
                     }
+                    Err(e) => {
+                        log::error!("Watch error: {:?}", e);
+                    }
                 }
-                Err(e) => {
-                    log::error!("Watch error: {:?}", e);
-                }
-            }
-        })
+            },
+        )
         .context("Failed to create file watcher")?;
 
         <RecommendedWatcher as Watcher>::watch(
@@ -225,5 +352,27 @@ mod tests {
         service.stop_watching_environment("env-1").await?;
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn watcher_debouncer_resets_trailing_generation_and_retains_final_pass() {
+        let debouncer = WatcherRefreshDebouncer::default();
+        assert_eq!(debouncer.reserve("env-1-mods").await, Some(0));
+        assert_eq!(debouncer.reserve("env-1-mods").await, None);
+        assert_eq!(debouncer.latest_generation("env-1-mods").await, Some(1));
+        assert_eq!(debouncer.reserve("env-1-plugins").await, Some(0));
+        assert_eq!(debouncer.reserve("env-2-mods").await, Some(0));
+
+        assert_eq!(
+            debouncer.complete_pass("env-1-mods", 0).await,
+            Some(1),
+            "a same-key event resets the quiet deadline and produces one retained final pass"
+        );
+        assert_eq!(
+            debouncer.complete_pass("env-1-mods", 1).await,
+            None,
+            "the final clean pass releases the key"
+        );
+        assert_eq!(debouncer.reserve("env-1-mods").await, Some(0));
     }
 }

@@ -17,7 +17,7 @@ use crate::types::{
     ModProfileCaptureRequest, ModProfileExportRequest, ModProfileImportPlan,
     ModProfileImportPlanItem, ModProfileImportStatus, ModProfileImportSummary, ModProfileInfo,
     ModProfileItem, ModProfileItemType, ModProfileManifest, ModProfileSaveRequest, ModSource,
-    Runtime, StoredModProfile,
+    Runtime, Settings, StoredModProfile,
 };
 
 const PROFILE_KIND: &str = "simm.profile";
@@ -29,6 +29,10 @@ const DEFAULT_MONO_PROFILE_ID: &str = "default-mono";
 
 pub struct ModProfilesService {
     pool: Arc<SqlitePool>,
+    // Profile work can traverse the shared mod library. Managed command paths
+    // supply this public-settings snapshot so those traversals do not fall
+    // back to a durable settings read.
+    runtime_settings: Option<Settings>,
 }
 
 #[derive(Debug, Default)]
@@ -41,7 +45,25 @@ pub struct RuntimeModSwitchSummary {
 
 impl ModProfilesService {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            runtime_settings: None,
+        }
+    }
+
+    pub fn with_runtime_settings(mut self, settings: Settings) -> Self {
+        self.runtime_settings = Some(settings);
+        self
+    }
+
+    fn mods_service(&self) -> ModsService {
+        let service = ModsService::new(self.pool.clone());
+        match &self.runtime_settings {
+            Some(settings) => service.with_runtime_settings(settings.clone()),
+            // Direct service construction is retained for focused tests and
+            // non-Tauri callers. It is not used by managed command paths.
+            None => service,
+        }
     }
 
     /// Disable the active items captured from the previous runtime, then install
@@ -53,7 +75,7 @@ impl ModProfilesService {
         target_environment: &Environment,
     ) -> RuntimeModSwitchSummary {
         let mut summary = RuntimeModSwitchSummary::default();
-        let mods_service = ModsService::new(self.pool.clone());
+        let mods_service = self.mods_service();
         let library = match mods_service.get_mod_library().await {
             Ok(library) => library.downloaded,
             Err(error) => {
@@ -130,7 +152,7 @@ impl ModProfilesService {
             .await?
             .ok_or_else(|| anyhow!("Environment not found"))?;
 
-        let mods_service = ModsService::new(self.pool.clone());
+        let mods_service = self.mods_service();
         let installed_mods = mods_service
             .list_mods(&environment.output_dir)
             .await
@@ -377,7 +399,7 @@ impl ModProfilesService {
         let target_environment = self
             .load_target_environment(target_environment_id.as_deref())
             .await?;
-        let mods_service = ModsService::new(self.pool.clone());
+        let mods_service = self.mods_service();
         let library = mods_service.get_mod_library().await?;
         let installed_snapshot = if let Some(environment) = target_environment.as_ref() {
             Some(build_installed_snapshot(self.pool.clone(), &mods_service, environment).await?)
@@ -429,7 +451,7 @@ impl ModProfilesService {
         let plan = self
             .preview_import(request.manifest, Some(target_environment_id.clone()))
             .await?;
-        let mods_service = ModsService::new(self.pool.clone());
+        let mods_service = self.mods_service();
         let mut installed = 0usize;
         let mut skipped = 0usize;
         let mut unresolved = 0usize;
@@ -698,7 +720,7 @@ impl ModProfilesService {
         environment: &Environment,
         plan: &ModProfileImportPlan,
     ) -> Result<()> {
-        let mods_service = ModsService::new(self.pool.clone());
+        let mods_service = self.mods_service();
         let snapshot =
             build_installed_snapshot(self.pool.clone(), &mods_service, environment).await?;
         let desired: HashMap<String, bool> = plan

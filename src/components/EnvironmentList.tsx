@@ -2,8 +2,9 @@ import { Suspense, lazy, useState, useEffect, useRef, useCallback } from 'react'
 import type { ComponentType } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { useEnvironmentStore } from '../stores/environmentStore';
+import { useModLibraryStore } from '../stores/modLibraryStore';
 import { useSettingsStore } from '../stores/settingsStore';
-import type { Environment, MelonLoaderStatus, ModProfileManifest, ModProfileItem } from '../types';
+import type { Environment, MelonLoaderStatus, ModLibraryResult, ModProfileManifest, ModProfileItem } from '../types';
 import { AuthenticationModal } from './AuthenticationModal';
 import { MessageOverlay } from './MessageOverlay';
 import { ConfirmOverlay } from './ConfirmOverlay';
@@ -11,7 +12,6 @@ import { AnchoredContextMenu, type AnchoredContextMenuItem } from './AnchoredCon
 import { ProfileExportDialog } from './ProfileExportDialog';
 import { ApiService } from '../services/api';
 import { buildEnvironmentModSnapshot } from '../services/modLibrarySummary';
-import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 import { logger } from '../services/logger';
 import {
   batchUpdateCheckEventName,
@@ -41,14 +41,11 @@ import {
   onComplete as onCompleteEvent,
   onUpdateAvailable,
   onUpdateCheckComplete,
-  onModsChanged,
-  onModUpdatesChecked,
   onPluginsChanged,
   onUserLibsChanged
 } from '../services/events';
 
 type InstalledModsResponse = Awaited<ReturnType<typeof ApiService.getMods>>;
-type ModLibraryResponse = Awaited<ReturnType<typeof ApiService.getModLibrary>>;
 type LaunchMethod = 'steam' | 'steam_restart' | 'direct';
 type ProfileExportState = {
   isOpen: boolean;
@@ -206,7 +203,7 @@ function countUnmanagedLocalMods(installedMods: InstalledModsResponse | null | u
 
 async function buildEnvironmentCardModSnapshot(
   environmentId: string,
-  library: ModLibraryResponse | null | undefined,
+  library: ModLibraryResult | null | undefined,
   refreshInstalledMods: boolean = false,
 ) {
   const snapshot = buildEnvironmentModSnapshot(library, environmentId);
@@ -277,7 +274,8 @@ export function EnvironmentList({
   onOpenWorkspace,
   onSelectEnvironment
 }: EnvironmentListProps) {
-  const { environments, loading, error, progress, activeGameDownloadId, startDownload, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion } = useEnvironmentStore();
+  const { environments, loading, error, progress, activeGameDownloadId, startDownload, cancelDownload, deleteEnvironment, checkUpdate, updateEnvironment, refreshGameVersion, ensureEnvironments } = useEnvironmentStore();
+  const { library, ensureLibrary, refreshLibrary } = useModLibraryStore();
   const { settings } = useSettingsStore();
   const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
   const [, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
@@ -361,7 +359,6 @@ export function EnvironmentList({
   }, []);
 
   // Debounce timers for filesystem change events
-  const modsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const pluginsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const userLibsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -608,8 +605,6 @@ export function EnvironmentList({
     let unlistenComplete: (() => void) | null = null;
     let unlistenUpdateAvailable: (() => void) | null = null;
     let unlistenUpdateCheckComplete: (() => void) | null = null;
-    let unlistenModsChanged: (() => void) | null = null;
-    let unlistenModUpdatesChecked: (() => void) | null = null;
     let unlistenPluginsChanged: (() => void) | null = null;
     let unlistenUserLibsChanged: (() => void) | null = null;
 
@@ -720,7 +715,7 @@ export function EnvironmentList({
           if (env && env.updateAvailable) {
             setTimeout(async () => {
               try {
-                const updatedEnvs = await ApiService.getEnvironments();
+                const updatedEnvs = await ensureEnvironments();
                 const updatedEnv = updatedEnvs.find(e => e.id === downloadId);
                 if (updatedEnv) {
                   // Use ConfirmOverlay instead of blocking confirm()
@@ -794,86 +789,6 @@ export function EnvironmentList({
           handleUpdateEventComplete({ environmentId: data.environmentId });
         });
 
-        unlistenModUpdatesChecked = await onModUpdatesChecked((data) => {
-          void ApiService.getModLibrary()
-            .then((library) => normalizeLibraryFeaturedDownloads(library))
-            .then((library) => buildEnvironmentCardModSnapshot(data.environmentId, library, true))
-            .then((snapshot) => {
-              setModsCounts(prev => {
-                const next = new Map(prev);
-                next.set(data.environmentId, snapshot.userMods);
-                return next;
-              });
-              setFeaturedDownloadCounts(prev => {
-                const next = new Map(prev);
-                next.set(data.environmentId, snapshot.featuredDownloads);
-                return next;
-              });
-              setModUpdatesCounts(prev => {
-                const next = new Map(prev);
-                next.set(data.environmentId, snapshot.updateCount);
-                return next;
-              });
-            })
-            .catch((error) => {
-              logger.warn(
-                'Failed to refresh environment mod summary after mod updates check',
-                {
-                  environmentId: data.environmentId,
-                  error: error instanceof Error ? error.message : String(error),
-                },
-              );
-            });
-        });
-
-        // Listen for filesystem change events (mods/plugins/userlibs)
-        // Debounce to avoid too many API calls when multiple file events fire rapidly
-        // Use refs to avoid closure issues and prevent unnecessary effect re-runs
-        unlistenModsChanged = await onModsChanged((data) => {
-          // Use ref to get latest environments without causing effect dependency
-          const env = environmentsRef.current.find(e => e.id === data.environmentId);
-          if (env && env.status === 'completed') {
-            // Clear existing timer for this environment
-            const existingTimer = modsRefreshTimers.current.get(data.environmentId);
-            if (existingTimer) {
-              clearTimeout(existingTimer);
-            }
-
-            // Set new timer to refresh count after 500ms of no events
-            const timer = setTimeout(async () => {
-              try {
-                const library = await ApiService.getModLibrary();
-                const normalizedLibrary = await normalizeLibraryFeaturedDownloads(library);
-                const snapshot = await buildEnvironmentCardModSnapshot(data.environmentId, normalizedLibrary, true);
-                setModsCounts(prev => {
-                  const next = new Map(prev);
-                  next.set(data.environmentId, snapshot.userMods);
-                  return next;
-                });
-                setFeaturedDownloadCounts(prev => {
-                  const next = new Map(prev);
-                  next.set(data.environmentId, snapshot.featuredDownloads);
-                  return next;
-                });
-                setModUpdatesCounts(prev => {
-                  const next = new Map(prev);
-                  next.set(data.environmentId, snapshot.updateCount);
-                  return next;
-                });
-              } catch (err) {
-                logger.error('Failed to refresh environment mod counts after filesystem change', {
-                  environmentId: data.environmentId,
-                  error: err instanceof Error ? err.message : String(err),
-                });
-              } finally {
-                modsRefreshTimers.current.delete(data.environmentId);
-              }
-            }, 500);
-
-            modsRefreshTimers.current.set(data.environmentId, timer);
-          }
-        });
-
         unlistenPluginsChanged = await onPluginsChanged((data) => {
           // Use ref to get latest environments without causing effect dependency
           const env = environmentsRef.current.find(e => e.id === data.environmentId);
@@ -942,8 +857,7 @@ export function EnvironmentList({
 
     setupListeners();
 
-    const modsRefreshTimerMap = modsRefreshTimers.current;
-    const pluginsRefreshTimerMap = pluginsRefreshTimers.current;
+      const pluginsRefreshTimerMap = pluginsRefreshTimers.current;
     const userLibsRefreshTimerMap = userLibsRefreshTimers.current;
 
     return () => {
@@ -958,16 +872,12 @@ export function EnvironmentList({
       if (unlistenComplete) unlistenComplete();
       if (unlistenUpdateAvailable) unlistenUpdateAvailable();
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
-      if (unlistenModsChanged) unlistenModsChanged();
-      if (unlistenModUpdatesChecked) unlistenModUpdatesChecked();
       if (unlistenPluginsChanged) unlistenPluginsChanged();
       if (unlistenUserLibsChanged) unlistenUserLibsChanged();
 
       // Clear all debounce timers
-      modsRefreshTimerMap.forEach(timer => clearTimeout(timer));
       pluginsRefreshTimerMap.forEach(timer => clearTimeout(timer));
       userLibsRefreshTimerMap.forEach(timer => clearTimeout(timer));
-      modsRefreshTimerMap.clear();
       pluginsRefreshTimerMap.clear();
       userLibsRefreshTimerMap.clear();
     };
@@ -975,6 +885,7 @@ export function EnvironmentList({
     authModal.isOpen,
     authModal.envId,
     environments,
+    ensureEnvironments,
     progress,
     setFeaturedDownloadCounts,
     setMelonLoaderStatus,
@@ -1205,18 +1116,10 @@ export function EnvironmentList({
       const pluginCounts = new Map<string, number>();
       const userLibsCounts = new Map<string, number>();
       const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
-      const library = await (async () => {
-        try {
-          return await normalizeLibraryFeaturedDownloads(
-            await ApiService.getModLibrary(),
-          );
-        } catch {
-          return null;
-        }
-      })();
+      const librarySnapshot = library ?? await ensureLibrary().catch(() => null);
       for (const env of environments) {
         if (env.status === 'completed') {
-          const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, library);
+          const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, librarySnapshot);
           modCounts.set(env.id, modSnapshot.userMods);
           featuredDownloadCountsMap.set(env.id, modSnapshot.featuredDownloads);
           modUpdatesCountsMap.set(env.id, modSnapshot.updateCount);
@@ -1288,6 +1191,8 @@ export function EnvironmentList({
   }, [
     error,
     environments,
+    ensureLibrary,
+    library,
     loadMelonLoaderReleases,
     loading,
     notifyInitialDetectionComplete,
@@ -1313,8 +1218,7 @@ export function EnvironmentList({
     if (modsOverlay.envId) {
       const env = environments.find(e => e.id === modsOverlay.envId);
       if (env && env.status === 'completed') {
-        ApiService.getModLibrary()
-          .then((library) => normalizeLibraryFeaturedDownloads(library))
+        refreshLibrary()
           .then((library) => buildEnvironmentCardModSnapshot(env.id, library, true))
           .then((snapshot) => {
             setModsCounts(prev => {

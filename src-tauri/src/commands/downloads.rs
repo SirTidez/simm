@@ -1,5 +1,6 @@
 use crate::services::depot_downloader::DepotDownloaderService;
 use crate::services::environment::EnvironmentService;
+use crate::services::settings::{RuntimeSettingsState, SettingsService};
 use crate::types::{DepotDownloadOptions, DownloadProgress};
 use once_cell::sync::Lazy;
 use sqlx::SqlitePool;
@@ -21,6 +22,7 @@ async fn get_download_service() -> Result<Arc<DepotDownloaderService>, String> {
 #[tauri::command]
 pub async fn start_download(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     app: AppHandle,
 ) -> Result<serde_json::Value, String> {
@@ -31,12 +33,9 @@ pub async fn start_download(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Environment not found".to_string())?;
 
-    let mut settings_service = crate::services::settings::SettingsService::new(db.inner().clone())
-        .map_err(|e| e.to_string())?;
-    let settings = settings_service
-        .load_settings()
-        .await
-        .map_err(|e| e.to_string())?;
+    let settings_service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let settings = runtime_settings.snapshot().await;
+    log::debug!("[Settings] Download startup using cached public settings snapshot");
 
     let credentials = settings_service
         .get_credentials()

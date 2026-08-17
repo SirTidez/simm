@@ -1,5 +1,6 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
+use crate::services::settings::RuntimeSettingsState;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use crate::utils::validation::validate_directory_path;
 use once_cell::sync::Lazy;
@@ -114,10 +115,13 @@ pub async fn reveal_path(path: String) -> Result<(), String> {
 pub async fn launch_game(
     app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     launch_method: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+    let env_service = EnvironmentService::new(db.inner().clone())
+        .map_err(|e| e.to_string())?
+        .with_runtime_settings(runtime_settings.snapshot().await);
     let mut env = env_service
         .get_environment(&environment_id)
         .await

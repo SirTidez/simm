@@ -40,6 +40,9 @@ pub async fn prepare_app(
             error.to_string()
         })?;
 
+    let runtime_settings = crate::services::settings::RuntimeSettingsState::new(
+        crate::services::settings::SettingsService::default_settings(),
+    );
     let mut settings_service = crate::services::settings::SettingsService::new(db_pool.clone())
         .map_err(|error| {
             log::error!("Failed to create SettingsService during startup: {}", error);
@@ -48,6 +51,7 @@ pub async fn prepare_app(
     match settings_service.load_settings().await {
         Ok(settings) => {
             crate::services::logger::LoggerService::apply_settings(&settings);
+            runtime_settings.replace(settings).await;
         }
         Err(error) => {
             log::warn!(
@@ -58,6 +62,7 @@ pub async fn prepare_app(
     }
 
     app.manage(db_pool.clone());
+    app.manage(runtime_settings);
 
     match crate::services::mods::ModsService::new(db_pool.clone())
         .migrate_s1api_author_metadata_once()
