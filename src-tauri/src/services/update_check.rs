@@ -51,16 +51,20 @@ impl UpdateCheckService {
                 }
             }
         }
-        if let Err(err) = env_service
+        let runtime_switch = match env_service
             .reconcile_steam_env_branch_runtime_from_disk(&mut effective_env)
             .await
         {
-            log::warn!(
-                "Failed to reconcile Steam env {} before update check: {}",
-                effective_env.id,
-                err
-            );
-        }
+            Ok(result) => result,
+            Err(err) => {
+                log::warn!(
+                    "Failed to reconcile Steam env {} before update check: {}",
+                    effective_env.id,
+                    err
+                );
+                None
+            }
+        };
 
         log::info!(
             "Checking for updates: {} (branch: {})",
@@ -77,6 +81,8 @@ impl UpdateCheckService {
             remote_manifest_id: None,
             remote_build_id: None,
             branch: effective_env.branch.clone(),
+            runtime: effective_env.runtime.clone(),
+            runtime_switch,
             app_id: effective_env.app_id.clone(),
             checked_at: Utc::now(),
             error: None,
@@ -307,6 +313,8 @@ impl UpdateCheckService {
                             remote_manifest_id: None,
                             remote_build_id: None,
                             branch: env.branch.clone(),
+                            runtime: env.runtime.clone(),
+                            runtime_switch: None,
                             app_id: env.app_id.clone(),
                             checked_at: Utc::now(),
                             error: Some(e.to_string()),
@@ -1124,6 +1132,8 @@ mod tests {
                     remote_manifest_id: Some("317".to_string()),
                     remote_build_id: None,
                     branch: beta_env.branch.clone(),
+                    runtime: beta_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: beta_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1139,6 +1149,8 @@ mod tests {
                     remote_manifest_id: Some("802".to_string()),
                     remote_build_id: None,
                     branch: steam_beta_env.branch.clone(),
+                    runtime: steam_beta_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: steam_beta_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1202,6 +1214,8 @@ mod tests {
                     remote_manifest_id: Some("317".to_string()),
                     remote_build_id: None,
                     branch: beta_env.branch.clone(),
+                    runtime: beta_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: beta_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1217,6 +1231,8 @@ mod tests {
                     remote_manifest_id: Some("802".to_string()),
                     remote_build_id: None,
                     branch: other_app_peer.branch.clone(),
+                    runtime: other_app_peer.runtime.clone(),
+                    runtime_switch: None,
                     app_id: other_app_peer.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1295,6 +1311,8 @@ mod tests {
                     remote_manifest_id: Some("3828069228120160165".to_string()),
                     remote_build_id: None,
                     branch: steam_env.branch.clone(),
+                    runtime: steam_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: steam_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1310,6 +1328,8 @@ mod tests {
                     remote_manifest_id: Some("3828069228120160165".to_string()),
                     remote_build_id: None,
                     branch: beta_env.branch.clone(),
+                    runtime: beta_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: beta_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1399,6 +1419,8 @@ mod tests {
                     remote_manifest_id: Some("3828069228120160165".to_string()),
                     remote_build_id: None,
                     branch: beta_env.branch.clone(),
+                    runtime: beta_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: beta_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,
@@ -1414,6 +1436,8 @@ mod tests {
                     remote_manifest_id: Some("6863174197092412323".to_string()),
                     remote_build_id: None,
                     branch: alternate_beta_env.branch.clone(),
+                    runtime: alternate_beta_env.runtime.clone(),
+                    runtime_switch: None,
                     app_id: alternate_beta_env.app_id.clone(),
                     checked_at: Utc::now(),
                     error: None,

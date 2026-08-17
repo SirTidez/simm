@@ -1,4 +1,4 @@
-use crate::types::{DownloadProgress, TrackedDownload, UpdateCheckResult};
+use crate::types::{DownloadProgress, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult};
 use tauri::{AppHandle, Emitter, Runtime};
 
 pub fn emit_progress<R: Runtime>(
@@ -154,6 +154,13 @@ pub fn emit_update_check_complete<R: Runtime>(
             "updateResult": update_result
         }),
     )
+}
+
+pub fn emit_runtime_switch<R: Runtime>(
+    app: &AppHandle<R>,
+    result: RuntimeSwitchResult,
+) -> Result<(), tauri::Error> {
+    app.emit("steam_runtime_switched", result)
 }
 
 pub fn emit_mods_changed<R: Runtime>(

@@ -1,5 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
-import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, TrackedDownload, UpdateCheckResult } from '../types';
+import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult } from '../types';
 
 export interface ProgressEvent {
   downloadId: string;
@@ -62,6 +62,8 @@ export interface UpdateCheckCompleteEvent {
   environmentId: string;
   updateResult: UpdateCheckResult;
 }
+
+export type RuntimeSwitchEvent = RuntimeSwitchResult;
 
 export interface ModsChangedEvent {
   environmentId: string;
@@ -189,6 +191,12 @@ export async function onUpdateAvailable(handler: (data: UpdateAvailableEvent) =>
 
 export async function onUpdateCheckComplete(handler: (data: UpdateCheckCompleteEvent) => void): Promise<() => void> {
   return await listen<UpdateCheckCompleteEvent>('update_check_complete', (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onRuntimeSwitch(handler: (data: RuntimeSwitchEvent) => void): Promise<() => void> {
+  return await listen<RuntimeSwitchEvent>('steam_runtime_switched', (event) => {
     handler(event.payload);
   });
 }

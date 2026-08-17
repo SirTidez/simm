@@ -593,6 +593,7 @@ describe('EnvironmentList', () => {
 
     render(<EnvironmentList />);
 
+    expect(await screen.findByText('Public')).toBeTruthy();
     expect(await screen.findByText('Steam launch')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Launch' }));
 

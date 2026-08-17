@@ -15,7 +15,7 @@ function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partia
   return out;
 }
 import { ApiService } from '../services/api';
-import { onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete } from '../services/events';
+import { onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete, onRuntimeSwitch } from '../services/events';
 
 interface EnvironmentStoreContextValue {
   environments: Environment[];
@@ -42,6 +42,12 @@ function mergeUpdateResultIntoEnvironment(
 ): Environment {
   return {
     ...env,
+    branch: updateResult.branch || env.branch,
+    runtime: updateResult.runtime === 'IL2CPP'
+      ? 'IL2CPP'
+      : updateResult.runtime === 'Mono' || updateResult.runtime === 'MONO'
+        ? 'Mono'
+      : env.runtime,
     lastUpdateCheck: updateResult.checkedAt,
     lastManifestId: updateResult.currentManifestId ?? env.lastManifestId,
     updateAvailable: updateResult.updateAvailable,
@@ -85,9 +91,15 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       setEnvironments(envs);
       hasLoadedEnvironmentsRef.current = true;
 
-      // Automatically extract versions for completed environments that don't have one
+      // Steam installs are also refreshed here even when their game version is known,
+      // because Steam can switch the selected branch/runtime outside SIMM.
       const envsNeedingVersion = envs.filter(env =>
-        env.status === 'completed' && !env.currentGameVersion
+        env.status === 'completed' && (
+          !env.currentGameVersion
+          || env.environmentType === 'Steam'
+          || env.environmentType === 'steam'
+          || env.id.startsWith('steam-')
+        )
       );
 
       if (envsNeedingVersion.length > 0) {
@@ -277,6 +289,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     let unlistenError: (() => void) | null = null;
     let unlistenUpdateAvailable: (() => void) | null = null;
     let unlistenUpdateCheckComplete: (() => void) | null = null;
+    let unlistenRuntimeSwitch: (() => void) | null = null;
 
     const setupListeners = async () => {
       try {
@@ -341,6 +354,14 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             console.error('Failed to apply update-check-complete event state:', err);
           }
         });
+
+        unlistenRuntimeSwitch = await onRuntimeSwitch((result) => {
+          setEnvironments(prev => prev.map(env => env.id === result.environmentId ? {
+            ...env,
+            branch: result.branch,
+            runtime: result.runtime === 'Mono' || result.runtime === 'MONO' ? 'Mono' : 'IL2CPP',
+          } : env));
+        });
       } catch (error) {
         console.error('Failed to set up event listeners:', error);
       }
@@ -354,6 +375,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       if (unlistenError) unlistenError();
       if (unlistenUpdateAvailable) unlistenUpdateAvailable();
       if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
+      if (unlistenRuntimeSwitch) unlistenRuntimeSwitch();
     };
   }, [updateEnvironment, applyUpdateResultLocally, refreshEnvironments]);
 

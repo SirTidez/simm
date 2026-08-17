@@ -6,7 +6,10 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use tokio::time::{sleep, Duration};
 
-use crate::types::{schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime};
+use crate::types::{
+    schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime,
+    RuntimeSwitchResult,
+};
 
 pub struct EnvironmentService {
     pool: Arc<SqlitePool>,
@@ -69,14 +72,14 @@ impl EnvironmentService {
     pub async fn reconcile_steam_env_branch_runtime_from_disk(
         &self,
         env: &mut Environment,
-    ) -> Result<bool> {
+    ) -> Result<Option<RuntimeSwitchResult>> {
         let is_steam =
             env.environment_type == Some(EnvironmentType::Steam) || env.id.starts_with("steam-");
         if !is_steam || !matches!(env.status, EnvironmentStatus::Completed) {
-            return Ok(false);
+            return Ok(None);
         }
         if env.output_dir.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
 
         let steam_service = crate::services::steam::SteamService::new();
@@ -100,8 +103,32 @@ impl EnvironmentService {
             .flatten()
             .unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
 
-        let detected_runtime =
-            Self::runtime_for_branch(&detected_branch).unwrap_or(runtime_from_files);
+        // The appmanifest identifies the selected branch, but Steam branches can
+        // change scripting backend without SIMM's static branch catalog changing.
+        // The installed Unity markers are therefore authoritative for runtime.
+        let detected_runtime = runtime_from_files;
+
+        let previous_branch = env.branch.clone();
+        let previous_runtime = env.runtime.clone();
+        let runtime_changed = previous_runtime != detected_runtime;
+        let previous_manifest = if runtime_changed {
+            match crate::services::mod_profiles::ModProfilesService::new(self.pool.clone())
+                .export_environment_profile_with_options(&env.id, false)
+                .await
+            {
+                Ok(manifest) => Some(manifest),
+                Err(error) => {
+                    log::warn!(
+                        "Failed to capture enabled items before Steam runtime switch for {}: {}",
+                        env.id,
+                        error
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let mut changed = false;
         if env.branch != detected_branch {
@@ -128,7 +155,40 @@ impl EnvironmentService {
         if changed {
             self.upsert_environment(env).await?;
         }
-        Ok(changed)
+
+        if !runtime_changed {
+            return Ok(None);
+        }
+
+        let mut result = RuntimeSwitchResult {
+            environment_id: env.id.clone(),
+            environment_name: env.name.clone(),
+            previous_branch,
+            branch: env.branch.clone(),
+            previous_runtime,
+            runtime: env.runtime.clone(),
+            disabled_items: 0,
+            installed_items: 0,
+            missing_items: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        if let Some(manifest) = previous_manifest {
+            let summary = crate::services::mod_profiles::ModProfilesService::new(self.pool.clone())
+                .switch_environment_runtime_items(manifest, env)
+                .await;
+            result.disabled_items = summary.disabled_items;
+            result.installed_items = summary.installed_items;
+            result.missing_items = summary.missing_items;
+            result.errors = summary.errors;
+        } else {
+            result.errors.push(
+                "SIMM could not inventory the active mods before changing runtimes. Review this environment before launching."
+                    .to_string(),
+            );
+        }
+
+        Ok(Some(result))
     }
 
     async fn heal_environment_payload_id(
@@ -581,7 +641,7 @@ impl EnvironmentService {
         };
         let branch =
             detected_branch.unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
-        let runtime = Self::runtime_for_branch(&branch).unwrap_or(runtime_from_files);
+        let runtime = runtime_from_files;
 
         let id = format!("steam-{}", chrono::Utc::now().timestamp_millis());
 
@@ -1019,6 +1079,72 @@ mod tests {
         let stored = service.get_environment(&env.id).await?;
         assert!(stored.is_some());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn steam_reconcile_uses_installed_runtime_markers_when_public_branch_changes_backend(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+        let game_dir = temp
+            .path()
+            .join("steamapps")
+            .join("common")
+            .join("Schedule I");
+        fs::create_dir_all(game_dir.join("Schedule I_Data").join("MonoBleedingEdge")).await?;
+        for folder in ["Mods", "Plugins", "UserLibs"] {
+            fs::create_dir_all(game_dir.join(folder)).await?;
+        }
+        fs::write(game_dir.join("Schedule I.exe"), b"game").await?;
+        let manifest_path = temp
+            .path()
+            .join("steamapps")
+            .join("appmanifest_3164500.acf");
+        fs::write(
+            &manifest_path,
+            "\"AppState\"\n{\n  \"installdir\" \"Schedule I\"\n}\n",
+        )
+        .await?;
+
+        let mut environment = Environment {
+            id: "steam-main".to_string(),
+            name: "Steam Installation".to_string(),
+            description: None,
+            app_id: "3164500".to_string(),
+            branch: "closed-beta".to_string(),
+            output_dir: game_dir.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: Some(temp.path().join("steamapps").to_string_lossy().to_string()),
+            steam_manifest_path: Some(manifest_path.to_string_lossy().to_string()),
+            environment_type: Some(EnvironmentType::Steam),
+        };
+        service.save_environment(&environment).await?;
+
+        let result = service
+            .reconcile_steam_env_branch_runtime_from_disk(&mut environment)
+            .await?
+            .expect("runtime switch result");
+
+        assert_eq!(environment.branch, "main");
+        assert_eq!(environment.runtime, Runtime::Mono);
+        assert_eq!(result.previous_runtime, Runtime::Il2cpp);
+        assert_eq!(result.runtime, Runtime::Mono);
         Ok(())
     }
 

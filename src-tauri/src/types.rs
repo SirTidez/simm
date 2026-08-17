@@ -515,12 +515,30 @@ pub struct UpdateCheckResult {
     pub remote_manifest_id: Option<String>,
     pub remote_build_id: Option<String>,
     pub branch: String,
+    pub runtime: Runtime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_switch: Option<RuntimeSwitchResult>,
     pub app_id: String,
     #[serde(with = "chrono::serde::ts_seconds")]
     pub checked_at: DateTime<Utc>,
     pub error: Option<String>,
     pub current_game_version: Option<String>,
     pub update_game_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSwitchResult {
+    pub environment_id: String,
+    pub environment_name: String,
+    pub previous_branch: String,
+    pub branch: String,
+    pub previous_runtime: Runtime,
+    pub runtime: Runtime,
+    pub disabled_items: usize,
+    pub installed_items: usize,
+    pub missing_items: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

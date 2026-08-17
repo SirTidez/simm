@@ -23,6 +23,7 @@ import { DownloadStatusStoreProvider, useDownloadStatusStore } from '../stores/d
 import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
+import { onRuntimeSwitch } from '../services/events';
 import { logger } from '../services/logger';
 import {
   buildSetupGuideSettings,
@@ -38,6 +39,7 @@ import type {
   AppUpdateChannel,
   AppUpdatePreferences,
   AppUpdateStatus,
+  RuntimeSwitchResult,
 } from '../types';
 import { ErrorBoundary } from './ErrorBoundary';
 import { Icon } from './Icon';
@@ -62,6 +64,10 @@ const SHELL_NAV_COLLAPSED_KEY = 'simm:shellNavCollapsed';
 const CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY = 'simm:consumedNexusOAuthCallbacks';
 const SIMM_RELEASES_URL = 'https://api.github.com/repos/SirTidez/simm/releases?per_page=4';
 const SIMM_CHANGELOG_URL = 'https://raw.githubusercontent.com/SirTidez/simm/master/CHANGELOG.md';
+
+const runtimeDisplayName = (runtime: RuntimeSwitchResult['runtime']) => (
+  runtime === 'Mono' || runtime === 'MONO' ? 'Mono' : 'IL2CPP'
+);
 
 const readConsumedNexusOAuthCallbacks = () => {
   try {
@@ -1380,6 +1386,7 @@ function AppContent() {
   const completedNxmCallbackRef = useRef(new Set<string>());
   const inFlightNxmCallbackRef = useRef<string | null>(null);
   const [pendingNexusRuntimeSelection, setPendingNexusRuntimeSelection] = useState<PendingNexusRuntimeSelection | null>(null);
+  const [runtimeSwitchNotice, setRuntimeSwitchNotice] = useState<RuntimeSwitchResult | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
   const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
@@ -1448,6 +1455,21 @@ function AppContent() {
     if (shellNavAnimationFrameRef.current !== null) {
       cancelShellAnimationFrame(shellNavAnimationFrameRef.current);
     }
+  }, []);
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void onRuntimeSwitch((result) => {
+      if (result.missingItems.length > 0 || result.errors.length > 0) {
+        setRuntimeSwitchNotice(result);
+      }
+    }).then((dispose) => {
+      unlisten = dispose;
+    }).catch((error) => {
+      logger.warn('Failed to listen for Steam runtime switches', {
+        error: getErrorMessage(error, 'listener setup failed'),
+      });
+    });
+    return () => unlisten?.();
   }, []);
   const isSameWorkspaceRoute = useCallback((a: WorkspaceRoute, b: WorkspaceRoute): boolean => {
     if (a.view !== b.view) {
@@ -2743,6 +2765,48 @@ function AppContent() {
           </SimmDialogContent>
         </Dialog>
       )}
+
+      <Dialog open={!!runtimeSwitchNotice} onOpenChange={(open) => {
+        if (!open) setRuntimeSwitchNotice(null);
+      }}>
+        <SimmDialogContent className="app-dialog app-dialog--message app-runtime-dialog" showCloseButton={false}>
+          <DialogHeader className="modal-header app-dialog__header">
+            <DialogTitle>Steam Runtime Changed</DialogTitle>
+            <SimmButton variant="ghost" size="icon-sm" className="modal-close" onClick={() => setRuntimeSwitchNotice(null)} aria-label="Close runtime switch notice">
+              <Icon name="times" />
+            </SimmButton>
+          </DialogHeader>
+          {runtimeSwitchNotice && (
+            <div className="app-dialog__body app-runtime-dialog__body">
+              <div className="app-dialog__callout app-dialog__callout--warning">
+                <div className="app-dialog__icon"><Icon name="triangleExclamation" /></div>
+                <div className="app-dialog__meta">
+                  <strong>{runtimeSwitchNotice.environmentName} changed from {runtimeDisplayName(runtimeSwitchNotice.previousRuntime)} to {runtimeDisplayName(runtimeSwitchNotice.runtime)}</strong>
+                  <DialogDescription>
+                    SIMM disabled {runtimeSwitchNotice.disabledItems} {runtimeDisplayName(runtimeSwitchNotice.previousRuntime)} item(s) and installed {runtimeSwitchNotice.installedItems} downloaded {runtimeDisplayName(runtimeSwitchNotice.runtime)} replacement(s).
+                  </DialogDescription>
+                </div>
+              </div>
+              {runtimeSwitchNotice.missingItems.length > 0 && (
+                <div className="app-runtime-dialog__details">
+                  <strong>No downloaded {runtimeDisplayName(runtimeSwitchNotice.runtime)} version was found for:</strong>
+                  <span>{runtimeSwitchNotice.missingItems.join(', ')}</span>
+                  <span>Those items remain disabled. Download their {runtimeDisplayName(runtimeSwitchNotice.runtime)} versions before enabling them.</span>
+                </div>
+              )}
+              {runtimeSwitchNotice.errors.length > 0 && (
+                <div className="app-runtime-dialog__details">
+                  <strong>SIMM also encountered:</strong>
+                  {runtimeSwitchNotice.errors.map((error) => <span key={error}>{error}</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter className="app-dialog__footer">
+            <SimmButton className="btn btn-primary" onClick={() => setRuntimeSwitchNotice(null)} autoFocus>OK</SimmButton>
+          </DialogFooter>
+        </SimmDialogContent>
+      </Dialog>
 
       <Dialog open={closePrompt.isOpen} onOpenChange={(open) => {
         if (!open) {

@@ -141,10 +141,60 @@ Force the AppImage path, preview the selected install without changing the syste
 ```bash
 bash install.sh --appimage
 bash install.sh --dry-run
+bash install.sh --appimage --yes
+bash install.sh --appimage --skip-dependencies
 bash install.sh --uninstall
 ```
 
-The installer does not install Steam, Protontricks, DepotDownloader, or .NET runtime tools. SIMM checks Linux readiness inside the app and provides repair actions for supported managed tools and desktop/protocol handlers.
+Preview the full installer TUI, animations, dependency states, and safety flow without
+network access, filesystem writes, sudo, or Steam process changes:
+
+```bash
+bash install.sh --preview
+bash install.sh --preview --preview-scenario update
+bash install.sh --preview --preview-scenario dependency-failure
+bash install.sh --preview --preview-distro steamos --preview-speed 4
+bash install.sh --preview --preview-auto-accept
+```
+
+Preview scenarios are `fresh`, `update`, `ready`, and `dependency-failure`. Distro
+profiles are `ubuntu`, `debian`, `fedora`, `arch`, `opensuse`, `steamos`, and
+`bazzite`. Use `--plain`, `--no-color`, or `--no-animation` for logs and terminal
+accessibility. The interactive preview pauses after distro detection, then requires
+an explicit acknowledgement of each needed dependency or update together with its
+approved source, privilege scope, and destination. Enter alone does not approve
+changes. Use `--preview-auto-accept` only for scripted demonstrations; plain or
+noninteractive output records a simulated acknowledgement and never blocks. Without
+`--preview-distro`, the system card uses the current Linux host identity while all
+install actions remain simulated.
+
+From this repository in Ubuntu WSL:
+
+```powershell
+wsl.exe -d Ubuntu -- bash -lc "cd /mnt/e/CLionProjects/simmrust && bash install.sh --preview"
+```
+
+The real installer detects Steam and the Linux tools SIMM needs, then shows every
+missing dependency together with its source, privilege scope, destination, and
+purpose. After explicit acknowledgement it installs Protontricks from Flathub or
+an enabled distro repository, DepotDownloader from SteamRE's official GitHub
+release, a private .NET SDK 8 from Microsoft's `dotnet-install.sh`, and MLVScan
+from NuGet. Each tool is verified before SIMM installation continues. Steam must
+already be installed and signed in. Use `--yes` for an approved noninteractive
+run or `--skip-dependencies` to intentionally install only SIMM.
+
+### Steam Deck
+
+On Steam Deck, the AppImage installer detects SteamOS and adds **Schedule I Mod Manager** to Steam as a Non-Steam game. It shuts down Steam before safely updating `shortcuts.vdf`; return to Gaming Mode after the installer finishes and launch SIMM from the Non-Steam library. Use `--skip-steam-shortcut` to opt out.
+
+For an offline transfer package, build the AppImage and package it with its installer and checksum:
+
+```powershell
+.\scripts\build-linux-container.cmd
+.\scripts\package-steam-deck.ps1 -AppImage .\target\release\bundle\appimage\*.AppImage
+```
+
+The generated zip under `target/steam-deck/` contains the AppImage, `SHA256SUMS`, `install.sh`, and Deck-specific instructions. On the Deck, extract it and run `bash install.sh --appimage-file ./SIMM_<version>_x86_64.AppImage`.
 
 ### Linux Build Dependencies
 

@@ -22,6 +22,7 @@ const eventMocks = vi.hoisted(() => ({
   onError: vi.fn(),
   onUpdateAvailable: vi.fn(),
   onUpdateCheckComplete: vi.fn(),
+  onRuntimeSwitch: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -49,6 +50,8 @@ function Consumer() {
       <div data-testid="loading">{String(loading)}</div>
       <div data-testid="env-status">{environments[0]?.status ?? 'none'}</div>
       <div data-testid="env-version">{environments[0]?.currentGameVersion ?? 'none'}</div>
+      <div data-testid="env-branch">{environments[0]?.branch ?? 'none'}</div>
+      <div data-testid="env-runtime">{environments[0]?.runtime ?? 'none'}</div>
       <div data-testid="update-available">{String(environments[0]?.updateAvailable ?? false)}</div>
       <div data-testid="progress-count">{progress.size}</div>
       <button
@@ -67,6 +70,7 @@ function Consumer() {
 describe('EnvironmentStore', () => {
   let progressHandler: ((data: DownloadProgress) => void) | null = null;
   let completeHandler: ((data: { downloadId: string; manifestId?: string }) => void) | null = null;
+  let runtimeSwitchHandler: ((data: import('../types').RuntimeSwitchResult) => void) | null = null;
 
   beforeEach(() => {
     apiMocks.getEnvironments.mockReset();
@@ -85,9 +89,11 @@ describe('EnvironmentStore', () => {
     eventMocks.onError.mockReset();
     eventMocks.onUpdateAvailable.mockReset();
     eventMocks.onUpdateCheckComplete.mockReset();
+    eventMocks.onRuntimeSwitch.mockReset();
 
     progressHandler = null;
     completeHandler = null;
+    runtimeSwitchHandler = null;
 
     eventMocks.onProgress.mockImplementation(async (handler: (data: DownloadProgress) => void) => {
       progressHandler = handler;
@@ -100,6 +106,10 @@ describe('EnvironmentStore', () => {
     eventMocks.onError.mockResolvedValue(() => {});
     eventMocks.onUpdateAvailable.mockResolvedValue(() => {});
     eventMocks.onUpdateCheckComplete.mockResolvedValue(() => {});
+    eventMocks.onRuntimeSwitch.mockImplementation(async (handler: (data: import('../types').RuntimeSwitchResult) => void) => {
+      runtimeSwitchHandler = handler;
+      return () => {};
+    });
   });
 
   afterEach(() => {
@@ -304,7 +314,8 @@ describe('EnvironmentStore', () => {
         environmentId: 'env-1',
         updateAvailable: true,
         remoteManifestId: '456',
-        branch: 'main',
+        branch: 'alternate',
+        runtime: 'Mono',
         appId: '3164500',
         checkedAt: 'now',
       },
@@ -324,6 +335,62 @@ describe('EnvironmentStore', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('update-available').textContent).toBe('true');
+      expect(screen.getByTestId('env-branch').textContent).toBe('alternate');
+      expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
+    });
+  });
+
+  it('refreshes a known Steam install version so external branch switches are detected', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([{
+      ...baseEnv,
+      currentGameVersion: '1.0.0',
+      environmentType: 'Steam',
+    }]);
+    apiMocks.extractGameVersion.mockResolvedValueOnce({
+      version: '1.0.0',
+      branch: 'alternate',
+      runtime: 'Mono',
+    });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('env-branch').textContent).toBe('alternate');
+      expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
+    });
+    expect(apiMocks.extractGameVersion).toHaveBeenCalledWith('env-1');
+  });
+
+  it('applies a launch-time Steam runtime switch event immediately', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+    await waitFor(() => expect(runtimeSwitchHandler).not.toBeNull());
+
+    const emitRuntimeSwitch = runtimeSwitchHandler as unknown as (data: import('../types').RuntimeSwitchResult) => void;
+    emitRuntimeSwitch({
+      environmentId: 'env-1',
+      environmentName: 'Env',
+      previousBranch: 'closed-beta',
+      branch: 'main',
+      previousRuntime: 'IL2CPP',
+      runtime: 'MONO',
+      disabledItems: 1,
+      installedItems: 0,
+      missingItems: ['Example'],
+      errors: [],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('env-branch').textContent).toBe('main');
+      expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
     });
   });
 
@@ -335,12 +402,14 @@ describe('EnvironmentStore', () => {
     const unlistenError = vi.fn();
     const unlistenUpdateAvailable = vi.fn();
     const unlistenUpdateCheckComplete = vi.fn();
+    const unlistenRuntimeSwitch = vi.fn();
 
     eventMocks.onProgress.mockResolvedValueOnce(unlistenProgress);
     eventMocks.onComplete.mockResolvedValueOnce(unlistenComplete);
     eventMocks.onError.mockResolvedValueOnce(unlistenError);
     eventMocks.onUpdateAvailable.mockResolvedValueOnce(unlistenUpdateAvailable);
     eventMocks.onUpdateCheckComplete.mockResolvedValueOnce(unlistenUpdateCheckComplete);
+    eventMocks.onRuntimeSwitch.mockResolvedValueOnce(unlistenRuntimeSwitch);
 
     const { unmount } = render(
       <EnvironmentStoreProvider>
@@ -359,5 +428,6 @@ describe('EnvironmentStore', () => {
     expect(unlistenError).toHaveBeenCalled();
     expect(unlistenUpdateAvailable).toHaveBeenCalled();
     expect(unlistenUpdateCheckComplete).toHaveBeenCalled();
+    expect(unlistenRuntimeSwitch).toHaveBeenCalled();
   });
 });

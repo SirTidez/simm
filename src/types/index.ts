@@ -206,6 +206,19 @@ export interface LaunchGameResult {
   environmentId?: string;
 }
 
+export interface RuntimeSwitchResult {
+  environmentId: string;
+  environmentName: string;
+  previousBranch: string;
+  branch: string;
+  previousRuntime: Runtime;
+  runtime: Runtime;
+  disabledItems: number;
+  installedItems: number;
+  missingItems: string[];
+  errors: string[];
+}
+
 export interface MelonLoaderLaunchVerification {
   status: 'confirmed' | 'notInstalled' | 'noLog' | 'staleLog' | 'noConfirmation' | string;
   confirmed: boolean;
@@ -220,6 +233,8 @@ export interface UpdateCheckResult {
   remoteManifestId?: string;
   remoteBuildId?: string;
   branch: string;
+  runtime: Runtime;
+  runtimeSwitch?: RuntimeSwitchResult;
   appId: string;
   checkedAt: string;
   error?: string;

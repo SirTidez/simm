@@ -486,7 +486,7 @@ impl SteamService {
 
         if let Some(key) = Self::find_vdf_key_value(&content, "betakey") {
             let key = key.trim().to_ascii_lowercase();
-            return if key.is_empty() {
+            return if key.is_empty() || key == "public" {
                 Ok(Some("main".to_string()))
             } else {
                 Ok(Some(key))
@@ -1041,7 +1041,8 @@ impl<'a> TextVdfParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_text_vdf, text_vdf_get_string, text_vdf_set_string, write_text_vdf, SteamService,
+        parse_text_vdf, text_vdf_get_string, text_vdf_set_string, write_text_vdf,
+        SteamInstallation, SteamService,
     };
     use anyhow::Result;
     use tempfile::TempDir;
@@ -1103,6 +1104,38 @@ mod tests {
             SteamService::find_vdf_key_value(manifest, "betakey"),
             Some("beta".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn detect_installed_branch_canonicalizes_explicit_public_key_to_main() -> Result<()> {
+        let temp = TempDir::new()?;
+        let steamapps = temp.path().join("steamapps");
+        let game_dir = steamapps.join("common").join("Schedule I");
+        fs::create_dir_all(&game_dir).await?;
+        let manifest_path = steamapps.join("appmanifest_3164500.acf");
+        fs::write(
+            &manifest_path,
+            "\"AppState\"\n{\n  \"UserConfig\"\n  {\n    \"BetaKey\" \"public\"\n  }\n}\n",
+        )
+        .await?;
+        let installation = SteamInstallation {
+            path: game_dir.to_string_lossy().to_string(),
+            executable_path: game_dir
+                .join("Schedule I.exe")
+                .to_string_lossy()
+                .to_string(),
+            app_id: SteamService::get_steam_app_id(),
+            steamapps_dir: Some(steamapps.to_string_lossy().to_string()),
+            manifest_path: Some(manifest_path.to_string_lossy().to_string()),
+        };
+
+        assert_eq!(
+            SteamService::new()
+                .detect_installed_branch_for_installation(&installation)
+                .await?,
+            Some("main".to_string())
+        );
+        Ok(())
     }
 
     #[test]

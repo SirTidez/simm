@@ -330,6 +330,8 @@ describe('App', () => {
     modLibraryOverlayMocks.resolveSuspend = null;
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(false);
+    listenMock.mockReset();
+    listenMock.mockImplementation(async () => () => {});
     deepLinkMocks.getCurrent.mockReset();
     deepLinkMocks.onOpenUrl.mockReset();
     deepLinkMocks.getCurrent.mockResolvedValue(null);
@@ -414,6 +416,39 @@ describe('App', () => {
 
     await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
     expect(screen.queryByRole('button', { name: 'Telemetry' })).toBeNull();
+  });
+
+  it('warns when a Steam runtime switch has no downloaded counterpart', async () => {
+    let runtimeSwitchHandler: ((event: { payload: unknown }) => void) | null = null;
+    listenMock.mockImplementation(async (eventName?: string, handler?: unknown) => {
+      if (eventName === 'steam_runtime_switched') {
+        runtimeSwitchHandler = handler as (event: { payload: unknown }) => void;
+      }
+      return () => {};
+    });
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+    await waitFor(() => expect(runtimeSwitchHandler).not.toBeNull());
+    const emitRuntimeSwitch = runtimeSwitchHandler as unknown as (event: { payload: unknown }) => void;
+    emitRuntimeSwitch({
+      payload: {
+        environmentId: 'steam-main',
+        environmentName: 'Steam Installation',
+        previousBranch: 'closed-beta',
+        branch: 'main',
+        previousRuntime: 'IL2CPP',
+        runtime: 'Mono',
+        disabledItems: 2,
+        installedItems: 1,
+        missingItems: ['Mono Missing Mod'],
+        errors: [],
+      },
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Steam Runtime Changed' })).toBeTruthy();
+    expect(screen.getByText(/Mono Missing Mod/)).toBeTruthy();
+    expect(screen.getByText(/Those items remain disabled/)).toBeTruthy();
   });
 
   it('shows a release and changelog feed on the Home dashboard', async () => {

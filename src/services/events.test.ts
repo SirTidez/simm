@@ -75,6 +75,7 @@ describe('events', () => {
         updateResult: {
           updateAvailable: true,
           branch: 'main',
+          runtime: 'IL2CPP',
           appId: '3164500',
           checkedAt: 'now',
         },

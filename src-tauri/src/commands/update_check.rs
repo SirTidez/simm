@@ -190,6 +190,12 @@ pub async fn run_background_update_checks(
             );
         }
         let _ = events::emit_update_check_complete(&app, environment_id.clone(), result.clone());
+        if let Some(runtime_switch) = result.runtime_switch.clone() {
+            let _ = events::emit_runtime_switch(&app, runtime_switch);
+            let _ = events::emit_mods_changed(&app, environment_id.clone());
+            let _ = events::emit_plugins_changed(&app, environment_id.clone());
+            let _ = events::emit_userlibs_changed(&app, environment_id.clone());
+        }
         if result.update_available {
             let _ = events::emit_update_available(&app, environment_id, result);
         }
@@ -564,6 +570,8 @@ pub async fn check_update(
                         remote_manifest_id: env.remote_manifest_id.clone(),
                         remote_build_id: env.remote_build_id.clone(),
                         branch: env.branch.clone(),
+                        runtime: env.runtime.clone(),
+                        runtime_switch: None,
                         app_id: env.app_id.clone(),
                         checked_at: last_check,
                         error: None,
@@ -611,6 +619,12 @@ pub async fn check_update(
 
     // Emit update check complete event
     let _ = events::emit_update_check_complete(&app, environment_id.clone(), result.clone());
+    if let Some(runtime_switch) = result.runtime_switch.clone() {
+        let _ = events::emit_runtime_switch(&app, runtime_switch);
+        let _ = events::emit_mods_changed(&app, environment_id.clone());
+        let _ = events::emit_plugins_changed(&app, environment_id.clone());
+        let _ = events::emit_userlibs_changed(&app, environment_id.clone());
+    }
 
     // Emit update available event if an update is available
     if result.update_available {
@@ -689,6 +703,12 @@ pub async fn check_all_updates(
         }
 
         let _ = events::emit_update_check_complete(&app, env_id.clone(), result.clone());
+        if let Some(runtime_switch) = result.runtime_switch.clone() {
+            let _ = events::emit_runtime_switch(&app, runtime_switch);
+            let _ = events::emit_mods_changed(&app, env_id.clone());
+            let _ = events::emit_plugins_changed(&app, env_id.clone());
+            let _ = events::emit_userlibs_changed(&app, env_id.clone());
+        }
         if result.update_available {
             let _ = events::emit_update_available(&app, env_id.clone(), result.clone());
         }
@@ -930,6 +950,8 @@ pub async fn check_all_updates(
             "remoteManifestId": result.remote_manifest_id,
             "remoteBuildId": result.remote_build_id,
             "branch": result.branch,
+            "runtime": result.runtime,
+            "runtimeSwitch": result.runtime_switch,
             "appId": result.app_id,
             "checkedAt": result.checked_at.timestamp(),
             "error": result.error,
@@ -1047,6 +1069,8 @@ mod tests {
             remote_manifest_id: Some("remote-manifest".to_string()),
             remote_build_id: None,
             branch: "beta".to_string(),
+            runtime: crate::types::Runtime::Il2cpp,
+            runtime_switch: None,
             app_id: "3164500".to_string(),
             checked_at: Utc::now(),
             error: None,
@@ -1069,6 +1093,8 @@ mod tests {
                 remote_manifest_id: Some("new-manifest".to_string()),
                 remote_build_id: None,
                 branch: "beta".to_string(),
+                runtime: crate::types::Runtime::Il2cpp,
+                runtime_switch: None,
                 app_id: "3164500".to_string(),
                 checked_at: Utc::now(),
                 error: None,

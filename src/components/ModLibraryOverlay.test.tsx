@@ -27,6 +27,7 @@ const apiMocks = vi.hoisted(() => ({
   searchNexusMods: vi.fn(),
   getNexusOAuthStatus: vi.fn(),
   getNexusModsModFiles: vi.fn(),
+  getNexusModFileDependencies: vi.fn(),
   getNexusModsLatestUpdated: vi.fn(),
   getNexusModsTrending: vi.fn(),
   getNexusModsLatestAdded: vi.fn(),
@@ -201,6 +202,7 @@ describe("ModLibraryOverlay", () => {
     apiMocks.searchNexusMods.mockReset();
     apiMocks.getNexusOAuthStatus.mockReset();
     apiMocks.getNexusModsModFiles.mockReset();
+    apiMocks.getNexusModFileDependencies.mockReset();
     apiMocks.getNexusModsLatestUpdated.mockReset();
     apiMocks.getNexusModsTrending.mockReset();
     apiMocks.getNexusModsLatestAdded.mockReset();
@@ -264,6 +266,10 @@ describe("ModLibraryOverlay", () => {
       },
     });
     apiMocks.getNexusModsModFiles.mockResolvedValue([]);
+    apiMocks.getNexusModFileDependencies.mockResolvedValue({
+      sourceVersionId: "",
+      requirements: [],
+    });
     apiMocks.getNexusModsLatestUpdated.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsTrending.mockResolvedValue({ mods: [] });
     apiMocks.getNexusModsLatestAdded.mockResolvedValue({ mods: [] });
@@ -700,6 +706,80 @@ describe("ModLibraryOverlay", () => {
         "Nexus Mods • ActualUploader • Original creator: ExampleAuthor",
       ),
     ).toBeTruthy();
+  });
+
+  it("loads published Nexus dependencies for the selected library update", async () => {
+    apiMocks.getModLibrary.mockResolvedValue({
+      downloaded: [
+        makeEntry({
+          storageId: "pack-rat-library",
+          displayName: "Pack Rat",
+          source: "nexusmods",
+          sourceId: "1629",
+          tags: ["nexus-file-id:301"],
+          installedVersion: "1.0.0",
+          updateAvailable: true,
+          remoteVersion: "1.1.0",
+        }),
+      ],
+    });
+    apiMocks.getNexusModsModFiles.mockResolvedValue([
+      {
+        file_id: 301,
+        name: "Pack Rat Mono 1.0.0",
+        file_name: "PackRat-mono-1.0.0.zip",
+        version: "1.0.0",
+        mod_version: "1.0.0",
+        category_name: "MAIN",
+        is_primary: true,
+        uploaded_timestamp: 1000,
+      },
+    ]);
+    apiMocks.getNexusModFileDependencies.mockResolvedValue({
+      sourceVersionId: "301",
+      requirements: [
+        {
+          id: "dependency-777",
+          candidates: [
+            {
+              modId: "777",
+              modName: "Library Helper",
+              modFileId: "44",
+              modFileName: "LibraryHelper.zip",
+              versionId: "44",
+              versionGameScopedId: "44",
+              version: "1.2.3",
+            },
+          ],
+        },
+      ],
+    });
+
+    renderLibraryOverlay({
+      navigationState: {
+        libraryTab: "updates",
+        activeModView: {
+          kind: "downloaded",
+          id: "nexusmods::1629::file::301",
+          name: "Pack Rat",
+          source: "nexusmods",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getNexusModsModFiles).toHaveBeenCalledWith(
+        "schedule1",
+        1629,
+      );
+      expect(apiMocks.getNexusModFileDependencies).toHaveBeenCalledWith(
+        "schedule1",
+        1629,
+        301,
+      );
+    });
+    expect(screen.getByText(/Library Helper/)).toBeTruthy();
+    expect(screen.getByText("Missing")).toBeTruthy();
   });
 
   it("ignores stale Nexus file responses after search results are pruned", async () => {

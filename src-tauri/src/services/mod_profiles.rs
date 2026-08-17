@@ -31,9 +31,84 @@ pub struct ModProfilesService {
     pool: Arc<SqlitePool>,
 }
 
+#[derive(Debug, Default)]
+pub struct RuntimeModSwitchSummary {
+    pub disabled_items: usize,
+    pub installed_items: usize,
+    pub missing_items: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 impl ModProfilesService {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
+    }
+
+    /// Disable the active items captured from the previous runtime, then install
+    /// explicitly downloaded counterparts for the environment's new runtime.
+    /// Unknown or runtime-ambiguous library entries are never crossed over.
+    pub async fn switch_environment_runtime_items(
+        &self,
+        previous_manifest: ModProfileManifest,
+        target_environment: &Environment,
+    ) -> RuntimeModSwitchSummary {
+        let mut summary = RuntimeModSwitchSummary::default();
+        let mods_service = ModsService::new(self.pool.clone());
+        let library = match mods_service.get_mod_library().await {
+            Ok(library) => library.downloaded,
+            Err(error) => {
+                summary.errors.push(format!(
+                    "Could not inspect the mod library for runtime counterparts: {}",
+                    error
+                ));
+                Vec::new()
+            }
+        };
+
+        let mut installs: HashMap<String, Vec<String>> = HashMap::new();
+        for item in previous_manifest
+            .items
+            .into_iter()
+            .filter(|item| item.enabled)
+        {
+            match toggle_profile_item(self.pool.clone(), target_environment, &item, false).await {
+                Ok(()) => summary.disabled_items += 1,
+                Err(error) => summary.errors.push(format!(
+                    "Could not disable {} before the runtime switch: {}",
+                    item.name, error
+                )),
+            }
+
+            match resolve_runtime_switch_storage_id(&library, &item, &target_environment.runtime) {
+                Some(storage_id) => installs.entry(storage_id).or_default().push(item.name),
+                None => summary.missing_items.push(item.name),
+            }
+        }
+
+        for (storage_id, item_names) in installs {
+            match mods_service
+                .install_storage_mod_to_envs(&storage_id, vec![target_environment.id.clone()])
+                .await
+            {
+                Ok(_) => summary.installed_items += item_names.len(),
+                Err(error) => {
+                    summary.missing_items.extend(item_names.iter().cloned());
+                    summary.errors.push(format!(
+                        "Could not install {} for the new runtime: {}",
+                        item_names.join(", "),
+                        error
+                    ));
+                }
+            }
+        }
+
+        summary
+            .missing_items
+            .sort_by_key(|name| name.to_ascii_lowercase());
+        summary
+            .missing_items
+            .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        summary
     }
 
     pub async fn export_environment_profile(
@@ -1326,6 +1401,53 @@ fn resolve_library_storage_id(
     None
 }
 
+fn resolve_runtime_switch_storage_id(
+    library: &[ModLibraryEntry],
+    item: &ModProfileItem,
+    target_runtime: &Runtime,
+) -> Option<String> {
+    let target_key = runtime_key(target_runtime);
+    library.iter().find_map(|entry| {
+        if let Some(storage_id) = item.storage_id.as_deref() {
+            if !library_entry_storage_id_matches(entry, storage_id) {
+                return None;
+            }
+        } else if !library_entry_source_matches(entry, item) {
+            return None;
+        }
+        if !library_entry_version_matches(entry, item) {
+            return None;
+        }
+        if let Some(source_id) = item.source_id.as_deref() {
+            if !entry
+                .source_id
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(source_id))
+            {
+                return None;
+            }
+        } else if matches!(
+            item.item_type,
+            ModProfileItemType::Plugin | ModProfileItemType::Userlib
+        ) && !library_entry_file_matches_item(entry, item)
+        {
+            return None;
+        }
+
+        entry
+            .storage_ids_by_runtime
+            .get(target_key)
+            .cloned()
+            .or_else(|| {
+                entry
+                    .available_runtimes
+                    .iter()
+                    .any(|runtime| runtime.eq_ignore_ascii_case(target_key))
+                    .then(|| entry.storage_id.clone())
+            })
+    })
+}
+
 fn installed_library_storage_id(
     library: &[ModLibraryEntry],
     environment: &Environment,
@@ -1748,6 +1870,35 @@ mod tests {
             },
             items: vec![profile_item()],
         }
+    }
+
+    #[test]
+    fn runtime_switch_never_reuses_a_single_runtime_library_entry() {
+        let entry = library_entry("mono-storage", "Author/Example", Runtime::Mono);
+        let mut item = profile_item();
+        item.storage_id = Some("mono-storage".to_string());
+
+        assert_eq!(
+            resolve_runtime_switch_storage_id(&[entry], &item, &Runtime::Il2cpp),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_switch_resolves_the_explicit_counterpart_storage_id() {
+        let mut entry = library_entry("mono-storage", "Author/Example", Runtime::Mono);
+        entry.available_runtimes = vec!["Mono".to_string(), "IL2CPP".to_string()];
+        entry.storage_ids_by_runtime = HashMap::from([
+            ("Mono".to_string(), "mono-storage".to_string()),
+            ("IL2CPP".to_string(), "il2cpp-storage".to_string()),
+        ]);
+        let mut item = profile_item();
+        item.storage_id = Some("mono-storage".to_string());
+
+        assert_eq!(
+            resolve_runtime_switch_storage_id(&[entry], &item, &Runtime::Il2cpp).as_deref(),
+            Some("il2cpp-storage")
+        );
     }
 
     fn test_environment(runtime: Runtime) -> Environment {

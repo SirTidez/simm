@@ -112,12 +112,13 @@ pub async fn reveal_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn launch_game(
+    app: AppHandle,
     db: State<'_, Arc<SqlitePool>>,
     environment_id: String,
     launch_method: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service
+    let mut env = env_service
         .get_environment(&environment_id)
         .await
         .map_err(|e| e.to_string())?
@@ -142,6 +143,29 @@ pub async fn launch_game(
                 "Launch requested for environment {} before download completed",
                 environment_id
             )))
+        }
+    }
+
+    if let Some(runtime_switch) = env_service
+        .reconcile_steam_env_branch_runtime_from_disk(&mut env)
+        .await
+        .map_err(|error| {
+            command_error(format!(
+                "Failed to refresh the Steam branch before launch: {}",
+                error
+            ))
+        })?
+    {
+        let switch_errors = runtime_switch.errors.clone();
+        let _ = crate::events::emit_runtime_switch(&app, runtime_switch);
+        let _ = crate::events::emit_mods_changed(&app, environment_id.clone());
+        let _ = crate::events::emit_plugins_changed(&app, environment_id.clone());
+        let _ = crate::events::emit_userlibs_changed(&app, environment_id.clone());
+        if !switch_errors.is_empty() {
+            return Err(command_error(format!(
+                "SIMM detected a Steam runtime switch but could not complete it safely: {}",
+                switch_errors.join(" ")
+            )));
         }
     }
 

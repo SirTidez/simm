@@ -2034,9 +2034,11 @@ export function EnvironmentList({
               </div>
               <div className="environment-card__identity-badges">
                 <span className={`badge ${env.runtime?.toLowerCase() === 'mono' ? 'badge-orange-red' : 'badge-blue'}`}>
-                  {isSteam && !['main', 'beta', 'alternate', 'alternate-beta'].includes(env.branch.toLowerCase())
-                    ? `Closed beta (${env.branch})`
-                    : env.branch}
+                  {isSteam && ['main', 'public'].includes(env.branch.toLowerCase())
+                    ? 'Public'
+                    : isSteam && !['beta', 'alternate', 'alternate-beta'].includes(env.branch.toLowerCase())
+                      ? `Closed beta (${env.branch})`
+                      : env.branch}
                 </span>
                 <span className="badge badge-gray">{env.runtime}</span>
                 {isSteam && <SteamBadge />}

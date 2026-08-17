@@ -1692,6 +1692,7 @@ export function ModLibraryOverlay({
   const nexusDependencyRequestRef = useRef(
     new Map<string, Promise<NexusModFileDependencies | null>>(),
   );
+  const nexusDependencyStateRef = useRef(nexusDependencyState);
   const pendingSecurityGateResolutionRef = useRef<
     ((result?: any) => void) | null
   >(null);
@@ -1707,6 +1708,10 @@ export function ModLibraryOverlay({
   useEffect(() => {
     navigationChangeHandlerRef.current = onNavigationStateChange;
   }, [onNavigationStateChange]);
+
+  useEffect(() => {
+    nexusDependencyStateRef.current = nexusDependencyState;
+  }, [nexusDependencyState]);
 
   const reportedNavigationState = useMemo<ModLibraryNavigationState>(
     () => ({
@@ -2089,10 +2094,11 @@ export function ModLibraryOverlay({
   const loadNexusDependencyReport = useCallback(
     async (modId: number, fileId: number): Promise<NexusModFileDependencies | null> => {
       const key = `${modId}:${fileId}`;
-      if (nexusDependencyState.key === key && nexusDependencyState.report) {
-        return nexusDependencyState.report;
+      const currentState = nexusDependencyStateRef.current;
+      if (currentState.key === key && currentState.report) {
+        return currentState.report;
       }
-      if (nexusDependencyState.key === key && nexusDependencyState.error) {
+      if (currentState.key === key && currentState.error) {
         return null;
       }
       const pendingRequest = nexusDependencyRequestRef.current.get(key);
@@ -2145,20 +2151,38 @@ export function ModLibraryOverlay({
       nexusDependencyRequestRef.current.set(key, request);
       return request;
     },
-    [nexusDependencyState],
+    [],
   );
 
   const selectedNexusModId = useMemo(() => {
-    if (activeModView?.kind !== "nexusmods") {
+    if (activeModView?.kind === "nexusmods") {
+      return (
+        nexusModsSearchResults.find(
+          (modItem) => String(modItem.mod_id) === activeModView.id,
+        )?.mod_id ?? null
+      );
+    }
+
+    if (activeModView?.kind !== "downloaded") {
       return null;
     }
 
-    return (
-      nexusModsSearchResults.find(
-        (modItem) => String(modItem.mod_id) === activeModView.id,
-      )?.mod_id ?? null
+    const group = downloadedGroups.find(
+      (candidate) => candidate.key === activeModView.id,
     );
-  }, [activeModView, nexusModsSearchResults]);
+    const selectedStorageId = group
+      ? selectedStorageByGroup[group.key]
+      : undefined;
+    const entry =
+      group?.entries.find((candidate) => candidate.storageId === selectedStorageId) ||
+      group?.entries[0];
+    if (entry?.source !== "nexusmods") {
+      return null;
+    }
+
+    const modId = Number(entry.sourceId);
+    return Number.isSafeInteger(modId) && modId > 0 ? modId : null;
+  }, [activeModView, downloadedGroups, nexusModsSearchResults, selectedStorageByGroup]);
 
   const loadLibrarySnapshot = useCallback(async () => {
     try {
@@ -2632,6 +2656,9 @@ export function ModLibraryOverlay({
     const activeModIds = new Set(
       nexusModsSearchResults.map((modItem) => modItem.mod_id),
     );
+    if (selectedNexusModId !== null) {
+      activeModIds.add(selectedNexusModId);
+    }
     activeNexusModIdsRef.current = activeModIds;
     nexusModsFileRequestTokenRef.current.forEach((_, modId) => {
       if (!activeModIds.has(modId)) {
@@ -2691,11 +2718,10 @@ export function ModLibraryOverlay({
       });
       return changed ? next : prev;
     });
-  }, [nexusModsSearchResults]);
+  }, [nexusModsSearchResults, selectedNexusModId]);
 
   useEffect(() => {
     if (
-      !showNexusModsResults ||
       selectedNexusModId === null ||
       nexusModsFiles.has(selectedNexusModId) ||
       nexusModsLoading.has(selectedNexusModId)
@@ -2705,7 +2731,6 @@ export function ModLibraryOverlay({
 
     void handleLoadNexusModFiles(selectedNexusModId);
   }, [
-    showNexusModsResults,
     selectedNexusModId,
     nexusModsFiles,
     nexusModsLoading,
@@ -6531,46 +6556,69 @@ export function ModLibraryOverlay({
   }, [activeModView, nexusModsSearchResults]);
 
   const selectedNexusFiles = useMemo(() => {
-    if (!selectedNexusResult) {
+    if (selectedNexusModId === null) {
       return [];
     }
     return sortNexusFilesNewestFirst(
-      nexusModsFiles.get(selectedNexusResult.mod_id) || [],
+      nexusModsFiles.get(selectedNexusModId) || [],
     );
-  }, [nexusModsFiles, selectedNexusResult]);
+  }, [nexusModsFiles, selectedNexusModId]);
 
-  const selectedNexusFile = useMemo(() => {
-    if (!selectedNexusResult) {
+  const selectedNexusStoredFileId = useMemo(() => {
+    if (selectedDownloadedEntry?.source !== "nexusmods") {
       return null;
     }
-    const selectedFileId = selectedNexusFileByModId[selectedNexusResult.mod_id];
+    const fileId = Number(getNexusFileIdFromTags(selectedDownloadedEntry.tags));
+    return Number.isSafeInteger(fileId) && fileId > 0 ? fileId : null;
+  }, [selectedDownloadedEntry]);
+
+  const selectedNexusFile = useMemo(() => {
+    if (selectedNexusModId === null) {
+      return null;
+    }
+    if (selectedNexusStoredFileId !== null) {
+      return (
+        selectedNexusFiles.find(
+          (file) => file.file_id === selectedNexusStoredFileId,
+        ) || null
+      );
+    }
+    const selectedFileId =
+      selectedNexusFileByModId[selectedNexusModId];
     return (
       selectedNexusFiles.find((file) => file.file_id === selectedFileId) ||
       selectedNexusFiles[0] ||
       null
     );
-  }, [selectedNexusFileByModId, selectedNexusFiles, selectedNexusResult]);
+  }, [
+    selectedNexusFileByModId,
+    selectedNexusFiles,
+    selectedNexusModId,
+    selectedNexusStoredFileId,
+  ]);
 
   useEffect(() => {
-    if (!selectedNexusResult || !selectedNexusFile?.file_id) {
-      setNexusDependencyState({
-        key: null,
-        loading: false,
-        report: null,
-        error: null,
+    if (selectedNexusModId === null || !selectedNexusFile?.file_id) {
+      setNexusDependencyState((previous) => {
+        if (
+          previous.key === null &&
+          !previous.loading &&
+          previous.report === null &&
+          previous.error === null
+        ) {
+          return previous;
+        }
+        return { key: null, loading: false, report: null, error: null };
       });
       return;
     }
 
-    void loadNexusDependencyReport(
-      selectedNexusResult.mod_id,
-      selectedNexusFile.file_id,
-    );
-  }, [loadNexusDependencyReport, selectedNexusFile?.file_id, selectedNexusResult]);
+    void loadNexusDependencyReport(selectedNexusModId, selectedNexusFile.file_id);
+  }, [loadNexusDependencyReport, selectedNexusFile?.file_id, selectedNexusModId]);
 
   const selectedNexusDependencyKey =
-    selectedNexusResult && selectedNexusFile?.file_id
-      ? `${selectedNexusResult.mod_id}:${selectedNexusFile.file_id}`
+    selectedNexusModId !== null && selectedNexusFile?.file_id
+      ? `${selectedNexusModId}:${selectedNexusFile.file_id}`
       : null;
   const selectedNexusDependencies =
     nexusDependencyState.key === selectedNexusDependencyKey
@@ -6594,15 +6642,15 @@ export function ModLibraryOverlay({
   }, [findDownloadedGroupForThunderstorePackage, selectedThunderstorePackage]);
 
   const downloadedGroupForSelectedNexus = useMemo(() => {
-    if (!selectedNexusResult) {
+    if (selectedNexusModId === null) {
       return null;
     }
     return findDownloadedGroupForNexusMod(
-      selectedNexusResult.mod_id,
+      selectedNexusModId,
       undefined,
       selectedNexusFile?.file_id ?? undefined,
     );
-  }, [findDownloadedGroupForNexusMod, selectedNexusFile, selectedNexusResult]);
+  }, [findDownloadedGroupForNexusMod, selectedNexusFile, selectedNexusModId]);
 
   const selectedThunderstoreDownloadedEntry = useMemo(() => {
     if (!downloadedGroupForSelectedThunderstore) {
@@ -6659,26 +6707,33 @@ export function ModLibraryOverlay({
   }, [selectedThunderstorePackage, selectedThunderstoreVersionOptions]);
 
   useEffect(() => {
-    if (!selectedNexusResult || selectedNexusFiles.length === 0) {
+    if (selectedNexusModId === null || selectedNexusFiles.length === 0) {
       return;
     }
 
     setSelectedNexusFileByModId((prev) => {
       if (
-        prev[selectedNexusResult.mod_id] &&
+        prev[selectedNexusModId] &&
         selectedNexusFiles.some(
-          (file) => file.file_id === prev[selectedNexusResult.mod_id],
+          (file) => file.file_id === prev[selectedNexusModId],
         )
       ) {
         return prev;
       }
 
+      const storedFile = selectedNexusFiles.find(
+        (file) => file.file_id === selectedNexusStoredFileId,
+      );
+      if (selectedNexusStoredFileId !== null && !storedFile) {
+        return prev;
+      }
+
       return {
         ...prev,
-        [selectedNexusResult.mod_id]: selectedNexusFiles[0].file_id,
+        [selectedNexusModId]: storedFile?.file_id || selectedNexusFiles[0].file_id,
       };
     });
-  }, [selectedNexusFiles, selectedNexusResult]);
+  }, [selectedNexusFiles, selectedNexusModId, selectedNexusStoredFileId]);
 
   useEffect(() => {
     if (!isOpen || openedFromLogs.active || libraryTab === "discover") {
@@ -7656,13 +7711,14 @@ export function ModLibraryOverlay({
                     </strong>
                   </div>
                 </div>
-                <section
-                  className="workspace-inspector-card__subsection workspace-inspector-card__subsection--dependencies"
-                  aria-labelledby="nexus-inspector-dependencies"
-                >
+                {selectedDownloadedEntry.source === "nexusmods" && (
+                  <section
+                    className="workspace-inspector-card__subsection workspace-inspector-card__subsection--dependencies"
+                    aria-labelledby="nexus-downloaded-inspector-dependencies"
+                  >
                   <div className="workspace-inspector-card__subsection-header">
                     <div>
-                      <h4 id="nexus-inspector-dependencies">
+                      <h4 id="nexus-downloaded-inspector-dependencies">
                         Required dependencies
                       </h4>
                       <p>
@@ -7722,10 +7778,13 @@ export function ModLibraryOverlay({
                     )
                   ) : (
                     <InspectorCardEmpty>
-                      Select a file to check its published dependencies.
+                      {selectedNexusStoredFileId !== null
+                        ? "The stored Nexus file is no longer available to inspect."
+                        : "Select a file to check its published dependencies."}
                     </InspectorCardEmpty>
                   )}
-                </section>
+                  </section>
+                )}
                 <div className="workspace-inspector-card__field">
                   <label
                     htmlFor={`mod-library-version-${selectedDownloadedGroup.key}`}
