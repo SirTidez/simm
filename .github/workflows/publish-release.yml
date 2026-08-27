@@ -37,6 +37,14 @@ jobs:
             throw "Release version metadata is not aligned. package.json=$packageVersion tauri=$tauriVersion Cargo.toml=$cargoVersion Cargo.lock=$lockVersion"
           }
 
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --version-only `
+            --channel stable `
+            --package-version $packageVersion
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Stable release version identity validation failed.'
+          }
+
       - name: Type check frontend
         run: bunx tsc --noEmit
 
@@ -310,6 +318,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Build and validate release checksums
+        shell: pwsh
+        run: |
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $checksumPath = Join-Path 'artifacts' 'SHA256SUMS'
+          $checksumLines = @(Get-ChildItem -Path 'artifacts' -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          })
+          Set-Content -LiteralPath $checksumPath -Encoding ascii -Value $checksumLines
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --artifacts-only `
+            --artifact-dir artifacts `
+            --package-version $version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Stable release artifact validation failed.'
+          }
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -349,6 +375,8 @@ jobs:
 
           .\scripts\generate-updater-manifest.ps1 `
             -Version $version `
+            -Channel Stable `
+            -PackageVersion $version `
             -AssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($windowsInstaller.Name)" `
             -SignaturePath $windowsSignature.FullName `
             -LinuxAssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($linuxAppImage.Name)" `
@@ -356,6 +384,15 @@ jobs:
             -OutputPath 'updater/stable/latest.json' `
             -Notes ($release.body ?? '') `
             -PubDate $publishedAtIso
+
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --manifest updater/stable/latest.json `
+            --channel stable `
+            --package-version $version `
+            --artifact-dir artifacts
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Generated Stable updater manifest validation failed.'
+          }
 
           $manifest = Get-Content 'updater/stable/latest.json' -Raw | ConvertFrom-Json
           $windowsPlatform = $manifest.platforms.'windows-x86_64'

@@ -254,7 +254,32 @@ describe('ProfilesWorkspace', () => {
     await waitFor(() => {
       expect(apiMocks.applyModProfile).toHaveBeenCalledWith('profile-il2cpp', 'il2cpp-env');
     });
-    expect(apiMocks.launchGame).toHaveBeenCalledWith('il2cpp-env', 'steam');
+    await waitFor(() => {
+      expect(apiMocks.launchGame).toHaveBeenCalledWith('il2cpp-env', 'steam');
+    });
+  });
+
+  it('freezes the target selector while a profile apply is in flight', async () => {
+    let resolveApply: (() => void) | undefined;
+    apiMocks.applyModProfile.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveApply = () => resolve({
+        plan,
+        installed: 0,
+        skipped: 1,
+        unresolved: 0,
+        messages: [],
+      });
+    }));
+
+    render(<ProfilesWorkspace />);
+    await screen.findByRole('button', { name: /Default IL2CPP/i });
+    fireEvent.click(screen.getByRole('button', { name: /^Apply$/i }));
+
+    expect(apiMocks.applyModProfile).toHaveBeenCalledWith('profile-il2cpp', 'il2cpp-env');
+    expect(screen.getByLabelText(/target environment/i)).toBeDisabled();
+
+    resolveApply?.();
+    await waitFor(() => expect(screen.getByLabelText(/target environment/i)).not.toBeDisabled());
   });
 
   it('creates a new profile from selected target items', async () => {

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -14,7 +14,7 @@ use crate::services::environment::EnvironmentService;
 use crate::services::logs::LogsService;
 use crate::services::telemetry::TelemetryService;
 use crate::services::telemetry_upload::TelemetryUploadService;
-use crate::types::{LiveTelemetrySession, TelemetryPreferences};
+use crate::types::{LiveTelemetrySession, TelemetryPreferences, TelemetrySessionEndReason};
 
 const PROCESS_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
 const LOG_RECONCILIATION_LINES: usize = 500;
@@ -64,13 +64,34 @@ impl GameSessionMonitor {
         let mut preferences = telemetry.get_preferences().await?;
         let mut active = HashMap::<String, ActiveSession>::new();
         let mut watchers = HashMap::<String, RecommendedWatcher>::new();
+        match running_schedule_directories().await {
+            Ok(running_directories) => {
+                let recovered = telemetry
+                    .reconcile_unfinished_sessions(&running_directories)
+                    .await?;
+                for session_id in recovered {
+                    if let Some(receipt) = TelemetryUploadService::new(self.pool.clone())
+                        .queue_finished_session(&session_id)
+                        .await?
+                    {
+                        let _ = self.app.emit("live_telemetry_upload", &receipt);
+                    }
+                }
+            }
+            Err(error) => log::warn!(
+                "Deferred unfinished telemetry-session recovery because process discovery failed: {}",
+                error
+            ),
+        }
         let mut interval = tokio::time::interval(PROCESS_RECONCILIATION_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    self.reconcile(&preferences, &mut active, &mut watchers, &change_tx, true).await?;
+                    if let Err(error) = self.reconcile(&preferences, &mut active, &mut watchers, &change_tx, true).await {
+                        log::warn!("Live telemetry reconciliation will retry: {}", error);
+                    }
                 }
                 Some(environment_id) = change_rx.recv() => {
                     let mut changed = HashSet::from([environment_id]);
@@ -78,12 +99,16 @@ impl GameSessionMonitor {
                         changed.insert(next_environment_id);
                     }
                     for environment_id in changed {
-                        self.ingest_environment(&environment_id, &mut active, "live", false, &preferences).await?;
+                        if let Err(error) = self.ingest_environment(&environment_id, &mut active, "live", false, &preferences).await {
+                            log::warn!("Failed to ingest telemetry log changes for {}: {}", environment_id, error);
+                        }
                     }
                 }
                 Some(updated_preferences) = preferences_rx.recv() => {
                     preferences = updated_preferences;
-                    self.reconcile(&preferences, &mut active, &mut watchers, &change_tx, false).await?;
+                    if let Err(error) = self.reconcile(&preferences, &mut active, &mut watchers, &change_tx, false).await {
+                        log::warn!("Failed to apply telemetry preference reconciliation: {}", error);
+                    }
                 }
             }
         }
@@ -98,14 +123,19 @@ impl GameSessionMonitor {
         reconcile_logs: bool,
     ) -> Result<()> {
         if !preferences.collection_enabled {
-            self.stop_all(active, watchers).await?;
+            self.stop_all(
+                active,
+                watchers,
+                TelemetrySessionEndReason::CollectionDisabled,
+            )
+            .await?;
             return Ok(());
         }
 
         let environments = EnvironmentService::new(self.pool.clone())?
             .get_environments()
             .await?;
-        let running_directories = running_schedule_directories().await;
+        let running_directories = running_schedule_directories().await?;
         let known_ids = environments
             .iter()
             .map(|environment| environment.id.clone())
@@ -138,8 +168,13 @@ impl GameSessionMonitor {
                 self.ingest_environment(&environment.id, active, "attach", true, preferences)
                     .await?;
             } else if !running && active.contains_key(&environment.id) {
-                self.stop_environment(&environment.id, active, watchers)
-                    .await?;
+                self.stop_environment(
+                    &environment.id,
+                    active,
+                    watchers,
+                    TelemetrySessionEndReason::GameExited,
+                )
+                .await?;
             }
         }
 
@@ -149,8 +184,13 @@ impl GameSessionMonitor {
             .cloned()
             .collect::<Vec<_>>();
         for environment_id in stale_ids {
-            self.stop_environment(&environment_id, active, watchers)
-                .await?;
+            self.stop_environment(
+                &environment_id,
+                active,
+                watchers,
+                TelemetrySessionEndReason::EnvironmentRemoved,
+            )
+            .await?;
         }
 
         if reconcile_logs {
@@ -252,11 +292,18 @@ impl GameSessionMonitor {
         environment_id: &str,
         active: &mut HashMap<String, ActiveSession>,
         watchers: &mut HashMap<String, RecommendedWatcher>,
+        reason: TelemetrySessionEndReason,
     ) -> Result<()> {
-        if let Some(active_session) = active.remove(environment_id) {
+        if let Some(active_session) = active.get(environment_id) {
             TelemetryService::new(self.pool.clone())
-                .end_live_session(&active_session.session.session_id)
+                .end_live_session(&active_session.session.session_id, reason)
                 .await?;
+            // Keep the in-memory session and watcher intact until the durable
+            // end write succeeds. A transient SQLite failure is retried on the
+            // next reconciliation instead of silently orphaning the row.
+            let active_session = active
+                .remove(environment_id)
+                .expect("active telemetry session must still exist after durable end");
             match TelemetryUploadService::new(self.pool.clone())
                 .queue_finished_session(&active_session.session.session_id)
                 .await
@@ -280,10 +327,11 @@ impl GameSessionMonitor {
         &self,
         active: &mut HashMap<String, ActiveSession>,
         watchers: &mut HashMap<String, RecommendedWatcher>,
+        reason: TelemetrySessionEndReason,
     ) -> Result<()> {
         let ids = active.keys().cloned().collect::<Vec<_>>();
         for id in ids {
-            self.stop_environment(&id, active, watchers).await?;
+            self.stop_environment(&id, active, watchers, reason).await?;
         }
         Ok(())
     }
@@ -301,34 +349,37 @@ impl GameSessionMonitor {
     }
 }
 
-async fn running_schedule_directories() -> HashSet<String> {
+async fn running_schedule_directories() -> Result<HashSet<String>> {
     let paths = tokio::task::spawn_blocking(discover_schedule_process_paths)
         .await
-        .unwrap_or_default();
-    paths
+        .context("Schedule I process discovery task failed")??;
+    Ok(paths
         .into_iter()
         .map(|path| normalize_path(&path))
-        .collect()
+        .collect())
 }
 
 #[cfg(windows)]
-fn discover_schedule_process_paths() -> Vec<PathBuf> {
+fn discover_schedule_process_paths() -> Result<Vec<PathBuf>> {
     let script = "Get-CimInstance Win32_Process -Filter \"Name = 'Schedule I.exe'\" | Select-Object ExecutablePath | ConvertTo-Json -Compress";
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) else {
-        return Vec::new();
-    };
+    let output = output.context("Failed to start Schedule I process discovery")?;
+    if !output.status.success() {
+        return Err(anyhow!("Schedule I process discovery command failed"));
+    }
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout)
+        .context("Schedule I process discovery returned invalid JSON")?;
     let values = match value {
         Value::Array(values) => values,
         Value::Object(_) => vec![value],
         _ => Vec::new(),
     };
-    values
+    Ok(values
         .into_iter()
         .filter_map(|value| {
             value
@@ -337,15 +388,13 @@ fn discover_schedule_process_paths() -> Vec<PathBuf> {
                 .map(PathBuf::from)
         })
         .filter_map(|path| path.parent().map(Path::to_path_buf))
-        .collect()
+        .collect())
 }
 
 #[cfg(target_os = "linux")]
-fn discover_schedule_process_paths() -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
+fn discover_schedule_process_paths() -> Result<Vec<PathBuf>> {
+    let entries = std::fs::read_dir("/proc").context("Failed to read process list")?;
+    Ok(entries
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             entry
@@ -371,12 +420,12 @@ fn discover_schedule_process_paths() -> Vec<PathBuf> {
                 })
                 .next()
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn discover_schedule_process_paths() -> Vec<PathBuf> {
-    Vec::new()
+fn discover_schedule_process_paths() -> Result<Vec<PathBuf>> {
+    Ok(Vec::new())
 }
 
 fn normalize_path(path: &Path) -> String {

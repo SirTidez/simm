@@ -6,15 +6,10 @@ import { AuthenticationModal } from './AuthenticationModal';
 const apiMocks = vi.hoisted(() => ({
   authenticate: vi.fn(),
   authenticateQr: vi.fn(),
-  saveCredentials: vi.fn(),
 }));
 
 const eventMocks = vi.hoisted(() => ({
   onSteamAuthQrLine: vi.fn(),
-}));
-
-const settingsStoreMocks = vi.hoisted(() => ({
-  useSettingsStore: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
@@ -25,23 +20,12 @@ vi.mock('../services/events', () => ({
   onSteamAuthQrLine: eventMocks.onSteamAuthQrLine,
 }));
 
-vi.mock('../stores/settingsStore', () => ({
-  useSettingsStore: settingsStoreMocks.useSettingsStore,
-}));
-
 describe('AuthenticationModal', () => {
-  const updateSettings = vi.fn();
-
   beforeEach(() => {
     apiMocks.authenticate.mockReset();
     apiMocks.authenticateQr.mockReset();
-    apiMocks.saveCredentials.mockReset();
     eventMocks.onSteamAuthQrLine.mockReset();
     eventMocks.onSteamAuthQrLine.mockResolvedValue(vi.fn());
-    updateSettings.mockReset();
-    settingsStoreMocks.useSettingsStore.mockReturnValue({
-      updateSettings,
-    });
   });
 
   afterEach(() => {
@@ -51,8 +35,6 @@ describe('AuthenticationModal', () => {
   it('submits credentials and preserves the existing authenticated payload', async () => {
     const onAuthenticated = vi.fn();
     apiMocks.authenticate.mockResolvedValue({ success: true });
-    apiMocks.saveCredentials.mockResolvedValue(undefined);
-    updateSettings.mockResolvedValue(undefined);
 
     render(
       <AuthenticationModal
@@ -84,8 +66,6 @@ describe('AuthenticationModal', () => {
   it('omits a blank Steam Guard code for password auth', async () => {
     const onAuthenticated = vi.fn();
     apiMocks.authenticate.mockResolvedValue({ success: true });
-    apiMocks.saveCredentials.mockResolvedValue(undefined);
-    updateSettings.mockResolvedValue(undefined);
 
     render(
       <AuthenticationModal
@@ -107,10 +87,33 @@ describe('AuthenticationModal', () => {
     });
   });
 
+  it('passes one-time password authentication through without persistence', async () => {
+    const onAuthenticated = vi.fn();
+    apiMocks.authenticate.mockResolvedValue({ success: true });
+
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={onAuthenticated}
+        required={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: /Password/ }));
+    fireEvent.change(screen.getByLabelText('Steam Username'), { target: { value: 'steam-user' } });
+    fireEvent.change(screen.getByLabelText('Steam Password'), { target: { value: 'secret-pass' } });
+    fireEvent.click(screen.getByText('Remember credentials securely'));
+    fireEvent.click(screen.getByRole('button', { name: 'Authenticate with Steam' }));
+
+    await waitFor(() => {
+      expect(apiMocks.authenticate).toHaveBeenCalledWith('steam-user', 'secret-pass', undefined, false);
+    });
+  });
+
   it('submits QR auth and stores only the returned account name', async () => {
     const onAuthenticated = vi.fn();
     apiMocks.authenticateQr.mockResolvedValue({ success: true, username: 'qr-user' });
-    updateSettings.mockResolvedValue(undefined);
 
     render(
       <AuthenticationModal
@@ -127,8 +130,6 @@ describe('AuthenticationModal', () => {
       expect(apiMocks.authenticateQr).toHaveBeenCalledWith(true);
     });
 
-    expect(apiMocks.saveCredentials).not.toHaveBeenCalled();
-    expect(updateSettings).toHaveBeenCalledWith({ steamUsername: 'qr-user' });
     expect(onAuthenticated).toHaveBeenCalledWith({
       username: 'qr-user',
       password: '',

@@ -1,3 +1,6 @@
+use crate::commands::mods::{
+    finalize_security_scan_response, prepare_security_scan_with_settings, SecurityGateResult,
+};
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem::FileSystemService;
 use crate::services::github_releases::GitHubReleasesService;
@@ -144,6 +147,7 @@ async fn upload_plugin_impl(
     original_file_name: String,
     runtime: String,
     metadata: Option<serde_json::Value>,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let env_service = EnvironmentService::new(db.clone()).map_err(|e| e.to_string())?;
     let env = env_service
@@ -166,6 +170,17 @@ async fn upload_plugin_impl(
 
     let requested_runtime = parse_plugin_runtime(&runtime, &env.runtime)?;
     let mods_service = ModsService::new(db).with_runtime_settings(settings.clone());
+    let (metadata, security_report) = match prepare_security_scan_with_settings(
+        settings,
+        &file_path,
+        metadata,
+        security_override.unwrap_or(false),
+    )
+    .await?
+    {
+        SecurityGateResult::Continue { metadata, report } => (metadata, report),
+        SecurityGateResult::EarlyResponse(response) => return Ok(response),
+    };
     let store_result = mods_service
         .store_mod_archive(
             &file_path,
@@ -206,7 +221,7 @@ async fn upload_plugin_impl(
             .collect();
     }
 
-    Ok(serde_json::json!({
+    let response = serde_json::json!({
         "success": true,
         "storageId": storage_id,
         "installedFiles": installed_files,
@@ -214,7 +229,15 @@ async fn upload_plugin_impl(
         "runtime": plugin_runtime_label(&requested_runtime),
         "storage": store_result,
         "result": install_result,
-    }))
+    });
+
+    Ok(finalize_security_scan_response(
+        &mods_service,
+        response,
+        security_report.as_ref(),
+        "installing a plugin upload",
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -404,6 +427,7 @@ pub async fn upload_plugin(
     original_file_name: String,
     runtime: String,
     metadata: Option<serde_json::Value>,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let settings = runtime_settings.snapshot().await;
     let result = upload_plugin_impl(
@@ -414,6 +438,7 @@ pub async fn upload_plugin(
         original_file_name,
         runtime,
         metadata,
+        security_override,
     )
     .await?;
 
@@ -900,6 +925,9 @@ mod tests {
         get_mlvscan_installation_status_impl, map_source_to_mod_source, response_source_label,
         upload_plugin_impl,
     };
+    use crate::commands::mods::{
+        blocked_security_scan_report_for_test, install_security_scan_test_hook,
+    };
     use crate::services::environment::EnvironmentService;
     use crate::services::plugins::PluginsService;
     use crate::services::settings::SettingsService;
@@ -996,7 +1024,8 @@ mod tests {
         let mut settings_service = SettingsService::new(pool.clone())?;
         settings_service
             .save_settings(serde_json::json!({
-                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string(),
+                "enableSecurityScanner": false
             }))
             .await?;
         let settings = settings_service.load_settings().await?;
@@ -1030,6 +1059,7 @@ mod tests {
                 "sourceId": "local/uploaded-plugin",
                 "sourceVersion": "1.0.0"
             })),
+            None,
         )
         .await
         .map_err(anyhow::Error::msg)?;
@@ -1067,6 +1097,68 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn upload_plugin_blocks_once_before_storage_or_plugin_materialization(
+    ) -> anyhow::Result<()> {
+        let (temp, _guard, pool) = init_test_pool_with_temp_data_dir().await?;
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool.clone())?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string(),
+                "enableSecurityScanner": false
+            }))
+            .await?;
+        let settings = settings_service.load_settings().await?;
+
+        let env_root = tempdir()?;
+        let output_dir = env_root.path().join("env-plugin-blocked");
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let source_dll = env_root.path().join("BlockedPlugin.dll");
+        fs::write(&source_dll, b"plugin-bytes").await?;
+        let scan_hook = install_security_scan_test_hook(
+            source_dll.to_string_lossy().to_string(),
+            blocked_security_scan_report_for_test(),
+        );
+
+        let response = upload_plugin_impl(
+            pool,
+            &settings,
+            env.id,
+            source_dll.to_string_lossy().to_string(),
+            "BlockedPlugin.dll".to_string(),
+            "IL2CPP".to_string(),
+            Some(serde_json::json!({ "source": "local" })),
+            // A caller-provided override may bypass a review confirmation, but
+            // never a blocked/unavailable policy.
+            Some(true),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert_eq!(scan_hook.call_count(), 1);
+        assert_eq!(
+            response
+                .get("securityScanBlocked")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(!download_dir.join("Mods").exists());
+        assert!(!output_dir.join("Plugins").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn upload_plugin_zip_with_root_dll_materializes_to_plugins_not_mods() -> anyhow::Result<()>
     {
         let (temp, _guard, pool) = init_test_pool_with_temp_data_dir().await?;
@@ -1074,7 +1166,8 @@ mod tests {
         let mut settings_service = SettingsService::new(pool.clone())?;
         settings_service
             .save_settings(serde_json::json!({
-                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string(),
+                "enableSecurityScanner": false
             }))
             .await?;
         let settings = settings_service.load_settings().await?;
@@ -1109,6 +1202,7 @@ mod tests {
             "LoosePlugin.zip".to_string(),
             "IL2CPP".to_string(),
             Some(serde_json::json!({ "source": "local" })),
+            None,
         )
         .await
         .map_err(anyhow::Error::msg)?;

@@ -25,6 +25,17 @@ export interface DownloadProgress {
   error?: string;
 }
 
+/**
+ * Credentials supplied only for the DepotDownloader child started by a single
+ * download request. They must not be retained in frontend state or settings.
+ */
+export interface OneTimeDownloadCredentials {
+  username: string;
+  password: string;
+  steamGuard?: string;
+  saveCredentials: boolean;
+}
+
 export type Runtime = 'IL2CPP' | 'Mono' | 'MONO';
 
 export type TrackedDownloadKind = 'game' | 'mod' | 'plugin' | 'framework';
@@ -144,6 +155,7 @@ export interface GameSaveRestorePreview {
   slotNumber: number;
   sourceLabel: string;
   sourcePath: string;
+  restoreToken: string | null;
   current: GameSaveSlot;
   restored: GameSaveSlot;
 }
@@ -255,14 +267,22 @@ export interface BranchConfig {
   requiresAuth: boolean;
 }
 
-export interface AppUpdatePreferences {
+export interface AppUpdateChannelPreferences {
   lastCheckedAt?: string | null;
   lastSeenVersionRaw?: string | null;
   lastSeenVersionNormalized?: string | null;
   lastResolvedUrl?: string | null;
   snoozedUntil?: string | null;
   skippedVersionNormalized?: string | null;
+}
+
+export interface AppUpdatePreferences extends AppUpdateChannelPreferences {
   channel?: AppUpdateChannel | null;
+  /**
+   * Channel-scoped updater history and suppression state. The legacy flat
+   * fields above remain readable while existing settings rows are migrated.
+   */
+  byChannel?: Partial<Record<AppUpdateChannel, AppUpdateChannelPreferences>> | null;
 }
 
 export type AppUpdateChannel = 'stable' | 'beta';
@@ -391,6 +411,17 @@ export interface TelemetryPreferencesUpdate {
   protectLocalMods?: boolean | null;
 }
 
+export interface TelemetryCapability {
+  available: boolean;
+}
+
+export type TelemetrySessionEndReason =
+  | 'game_exited'
+  | 'collection_disabled'
+  | 'environment_removed'
+  | 'interrupted_process_running'
+  | 'interrupted_process_missing';
+
 export type TelemetryModCaptureMode = 'share' | 'local_only' | 'ignore';
 
 export interface TelemetryModPolicyItem {
@@ -413,6 +444,7 @@ export interface LiveTelemetrySession {
   environmentId: string;
   startedAt: string;
   endedAt?: string | null;
+  endReason?: TelemetrySessionEndReason | null;
   environment: ModTelemetryEnvironment;
   mods: ModTelemetryModEntry[];
   monitoring: boolean;

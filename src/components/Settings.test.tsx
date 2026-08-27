@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 import {
@@ -34,6 +35,8 @@ const apiMocks = vi.hoisted(() => ({
   createDirectory: vi.fn(),
   backupDatabase: vi.fn(),
   getHomeDirectory: vi.fn(),
+  getBackupsDirectory: vi.fn(),
+  getTelemetryCapability: vi.fn(),
   openPath: vi.fn(),
 }));
 
@@ -181,20 +184,53 @@ describe("Settings", () => {
       path: "C:\\Users\\SirTidez\\SIMM\\backups\\SIMM-db-backup-manual-20260326-034426.db",
     });
     apiMocks.getHomeDirectory.mockResolvedValue("C:\\Users\\SirTidez\\SIMM");
+    apiMocks.getBackupsDirectory.mockResolvedValue("C:\\Users\\SirTidez\\SIMM\\backups");
+    apiMocks.getTelemetryCapability.mockResolvedValue({ available: true });
     apiMocks.openPath.mockResolvedValue(undefined);
   });
 
-  it("hides telemetry controls while the telemetry feature flag is disabled", async () => {
+  it("hides telemetry controls when backend capability is unavailable", async () => {
+    apiMocks.getTelemetryCapability.mockResolvedValueOnce({ available: false });
     render(<Settings isOpen={true} onClose={vi.fn()} />);
 
-    expect(screen.queryByText("Live Telemetry")).toBeNull();
-    expect(screen.queryByRole("switch", { name: /collect local telemetry/i })).toBeNull();
+    await waitFor(() => {
+      expect(screen.queryByText("Live Telemetry")).toBeNull();
+      expect(screen.queryByRole("switch", { name: /collect local telemetry/i })).toBeNull();
+    });
   });
 
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
     vi.useRealTimers();
+  });
+
+  it("shows Stable before persisted settings finish loading", () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: null,
+      customThemes: [],
+      themesDirectory: "",
+      depotDownloader: null,
+      loading: true,
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+      refreshThemes: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+
+    const channelControl = screen.getByRole("combobox", {
+      name: /app update channel/i,
+    });
+    expect(channelControl.textContent).toContain("Stable");
+    expect(channelControl.textContent).not.toContain("Beta");
+
+    const status = screen.getByText("App Update Channel").closest(
+      ".settings-inline-status",
+    );
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText("Stable")).toBeTruthy();
+    expect(within(status as HTMLElement).queryByText("Beta")).toBeNull();
   });
 
   it("opens the directory picker from the sidebar and browses the current path", async () => {
@@ -329,6 +365,47 @@ describe("Settings", () => {
         name: /auto-install after download/i,
       }),
     ).toBeTruthy();
+  });
+
+  it("flushes a pending settings edit when the workspace closes", async () => {
+    const updateSettingsSpy = vi.fn().mockResolvedValue(undefined);
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        defaultDownloadDir: "C:\\Games",
+        maxConcurrentDownloads: 2,
+        theme: "modern-blue",
+        melonLoaderVersion: "",
+        autoInstallMelonLoader: true,
+        enableSecurityScanner: true,
+        autoInstallSecurityScanner: true,
+        blockCriticalScans: true,
+        promptOnHighScans: true,
+        showSecurityScanBadges: true,
+        updateCheckInterval: 60,
+        autoCheckUpdates: true,
+        logLevel: "info",
+        modIconCacheLimitMb: 500,
+        databaseBackupCount: 10,
+        appUpdate: { channel: "beta" as const },
+      },
+      customThemes: [],
+      themesDirectory: "C:\\Users\\SirTidez\\SIMM\\themes",
+      depotDownloader: null,
+      loading: false,
+      updateSettings: updateSettingsSpy,
+      refreshDepotDownloader: vi.fn().mockResolvedValue(undefined),
+      refreshThemes: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { rerender } = render(<Settings isOpen={true} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("switch", { name: /auto-install after download/i }));
+    rerender(<Settings isOpen={false} onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(updateSettingsSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ autoInstallMelonLoader: false }),
+      );
+    });
   });
 
   it("preserves a Linux platform value when saving settings", async () => {
@@ -494,13 +571,25 @@ describe("Settings", () => {
     );
 
     await waitFor(() => {
-      expect(apiMocks.getHomeDirectory).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getBackupsDirectory).toHaveBeenCalledTimes(1);
     });
+    expect(apiMocks.getHomeDirectory).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(apiMocks.openPath).toHaveBeenCalledWith(
         "C:\\Users\\SirTidez\\SIMM\\backups",
       );
     });
+  });
+
+  it("dispatches a manual app-update request for the selected channel", async () => {
+    const requestListener = vi.fn();
+    window.addEventListener("simm:check-app-update", requestListener);
+
+    render(<Settings isOpen={true} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /check for app updates/i }));
+
+    expect(requestListener).toHaveBeenCalledTimes(1);
+    window.removeEventListener("simm:check-app-update", requestListener);
   });
 
   it("opens the themes folder from settings", async () => {

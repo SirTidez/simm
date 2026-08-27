@@ -771,6 +771,61 @@ describe('ModsOverlay', () => {
     expect(screen.queryByText('Manual Download Required')).toBeNull();
   });
 
+  it('continues an update with securityOverride only after the security report is confirmed', async () => {
+    apiMocks.getMods.mockResolvedValue({
+      mods: [{
+        name: 'Security Update Mod',
+        fileName: 'Security.Update.Mod.dll',
+        path: 'C:/env/Mods/Security.Update.Mod.dll',
+        source: 'thunderstore',
+        managed: true,
+        disabled: false,
+        version: '1.0.0',
+      }],
+      modsDirectory: 'C:/env/Mods',
+      count: 1,
+    });
+    apiMocks.getModUpdatesSummary.mockResolvedValue({
+      count: 1,
+      updates: [{
+        modFileName: 'Security.Update.Mod.dll',
+        currentVersion: '1.0.0',
+        latestVersion: '1.1.0',
+      }],
+    });
+    apiMocks.updateMod
+      .mockResolvedValueOnce({
+        success: false,
+        securityScanConfirmationRequired: true,
+        securityScan: {
+          summary: { state: 'review', verified: false, totalFindings: 1, threatFamilyCount: 0 },
+          policy: {
+            enabled: true,
+            requiresConfirmation: true,
+            blocked: false,
+            promptOnHighFindings: false,
+            blockCriticalFindings: false,
+          },
+          files: [],
+        },
+      })
+      .mockResolvedValueOnce({ success: true });
+
+    render(<ModsOverlay isOpen={true} onClose={() => {}} environmentId="env-1" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details for Security Update Mod' }));
+    const inspector = document.querySelector('.workspace-collection__inspector') as HTMLElement;
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Update' }));
+
+    expect(await screen.findByText('Security Findings - Security Update Mod')).toBeTruthy();
+    expect(apiMocks.updateMod).toHaveBeenCalledWith('env-1', 'Security.Update.Mod.dll', false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue Install' }));
+    await waitFor(() => {
+      expect(apiMocks.updateMod).toHaveBeenLastCalledWith('env-1', 'Security.Update.Mod.dll', true);
+    });
+  });
+
   it('renders the environment grid layout and no list-mode container', async () => {
     render(
       <ModsOverlay

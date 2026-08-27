@@ -81,9 +81,17 @@ async fn refresh_mods_snapshot(
         None => ModsService::new(pool),
     };
     let snapshot = mods_service.list_mods(&environment.output_dir).await?;
-    mods_snapshot_cache::set(environment_id.to_string(), snapshot.clone()).await;
-    crate::commands::mods::invalidate_mod_library_cache("mods snapshot refreshed").await;
-    events::emit_mods_snapshot_updated(app, environment_id.to_string(), snapshot)?;
+    let replacement =
+        mods_snapshot_cache::replace_if_changed(environment_id.to_string(), snapshot.clone()).await;
+    if replacement.should_publish() {
+        crate::commands::mods::invalidate_mod_library_cache("mods snapshot changed").await;
+        events::emit_mods_snapshot_updated(app, environment_id.to_string(), snapshot)?;
+    } else {
+        log::debug!(
+            "Skipped unchanged mods snapshot event for {}",
+            environment_id
+        );
+    }
     Ok(())
 }
 

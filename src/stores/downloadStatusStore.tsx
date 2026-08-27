@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { TrackedDownload } from '../types';
 import { useEnvironmentStore } from './environmentStore';
-import { onComplete, onError, onProgress, onTrackedDownloadUpdated } from '../services/events';
+import { createAsyncListenerScope, onComplete, onError, onProgress, onTrackedDownloadUpdated } from '../services/events';
 
 interface DownloadStatusStoreContextValue {
   downloads: TrackedDownload[];
@@ -44,36 +44,60 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
   }, [environments]);
 
   const updateDownload = useCallback((download: TrackedDownload) => {
+    const normalizedDownload = isTerminal(download.status) && download.finishedAt == null
+      ? { ...download, finishedAt: Date.now() }
+      : download;
+
     setDownloadsById((previous) => {
+      const current = previous.get(normalizedDownload.id);
+      // A backend completion, cancellation, or failure is final for this
+      // operation. Late progress events must never turn that row active again.
+      if (current && isTerminal(current.status)) {
+        return previous;
+      }
+
       const next = new Map(previous);
-      next.set(download.id, download);
+      next.set(normalizedDownload.id, normalizedDownload);
       return next;
     });
 
-    const existingTimer = removalTimersRef.current.get(download.id);
-    if (existingTimer) {
-      window.clearTimeout(existingTimer);
-      removalTimersRef.current.delete(download.id);
-    }
-
-    if (isTerminal(download.status)) {
+    if (isTerminal(normalizedDownload.status)) {
+      const existingTimer = removalTimersRef.current.get(normalizedDownload.id);
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+        removalTimersRef.current.delete(normalizedDownload.id);
+      }
+      const terminalFinishedAt = normalizedDownload.finishedAt;
       const timeoutId = window.setTimeout(() => {
         setDownloadsById((previous) => {
+          const current = previous.get(normalizedDownload.id);
+          if (!current || !isTerminal(current.status) || current.finishedAt !== terminalFinishedAt) {
+            return previous;
+          }
           const next = new Map(previous);
-          next.delete(download.id);
+          next.delete(normalizedDownload.id);
           return next;
         });
-        removalTimersRef.current.delete(download.id);
+        removalTimersRef.current.delete(normalizedDownload.id);
       }, TERMINAL_ROW_TTL_MS);
-      removalTimersRef.current.set(download.id, timeoutId);
+      removalTimersRef.current.set(normalizedDownload.id, timeoutId);
     }
   }, []);
 
   const updateGameDownload = useCallback((downloadId: string, patch: Partial<TrackedDownload>) => {
     const trackedId = `game:${downloadId}`;
+    const terminalFinishedAt = patch.status && isTerminal(patch.status)
+      ? (patch.finishedAt ?? Date.now())
+      : undefined;
+    const normalizedPatch = terminalFinishedAt == null
+      ? patch
+      : { ...patch, finishedAt: terminalFinishedAt };
     setDownloadsById((previous) => {
       const next = new Map(previous);
       const current = next.get(trackedId);
+      if (current && isTerminal(current.status)) {
+        return previous;
+      }
       const now = Date.now();
       const nextDownload: TrackedDownload = {
         id: trackedId,
@@ -88,7 +112,7 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
         error: current?.error,
         startedAt: current?.startedAt ?? now,
         finishedAt: current?.finishedAt ?? null,
-        ...patch,
+        ...normalizedPatch,
       };
 
       if (isTerminal(nextDownload.status) && nextDownload.finishedAt == null) {
@@ -99,15 +123,18 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
       return next;
     });
 
-    const activeTimer = removalTimersRef.current.get(trackedId);
-    if (activeTimer) {
-      window.clearTimeout(activeTimer);
-      removalTimersRef.current.delete(trackedId);
-    }
-
-    if (patch.status && isTerminal(patch.status)) {
+    if (terminalFinishedAt != null) {
+      const activeTimer = removalTimersRef.current.get(trackedId);
+      if (activeTimer) {
+        window.clearTimeout(activeTimer);
+        removalTimersRef.current.delete(trackedId);
+      }
       const timeoutId = window.setTimeout(() => {
         setDownloadsById((previous) => {
+          const current = previous.get(trackedId);
+          if (!current || !isTerminal(current.status) || current.finishedAt !== terminalFinishedAt) {
+            return previous;
+          }
           const next = new Map(previous);
           next.delete(trackedId);
           return next;
@@ -148,13 +175,11 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
   }, [resolveGameLabel]);
 
   useEffect(() => {
-    let unlistenProgress: (() => void) | null = null;
-    let unlistenComplete: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-    let unlistenTrackedDownload: (() => void) | null = null;
+    const listeners = createAsyncListenerScope((error) => {
+      console.error('Failed to set up download status listener:', error);
+    });
 
-    const bindListeners = async () => {
-      unlistenProgress = await onProgress((progress) => {
+    listeners.register(() => onProgress((progress) => {
         updateGameDownload(progress.downloadId, {
           status: progress.status,
           progress: progress.progress,
@@ -164,9 +189,9 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
           error: progress.error,
           finishedAt: isTerminal(progress.status) ? Date.now() : null,
         });
-      });
+      }));
 
-      unlistenComplete = await onComplete(({ downloadId }) => {
+    listeners.register(() => onComplete(({ downloadId }) => {
         const current = downloadsRef.current.get(`game:${downloadId}`);
         updateGameDownload(downloadId, {
           status: 'completed',
@@ -177,31 +202,25 @@ export function DownloadStatusStoreProvider({ children }: { children: React.Reac
           error: undefined,
           finishedAt: Date.now(),
         });
-      });
+      }));
 
-      unlistenError = await onError(({ downloadId, error }) => {
+    listeners.register(() => onError(({ downloadId, error }) => {
         updateGameDownload(downloadId, {
           status: 'error',
           error,
           message: 'Download failed',
           finishedAt: Date.now(),
         });
-      });
+      }));
 
-      unlistenTrackedDownload = await onTrackedDownloadUpdated((download) => {
+    listeners.register(() => onTrackedDownloadUpdated((download) => {
         updateDownload(download);
-      });
-    };
-
-    void bindListeners();
+      }));
 
     const removalTimers = removalTimersRef.current;
 
     return () => {
-      unlistenProgress?.();
-      unlistenComplete?.();
-      unlistenError?.();
-      unlistenTrackedDownload?.();
+      listeners.dispose();
       for (const timeoutId of removalTimers.values()) {
         window.clearTimeout(timeoutId);
       }

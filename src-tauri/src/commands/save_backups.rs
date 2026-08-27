@@ -40,10 +40,10 @@ pub async fn export_game_save_backup(
 pub async fn restore_game_save_backup(
     steam_id: String,
     slot_number: u8,
-    backup_path: Option<String>,
+    restore_token: String,
 ) -> Result<GameSaveRestoreResult, String> {
     SaveBackupsService::new()
-        .restore_from_game_backup(&steam_id, slot_number, backup_path.as_deref())
+        .restore_from_game_backup(&steam_id, slot_number, &restore_token)
         .await
         .map_err(|error| error.to_string())
 }

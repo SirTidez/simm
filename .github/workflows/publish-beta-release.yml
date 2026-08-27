@@ -37,6 +37,20 @@ jobs:
             throw "Release version metadata is not aligned. package.json=$packageVersion tauri=$tauriVersion Cargo.toml=$cargoVersion Cargo.lock=$lockVersion"
           }
 
+          $stableManifestPath = 'updater/stable/latest.json'
+          if (-not (Test-Path -LiteralPath $stableManifestPath -PathType Leaf)) {
+            throw 'Beta publication requires the current updater/stable/latest.json manifest.'
+          }
+          $stableVersion = (Get-Content $stableManifestPath -Raw | ConvertFrom-Json).version
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --version-only `
+            --channel beta `
+            --package-version $packageVersion `
+            --minimum-version $stableVersion
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Beta release version identity validation failed.'
+          }
+
       - name: Type check frontend
         run: bunx tsc --noEmit
 
@@ -106,7 +120,7 @@ jobs:
           }
 
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "tag=v${version}-beta" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v${version}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Enable updater artifacts for release build
         shell: pwsh
@@ -309,6 +323,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Build and validate release checksums
+        shell: pwsh
+        run: |
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $checksumPath = Join-Path 'artifacts' 'SHA256SUMS'
+          $checksumLines = @(Get-ChildItem -Path 'artifacts' -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          })
+          Set-Content -LiteralPath $checksumPath -Encoding ascii -Value $checksumLines
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --artifacts-only `
+            --artifact-dir artifacts `
+            --package-version $version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Beta release artifact validation failed.'
+          }
+
       - name: Publish beta GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -336,6 +368,11 @@ jobs:
           $tag = '${{ needs.build-windows.outputs.tag }}'
           $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
           $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { '' }
+          $stableManifestPath = 'updater/stable/latest.json'
+          if (-not (Test-Path -LiteralPath $stableManifestPath -PathType Leaf)) {
+            throw 'Beta manifest generation requires updater/stable/latest.json.'
+          }
+          $stableVersion = (Get-Content $stableManifestPath -Raw | ConvertFrom-Json).version
 
           $windowsInstaller = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_Setup.exe" | Select-Object -First 1
           $windowsSignature = Get-ChildItem -Path 'artifacts' -File -Filter "SIMM_${version}_Setup.exe.sig" | Select-Object -First 1
@@ -348,6 +385,9 @@ jobs:
 
           .\scripts\generate-updater-manifest.ps1 `
             -Version $version `
+            -Channel Beta `
+            -PackageVersion $version `
+            -MinimumVersion $stableVersion `
             -AssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($windowsInstaller.Name)" `
             -SignaturePath $windowsSignature.FullName `
             -LinuxAssetUrl "https://github.com/SirTidez/simm/releases/download/$tag/$($linuxAppImage.Name)" `
@@ -355,6 +395,16 @@ jobs:
             -OutputPath 'updater/beta/latest-beta.json' `
             -Notes ($release.body ?? '') `
             -PubDate $publishedAtIso
+
+          python .codex/skills/simmrust-release-updater/scripts/check_release_artifacts.py `
+            --manifest updater/beta/latest-beta.json `
+            --channel beta `
+            --package-version $version `
+            --minimum-version $stableVersion `
+            --artifact-dir artifacts
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Generated Beta updater manifest validation failed.'
+          }
 
           $manifest = Get-Content 'updater/beta/latest-beta.json' -Raw | ConvertFrom-Json
           $windowsPlatform = $manifest.platforms.'windows-x86_64'

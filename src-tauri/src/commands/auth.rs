@@ -28,8 +28,14 @@ pub async fn authenticate(
     runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<serde_json::Value, String> {
     let auth_service = get_auth_service().await?;
+    let save_credentials = save_credentials.unwrap_or(false);
     let result = auth_service
-        .authenticate(username.clone(), password.clone(), steam_guard)
+        .authenticate(
+            username.clone(),
+            password.clone(),
+            steam_guard,
+            save_credentials,
+        )
         .await
         .map_err(|e| {
             error_with_location(format!(
@@ -41,7 +47,7 @@ pub async fn authenticate(
 
     if result.success {
         // Save credentials if requested
-        if save_credentials.unwrap_or(false) {
+        if save_credentials {
             if let Some(pwd) = password {
                 let settings_service =
                     SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
@@ -73,7 +79,11 @@ pub async fn authenticate(
 
         Ok(serde_json::json!({
             "success": true,
-            "message": "Authentication successful. Session stored for future downloads."
+            "message": if save_credentials {
+                "Authentication successful. Session stored for future downloads."
+            } else {
+                "Authentication successful. Credentials and the DepotDownloader session were not saved."
+            }
         }))
     } else {
         Ok(serde_json::json!({
@@ -92,17 +102,21 @@ pub async fn authenticate_qr(
     runtime_settings: State<'_, RuntimeSettingsState>,
 ) -> Result<serde_json::Value, String> {
     let auth_service = get_auth_service().await?;
-    let result = auth_service.authenticate_qr(app).await.map_err(|e| {
-        error_with_location(format!("Steam QR auth command failed: {}", e));
-        e.to_string()
-    })?;
+    let save_credentials = save_credentials.unwrap_or(false);
+    let result = auth_service
+        .authenticate_qr(app, save_credentials)
+        .await
+        .map_err(|e| {
+            error_with_location(format!("Steam QR auth command failed: {}", e));
+            e.to_string()
+        })?;
 
     if result.success {
         let username = result.username.clone().ok_or_else(|| {
             "QR login succeeded, but SIMM could not detect the Steam account name.".to_string()
         })?;
 
-        if save_credentials.unwrap_or(true) {
+        if save_credentials {
             let mut updates = serde_json::Map::new();
             updates.insert(
                 "steamUsername".to_string(),
@@ -122,7 +136,11 @@ pub async fn authenticate_qr(
 
         Ok(serde_json::json!({
             "success": true,
-            "message": "QR authentication successful. DepotDownloader session stored for future downloads.",
+            "message": if save_credentials {
+                "QR authentication successful. DepotDownloader session stored for future downloads."
+            } else {
+                "QR authentication successful. The DepotDownloader session was not saved."
+            },
             "username": username
         }))
     } else {

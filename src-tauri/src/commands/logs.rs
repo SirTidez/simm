@@ -88,24 +88,21 @@ pub async fn read_log_file(
 }
 
 #[tauri::command]
-pub async fn watch_log_file(app_handle: AppHandle, log_path: String) -> Result<(), String> {
+pub async fn watch_log_file(
+    app_handle: AppHandle,
+    log_path: String,
+) -> Result<crate::services::logs::LogWatchSession, String> {
     let logs_service = get_logs_service().await?;
-
-    // Spawn a task to watch the file
-    tokio::spawn(async move {
-        if let Err(e) = logs_service.watch_log_file(&log_path, app_handle).await {
-            log::error!("Error watching log file: {}", e);
-        }
-    });
-
-    Ok(())
+    logs_service
+        .start_watching_log(&log_path, app_handle)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn stop_watching_log() -> Result<(), String> {
+pub async fn stop_watching_log(session_id: u64) -> Result<bool, String> {
     let logs_service = get_logs_service().await?;
-    logs_service.stop_watching().await;
-    Ok(())
+    Ok(logs_service.stop_watching(session_id).await)
 }
 
 #[tauri::command]

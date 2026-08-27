@@ -27,6 +27,8 @@ const PACKAGE_LISTING_MANUAL_REFRESH_COOLDOWN: Duration = Duration::from_secs(60
 const PACKAGE_LISTING_STALE_FALLBACK_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const PACKAGE_DETAIL_MEMORY_TTL: Duration = Duration::from_secs(30 * 60);
 const API_ISSUE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 static SHARED_THUNDERSTORE_SERVICE: Lazy<Arc<ThunderStoreService>> =
     Lazy::new(|| Arc::new(ThunderStoreService::new()));
@@ -166,6 +168,8 @@ impl ThunderStoreService {
         let client = reqwest::Client::builder()
             .user_agent(http_identity::user_agent())
             .redirect(reqwest::redirect::Policy::limited(5))
+            .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+            .timeout(PROVIDER_REQUEST_TIMEOUT)
             .build()
             .expect("failed to build Thunderstore HTTP client");
 

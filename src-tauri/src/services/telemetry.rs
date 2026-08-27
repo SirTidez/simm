@@ -157,49 +157,156 @@ impl TelemetryService {
         &self,
         updates: TelemetryPreferencesUpdate,
     ) -> Result<TelemetryPreferences> {
-        let current = self.get_preferences().await?;
+        if updates.field_count() == 0 {
+            return Err(anyhow!("Update exactly one telemetry preference at a time"));
+        }
+        // IPC accepts exactly one field. Retain this sequential path for
+        // internal setup/migration callers that construct a complete fixture;
+        // each individual write still uses the atomic field mutation below.
+        if updates.field_count() > 1 {
+            let mut latest = self.get_preferences().await?;
+            for update in [
+                TelemetryPreferencesUpdate {
+                    collection_enabled: updates.collection_enabled,
+                    upload_enabled: None,
+                    error_excerpts_enabled: None,
+                    retention_days: None,
+                    protect_local_mods: None,
+                },
+                TelemetryPreferencesUpdate {
+                    collection_enabled: None,
+                    upload_enabled: updates.upload_enabled,
+                    error_excerpts_enabled: None,
+                    retention_days: None,
+                    protect_local_mods: None,
+                },
+                TelemetryPreferencesUpdate {
+                    collection_enabled: None,
+                    upload_enabled: None,
+                    error_excerpts_enabled: updates.error_excerpts_enabled,
+                    retention_days: None,
+                    protect_local_mods: None,
+                },
+                TelemetryPreferencesUpdate {
+                    collection_enabled: None,
+                    upload_enabled: None,
+                    error_excerpts_enabled: None,
+                    retention_days: updates.retention_days,
+                    protect_local_mods: None,
+                },
+                TelemetryPreferencesUpdate {
+                    collection_enabled: None,
+                    upload_enabled: None,
+                    error_excerpts_enabled: None,
+                    retention_days: None,
+                    protect_local_mods: updates.protect_local_mods,
+                },
+            ] {
+                if update.field_count() == 1 {
+                    latest = Box::pin(self.save_preferences(update)).await?;
+                }
+            }
+            return Ok(latest);
+        }
         let now = Utc::now().to_rfc3339();
-        let mut next = TelemetryPreferences {
-            collection_enabled: updates
-                .collection_enabled
-                .unwrap_or(current.collection_enabled),
-            upload_enabled: updates.upload_enabled.unwrap_or(current.upload_enabled),
-            error_excerpts_enabled: updates
-                .error_excerpts_enabled
-                .unwrap_or(current.error_excerpts_enabled),
-            retention_days: updates
-                .retention_days
-                .unwrap_or(current.retention_days)
-                .clamp(1, 365),
-            protect_local_mods: updates
-                .protect_local_mods
-                .unwrap_or(current.protect_local_mods),
-            updated_at: Some(now.clone()),
-        };
-
-        if !next.collection_enabled {
-            next.upload_enabled = false;
-        }
-
-        if next.upload_enabled && !next.collection_enabled {
-            return Err(anyhow!(
-                "Telemetry upload cannot be enabled before telemetry collection is enabled"
-            ));
-        }
-
-        let data = serde_json::to_string(&next).context("Failed to serialize preferences")?;
+        let default = TelemetryPreferences::default();
+        let default_data = serde_json::to_string(&default)
+            .context("Failed to serialize default telemetry preferences")?;
         sqlx::query(
-            "INSERT INTO telemetry_preferences (id, data, updated_at) VALUES (?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+            "INSERT OR IGNORE INTO telemetry_preferences (id, data, updated_at) VALUES (?, ?, ?)",
         )
         .bind(TELEMETRY_PREFERENCES_ID)
-        .bind(data)
-        .bind(now)
+        .bind(default_data)
+        .bind(&now)
         .execute(self.pool.as_ref())
         .await
-        .context("Failed to save telemetry preferences")?;
+        .context("Failed to initialize telemetry preferences")?;
 
-        Ok(next)
+        let affected = if let Some(collection_enabled) = updates.collection_enabled {
+            // Disabling collection atomically revokes upload consent in the same
+            // write, so a concurrent field update cannot re-enable it later.
+            if collection_enabled {
+                sqlx::query(
+                    "UPDATE telemetry_preferences SET data = json_set(data, '$.collectionEnabled', json(?), '$.updatedAt', json(?)), updated_at = ? WHERE id = ?",
+                )
+                .bind("true")
+                .bind(serde_json::to_string(&now)?)
+                .bind(&now)
+                .bind(TELEMETRY_PREFERENCES_ID)
+                .execute(self.pool.as_ref())
+                .await?
+                .rows_affected()
+            } else {
+                sqlx::query(
+                    "UPDATE telemetry_preferences SET data = json_set(data, '$.collectionEnabled', json(?), '$.uploadEnabled', json(?), '$.updatedAt', json(?)), updated_at = ? WHERE id = ?",
+                )
+                .bind("false")
+                .bind("false")
+                .bind(serde_json::to_string(&now)?)
+                .bind(&now)
+                .bind(TELEMETRY_PREFERENCES_ID)
+                .execute(self.pool.as_ref())
+                .await?
+                .rows_affected()
+            }
+        } else if let Some(upload_enabled) = updates.upload_enabled {
+            let result = sqlx::query(
+                "UPDATE telemetry_preferences SET data = json_set(data, '$.uploadEnabled', json(?), '$.updatedAt', json(?)), updated_at = ? WHERE id = ? AND json_extract(data, '$.collectionEnabled') = 1",
+            )
+            .bind(if upload_enabled { "true" } else { "false" })
+            .bind(serde_json::to_string(&now)?)
+            .bind(&now)
+            .bind(TELEMETRY_PREFERENCES_ID)
+            .execute(self.pool.as_ref())
+            .await?;
+            if upload_enabled && result.rows_affected() == 0 {
+                return Err(anyhow!(
+                    "Telemetry upload cannot be enabled before telemetry collection is enabled"
+                ));
+            }
+            result.rows_affected()
+        } else if let Some(error_excerpts_enabled) = updates.error_excerpts_enabled {
+            sqlx::query(
+                "UPDATE telemetry_preferences SET data = json_set(data, '$.errorExcerptsEnabled', json(?), '$.updatedAt', json(?)), updated_at = ? WHERE id = ?",
+            )
+            .bind(if error_excerpts_enabled { "true" } else { "false" })
+            .bind(serde_json::to_string(&now)?)
+            .bind(&now)
+            .bind(TELEMETRY_PREFERENCES_ID)
+            .execute(self.pool.as_ref())
+            .await?
+            .rows_affected()
+        } else if let Some(retention_days) = updates.retention_days {
+            sqlx::query(
+                "UPDATE telemetry_preferences SET data = json_set(data, '$.retentionDays', ?, '$.updatedAt', json(?)), updated_at = ? WHERE id = ?",
+            )
+            .bind(i64::from(retention_days.clamp(1, 365)))
+            .bind(serde_json::to_string(&now)?)
+            .bind(&now)
+            .bind(TELEMETRY_PREFERENCES_ID)
+            .execute(self.pool.as_ref())
+            .await?
+            .rows_affected()
+        } else if let Some(protect_local_mods) = updates.protect_local_mods {
+            sqlx::query(
+                "UPDATE telemetry_preferences SET data = json_set(data, '$.protectLocalMods', json(?), '$.updatedAt', json(?)), updated_at = ? WHERE id = ?",
+            )
+            .bind(if protect_local_mods { "true" } else { "false" })
+            .bind(serde_json::to_string(&now)?)
+            .bind(&now)
+            .bind(TELEMETRY_PREFERENCES_ID)
+            .execute(self.pool.as_ref())
+            .await?
+            .rows_affected()
+        } else {
+            0
+        };
+
+        if affected != 1 {
+            return Err(anyhow!("Failed to save telemetry preferences"));
+        }
+
+        self.get_preferences().await
     }
 
     pub async fn start_live_session(&self, environment_id: &str) -> Result<LiveTelemetrySession> {
@@ -216,6 +323,7 @@ impl TelemetryService {
             environment_id: environment.id,
             started_at: Utc::now().to_rfc3339(),
             ended_at: None,
+            end_reason: None,
             environment: ModTelemetryEnvironment {
                 app_id: environment.app_id,
                 branch: environment.branch,
@@ -238,7 +346,11 @@ impl TelemetryService {
         Ok(session)
     }
 
-    pub async fn end_live_session(&self, session_id: &str) -> Result<()> {
+    pub async fn end_live_session(
+        &self,
+        session_id: &str,
+        reason: crate::types::TelemetrySessionEndReason,
+    ) -> Result<()> {
         let data =
             sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_sessions WHERE id = ?")
                 .bind(session_id)
@@ -248,6 +360,7 @@ impl TelemetryService {
         let mut session: LiveTelemetrySession = serde_json::from_str(&data)?;
         if session.ended_at.is_none() {
             session.ended_at = Some(Utc::now().to_rfc3339());
+            session.end_reason = Some(reason);
             session.monitoring = false;
             sqlx::query("UPDATE telemetry_sessions SET ended_at = ?, data = ? WHERE id = ?")
                 .bind(session.ended_at.as_deref())
@@ -257,6 +370,37 @@ impl TelemetryService {
                 .await?;
         }
         Ok(())
+    }
+
+    /// A process that outlives SIMM cannot safely be treated as a continuation
+    /// of the old in-memory monitor. Mark the prior durable row ended before a
+    /// restart creates a new monitor session. The explicit reason records the
+    /// process evidence used for recovery.
+    pub async fn reconcile_unfinished_sessions(
+        &self,
+        running_directories: &HashSet<String>,
+    ) -> Result<Vec<String>> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT telemetry_sessions.id, environments.output_dir \
+             FROM telemetry_sessions \
+             INNER JOIN environments ON environments.id = telemetry_sessions.environment_id \
+             WHERE telemetry_sessions.ended_at IS NULL",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to load unfinished telemetry sessions for restart recovery")?;
+
+        let mut ended = Vec::with_capacity(rows.len());
+        for (session_id, output_dir) in rows {
+            let reason = if running_directories.contains(&normalize_telemetry_path(&output_dir)) {
+                crate::types::TelemetrySessionEndReason::InterruptedProcessRunning
+            } else {
+                crate::types::TelemetrySessionEndReason::InterruptedProcessMissing
+            };
+            self.end_live_session(&session_id, reason).await?;
+            ended.push(session_id);
+        }
+        Ok(ended)
     }
 
     /// Fills metadata that MelonLoader prints during startup for unmanaged local mods.
@@ -1198,12 +1342,17 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn telemetry_feature_flag_requires_an_explicit_opt_in() {
+    fn telemetry_feature_flag_requires_an_explicit_true_value() {
         assert!(!telemetry_feature_enabled_from_value(None));
-        assert!(!telemetry_feature_enabled_from_value(Some("")));
         assert!(!telemetry_feature_enabled_from_value(Some("false")));
+        assert!(telemetry_feature_enabled_from_value(Some("true")));
         assert!(telemetry_feature_enabled_from_value(Some("1")));
-        assert!(telemetry_feature_enabled_from_value(Some(" true ")));
+    }
+
+    #[test]
+    fn telemetry_collection_defaults_off_when_the_feature_is_enabled() {
+        assert!(!TelemetryPreferences::default().collection_enabled);
+        assert!(!TelemetryPreferences::default().upload_enabled);
     }
 
     #[tokio::test]
@@ -1266,6 +1415,113 @@ mod tests {
         assert!(!disabled.upload_enabled);
         assert!(disabled.error_excerpts_enabled);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disjoint_preference_mutations_preserve_each_other() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let service = TelemetryService::new(pool.clone());
+        service
+            .save_preferences(TelemetryPreferencesUpdate {
+                collection_enabled: Some(true),
+                upload_enabled: None,
+                error_excerpts_enabled: None,
+                retention_days: None,
+                protect_local_mods: None,
+            })
+            .await?;
+
+        let excerpts_service = TelemetryService::new(pool.clone());
+        let retention_service = TelemetryService::new(pool.clone());
+        let excerpts = excerpts_service.save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: None,
+            upload_enabled: None,
+            error_excerpts_enabled: Some(true),
+            retention_days: None,
+            protect_local_mods: None,
+        });
+        let retention = retention_service.save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: None,
+            upload_enabled: None,
+            error_excerpts_enabled: None,
+            retention_days: Some(90),
+            protect_local_mods: None,
+        });
+        let (excerpts_result, retention_result) = tokio::join!(excerpts, retention);
+        excerpts_result?;
+        retention_result?;
+
+        let preferences = service.get_preferences().await?;
+        assert!(preferences.collection_enabled);
+        assert!(preferences.error_excerpts_enabled);
+        assert_eq!(preferences.retention_days, 90);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn restart_reconciliation_durably_ends_unfinished_sessions_with_process_evidence(
+    ) -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let service = TelemetryService::new(pool.clone());
+        let session = LiveTelemetrySession {
+            session_id: "session-restart-recovery".to_string(),
+            environment_id: "environment-restart-recovery".to_string(),
+            started_at: "2026-08-20T00:00:00Z".to_string(),
+            ended_at: None,
+            end_reason: None,
+            environment: ModTelemetryEnvironment {
+                app_id: "3164500".to_string(),
+                branch: "main".to_string(),
+                runtime: Runtime::Mono,
+                s1_version: None,
+            },
+            mods: Vec::new(),
+            monitoring: true,
+        };
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind(&session.environment_id)
+            .bind("C:\\Games\\Schedule I")
+            .bind("{}")
+            .execute(pool.as_ref())
+            .await?;
+        sqlx::query(
+            "INSERT INTO telemetry_sessions (id, environment_id, started_at, ended_at, data) VALUES (?, ?, ?, NULL, ?)",
+        )
+        .bind(&session.session_id)
+        .bind(&session.environment_id)
+        .bind(&session.started_at)
+        .bind(serde_json::to_string(&session)?)
+        .execute(pool.as_ref())
+        .await?;
+
+        let ended = service
+            .reconcile_unfinished_sessions(&HashSet::from(["c:\\games\\schedule i".to_string()]))
+            .await?;
+        assert_eq!(ended, vec![session.session_id.clone()]);
+        let persisted: LiveTelemetrySession = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_sessions WHERE id = ?")
+                .bind(&session.session_id)
+                .fetch_one(pool.as_ref())
+                .await?,
+        )?;
+        assert!(persisted.ended_at.is_some());
+        assert_eq!(
+            persisted.end_reason,
+            Some(crate::types::TelemetrySessionEndReason::InterruptedProcessRunning)
+        );
         Ok(())
     }
 
@@ -1446,6 +1702,7 @@ mod tests {
             environment_id: "environment-melonloader-metadata".to_string(),
             started_at: "2026-07-25T00:00:00Z".to_string(),
             ended_at: None,
+            end_reason: None,
             environment: ModTelemetryEnvironment {
                 app_id: "3164500".to_string(),
                 branch: "main".to_string(),
@@ -1560,4 +1817,10 @@ fn error_identity(sanitized: &str) -> (String, Option<String>) {
         .and_then(|captures| captures.get(1))
         .map(|capture| capture.as_str().to_ascii_uppercase());
     (error_class, error_code)
+}
+
+fn normalize_telemetry_path(path: &str) -> String {
+    path.trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_ascii_lowercase()
 }

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { Environment, DownloadProgress, ExtractGameVersionResult } from '../types';
+import type { Environment, DownloadProgress, ExtractGameVersionResult, OneTimeDownloadCredentials } from '../types';
 
 function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partial<Environment> {
   const out: Partial<Environment> = {};
@@ -15,7 +15,7 @@ function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partia
   return out;
 }
 import { ApiService } from '../services/api';
-import { onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete, onRuntimeSwitch } from '../services/events';
+import { createAsyncListenerScope, onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete, onRuntimeSwitch } from '../services/events';
 
 interface EnvironmentStoreContextValue {
   environments: Environment[];
@@ -28,7 +28,7 @@ interface EnvironmentStoreContextValue {
   createEnvironment: (data: { appId: string; branch: string; outputDir: string; name?: string; description?: string }) => Promise<Environment>;
   updateEnvironment: (id: string, updates: Partial<Environment>) => Promise<void>;
   deleteEnvironment: (id: string, deleteFiles?: boolean) => Promise<void>;
-  startDownload: (environmentId: string) => Promise<void>;
+  startDownload: (environmentId: string, oneTimeCredentials?: OneTimeDownloadCredentials) => Promise<void>;
   cancelDownload: (downloadId: string) => Promise<void>;
   checkUpdate: (environmentId: string, manual?: boolean) => Promise<void>;
   refreshGameVersion: (environmentId: string) => Promise<string | null>;
@@ -197,7 +197,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
   const deleteEnvironment = useCallback(async (id: string, deleteFiles?: boolean) => {
     try {
+      // Invalidate before awaiting IPC: a pre-delete list response must never
+      // be accepted after this mutation.  The refresh coordinator retains one
+      // follow-up pass when that older request finishes.
+      invalidateEnvironmentSnapshot();
       await ApiService.deleteEnvironment(id, deleteFiles);
+      commitEnvironmentSnapshot(current => current.filter(env => env.id !== id));
       await refreshEnvironments();
       setProgress(prev => {
         const next = new Map(prev);
@@ -207,9 +212,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     } catch (err) {
       throw err;
     }
-  }, [refreshEnvironments]);
+  }, [commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
 
-  const startDownload = useCallback(async (environmentId: string) => {
+  const startDownload = useCallback(async (
+    environmentId: string,
+    oneTimeCredentials?: OneTimeDownloadCredentials,
+  ) => {
     const activeDownloadId = activeGameDownloadId ?? startingGameDownloadRef.current;
     if (activeDownloadId && activeDownloadId !== environmentId) {
       throw new Error(`Another game download or update is already running for ${activeDownloadId}.`);
@@ -217,8 +225,11 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
     startingGameDownloadRef.current = environmentId;
     try {
-      await ApiService.startDownload(environmentId);
-      await updateEnvironment(environmentId, { status: 'downloading' });
+      if (oneTimeCredentials) {
+        await ApiService.startDownload(environmentId, oneTimeCredentials);
+      } else {
+        await ApiService.startDownload(environmentId);
+      }
     } catch (err) {
       throw err;
     } finally {
@@ -226,21 +237,27 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         startingGameDownloadRef.current = null;
       }
     }
-  }, [activeGameDownloadId, updateEnvironment]);
+  }, [activeGameDownloadId]);
 
   const cancelDownload = useCallback(async (downloadId: string) => {
     try {
-      await ApiService.cancelDownload(downloadId);
-      await updateEnvironment(downloadId, { status: 'not_downloaded' });
+      const result = await ApiService.cancelDownload(downloadId);
+      if (!result.success) {
+        await refreshEnvironments();
+        return;
+      }
+
       setProgress(prev => {
         const next = new Map(prev);
         next.delete(downloadId);
         return next;
       });
+
+      await refreshEnvironments();
     } catch (err) {
       throw err;
     }
-  }, [updateEnvironment]);
+  }, [refreshEnvironments]);
 
   const checkUpdate = useCallback(async (environmentId: string, manual: boolean = false) => {
     try {
@@ -310,16 +327,12 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
   // Set up Tauri event listeners
   useEffect(() => {
-    let unlistenProgress: (() => void) | null = null;
-    let unlistenComplete: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-    let unlistenUpdateAvailable: (() => void) | null = null;
-    let unlistenUpdateCheckComplete: (() => void) | null = null;
-    let unlistenRuntimeSwitch: (() => void) | null = null;
+    const listeners = createAsyncListenerScope((error) => {
+      console.error('Failed to set up event listener:', error);
+    });
 
-    const setupListeners = async () => {
-      try {
-        unlistenProgress = await onProgress((data: DownloadProgress) => {
+    listeners.register(() => onProgress((data: DownloadProgress) => {
+          if (!listeners.isActive()) return;
           setProgress(prev => {
             const next = new Map(prev);
             next.set(data.downloadId, data);
@@ -331,9 +344,10 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
               console.error('Failed to apply error status update from progress event:', err);
             });
           }
-        });
+        }));
 
-        unlistenComplete = await onComplete(async ({ downloadId }: { downloadId: string; manifestId?: string }) => {
+    listeners.register(() => onComplete(async ({ downloadId }: { downloadId: string; manifestId?: string }) => {
+          if (!listeners.isActive()) return;
           // DepotDownloader persists completion before emitting this event. Refresh
           // that backend-owned state instead of independently writing manifests here.
           // A response already in flight predates the completion, so discard it
@@ -358,53 +372,46 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             console.warn('Failed to auto-extract game version:', err);
           }
 
-        });
+        }));
 
-        unlistenError = await onError(async ({ downloadId }: { downloadId: string }) => {
+    listeners.register(() => onError(async ({ downloadId }: { downloadId: string }) => {
+          if (!listeners.isActive()) return;
           try {
             await updateEnvironment(downloadId, { status: 'error' });
           } catch (err) {
             console.error('Failed to apply error status update from event:', err);
           }
-        });
+        }));
 
-        unlistenUpdateAvailable = await onUpdateAvailable(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
+    listeners.register(() => onUpdateAvailable(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
+          if (!listeners.isActive()) return;
           try {
             applyUpdateResultLocally(environmentId, updateResult);
           } catch (err) {
             console.error('Failed to apply update-available event state:', err);
           }
-        });
+        }));
 
-        unlistenUpdateCheckComplete = await onUpdateCheckComplete(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
+    listeners.register(() => onUpdateCheckComplete(async ({ environmentId, updateResult }: { environmentId: string; updateResult: import('../types').UpdateCheckResult }) => {
+          if (!listeners.isActive()) return;
           try {
             applyUpdateResultLocally(environmentId, updateResult);
           } catch (err) {
             console.error('Failed to apply update-check-complete event state:', err);
           }
-        });
+        }));
 
-        unlistenRuntimeSwitch = await onRuntimeSwitch((result) => {
+    listeners.register(() => onRuntimeSwitch((result) => {
+          if (!listeners.isActive()) return;
           commitEnvironmentSnapshot(current => current.map(env => env.id === result.environmentId ? {
             ...env,
             branch: result.branch,
             runtime: (result.runtime === 'Mono' || result.runtime === 'MONO' ? 'Mono' : 'IL2CPP') as Environment['runtime'],
           } : env));
-        });
-      } catch (error) {
-        console.error('Failed to set up event listeners:', error);
-      }
-    };
-
-    setupListeners();
+        }));
 
     return () => {
-      if (unlistenProgress) unlistenProgress();
-      if (unlistenComplete) unlistenComplete();
-      if (unlistenError) unlistenError();
-      if (unlistenUpdateAvailable) unlistenUpdateAvailable();
-      if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
-      if (unlistenRuntimeSwitch) unlistenRuntimeSwitch();
+      listeners.dispose();
     };
   }, [updateEnvironment, applyUpdateResultLocally, commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
 

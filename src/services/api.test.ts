@@ -35,6 +35,53 @@ describe('ApiService', () => {
     });
   });
 
+  it('gets the backend-owned backups directory without reconstructing a platform path', async () => {
+    invokeMock.mockResolvedValueOnce('C:/Users/Test/SIMM/backups');
+
+    await expect(ApiService.getBackupsDirectory()).resolves.toBe('C:/Users/Test/SIMM/backups');
+    expect(invokeMock).toHaveBeenCalledWith('get_backups_directory');
+  });
+
+  it('gets telemetry capability from the backend instead of a build-time flag', async () => {
+    invokeMock.mockResolvedValueOnce({ available: true });
+
+    await expect(ApiService.getTelemetryCapability()).resolves.toEqual({ available: true });
+    expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
+  });
+
+  it('forwards one-time download credentials while preserving the legacy no-credential payload', async () => {
+    const oneTimeCredentials = {
+      username: 'steam-user',
+      password: 'one-time-password',
+      steamGuard: '12345',
+      saveCredentials: false,
+    };
+    invokeMock.mockResolvedValue({ success: true, downloadId: 'env-1' });
+
+    await ApiService.startDownload('env-1', oneTimeCredentials);
+    await ApiService.startDownload('env-2');
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, 'start_download', {
+      environmentId: 'env-1',
+      oneTimeCredentials,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'start_download', {
+      environmentId: 'env-2',
+    });
+  });
+
+  it('uses the explicit Nexus manual-download security override contract', async () => {
+    invokeMock.mockResolvedValueOnce({ success: true });
+
+    await ApiService.completeNexusManualDownloadSession('nxm://schedule1/mods/1/files/2', 'IL2CPP', true);
+
+    expect(invokeMock).toHaveBeenCalledWith('complete_nexus_manual_download_session', {
+      nxmUrl: 'nxm://schedule1/mods/1/files/2',
+      runtimeOverride: 'IL2CPP',
+      securityOverride: true,
+    });
+  });
+
   it('uses explicit commands for Schedule I save backup status and creation', async () => {
     invokeMock
       .mockResolvedValueOnce({
@@ -213,6 +260,7 @@ describe('ApiService', () => {
       slotNumber: 2,
       sourceLabel: 'Game backup',
       sourcePath: 'C:/Users/Test/AppData/LocalLow/TVGS/Schedule I/Saves/76561198000000000/backups/SaveGame_2',
+      restoreToken: 'preview-token-for-selected-snapshot',
       current: {
         slotNumber: 2, organizationName: 'Current', cashBalance: 100, onlineBalance: 200, netWorth: 300,
         rank: 2, tier: 1, totalXp: 250, createdAt: null, lastPlayedAt: null, lastSaveVersion: null,
@@ -260,6 +308,7 @@ describe('ApiService', () => {
         ...restorePreview,
         sourceLabel: 'ZIP: schedule-i-save-2.zip',
         sourcePath: 'C:/Backups/schedule-i-save-2.zip',
+        restoreToken: null,
       })
       .mockResolvedValueOnce({
         steamId: '76561198000000000',
@@ -272,7 +321,7 @@ describe('ApiService', () => {
     await ApiService.createGameSaveBackup('76561198000000000', 2, 5);
     await ApiService.exportGameSaveBackup('76561198000000000', 2, 'C:/Backups/schedule-i-save-2.zip');
     await ApiService.previewGameSaveBackupRestore('76561198000000000', 2, restorePreview.sourcePath);
-    await ApiService.restoreGameSaveBackup('76561198000000000', 2, restorePreview.sourcePath);
+    await ApiService.restoreGameSaveBackup('76561198000000000', 2, restorePreview.restoreToken);
     await ApiService.previewGameSaveZipRestore('76561198000000000', 2, 'C:/Backups/schedule-i-save-2.zip');
     await ApiService.restoreGameSaveFromZip('76561198000000000', 2, 'C:/Backups/schedule-i-save-2.zip');
 
@@ -295,7 +344,7 @@ describe('ApiService', () => {
     expect(invokeMock).toHaveBeenNthCalledWith(5, 'restore_game_save_backup', {
       steamId: '76561198000000000',
       slotNumber: 2,
-      backupPath: restorePreview.sourcePath,
+      restoreToken: restorePreview.restoreToken,
     });
     expect(invokeMock).toHaveBeenNthCalledWith(6, 'preview_game_save_zip_restore', {
       steamId: '76561198000000000',
@@ -611,7 +660,7 @@ describe('ApiService', () => {
     ['repairLinuxDesktopIntegration', () => ApiService.repairLinuxDesktopIntegration(), 'repair_linux_desktop_integration', undefined],
     ['checkModUpdates', () => ApiService.checkModUpdates('env-1'), 'check_mod_updates', { environmentId: 'env-1' }],
     ['getModUpdatesSummary', () => ApiService.getModUpdatesSummary('env-1'), 'get_mod_updates_summary', { environmentId: 'env-1' }],
-    ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll' }],
+    ['updateMod', () => ApiService.updateMod('env-1', 'Example.dll'), 'update_mod', { environmentId: 'env-1', modFileName: 'Example.dll', securityOverride: false }],
     ['refreshThunderstorePackageCache', () => ApiService.refreshThunderstorePackageCache('schedule-i'), 'refresh_thunderstore_package_cache', { gameId: 'schedule-i' }],
     ['openPath', () => ApiService.openPath('C:/test/file.cfg'), 'open_path', { path: 'C:/test/file.cfg' }],
     ['openExternalUrl', () => ApiService.openExternalUrl('https://example.com/mod'), 'open_external_url', { url: 'https://example.com/mod' }],

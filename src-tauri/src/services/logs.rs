@@ -2,11 +2,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Utc};
 use regex::Regex;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, Mutex};
 use tokio::time::{sleep, Duration};
 
 use crate::services::logger::LoggerService;
@@ -33,6 +32,24 @@ pub struct LogLine {
     pub category: LogCategory,
 }
 
+/// Immutable identity attached to every live update. A source may be selected
+/// again later, so the session is required in addition to the path to reject
+/// stale events from a replaced watcher.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LogWatchSession {
+    pub source_path: String,
+    pub session_id: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogWatchUpdate {
+    source_path: String,
+    session_id: u64,
+    lines: Vec<LogLine>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogCategory {
@@ -55,19 +72,32 @@ struct LogModCandidate {
 }
 
 pub struct LogsService {
-    watching: Arc<RwLock<bool>>,
-    last_position: Arc<RwLock<u64>>,
-    last_line_count: Arc<RwLock<usize>>,
-    watch_session_id: Arc<RwLock<u64>>,
+    /// Serializes lifecycle transitions, including the join of a cancelled
+    /// task. This prevents a slow A start from installing after a later B
+    /// switch has already completed.
+    watch_transition: Mutex<()>,
+    watch_state: Mutex<LogWatchState>,
+}
+
+struct LogWatchState {
+    next_session_id: u64,
+    active: Option<ActiveLogWatch>,
+}
+
+struct ActiveLogWatch {
+    session: LogWatchSession,
+    shutdown: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl LogsService {
     pub fn new() -> Self {
         Self {
-            watching: Arc::new(RwLock::new(false)),
-            last_position: Arc::new(RwLock::new(0)),
-            last_line_count: Arc::new(RwLock::new(0)),
-            watch_session_id: Arc::new(RwLock::new(0)),
+            watch_transition: Mutex::new(()),
+            watch_state: Mutex::new(LogWatchState {
+                next_session_id: 0,
+                active: None,
+            }),
         }
     }
 
@@ -1333,40 +1363,105 @@ impl LogsService {
         Ok(())
     }
 
-    pub async fn watch_log_file(&self, log_path: &str, app_handle: AppHandle) -> Result<()> {
+    pub async fn start_watching_log(
+        &self,
+        log_path: &str,
+        app_handle: AppHandle,
+    ) -> Result<LogWatchSession> {
         let path = Path::new(log_path).to_path_buf();
         let sanitized_path = LoggerService::sanitize_log_text(log_path);
-
         if !path.exists() {
             log::warn!("Cannot watch missing log file: {}", sanitized_path);
             return Err(anyhow::anyhow!("Log file does not exist: {}", log_path));
         }
 
-        // Set watching flag
-        *self.watching.write().await = true;
-        let current_session = {
-            let mut session = self.watch_session_id.write().await;
-            *session += 1;
-            *session
+        let source_path = log_path.to_string();
+        Ok(self
+            .replace_active_watch(source_path.clone(), move |session, shutdown| {
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        Self::watch_log_file_task(path, session, shutdown, app_handle).await
+                    {
+                        log::error!("Error watching log file: {error}");
+                    }
+                })
+            })
+            .await)
+    }
+
+    /// Replace the one watcher owned by this service. The replacement waits
+    /// for the old task to acknowledge cancellation before it starts the new
+    /// task, so no mutable positions or shutdown signal can be shared between
+    /// two sources.
+    async fn replace_active_watch<F>(&self, source_path: String, spawn: F) -> LogWatchSession
+    where
+        F: FnOnce(LogWatchSession, watch::Receiver<bool>) -> tokio::task::JoinHandle<()>,
+    {
+        let _transition = self.watch_transition.lock().await;
+        let previous = self.watch_state.lock().await.active.take();
+        Self::cancel_and_join(previous).await;
+
+        let mut state = self.watch_state.lock().await;
+        state.next_session_id += 1;
+        let session = LogWatchSession {
+            source_path,
+            session_id: state.next_session_id,
+        };
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let task = spawn(session.clone(), shutdown_receiver);
+        state.active = Some(ActiveLogWatch {
+            session: session.clone(),
+            shutdown,
+            task,
+        });
+        session
+    }
+
+    async fn cancel_and_join(previous: Option<ActiveLogWatch>) {
+        let Some(previous) = previous else {
+            return;
         };
 
+        let _ = previous.shutdown.send(true);
+        if let Err(error) = previous.task.await {
+            if !error.is_cancelled() {
+                log::warn!(
+                    "Log watcher session {} ended unexpectedly while stopping: {error}",
+                    previous.session.session_id
+                );
+            }
+        }
+    }
+
+    async fn watch_log_file_task(
+        path: PathBuf,
+        session: LogWatchSession,
+        mut shutdown: watch::Receiver<bool>,
+        app_handle: AppHandle,
+    ) -> Result<()> {
         let mut watched_file = fs::File::open(&path).await?;
         let metadata = watched_file.metadata().await?;
         let (mut encoding, mut data_start) = Self::detect_log_encoding(&mut watched_file).await?;
         let mod_candidates = Self::load_mod_candidates_for_log(&path).await;
-        *self.last_position.write().await = metadata.len();
-        *self.last_line_count.write().await =
+        let mut last_position = metadata.len();
+        let mut last_line_count =
             Self::count_lines(&mut watched_file, metadata.len(), data_start, encoding).await?;
-
-        let watching = Arc::clone(&self.watching);
-        let last_position = Arc::clone(&self.last_position);
-        let last_line_count = Arc::clone(&self.last_line_count);
-        let watch_session_id = Arc::clone(&self.watch_session_id);
         let mut pending_bytes = Vec::new();
 
-        // Watch loop
-        while *watching.read().await && *watch_session_id.read().await == current_session {
-            sleep(Duration::from_millis(500)).await;
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    // A dropped sender also means the owning service has gone away.
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = sleep(Duration::from_millis(500)) => {}
+            }
+
+            if *shutdown.borrow() {
+                break;
+            }
 
             let metadata = match fs::metadata(&path).await {
                 Ok(m) => m,
@@ -1374,7 +1469,7 @@ impl LogsService {
             };
 
             let current_size = metadata.len();
-            let last_pos = *last_position.read().await;
+            let last_pos = last_position;
 
             // Check if file has new content
             if current_size > last_pos {
@@ -1399,14 +1494,14 @@ impl LogsService {
                         pending_bytes = next_pending_bytes;
 
                         if complete_bytes.is_empty() {
-                            *last_position.write().await = current_size;
+                            last_position = current_size;
                             continue;
                         }
 
                         let file_content =
                             Self::decode_log_content_with_encoding(&complete_bytes, encoding);
                         let lines: Vec<&str> = file_content.lines().collect();
-                        let previous_line_count = *last_line_count.read().await;
+                        let previous_line_count = last_line_count;
 
                         if !lines.is_empty() {
                             let log_lines = Self::parse_log_lines(
@@ -1418,14 +1513,16 @@ impl LogsService {
                             // Emit event with new log lines
                             let _ = app_handle.emit(
                                 "log-update",
-                                serde_json::json!({
-                                    "lines": log_lines,
-                                }),
+                                LogWatchUpdate {
+                                    source_path: session.source_path.clone(),
+                                    session_id: session.session_id,
+                                    lines: log_lines,
+                                },
                             );
                         }
 
-                        *last_line_count.write().await = previous_line_count + lines.len();
-                        *last_position.write().await = current_size;
+                        last_line_count = previous_line_count + lines.len();
+                        last_position = current_size;
                     }
                 }
             } else if current_size < last_pos {
@@ -1437,8 +1534,8 @@ impl LogsService {
                     {
                         encoding = next_encoding;
                         data_start = next_data_start;
-                        *last_position.write().await = data_start;
-                        *last_line_count.write().await = Self::count_lines(
+                        last_position = data_start;
+                        last_line_count = Self::count_lines(
                             &mut refreshed_file,
                             data_start,
                             data_start,
@@ -1447,24 +1544,33 @@ impl LogsService {
                         .await
                         .unwrap_or(0);
                     } else {
-                        *last_position.write().await = 0;
-                        *last_line_count.write().await = 0;
+                        last_position = 0;
+                        last_line_count = 0;
                     }
                 } else {
-                    *last_position.write().await = 0;
-                    *last_line_count.write().await = 0;
+                    last_position = 0;
+                    last_line_count = 0;
                 }
             }
         }
 
         Ok(())
     }
-    pub async fn stop_watching(&self) {
-        *self.watching.write().await = false;
-        *self.last_position.write().await = 0;
-        *self.last_line_count.write().await = 0;
-        let mut session = self.watch_session_id.write().await;
-        *session += 1;
+
+    /// Stop only the session the caller started. A late cleanup from source A
+    /// must never tear down source B after the user has switched files.
+    pub async fn stop_watching(&self, session_id: u64) -> bool {
+        let _transition = self.watch_transition.lock().await;
+        let previous = {
+            let mut state = self.watch_state.lock().await;
+            match state.active.as_ref() {
+                Some(active) if active.session.session_id == session_id => state.active.take(),
+                _ => None,
+            }
+        };
+        let stopped = previous.is_some();
+        Self::cancel_and_join(previous).await;
+        stopped
     }
 }
 
@@ -1477,6 +1583,118 @@ impl Default for LogsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+
+    fn delayed_test_watch(
+        mut shutdown: watch::Receiver<bool>,
+        started: Option<oneshot::Sender<u64>>,
+        stopped: oneshot::Sender<()>,
+        session: LogWatchSession,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Some(started) = started {
+                let _ = started.send(session.session_id);
+            }
+            tokio::select! {
+                _ = sleep(Duration::from_secs(30)) => panic!("test watcher was not cancelled"),
+                changed = shutdown.changed() => {
+                    assert!(changed.is_ok());
+                    assert!(*shutdown.borrow());
+                }
+            }
+            let _ = stopped.send(());
+        })
+    }
+
+    #[tokio::test]
+    async fn switching_sources_cancels_and_joins_a_delayed_prior_start() {
+        let service = LogsService::new();
+        let (first_started_tx, first_started_rx) = oneshot::channel();
+        let (first_stopped_tx, first_stopped_rx) = oneshot::channel();
+        let first = service
+            .replace_active_watch("A.log".to_string(), move |session, shutdown| {
+                delayed_test_watch(shutdown, Some(first_started_tx), first_stopped_tx, session)
+            })
+            .await;
+        assert_eq!(first.session_id, 1);
+        assert_eq!(first_started_rx.await.expect("first watcher starts"), 1);
+
+        let (second_stopped_tx, second_stopped_rx) = oneshot::channel();
+        let second = service
+            .replace_active_watch("B.log".to_string(), move |session, shutdown| {
+                delayed_test_watch(shutdown, None, second_stopped_tx, session)
+            })
+            .await;
+
+        assert_eq!(second.session_id, 2);
+        timeout(Duration::from_secs(1), first_stopped_rx)
+            .await
+            .expect("B start waits for delayed A task cleanup")
+            .expect("first watcher reports cancellation");
+        let active = service.watch_state.lock().await;
+        assert_eq!(
+            active.active.as_ref().map(|watch| &watch.session),
+            Some(&second)
+        );
+        drop(active);
+        assert!(service.stop_watching(second.session_id).await);
+        timeout(Duration::from_secs(1), second_stopped_rx)
+            .await
+            .expect("active watcher is joined during cleanup")
+            .expect("second watcher reports cancellation");
+    }
+
+    #[tokio::test]
+    async fn stale_stop_cannot_cancel_the_newer_watch_session() {
+        let service = LogsService::new();
+        let (first_stopped_tx, first_stopped_rx) = oneshot::channel();
+        let first = service
+            .replace_active_watch("A.log".to_string(), move |session, shutdown| {
+                delayed_test_watch(shutdown, None, first_stopped_tx, session)
+            })
+            .await;
+        let (second_stopped_tx, second_stopped_rx) = oneshot::channel();
+        let second = service
+            .replace_active_watch("B.log".to_string(), move |session, shutdown| {
+                delayed_test_watch(shutdown, None, second_stopped_tx, session)
+            })
+            .await;
+
+        timeout(Duration::from_secs(1), first_stopped_rx)
+            .await
+            .expect("replaced watcher is cancelled")
+            .expect("first watcher reports cancellation");
+        assert!(!service.stop_watching(first.session_id).await);
+        assert_eq!(
+            service
+                .watch_state
+                .lock()
+                .await
+                .active
+                .as_ref()
+                .map(|watch| watch.session.session_id),
+            Some(second.session_id)
+        );
+        assert!(service.stop_watching(second.session_id).await);
+        timeout(Duration::from_secs(1), second_stopped_rx)
+            .await
+            .expect("new watcher is cancelled by its own stop")
+            .expect("second watcher reports cancellation");
+    }
+
+    #[test]
+    fn live_log_updates_include_immutable_source_and_session_identity() {
+        let payload = serde_json::to_value(LogWatchUpdate {
+            source_path: "C:/Logs/Latest.log".to_string(),
+            session_id: 42,
+            lines: Vec::new(),
+        })
+        .expect("serialize live log update");
+        assert_eq!(payload["sourcePath"], "C:/Logs/Latest.log");
+        assert_eq!(payload["sessionId"], 42);
+        assert!(payload["lines"].as_array().is_some());
+    }
 
     #[tokio::test]
     async fn read_log_file_limits_to_tail_with_original_line_numbers() {

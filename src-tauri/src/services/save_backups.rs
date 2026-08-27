@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::sync::Mutex;
 use zip::write::FileOptions;
@@ -35,6 +38,15 @@ struct SaveSlotDetails {
     created_at: Option<String>,
     last_played_at: Option<String>,
     last_save_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GameBackupRestoreToken {
+    steam_id: String,
+    slot_number: u8,
+    snapshot_id: String,
+    content_fingerprint: String,
 }
 
 pub struct SaveBackupsService;
@@ -101,29 +113,15 @@ impl SaveBackupsService {
         fs::create_dir_all(&backup_slot_root)
             .await
             .context("Failed to create the game's save backup directory")?;
-        let snapshot_name = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-        let destination = backup_slot_root.join(&snapshot_name);
-        let staging = backup_slot_root.join(format!(".{snapshot_name}.simm-partial"));
-
-        if staging.exists() {
-            fs::remove_dir_all(&staging)
-                .await
-                .context("Failed to clear an incomplete game save backup")?;
-        }
-        if destination.exists() {
-            anyhow::bail!("A game backup already exists for this save slot at this timestamp")
-        }
-        copy_directory_recursive(&source, &staging).await?;
-        fs::rename(&staging, &destination)
-            .await
-            .context("Failed to finalize the game save backup")?;
+        let destination = create_backup_snapshot(&source, &backup_slot_root, "manual").await?;
 
         let pruned_backup_count =
             prune_game_backups(&backup_slot_root, retention_limit, Some(&destination)).await?;
 
-        let backup = read_backup(&backup_slot_root)
-            .await?
-            .expect("newly-created backup must exist");
+        // Do not re-discover "the latest" backup here: when the requested source is
+        // corrupt, returning an older snapshot would misidentify the operation. The
+        // exact finalised path is the only acceptable result for this request.
+        let backup = game_backup_from_path(&destination).await?;
         Ok(GameSaveBackupResult {
             steam_id: steam_id.to_string(),
             slot_number,
@@ -208,30 +206,26 @@ impl SaveBackupsService {
         &self,
         steam_id: &str,
         slot_number: u8,
-        backup_path: Option<&str>,
+        restore_token: &str,
     ) -> Result<GameSaveRestoreResult> {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
 
         let account_path = schedule_i_saves_dir()?.join(steam_id);
         let backup_slot_root = slot_path(&account_path.join("backups"), slot_number);
-        let source = select_game_backup(&backup_slot_root, backup_path)
-            .await?
-            .with_context(|| {
-                format!("No valid game backup exists for save slot {}", slot_number)
-            })?;
+        let source =
+            resolve_backup_restore_token(restore_token, steam_id, slot_number, &backup_slot_root)
+                .await?;
+        let destination = slot_path(&account_path, slot_number);
 
         restore_directory_to_slot(
             Path::new(&source.path),
-            &slot_path(&account_path, slot_number),
+            &destination,
+            &backup_slot_root,
+            backup_is_legacy(&source, &backup_slot_root),
         )
         .await?;
-        restored_save_result(
-            steam_id,
-            slot_number,
-            &slot_path(&account_path, slot_number),
-        )
-        .await
+        restored_save_result(steam_id, slot_number, &destination).await
     }
 
     pub async fn preview_game_backup_restore(
@@ -256,6 +250,7 @@ impl SaveBackupsService {
             slot_number,
             game_backup_source_label(&source),
             source.path.clone(),
+            Some(issue_backup_restore_token(steam_id, slot_number, &source).await?),
             &slot_path(&account_path, slot_number),
             Path::new(&source.path),
         )
@@ -291,6 +286,12 @@ impl SaveBackupsService {
             return Err(error);
         }
 
+        validate_save_directory(&staging, "The staged ZIP restore").await?;
+        create_rollback_backup_if_present(
+            &destination,
+            &slot_path(&account_path.join("backups"), slot_number),
+        )
+        .await?;
         replace_slot_with_staging(&destination, &staging, slot_number).await?;
         restored_save_result(steam_id, slot_number, &destination).await
     }
@@ -334,6 +335,7 @@ impl SaveBackupsService {
             slot_number,
             format!("ZIP: {file_name}"),
             zip_path.to_string_lossy().to_string(),
+            None,
             &slot_path(&account_path, slot_number),
             &preview_path,
         )
@@ -443,11 +445,188 @@ fn restore_staging_path(destination: &Path, slot_number: u8) -> PathBuf {
     destination.with_file_name(format!("SaveGame_{slot_number}.simm-restore"))
 }
 
-async fn restore_directory_to_slot(source: &Path, destination: &Path) -> Result<()> {
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+async fn validate_save_directory(path: &Path, subject: &str) -> Result<()> {
+    let root_metadata = fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("{subject} was not found"))?;
+    if is_link_or_reparse_point(&root_metadata) || !root_metadata.is_dir() {
+        anyhow::bail!("{subject} must be a real save directory, not a link or file")
+    }
+
+    let game_path = path.join("Game.json");
+    let game_metadata = fs::symlink_metadata(&game_path)
+        .await
+        .with_context(|| format!("{subject} is missing required Game.json"))?;
+    if is_link_or_reparse_point(&game_metadata) || !game_metadata.is_file() {
+        anyhow::bail!("{subject} has an unsafe or invalid Game.json")
+    }
+    let game_contents = fs::read(&game_path)
+        .await
+        .with_context(|| format!("Failed to read {subject}'s Game.json"))?;
+    serde_json::from_slice::<serde_json::Value>(&game_contents)
+        .with_context(|| format!("{subject} has invalid Game.json"))?;
+
+    validate_save_directory_children(path, subject).await
+}
+
+async fn validate_save_directory_children(path: &Path, subject: &str) -> Result<()> {
+    let mut pending_directories = vec![path.to_path_buf()];
+    while let Some(directory) = pending_directories.pop() {
+        let mut entries = fs::read_dir(&directory)
+            .await
+            .with_context(|| format!("Failed to inspect {subject}"))?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path).await?;
+            if is_link_or_reparse_point(&metadata) {
+                anyhow::bail!(
+                    "{subject} contains an unsupported symbolic link or reparse point: {}",
+                    entry_path.display()
+                )
+            }
+            if metadata.is_dir() {
+                pending_directories.push(entry_path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_name() -> String {
+    Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
+}
+
+fn is_snapshot_name(name: &str) -> bool {
+    let prefix = name.get(..19).unwrap_or_default();
+    NaiveDate::parse_from_str(prefix.get(..10).unwrap_or_default(), "%Y-%m-%d").is_ok()
+        && prefix.as_bytes().get(10) == Some(&b'_')
+        && prefix
+            .get(11..)
+            .is_some_and(|time| chrono::NaiveTime::parse_from_str(time, "%H-%M-%S").is_ok())
+        && name
+            .get(19..)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-'))
+}
+
+async fn create_backup_snapshot(
+    source: &Path,
+    backup_slot_root: &Path,
+    kind: &str,
+) -> Result<PathBuf> {
+    validate_save_directory(source, "The source save").await?;
+    fs::create_dir_all(backup_slot_root)
+        .await
+        .context("Failed to create the game's save backup directory")?;
+
+    let base_name = snapshot_name();
+    let snapshot_name = if kind == "manual" {
+        base_name
+    } else {
+        format!("{base_name}-{kind}-{}", uuid::Uuid::new_v4())
+    };
+    let destination = backup_slot_root.join(&snapshot_name);
+    let staging = backup_slot_root.join(format!(".{snapshot_name}.simm-partial"));
+    remove_directory_if_exists(&staging)
+        .await
+        .context("Failed to clear an incomplete game save backup")?;
+    if destination.exists() {
+        anyhow::bail!("A game backup already exists for this save slot at this timestamp")
+    }
+
+    if let Err(error) = copy_directory_recursive(source, &staging).await {
+        let _ = remove_directory_if_exists(&staging).await;
+        return Err(error).context("Failed to stage the game save backup");
+    }
+    if let Err(error) = validate_save_directory(&staging, "The staged game backup").await {
+        let _ = remove_directory_if_exists(&staging).await;
+        return Err(error);
+    }
+    fs::rename(&staging, &destination)
+        .await
+        .context("Failed to finalize the game save backup")?;
+    Ok(destination)
+}
+
+async fn create_rollback_backup_if_present(
+    destination: &Path,
+    backup_slot_root: &Path,
+) -> Result<()> {
+    if !destination.exists() {
+        return Ok(());
+    }
+    create_backup_snapshot(destination, backup_slot_root, "pre-restore")
+        .await
+        .context("Could not create a validated rollback backup before restore")?;
+    Ok(())
+}
+
+async fn copy_legacy_backup_payload(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).await?;
+    let mut entries = fs::read_dir(source).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let source_path = entry.path();
+        let metadata = fs::symlink_metadata(&source_path).await?;
+        if is_link_or_reparse_point(&metadata) {
+            anyhow::bail!(
+                "Legacy game backup contains an unsupported symbolic link or reparse point: {}",
+                source_path.display()
+            )
+        }
+        if metadata.is_dir() && is_snapshot_name(&name.to_string_lossy()) {
+            // A legacy root may also contain newer timestamped snapshots. They are
+            // manager data, not part of the save payload selected for restoration.
+            continue;
+        }
+        let destination_path = destination.join(name);
+        if metadata.is_dir() {
+            Box::pin(copy_legacy_backup_payload(&source_path, &destination_path)).await?;
+        } else {
+            fs::copy(&source_path, &destination_path).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn restore_directory_to_slot(
+    source: &Path,
+    destination: &Path,
+    backup_slot_root: &Path,
+    legacy_root: bool,
+) -> Result<()> {
     let slot_number = slot_number_from_path(destination)?;
     let staging = restore_staging_path(destination, slot_number);
     remove_directory_if_exists(&staging).await?;
-    copy_directory_recursive(source, &staging).await?;
+    let stage_result = if legacy_root {
+        copy_legacy_backup_payload(source, &staging).await
+    } else {
+        copy_directory_recursive(source, &staging).await
+    };
+    if let Err(error) = stage_result {
+        let _ = remove_directory_if_exists(&staging).await;
+        return Err(error).context("Failed to stage the selected game backup");
+    }
+    if let Err(error) = validate_save_directory(&staging, "The staged game backup").await {
+        let _ = remove_directory_if_exists(&staging).await;
+        return Err(error);
+    }
+    create_rollback_backup_if_present(destination, backup_slot_root).await?;
     replace_slot_with_staging(destination, &staging, slot_number).await
 }
 
@@ -470,7 +649,18 @@ async fn replace_slot_with_staging(
         }
         return Err(error).context("Failed to activate the restored save");
     }
-    remove_directory_if_exists(&previous).await
+    if let Err(error) = remove_directory_if_exists(&previous).await {
+        // The restored slot is already active. Keep the rollback snapshot and leave
+        // the old staging directory for manual recovery rather than reporting a
+        // failed restore after the destructive step completed.
+        log::warn!(
+            "Restored save slot {} but could not remove transient previous slot {}: {}",
+            slot_number,
+            previous.display(),
+            error
+        );
+    }
+    Ok(())
 }
 
 async fn remove_directory_if_exists(path: &Path) -> Result<()> {
@@ -478,6 +668,21 @@ async fn remove_directory_if_exists(path: &Path) -> Result<()> {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path).await?;
+    if is_link_or_reparse_point(&metadata) {
+        match fs::remove_file(path).await {
+            Ok(()) => return Ok(()),
+            Err(file_error) => {
+                fs::remove_dir(path).await.with_context(|| {
+                    format!(
+                        "Failed to remove link/reparse point {} (file removal error: {})",
+                        path.display(),
+                        file_error
+                    )
+                })?;
+                return Ok(());
+            }
+        }
+    }
     if metadata.is_dir() {
         fs::remove_dir_all(path).await?;
     } else {
@@ -511,6 +716,7 @@ async fn restore_preview(
     slot_number: u8,
     source_label: String,
     source_path: String,
+    restore_token: Option<String>,
     current_path: &Path,
     restored_path: &Path,
 ) -> Result<GameSaveRestorePreview> {
@@ -519,6 +725,7 @@ async fn restore_preview(
         slot_number,
         source_label,
         source_path,
+        restore_token,
         current: read_game_save_slot(current_path, slot_number).await?,
         restored: read_game_save_slot(restored_path, slot_number).await?,
     })
@@ -785,11 +992,13 @@ async fn read_valid_game_backups(backup_slot_root: &Path) -> Result<Vec<GameSave
         .context("Failed to inspect the game's save backup folder")?;
     while let Some(entry) = entries.next_entry().await? {
         let entry_path = entry.path();
-        let entry_metadata = entry.metadata().await?;
+        let entry_metadata = fs::symlink_metadata(&entry_path).await?;
         if entry_metadata.is_dir()
-            && fs::metadata(entry_path.join("Game.json"))
+            && !is_link_or_reparse_point(&entry_metadata)
+            && is_snapshot_name(&entry.file_name().to_string_lossy())
+            && validate_save_directory(&entry_path, "A game backup")
                 .await
-                .is_ok_and(|metadata| metadata.is_file())
+                .is_ok()
         {
             snapshots.push((entry.file_name().to_string_lossy().to_string(), entry_path));
         }
@@ -801,9 +1010,9 @@ async fn read_valid_game_backups(backup_slot_root: &Path) -> Result<Vec<GameSave
         backups.push(game_backup_from_path(&snapshot).await?);
     }
 
-    if fs::metadata(backup_slot_root.join("Game.json"))
+    if validate_save_directory(backup_slot_root, "The legacy game backup")
         .await
-        .is_ok_and(|metadata| metadata.is_file())
+        .is_ok()
     {
         // Older SIMM builds stored a save directly in SaveGame_N. Keep it available for
         // recovery without treating the parent folder as a timestamped game snapshot.
@@ -814,7 +1023,8 @@ async fn read_valid_game_backups(backup_slot_root: &Path) -> Result<Vec<GameSave
 }
 
 async fn game_backup_from_path(path: &Path) -> Result<GameSaveBackup> {
-    let metadata = fs::metadata(path)
+    validate_save_directory(path, "The selected game backup").await?;
+    let metadata = fs::symlink_metadata(path)
         .await
         .context("Failed to read the selected game backup")?;
     Ok(GameSaveBackup {
@@ -822,6 +1032,109 @@ async fn game_backup_from_path(path: &Path) -> Result<GameSaveBackup> {
         size_bytes: directory_size(path).await?,
         last_modified: metadata.modified().ok().map(format_time),
     })
+}
+
+fn backup_is_legacy(backup: &GameSaveBackup, backup_slot_root: &Path) -> bool {
+    Path::new(&backup.path) == backup_slot_root
+}
+
+async fn backup_content_fingerprint(path: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_save_tree(path, path, &mut hasher).await?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+async fn hash_save_tree(root: &Path, path: &Path, hasher: &mut Sha256) -> Result<()> {
+    let mut pending_directories = vec![path.to_path_buf()];
+    let mut entries = Vec::new();
+    while let Some(directory) = pending_directories.pop() {
+        let mut directory_entries = fs::read_dir(&directory).await?;
+        while let Some(entry) = directory_entries.next_entry().await? {
+            let child = entry.path();
+            let metadata = fs::symlink_metadata(&child).await?;
+            if is_link_or_reparse_point(&metadata) {
+                anyhow::bail!(
+                    "The selected game backup contains an unsupported symbolic link or reparse point: {}",
+                    child.display()
+                )
+            }
+            if metadata.is_dir() {
+                pending_directories.push(child.clone());
+            }
+            entries.push((child, metadata));
+        }
+    }
+    entries.sort_by(|left, right| {
+        left.0
+            .strip_prefix(root)
+            .unwrap_or(&left.0)
+            .cmp(right.0.strip_prefix(root).unwrap_or(&right.0))
+    });
+    for (child, metadata) in entries {
+        let relative = child.strip_prefix(root)?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        if metadata.is_dir() {
+            hasher.update(b"dir");
+        } else if metadata.is_file() {
+            hasher.update(b"file");
+            hasher.update(metadata.len().to_le_bytes());
+            let contents = fs::read(&child).await?;
+            hasher.update(contents);
+        } else {
+            anyhow::bail!("The selected game backup contains an unsupported file type")
+        }
+    }
+    Ok(())
+}
+
+async fn issue_backup_restore_token(
+    steam_id: &str,
+    slot_number: u8,
+    backup: &GameSaveBackup,
+) -> Result<String> {
+    let snapshot_id = Path::new(&backup.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("The selected game backup has no snapshot identity")?;
+    let token = GameBackupRestoreToken {
+        steam_id: steam_id.to_string(),
+        slot_number,
+        snapshot_id: snapshot_id.to_string(),
+        content_fingerprint: backup_content_fingerprint(Path::new(&backup.path)).await?,
+    };
+    let encoded = serde_json::to_vec(&token).context("Failed to issue the backup restore token")?;
+    Ok(URL_SAFE_NO_PAD.encode(encoded))
+}
+
+async fn resolve_backup_restore_token(
+    encoded_token: &str,
+    steam_id: &str,
+    slot_number: u8,
+    backup_slot_root: &Path,
+) -> Result<GameSaveBackup> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded_token)
+        .context("The restore preview identity is invalid; preview the backup again")?;
+    let token: GameBackupRestoreToken = serde_json::from_slice(&bytes)
+        .context("The restore preview identity is invalid; preview the backup again")?;
+    if token.steam_id != steam_id || token.slot_number != slot_number {
+        anyhow::bail!("The restore preview belongs to a different account or save slot")
+    }
+    let source = read_valid_game_backups(backup_slot_root)
+        .await?
+        .into_iter()
+        .find(|backup| {
+            Path::new(&backup.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(token.snapshot_id.as_str())
+        })
+        .context("The selected game backup is no longer available; preview it again")?;
+    if backup_content_fingerprint(Path::new(&source.path)).await? != token.content_fingerprint {
+        anyhow::bail!("The selected game backup changed after preview; preview it again")
+    }
+    Ok(source)
 }
 
 async fn select_game_backup(
@@ -1093,15 +1406,25 @@ fn format_time(value: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cash_balance_from_inventory, extract_save_zip, extract_steam_display_name,
-        game_date_from_json, json_number, json_unsigned, organization_name_from_json,
-        prune_game_backups, read_backup, read_valid_game_backups, restore_preview,
-        safe_zip_output_path, select_game_backup, slot_path, validate_slot_number,
-        validate_steam_id, write_save_slot_zip,
+        backup_content_fingerprint, cash_balance_from_inventory, create_backup_snapshot,
+        extract_save_zip, extract_steam_display_name, game_backup_from_path, game_date_from_json,
+        issue_backup_restore_token, json_number, json_unsigned, organization_name_from_json,
+        prune_game_backups, read_backup, read_valid_game_backups, resolve_backup_restore_token,
+        restore_directory_to_slot, restore_preview, safe_zip_output_path, select_game_backup,
+        slot_path, validate_slot_number, validate_steam_id, write_save_slot_zip,
     };
     use std::io::Read;
     use std::path::Path;
     use tempfile::tempdir;
+
+    fn write_game_json(path: &Path, organization_name: &str) {
+        std::fs::create_dir_all(path).expect("save directory");
+        std::fs::write(
+            path.join("Game.json"),
+            format!(r#"{{"OrganisationName":"{organization_name}"}}"#),
+        )
+        .expect("game json");
+    }
 
     #[test]
     fn steam_ids_are_kept_inside_the_save_root() {
@@ -1265,6 +1588,7 @@ mod tests {
             1,
             "Game backup".to_string(),
             restored.to_string_lossy().to_string(),
+            None,
             &current,
             &restored,
         )
@@ -1362,5 +1686,119 @@ mod tests {
         assert!(newly_created.exists());
         assert!(!newest.exists());
         assert!(!future_dated.exists());
+    }
+
+    #[tokio::test]
+    async fn restore_token_rejects_a_backup_changed_after_preview() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let backup_root = temporary_directory.path().join("backups/SaveGame_2");
+        let snapshot = backup_root.join("2026-08-20_12-00-00");
+        write_game_json(&snapshot, "Before preview");
+        let backup = game_backup_from_path(&snapshot)
+            .await
+            .expect("backup identity");
+        let token = issue_backup_restore_token("76561198000000000", 2, &backup)
+            .await
+            .expect("preview token");
+
+        write_game_json(&snapshot, "Changed after preview");
+        let error = resolve_backup_restore_token(&token, "76561198000000000", 2, &backup_root)
+            .await
+            .expect_err("changed backup must require a new preview");
+        assert!(error.to_string().contains("changed after preview"));
+    }
+
+    #[tokio::test]
+    async fn legacy_restore_excludes_nested_snapshots_and_creates_a_rollback_backup() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let account = temporary_directory.path().join("76561198000000000");
+        let destination = account.join("SaveGame_1");
+        let backup_root = account.join("backups/SaveGame_1");
+        write_game_json(&destination, "Current save");
+        write_game_json(&backup_root, "Legacy save");
+        write_game_json(&backup_root.join("2026-08-20_12-00-00"), "Nested snapshot");
+
+        restore_directory_to_slot(&backup_root, &destination, &backup_root, true)
+            .await
+            .expect("restore legacy save");
+
+        let restored =
+            std::fs::read_to_string(destination.join("Game.json")).expect("restored game data");
+        assert!(restored.contains("Legacy save"));
+        assert!(
+            !destination.join("2026-08-20_12-00-00").exists(),
+            "nested snapshot must remain backup-manager data, not live save payload"
+        );
+        let rollback = std::fs::read_dir(&backup_root)
+            .expect("backup entries")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains("pre-restore"))
+            })
+            .expect("automatic rollback snapshot");
+        assert!(std::fs::read_to_string(rollback.join("Game.json"))
+            .expect("rollback game data")
+            .contains("Current save"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn validation_rejects_symlinked_game_json_before_copy_or_restore() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let save = temporary_directory.path().join("SaveGame_1");
+        let outside = temporary_directory.path().join("outside-Game.json");
+        std::fs::create_dir_all(&save).expect("save directory");
+        std::fs::write(&outside, b"{}").expect("outside data");
+        std::os::unix::fs::symlink(&outside, save.join("Game.json")).expect("game link");
+
+        let error = validate_save_directory(&save, "The selected game backup")
+            .await
+            .expect_err("symlinked Game.json must be rejected");
+        assert!(error.to_string().contains("unsafe or invalid Game.json"));
+    }
+
+    #[tokio::test]
+    async fn fingerprint_changes_when_nested_payload_changes() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let save = temporary_directory.path().join("SaveGame_1");
+        write_game_json(&save, "Fingerprint");
+        std::fs::create_dir_all(save.join("Nested")).expect("nested directory");
+        std::fs::write(save.join("Nested/state.bin"), b"first").expect("nested payload");
+        let initial = backup_content_fingerprint(&save)
+            .await
+            .expect("initial fingerprint");
+        std::fs::write(save.join("Nested/state.bin"), b"second").expect("changed payload");
+        let changed = backup_content_fingerprint(&save)
+            .await
+            .expect("changed fingerprint");
+        assert_ne!(initial, changed);
+    }
+
+    #[tokio::test]
+    async fn corrupt_source_backup_returns_its_exact_error_without_selecting_an_older_snapshot() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let source = temporary_directory.path().join("SaveGame_1");
+        let backup_root = temporary_directory.path().join("backups/SaveGame_1");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::write(source.join("Game.json"), b"not valid JSON").expect("corrupt game data");
+        write_game_json(
+            &backup_root.join("2026-08-20_12-00-00"),
+            "Older valid backup",
+        );
+
+        let error = create_backup_snapshot(&source, &backup_root, "manual")
+            .await
+            .expect_err("corrupt source must not be converted into an older backup result");
+        assert!(error.to_string().contains("invalid Game.json"));
+        assert_eq!(
+            std::fs::read_dir(&backup_root)
+                .expect("backup entries")
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "the pre-existing snapshot must not be misreported as the requested backup"
+        );
     }
 }

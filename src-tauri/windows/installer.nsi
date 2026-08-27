@@ -897,6 +897,11 @@ Section Uninstall
     SetShellVarContext current
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    ; SIMM's normal data root is intentionally separate from Tauri's bundle
+    ; paths. Delete the current user's default root only after an explicit
+    ; uninstall checkbox choice. Historical SIMMRUST_DATA_DIR overrides cannot
+    ; be inferred safely by an NSIS uninstaller and are left untouched.
+    RmDir /r "$PROFILE\SIMM"
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

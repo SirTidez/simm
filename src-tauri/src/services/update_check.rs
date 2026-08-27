@@ -8,9 +8,208 @@ use chrono::Utc;
 use regex::Regex;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir_in;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::{Child, Command};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+const MANIFEST_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+const MANIFEST_PROBE_REAP_TIMEOUT: Duration = Duration::from_secs(3);
+const MANIFEST_PROBE_READER_TIMEOUT: Duration = Duration::from_secs(3);
+const MANIFEST_PROBE_OUTPUT_LIMIT: usize = 128 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+enum ManifestProbeError {
+    #[error("Failed to start DepotDownloader manifest probe: {0}")]
+    Spawn(#[source] std::io::Error),
+    #[error("DepotDownloader manifest probe I/O failed: {0}")]
+    Io(String),
+    #[error(
+        "DepotDownloader manifest probe timed out after {timeout_ms}ms (child reaped: {reaped})"
+    )]
+    Timeout { timeout_ms: u128, reaped: bool },
+    #[error("DepotDownloader manifest probe was cancelled (child reaped: {reaped})")]
+    Cancelled { reaped: bool },
+    #[error("DepotDownloader manifest provider exited with code {exit_code}: {stderr}")]
+    Provider { exit_code: i32, stderr: String },
+}
+
+#[derive(Default)]
+struct CappedProbeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl CappedProbeOutput {
+    fn into_text(self) -> String {
+        let mut text = String::from_utf8_lossy(&self.bytes).into_owned();
+        if self.truncated {
+            text.push_str("\n[manifest probe output truncated]");
+        }
+        text
+    }
+}
+
+#[derive(Debug)]
+struct ManifestProbeOutput {
+    stdout: String,
+    stderr: String,
+}
+
+async fn read_capped_probe_output<R>(
+    mut reader: R,
+    limit: usize,
+) -> std::io::Result<CappedProbeOutput>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = CappedProbeOutput::default();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(output.bytes.len());
+        let retained = remaining.min(read);
+        output.bytes.extend_from_slice(&chunk[..retained]);
+        output.truncated |= retained < read;
+    }
+    Ok(output)
+}
+
+async fn wait_for_manifest_probe_cancellation(mut cancellation: Option<watch::Receiver<bool>>) {
+    let Some(receiver) = cancellation.as_mut() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+
+    loop {
+        if *receiver.borrow() {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn terminate_and_reap_manifest_probe(child: &mut Child) -> bool {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return true;
+    }
+    let _ = child.start_kill();
+    matches!(
+        tokio::time::timeout(MANIFEST_PROBE_REAP_TIMEOUT, child.wait()).await,
+        Ok(Ok(_))
+    )
+}
+
+async fn collect_probe_reader(
+    task: Option<JoinHandle<std::io::Result<CappedProbeOutput>>>,
+    stream_name: &str,
+) -> Result<CappedProbeOutput, ManifestProbeError> {
+    let Some(mut task) = task else {
+        return Ok(CappedProbeOutput::default());
+    };
+    match tokio::time::timeout(MANIFEST_PROBE_READER_TIMEOUT, &mut task).await {
+        Ok(Ok(Ok(output))) => Ok(output),
+        Ok(Ok(Err(error))) => Err(ManifestProbeError::Io(format!(
+            "failed reading {}: {}",
+            stream_name, error
+        ))),
+        Ok(Err(error)) => Err(ManifestProbeError::Io(format!(
+            "{} reader task failed: {}",
+            stream_name, error
+        ))),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            Err(ManifestProbeError::Io(format!(
+                "{} did not close after DepotDownloader exited",
+                stream_name
+            )))
+        }
+    }
+}
+
+async fn run_manifest_probe_child(
+    child: &mut Child,
+    timeout: Duration,
+    cancellation: Option<watch::Receiver<bool>>,
+) -> Result<ManifestProbeOutput, ManifestProbeError> {
+    let stdout_task = child.stdout.take().map(|stdout| {
+        tokio::spawn(read_capped_probe_output(
+            stdout,
+            MANIFEST_PROBE_OUTPUT_LIMIT,
+        ))
+    });
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(read_capped_probe_output(
+            stderr,
+            MANIFEST_PROBE_OUTPUT_LIMIT,
+        ))
+    });
+
+    enum ProbeWait {
+        Exited(std::io::Result<ExitStatus>),
+        TimedOut,
+        Cancelled,
+    }
+
+    let wait = tokio::select! {
+        status = child.wait() => ProbeWait::Exited(status),
+        _ = tokio::time::sleep(timeout) => ProbeWait::TimedOut,
+        _ = wait_for_manifest_probe_cancellation(cancellation) => ProbeWait::Cancelled,
+    };
+
+    let status = match wait {
+        ProbeWait::Exited(Ok(status)) => status,
+        ProbeWait::Exited(Err(error)) => {
+            let _ = terminate_and_reap_manifest_probe(child).await;
+            let _ = collect_probe_reader(stdout_task, "stdout").await;
+            let _ = collect_probe_reader(stderr_task, "stderr").await;
+            return Err(ManifestProbeError::Io(format!(
+                "failed waiting for child: {}",
+                error
+            )));
+        }
+        ProbeWait::TimedOut => {
+            let reaped = terminate_and_reap_manifest_probe(child).await;
+            let _ = collect_probe_reader(stdout_task, "stdout").await;
+            let _ = collect_probe_reader(stderr_task, "stderr").await;
+            return Err(ManifestProbeError::Timeout {
+                timeout_ms: timeout.as_millis(),
+                reaped,
+            });
+        }
+        ProbeWait::Cancelled => {
+            let reaped = terminate_and_reap_manifest_probe(child).await;
+            let _ = collect_probe_reader(stdout_task, "stdout").await;
+            let _ = collect_probe_reader(stderr_task, "stderr").await;
+            return Err(ManifestProbeError::Cancelled { reaped });
+        }
+    };
+
+    let stdout = collect_probe_reader(stdout_task, "stdout")
+        .await?
+        .into_text();
+    let stderr = collect_probe_reader(stderr_task, "stderr")
+        .await?
+        .into_text();
+    if !status.success() {
+        return Err(ManifestProbeError::Provider {
+            exit_code: status.code().unwrap_or(-1),
+            stderr: crate::services::logger::LoggerService::sanitize_log_text(&stderr),
+        });
+    }
+
+    Ok(ManifestProbeOutput { stdout, stderr })
+}
 
 pub struct UpdateCheckService {
     game_version_service: GameVersionService,
@@ -622,6 +821,28 @@ impl UpdateCheckService {
         }
     }
 
+    fn parse_manifest_id_from_probe_output(output: &str) -> Option<String> {
+        // Accept only a manifest-labelled line or DepotDownloader's structured
+        // manifestid field. Arbitrary build IDs, timestamps, and account IDs
+        // must never become a remote manifest baseline.
+        let labelled = Regex::new(r"(?im)^\s*manifest(?:\s*id)?\s*(?::|=|\s)\s*(\d+)\s*$")
+            .expect("manifest label regex is valid");
+        if let Some(manifest_id) = labelled
+            .captures(output)
+            .and_then(|captures| captures.get(1))
+        {
+            return Some(manifest_id.as_str().to_string());
+        }
+
+        let structured =
+            Regex::new(r#"(?im)^\s*(?:\{\s*)?"manifestid"\s*:\s*"?(\d+)"?\s*,?\s*(?:\}\s*)?$"#)
+                .expect("structured manifest regex is valid");
+        structured
+            .captures(output)
+            .and_then(|captures| captures.get(1))
+            .map(|manifest_id| manifest_id.as_str().to_string())
+    }
+
     async fn get_manifest_id_from_depot_downloader(
         &self,
         app_id: &str,
@@ -692,7 +913,11 @@ impl UpdateCheckService {
             .arg("-os")
             .arg(DepotDownloaderService::platform_arg(&depot_platform))
             .arg("-manifest-only")
-            .current_dir(manifest_probe_dir.path());
+            .current_dir(manifest_probe_dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         // DepotDownloader's remembered sessions are cross-platform. If SIMM
         // sends a username without a password, it must opt into the saved token.
@@ -703,14 +928,14 @@ impl UpdateCheckService {
         // Hide console window on Windows
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW flag
         }
 
-        let output = cmd.output().context("Failed to execute DepotDownloader")?;
+        let mut child = cmd.spawn().map_err(ManifestProbeError::Spawn)?;
+        let output = run_manifest_probe_child(&mut child, MANIFEST_PROBE_TIMEOUT, None).await?;
 
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        let error_str = String::from_utf8_lossy(&output.stderr);
+        let output_str = output.stdout;
+        let error_str = output.stderr;
         let all_output = format!("{}{}", output_str, error_str);
         let sanitized_stdout =
             crate::services::logger::LoggerService::sanitize_log_text(&output_str);
@@ -724,48 +949,9 @@ impl UpdateCheckService {
             log::info!("DepotDownloader stderr: {}", sanitized_stderr);
         }
 
-        // Check if command failed
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "DepotDownloader exited with code {}: {}",
-                output.status.code().unwrap_or(-1),
-                sanitized_stderr
-            ));
-        }
-
-        // Parse manifest ID from output
-        let manifest_id_pattern =
-            Regex::new(r"(?i)manifest[:\s]+(\d+)").context("Failed to compile regex")?;
-
-        if let Some(caps) = manifest_id_pattern.captures(&all_output) {
-            if let Some(manifest_id) = caps.get(1) {
-                let manifest_id_str = manifest_id.as_str().to_string();
-                log::info!("Found manifest ID: {}", manifest_id_str);
-                return Ok(manifest_id_str);
-            }
-        }
-
-        // Try alternative patterns
-        let alt_pattern =
-            Regex::new(r#""manifestid"\s*:\s*(\d+)"#).context("Failed to compile regex")?;
-
-        if let Some(caps) = alt_pattern.captures(&all_output) {
-            if let Some(manifest_id) = caps.get(1) {
-                let manifest_id_str = manifest_id.as_str().to_string();
-                log::info!("Found manifest ID (alt pattern): {}", manifest_id_str);
-                return Ok(manifest_id_str);
-            }
-        }
-
-        // Try to find any large number that might be a manifest ID
-        let number_pattern = Regex::new(r"\b(\d{10,})\b").context("Failed to compile regex")?;
-
-        if let Some(caps) = number_pattern.captures(&all_output) {
-            if let Some(manifest_id) = caps.get(1) {
-                let manifest_id_str = manifest_id.as_str().to_string();
-                log::info!("Found manifest ID (number pattern): {}", manifest_id_str);
-                return Ok(manifest_id_str);
-            }
+        if let Some(manifest_id) = Self::parse_manifest_id_from_probe_output(&all_output) {
+            log::info!("Found manifest ID: {}", manifest_id);
+            return Ok(manifest_id);
         }
 
         log::error!("Could not parse manifest ID from DepotDownloader output");
@@ -806,6 +992,81 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    #[test]
+    fn manifest_probe_parser_requires_anchored_manifest_context() {
+        assert_eq!(
+            UpdateCheckService::parse_manifest_id_from_probe_output(
+                "Manifest: 5738443694136269112\n"
+            )
+            .as_deref(),
+            Some("5738443694136269112")
+        );
+        assert_eq!(
+            UpdateCheckService::parse_manifest_id_from_probe_output(
+                "{\n  \"manifestid\": 3260909537147661748\n}\n"
+            )
+            .as_deref(),
+            Some("3260909537147661748")
+        );
+        assert!(UpdateCheckService::parse_manifest_id_from_probe_output(
+            "Account 123456789012345 authenticated\nBuild 987654321098765 ready\n"
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn manifest_probe_timeout_kills_and_reaps_child_fixture() -> Result<()> {
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args([
+                "/D",
+                "/Q",
+                "/C",
+                "echo Manifest: 5738443694136269112 & for /L %i in (1,1,2147483647) do @rem fixture",
+            ]);
+            command
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                "printf 'Manifest: 5738443694136269112\\n'; while :; do :; done",
+            ]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+
+        let error = run_manifest_probe_child(&mut child, Duration::from_millis(50), None)
+            .await
+            .expect_err("fixture must exceed the short manifest-probe deadline");
+
+        assert!(matches!(
+            error,
+            ManifestProbeError::Timeout { reaped: true, .. }
+        ));
+        assert!(
+            child.try_wait()?.is_some(),
+            "timed-out fixture must already be reaped"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manifest_probe_output_reader_caps_retained_bytes_while_draining() -> Result<()> {
+        let input = vec![b'x'; 64];
+        let output = read_capped_probe_output(input.as_slice(), 16).await?;
+        assert_eq!(output.bytes.len(), 16);
+        assert!(output.truncated);
+        Ok(())
     }
 
     struct CurrentDirGuard {

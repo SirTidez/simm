@@ -1,6 +1,52 @@
 import { listen } from '@tauri-apps/api/event';
 import type { DownloadProgress, LiveTelemetryEvent, LiveTelemetryStatus, RuntimeSwitchResult, TrackedDownload, UpdateCheckResult } from '../types';
 
+export type EventUnlisten = () => void;
+
+/**
+ * Own asynchronous Tauri listener registration for a React effect.
+ *
+ * `listen()` resolves asynchronously.  A normal effect cleanup can therefore
+ * run before it yields its unlisten callback, leaking a stale listener.  Keep
+ * the listener and the callback's liveness in one small scope so callers can
+ * safely register several listeners without hand-rolled mutable variables.
+ */
+export interface AsyncListenerScope {
+  register: (subscribe: () => Promise<EventUnlisten>) => void;
+  dispose: () => void;
+  isActive: () => boolean;
+}
+
+export function createAsyncListenerScope(onError?: (error: unknown) => void): AsyncListenerScope {
+  let disposed = false;
+  const unlisteners = new Set<EventUnlisten>();
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const unlisten of unlisteners) {
+      unlisten();
+    }
+    unlisteners.clear();
+  };
+
+  return {
+    register: (subscribe) => {
+      void subscribe()
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+            return;
+          }
+          unlisteners.add(unlisten);
+        })
+        .catch((error: unknown) => onError?.(error));
+    },
+    dispose,
+    isActive: () => !disposed,
+  };
+}
+
 export interface ProgressEvent {
   downloadId: string;
   progress: DownloadProgress;

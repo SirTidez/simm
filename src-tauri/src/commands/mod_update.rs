@@ -150,6 +150,7 @@ pub async fn update_mod(
     runtime_settings: State<'_, RuntimeSettingsState>,
     environment_id: String,
     mod_file_name: String,
+    security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let settings = runtime_settings.snapshot().await;
     let mod_update_service = get_mod_update_service().await?;
@@ -173,6 +174,8 @@ pub async fn update_mod(
             &nexus_game_id,
             nexus_access_token.as_deref(),
             &github_service,
+            &settings,
+            security_override.unwrap_or(false),
         )
         .await
         .map_err(|error| {

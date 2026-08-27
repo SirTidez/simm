@@ -1,18 +1,95 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::types::{
     schedule_i_config, Environment, EnvironmentStatus, EnvironmentType, Runtime,
     RuntimeSwitchResult, Settings,
 };
+use uuid::Uuid;
 
 fn notify_scheduler_of_environment_change() {
     crate::services::runtime_update_scheduler::notify_environment_changed();
+}
+
+// Environment payloads are JSON documents, so callers cannot safely perform a
+// stale read/whole-row write concurrently.  Keep the read-modify-write command
+// path serialized until all legacy whole-row writers have been migrated to
+// field-specific commands. SQLite remains the durable authority.
+static ENVIRONMENT_MUTATION_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+const MANAGED_ENVIRONMENT_MARKER_FILE: &str = ".simm-environment-owner.json";
+const MANAGED_ENVIRONMENT_MARKER_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedEnvironmentOwnershipMarker {
+    schema_version: u32,
+    environment_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment_uuid: Option<String>,
+    canonical_root: String,
+}
+
+#[derive(Debug, Default)]
+struct ManagedDirectoryClaim {
+    marker_path: Option<PathBuf>,
+    created_root: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct EnvironmentDeletionJournalEntry {
+    environment_id: String,
+    original_path: String,
+    staged_path: String,
+    environment_data: String,
+    state: String,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EnvironmentDeletionRecoveryReport {
+    pub restored: usize,
+    pub finalized: usize,
+    pub pending: usize,
+}
+
+const DELETE_FAILURE_STAGED_REVALIDATION: u8 = 1 << 0;
+const DELETE_FAILURE_REMOVE: u8 = 1 << 1;
+const DELETE_FAILURE_DB_COMMIT: u8 = 1 << 2;
+const DELETE_FAILURE_RESTORE_RENAME: u8 = 1 << 3;
+
+#[cfg(test)]
+static DELETE_FAILURES: AtomicU8 = AtomicU8::new(0);
+
+fn take_delete_failure(flag: u8) -> bool {
+    #[cfg(test)]
+    {
+        return DELETE_FAILURES.fetch_and(!flag, Ordering::SeqCst) & flag != 0;
+    }
+    #[cfg(not(test))]
+    {
+        let _ = flag;
+        false
+    }
+}
+
+fn fail_environment_deletion_if_injected(flag: u8, boundary: &str) -> Result<()> {
+    if take_delete_failure(flag) {
+        anyhow::bail!("Injected environment deletion failure at {boundary}");
+    }
+    Ok(())
 }
 
 pub struct EnvironmentService {
@@ -155,6 +232,7 @@ impl EnvironmentService {
         };
 
         let mut changed = false;
+        let mut reconciliation_updates = Vec::new();
         if env.branch != detected_branch {
             log::info!(
                 "Reconciling Steam env {} branch: {} -> {}",
@@ -163,6 +241,8 @@ impl EnvironmentService {
                 detected_branch
             );
             env.branch = detected_branch;
+            reconciliation_updates
+                .push(("branch".to_string(), serde_json::json!(env.branch.clone())));
             changed = true;
         }
         if env.runtime != detected_runtime {
@@ -173,11 +253,19 @@ impl EnvironmentService {
                 detected_runtime
             );
             env.runtime = detected_runtime;
+            reconciliation_updates.push((
+                "runtime".to_string(),
+                serde_json::json!(match env.runtime {
+                    Runtime::Il2cpp => "IL2CPP",
+                    Runtime::Mono => "Mono",
+                }),
+            ));
             changed = true;
         }
 
         if changed {
-            self.upsert_environment(env).await?;
+            self.update_environment(&env.id, reconciliation_updates)
+                .await?;
         }
 
         if !runtime_changed {
@@ -501,32 +589,683 @@ impl EnvironmentService {
     }
 
     pub async fn hard_delete_environment_record(&self, id: &str) -> Result<()> {
-        self.clear_environment_metadata(id).await?;
-
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin hard environment delete")?;
+        Self::clear_environment_metadata_in_transaction(&mut transaction, id).await?;
+        sqlx::query("DELETE FROM environment_profiles WHERE environment_id = ?")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await
+            .context("Failed to clear active environment profile mapping")?;
         sqlx::query("DELETE FROM environments WHERE id = ?")
             .bind(id)
-            .execute(&*self.pool)
+            .execute(&mut *transaction)
             .await
             .context("Failed to hard delete environment")?;
+        transaction
+            .commit()
+            .await
+            .context("Failed to commit hard environment delete")?;
+        crate::services::mods_snapshot_cache::remove(id).await;
 
         notify_scheduler_of_environment_change();
         Ok(())
     }
 
     fn normalize_path(path: &str) -> String {
-        path.replace('/', "\\")
-            .trim_end_matches(['\\', '/'])
-            .to_ascii_lowercase()
+        let trimmed = path.trim_end_matches(['\\', '/']);
+        #[cfg(windows)]
+        {
+            trimmed.replace('/', "\\").to_ascii_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            trimmed.to_string()
+        }
+    }
+
+    fn paths_equal(left: &Path, right: &Path) -> bool {
+        fn comparison_path(path: &Path) -> String {
+            let normalized = EnvironmentService::normalize_path(path.to_string_lossy().as_ref());
+            #[cfg(windows)]
+            {
+                if let Some(unc) = normalized.strip_prefix(r"\\?\unc\") {
+                    return format!(r"\\{}", unc);
+                }
+                normalized
+                    .strip_prefix(r"\\?\")
+                    .unwrap_or(&normalized)
+                    .to_string()
+            }
+            #[cfg(not(windows))]
+            {
+                normalized
+            }
+        }
+
+        comparison_path(left) == comparison_path(right)
+    }
+
+    fn managed_environment_uuid(environment_id: &str) -> Option<Uuid> {
+        let bytes = environment_id.as_bytes();
+        if bytes.len() < 37 || bytes.get(bytes.len() - 37) != Some(&b'-') {
+            return None;
+        }
+        std::str::from_utf8(&bytes[bytes.len() - 36..])
+            .ok()
+            .and_then(|value| Uuid::parse_str(value).ok())
+    }
+
+    fn expected_ownership_marker(
+        env: &Environment,
+        canonical_root: &Path,
+    ) -> Result<ManagedEnvironmentOwnershipMarker> {
+        Ok(ManagedEnvironmentOwnershipMarker {
+            schema_version: MANAGED_ENVIRONMENT_MARKER_VERSION,
+            environment_id: env.id.clone(),
+            environment_uuid: Self::managed_environment_uuid(&env.id).map(|uuid| uuid.to_string()),
+            canonical_root: canonical_root.to_string_lossy().to_string(),
+        })
+    }
+
+    async fn write_ownership_marker(env: &Environment, canonical_root: &Path) -> Result<PathBuf> {
+        let marker = Self::expected_ownership_marker(env, canonical_root)?;
+        let marker_path = canonical_root.join(MANAGED_ENVIRONMENT_MARKER_FILE);
+        let content = serde_json::to_vec_pretty(&marker)
+            .context("Failed to serialize managed environment ownership marker")?;
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker_path)
+            .await
+            .context("Failed to create managed environment ownership marker")?;
+        let write_result = async {
+            file.write_all(&content)
+                .await
+                .context("Failed to write managed environment ownership marker")?;
+            file.flush()
+                .await
+                .context("Failed to flush managed environment ownership marker")?;
+            file.sync_all()
+                .await
+                .context("Failed to persist managed environment ownership marker")
+        }
+        .await;
+
+        if let Err(error) = write_result {
+            let _ = tokio::fs::remove_file(&marker_path).await;
+            return Err(error);
+        }
+        Ok(marker_path)
+    }
+
+    async fn validate_ownership_marker_at(
+        env: &Environment,
+        marker_root: &Path,
+        expected_canonical_root: &Path,
+    ) -> Result<()> {
+        let marker_path = marker_root.join(MANAGED_ENVIRONMENT_MARKER_FILE);
+        let metadata = tokio::fs::symlink_metadata(&marker_path)
+            .await
+            .context("Managed environment ownership marker is missing")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(anyhow::anyhow!(
+                "Managed environment ownership marker must be a real file"
+            ));
+        }
+
+        let content = tokio::fs::read(&marker_path)
+            .await
+            .context("Failed to read managed environment ownership marker")?;
+        let marker: ManagedEnvironmentOwnershipMarker = serde_json::from_slice(&content)
+            .context("Managed environment ownership marker is invalid")?;
+        let expected = Self::expected_ownership_marker(env, expected_canonical_root)?;
+        if marker.schema_version != expected.schema_version
+            || marker.environment_id != expected.environment_id
+            || marker.environment_uuid != expected.environment_uuid
+            || !Self::paths_equal(
+                Path::new(&marker.canonical_root),
+                Path::new(&expected.canonical_root),
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Managed environment ownership marker does not match this environment or canonical root"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn initialize_managed_directory_ownership(
+        &self,
+        env: &Environment,
+    ) -> Result<ManagedDirectoryClaim> {
+        let configured_root = Path::new(&env.output_dir);
+        let created_root = match tokio::fs::symlink_metadata(configured_root).await {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(anyhow::anyhow!(
+                        "Managed environment output must be a real directory"
+                    ));
+                }
+                false
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::create_dir_all(configured_root)
+                    .await
+                    .context("Failed to create managed environment directory")?;
+                true
+            }
+            Err(error) => {
+                return Err(error).context("Failed to inspect managed environment directory")
+            }
+        };
+
+        let canonical_root = match tokio::fs::canonicalize(configured_root).await {
+            Ok(root) => root,
+            Err(error) => {
+                if created_root {
+                    let _ = tokio::fs::remove_dir(configured_root).await;
+                }
+                return Err(error).context("Failed to resolve managed environment directory");
+            }
+        };
+        let marker_path = canonical_root.join(MANAGED_ENVIRONMENT_MARKER_FILE);
+        match tokio::fs::symlink_metadata(&marker_path).await {
+            Ok(_) => {
+                Self::validate_ownership_marker_at(env, &canonical_root, &canonical_root).await?;
+                return Ok(ManagedDirectoryClaim::default());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("Failed to inspect managed environment ownership marker")
+            }
+        }
+
+        if !created_root {
+            let mut entries = tokio::fs::read_dir(&canonical_root)
+                .await
+                .context("Failed to inspect managed environment directory contents")?;
+            if entries
+                .next_entry()
+                .await
+                .context("Failed to inspect managed environment directory contents")?
+                .is_some()
+            {
+                log::warn!(
+                    "Environment {} uses a pre-existing non-empty directory; recursive deletion remains disabled until it satisfies the configured-root migration policy",
+                    env.id
+                );
+                return Ok(ManagedDirectoryClaim::default());
+            }
+        }
+
+        let marker_path = match Self::write_ownership_marker(env, &canonical_root).await {
+            Ok(marker_path) => marker_path,
+            Err(error) => {
+                if created_root {
+                    let _ = tokio::fs::remove_dir(&canonical_root).await;
+                }
+                return Err(error);
+            }
+        };
+        Ok(ManagedDirectoryClaim {
+            marker_path: Some(marker_path),
+            created_root,
+        })
+    }
+
+    async fn rollback_managed_directory_claim(&self, claim: ManagedDirectoryClaim) {
+        let root = claim
+            .marker_path
+            .as_ref()
+            .and_then(|marker| marker.parent())
+            .map(Path::to_path_buf);
+        if let Some(marker_path) = claim.marker_path {
+            let _ = tokio::fs::remove_file(marker_path).await;
+        }
+        if claim.created_root {
+            if let Some(root) = root {
+                let _ = tokio::fs::remove_dir(root).await;
+            }
+        }
+    }
+
+    async fn configured_managed_download_root(&self) -> Result<PathBuf> {
+        let settings = match self.runtime_settings.as_ref() {
+            Some(settings) => settings.clone(),
+            None => {
+                let mut service =
+                    crate::services::settings::SettingsService::new(self.pool.clone())?;
+                service.load_settings().await?
+            }
+        };
+        let configured_root = Path::new(&settings.default_download_dir);
+        let metadata = tokio::fs::metadata(configured_root)
+            .await
+            .context("Configured managed download root is unavailable")?;
+        if !metadata.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Configured managed download root is not a directory"
+            ));
+        }
+        tokio::fs::canonicalize(configured_root)
+            .await
+            .context("Failed to resolve configured managed download root")
+    }
+
+    async fn migrate_legacy_ownership_marker(
+        &self,
+        env: &Environment,
+        canonical_target: &Path,
+    ) -> Result<()> {
+        let managed_root = self.configured_managed_download_root().await?;
+        if Self::paths_equal(canonical_target, &managed_root)
+            || !canonical_target.starts_with(&managed_root)
+        {
+            return Err(anyhow::anyhow!(
+                "Managed environment ownership marker is missing; automatic migration is limited to strict children of the configured download root"
+            ));
+        }
+
+        let metadata = tokio::fs::symlink_metadata(Path::new(&env.output_dir))
+            .await
+            .context("Failed to re-inspect legacy environment directory")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Legacy environment directory changed before ownership migration"
+            ));
+        }
+        let revalidated = tokio::fs::canonicalize(&env.output_dir)
+            .await
+            .context("Failed to re-resolve legacy environment directory")?;
+        if !Self::paths_equal(&revalidated, canonical_target)
+            || !revalidated.starts_with(&managed_root)
+        {
+            return Err(anyhow::anyhow!(
+                "Legacy environment directory changed before ownership migration"
+            ));
+        }
+
+        Self::write_ownership_marker(env, &revalidated).await?;
+        Self::validate_ownership_marker_at(env, &revalidated, &revalidated).await?;
+        log::info!(
+            "Migrated legacy managed environment ownership marker for {}",
+            env.id
+        );
+        Ok(())
+    }
+
+    async fn ensure_ownership_marker(
+        &self,
+        env: &Environment,
+        canonical_target: &Path,
+    ) -> Result<()> {
+        let marker_path = canonical_target.join(MANAGED_ENVIRONMENT_MARKER_FILE);
+        match tokio::fs::symlink_metadata(&marker_path).await {
+            Ok(_) => {
+                Self::validate_ownership_marker_at(env, canonical_target, canonical_target).await
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.migrate_legacy_ownership_marker(env, canonical_target)
+                    .await
+            }
+            Err(error) => {
+                Err(error).context("Failed to inspect managed environment ownership marker")
+            }
+        }
+    }
+
+    async fn validate_depot_installation_artifacts(canonical_target: &Path) -> Result<()> {
+        let receipt = tokio::fs::symlink_metadata(canonical_target.join(".DepotDownloader"))
+            .await
+            .context("SIMM DepotDownloader receipt is missing")?;
+        let executable = tokio::fs::symlink_metadata(canonical_target.join("Schedule I.exe"))
+            .await
+            .context("Schedule I executable is missing")?;
+        if receipt.file_type().is_symlink()
+            || !receipt.is_dir()
+            || executable.file_type().is_symlink()
+            || !executable.is_file()
+        {
+            return Err(anyhow::anyhow!(
+                "Refusing to delete an environment without real DepotDownloader receipt and Schedule I.exe artifacts"
+            ));
+        }
+        Ok(())
     }
 
     async fn clear_environment_metadata(&self, id: &str) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin environment metadata cleanup")?;
+        Self::clear_environment_metadata_in_transaction(&mut transaction, id).await?;
+        transaction
+            .commit()
+            .await
+            .context("Failed to commit environment metadata cleanup")?;
+        Ok(())
+    }
+
+    async fn clear_environment_metadata_in_transaction(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &str,
+    ) -> Result<()> {
         sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ?")
             .bind(id)
-            .execute(&*self.pool)
+            .execute(&mut **transaction)
             .await
             .context("Failed to clear environment metadata")?;
 
         Ok(())
+    }
+
+    async fn create_environment_deletion_journal(
+        &self,
+        env: &Environment,
+        original_path: &Path,
+        staged_path: &Path,
+    ) -> Result<EnvironmentDeletionJournalEntry> {
+        let now = Utc::now().to_rfc3339();
+        let environment_data =
+            serde_json::to_string(env).context("Failed to snapshot environment for deletion")?;
+        let entry = EnvironmentDeletionJournalEntry {
+            environment_id: env.id.clone(),
+            original_path: original_path.to_string_lossy().to_string(),
+            staged_path: staged_path.to_string_lossy().to_string(),
+            environment_data,
+            state: "planned".to_string(),
+            last_error: None,
+        };
+
+        sqlx::query(
+            "INSERT INTO environment_deletion_journal \
+             (environment_id, original_path, staged_path, environment_data, state, last_error, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 'planned', NULL, ?, ?)",
+        )
+        .bind(&entry.environment_id)
+        .bind(&entry.original_path)
+        .bind(&entry.staged_path)
+        .bind(&entry.environment_data)
+        .bind(&now)
+        .bind(&now)
+        .execute(&*self.pool)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to create durable deletion journal for environment {}",
+                env.id
+            )
+        })?;
+
+        Ok(entry)
+    }
+
+    async fn update_environment_deletion_journal(
+        &self,
+        environment_id: &str,
+        state: &str,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        let updated = sqlx::query(
+            "UPDATE environment_deletion_journal \
+             SET state = ?, last_error = ?, updated_at = ? \
+             WHERE environment_id = ?",
+        )
+        .bind(state)
+        .bind(last_error)
+        .bind(Utc::now().to_rfc3339())
+        .bind(environment_id)
+        .execute(&*self.pool)
+        .await
+        .context("Failed to update environment deletion journal")?;
+
+        if updated.rows_affected() != 1 {
+            anyhow::bail!(
+                "Deletion journal for environment {} is missing",
+                environment_id
+            );
+        }
+        Ok(())
+    }
+
+    async fn clear_environment_deletion_journal(&self, environment_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM environment_deletion_journal WHERE environment_id = ?")
+            .bind(environment_id)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to clear environment deletion journal")?;
+        Ok(())
+    }
+
+    async fn list_environment_deletion_journals(
+        &self,
+    ) -> Result<Vec<EnvironmentDeletionJournalEntry>> {
+        sqlx::query_as::<_, EnvironmentDeletionJournalEntry>(
+            "SELECT environment_id, original_path, staged_path, environment_data, state, last_error \
+             FROM environment_deletion_journal \
+             ORDER BY created_at ASC, environment_id ASC",
+        )
+        .fetch_all(&*self.pool)
+        .await
+        .context("Failed to list pending environment deletions")
+    }
+
+    fn validate_environment_deletion_journal_entry(
+        entry: &EnvironmentDeletionJournalEntry,
+    ) -> Result<Environment> {
+        let env: Environment = serde_json::from_str(&entry.environment_data)
+            .context("Deletion journal contains an invalid environment snapshot")?;
+        let original = Path::new(&entry.original_path);
+        let staged = Path::new(&entry.staged_path);
+        let staged_name = staged.file_name().and_then(|name| name.to_str());
+
+        if env.id != entry.environment_id
+            || !Self::paths_equal(Path::new(&env.output_dir), original)
+            || env.environment_type != Some(EnvironmentType::DepotDownloader)
+            || staged_name.is_none_or(|name| !name.starts_with(".simm-delete-"))
+            || original.parent().is_none()
+            || staged.parent().is_none()
+            || !Self::paths_equal(
+                original.parent().expect("checked original parent"),
+                staged.parent().expect("checked staged parent"),
+            )
+            || Self::paths_equal(original, staged)
+        {
+            anyhow::bail!(
+                "Deletion journal for environment {} failed identity validation",
+                entry.environment_id
+            );
+        }
+
+        Ok(env)
+    }
+
+    async fn filesystem_entry_exists(path: &Path) -> Result<bool> {
+        match tokio::fs::symlink_metadata(path).await {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("Failed to inspect recovery path {}", path.display())),
+        }
+    }
+
+    async fn restore_staged_environment_deletion(
+        &self,
+        entry: &EnvironmentDeletionJournalEntry,
+        env: &Environment,
+    ) -> Result<()> {
+        let original = Path::new(&entry.original_path);
+        let staged = Path::new(&entry.staged_path);
+        if Self::filesystem_entry_exists(original).await? {
+            anyhow::bail!(
+                "Cannot restore staged environment {} because its original path already exists",
+                entry.environment_id
+            );
+        }
+        let verified_staged = self
+            .validate_staged_environment_file_deletion(env, original, staged)
+            .await?;
+        fail_environment_deletion_if_injected(DELETE_FAILURE_RESTORE_RENAME, "restore rename")?;
+        tokio::fs::rename(&verified_staged, original)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to restore staged environment directory {} to {}",
+                    verified_staged.display(),
+                    original.display()
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn finalize_staged_environment_deletion(
+        &self,
+        entry: &EnvironmentDeletionJournalEntry,
+        env: &Environment,
+    ) -> Result<()> {
+        fail_environment_deletion_if_injected(
+            DELETE_FAILURE_STAGED_REVALIDATION,
+            "staged revalidation",
+        )?;
+        let verified_staged = self
+            .validate_staged_environment_file_deletion(
+                env,
+                Path::new(&entry.original_path),
+                Path::new(&entry.staged_path),
+            )
+            .await?;
+        fail_environment_deletion_if_injected(DELETE_FAILURE_REMOVE, "staged tree removal")?;
+        tokio::fs::remove_dir_all(&verified_staged)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to remove staged environment directory {}",
+                    verified_staged.display()
+                )
+            })?;
+        self.clear_environment_deletion_journal(&entry.environment_id)
+            .await?;
+        crate::services::mods_snapshot_cache::remove(&entry.environment_id).await;
+        Ok(())
+    }
+
+    pub async fn recover_pending_environment_deletions(
+        &self,
+    ) -> Result<EnvironmentDeletionRecoveryReport> {
+        let _mutation_guard = ENVIRONMENT_MUTATION_LOCK.lock().await;
+        let entries = self.list_environment_deletion_journals().await?;
+        let mut report = EnvironmentDeletionRecoveryReport::default();
+
+        for entry in entries {
+            let recovery = async {
+                let snapshot = Self::validate_environment_deletion_journal_entry(&entry)?;
+                let live_environment = self.get_environment(&entry.environment_id).await?;
+                let original_exists =
+                    Self::filesystem_entry_exists(Path::new(&entry.original_path)).await?;
+                let staged_exists =
+                    Self::filesystem_entry_exists(Path::new(&entry.staged_path)).await?;
+
+                match (live_environment, original_exists, staged_exists) {
+                    (Some(live), true, false) => {
+                        if !Self::paths_equal(
+                            Path::new(&live.output_dir),
+                            Path::new(&entry.original_path),
+                        ) {
+                            anyhow::bail!(
+                                "Live environment path no longer matches deletion journal"
+                            );
+                        }
+                        self.clear_environment_deletion_journal(&entry.environment_id)
+                            .await?;
+                        Ok((true, false))
+                    }
+                    (Some(live), false, true) => {
+                        if live.id != snapshot.id
+                            || !Self::paths_equal(
+                                Path::new(&live.output_dir),
+                                Path::new(&entry.original_path),
+                            )
+                        {
+                            anyhow::bail!(
+                                "Live environment identity no longer matches deletion journal"
+                            );
+                        }
+                        self.restore_staged_environment_deletion(&entry, &snapshot)
+                            .await?;
+                        self.clear_environment_deletion_journal(&entry.environment_id)
+                            .await?;
+                        Ok((true, false))
+                    }
+                    (None, false, true) => {
+                        self.finalize_staged_environment_deletion(&entry, &snapshot)
+                            .await?;
+                        Ok((false, true))
+                    }
+                    (None, false, false) => {
+                        self.clear_environment_deletion_journal(&entry.environment_id)
+                            .await?;
+                        crate::services::mods_snapshot_cache::remove(&entry.environment_id).await;
+                        Ok((false, true))
+                    }
+                    (Some(_), true, true) => {
+                        anyhow::bail!("Both original and staged paths exist for a live environment")
+                    }
+                    (Some(_), false, false) => anyhow::bail!(
+                        "Neither original nor staged path exists for a live environment"
+                    ),
+                    (None, true, _) => {
+                        anyhow::bail!("Original path exists after environment metadata was deleted")
+                    }
+                }
+            }
+            .await;
+
+            match recovery {
+                Ok((restored, finalized)) => {
+                    report.restored += usize::from(restored);
+                    report.finalized += usize::from(finalized);
+                }
+                Err(error) => {
+                    report.pending += 1;
+                    let state = if self.environment_row_exists(&entry.environment_id).await? {
+                        "restore_required"
+                    } else {
+                        "metadata_deleted"
+                    };
+                    let error_text = format!("{error:#}");
+                    if let Err(update_error) = self
+                        .update_environment_deletion_journal(
+                            &entry.environment_id,
+                            state,
+                            Some(&error_text),
+                        )
+                        .await
+                    {
+                        log::error!(
+                            "Failed to record recovery error for environment {}: {}",
+                            entry.environment_id,
+                            update_error
+                        );
+                    }
+                    log::error!(
+                        "Environment deletion for {} remains pending (journal_state={}, previous_state={}, previous_error={:?}): {}",
+                        entry.environment_id,
+                        state,
+                        entry.state,
+                        entry.last_error,
+                        error
+                    );
+                }
+            }
+        }
+
+        Ok(report)
     }
 
     pub async fn get_environments(&self) -> Result<Vec<Environment>> {
@@ -552,6 +1291,7 @@ impl EnvironmentService {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn upsert_environment(&self, env: &Environment) -> Result<()> {
         self.save_environment(env).await
     }
@@ -576,12 +1316,7 @@ impl EnvironmentService {
             .find(|b| b.name == branch)
             .ok_or_else(|| anyhow::anyhow!("Unknown branch: {} for app {}", branch, app_id))?;
 
-        let id = format!(
-            "{}-{}-{}",
-            app_id,
-            branch,
-            chrono::Utc::now().timestamp_millis()
-        );
+        let id = format!("{}-{}-{}", app_id, branch, Uuid::new_v4());
 
         let branch_name = branch_config
             .display_name
@@ -615,7 +1350,11 @@ impl EnvironmentService {
         };
 
         let env = self.resolve_environment_for_save(&env).await?;
-        self.save_environment(&env).await?;
+        let ownership_claim = self.initialize_managed_directory_ownership(&env).await?;
+        if let Err(error) = self.save_environment(&env).await {
+            self.rollback_managed_directory_claim(ownership_claim).await;
+            return Err(error);
+        }
         Ok(env)
     }
 
@@ -676,7 +1415,7 @@ impl EnvironmentService {
             detected_branch.unwrap_or_else(|| Self::branch_for_runtime(&runtime_from_files));
         let runtime = runtime_from_files;
 
-        let id = format!("steam-{}", chrono::Utc::now().timestamp_millis());
+        let id = format!("steam-{}", Uuid::new_v4());
 
         let env = Environment {
             id: id.clone(),
@@ -753,7 +1492,7 @@ impl EnvironmentService {
         // Check MelonLoader status
         let melon_loader_version = self.detect_melon_loader_version(path).await;
 
-        let id = format!("local-{}", chrono::Utc::now().timestamp_millis());
+        let id = format!("local-{}", Uuid::new_v4());
 
         // Generate default name from folder name
         let default_name = path
@@ -827,6 +1566,7 @@ impl EnvironmentService {
         id: &str,
         updates: impl IntoIterator<Item = (String, serde_json::Value)>,
     ) -> Result<Environment> {
+        let _mutation_guard = ENVIRONMENT_MUTATION_LOCK.lock().await;
         let mut env = self
             .get_environment(id)
             .await?
@@ -841,6 +1581,34 @@ impl EnvironmentService {
                 }
                 "description" => {
                     env.description = value.as_str().map(|s| s.to_string());
+                }
+                // These fields are restricted to backend reconciliation paths;
+                // callers update only what they observed instead of saving a
+                // stale whole environment payload over user-owned fields.
+                "branch" => {
+                    if let Some(v) = value.as_str() {
+                        env.branch = v.to_string();
+                    }
+                }
+                "runtime" => {
+                    if let Some(v) = value.as_str() {
+                        env.runtime = match v {
+                            "IL2CPP" | "Il2cpp" => Runtime::Il2cpp,
+                            "Mono" | "MONO" => Runtime::Mono,
+                            _ => return Err(anyhow::anyhow!("Invalid runtime: {}", v)),
+                        };
+                    }
+                }
+                "outputDir" => {
+                    if let Some(v) = value.as_str() {
+                        env.output_dir = v.to_string();
+                    }
+                }
+                "steamappsDir" => {
+                    env.steamapps_dir = value.as_str().map(ToString::to_string);
+                }
+                "steamManifestPath" => {
+                    env.steam_manifest_path = value.as_str().map(ToString::to_string);
                 }
                 "status" => {
                     if let Some(v) = value.as_str() {
@@ -927,6 +1695,7 @@ impl EnvironmentService {
     }
 
     pub async fn delete_environment(&self, id: &str, delete_files: bool) -> Result<bool> {
+        let _mutation_guard = ENVIRONMENT_MUTATION_LOCK.lock().await;
         let env = self.get_environment(id).await?;
 
         if let Some(env) = env {
@@ -963,32 +1732,322 @@ impl EnvironmentService {
                 return Ok(true);
             }
 
-            // Only delete files if explicitly requested AND not a Steam environment
-            // Steam environments are managed by Steam, so we never delete their files
+            // Only delete files if explicitly requested.  An environment record can
+            // originate from stale JSON or a malformed IPC caller, so the record is
+            // not itself authority to recursively remove its output directory.
             let should_delete_files = delete_files
                 && env.environment_type != Some(crate::types::EnvironmentType::Steam)
                 && Path::new(&env.output_dir).exists();
 
-            if should_delete_files {
-                tokio::fs::remove_dir_all(&env.output_dir)
+            // Record intent durably before the first filesystem mutation. The
+            // journal survives every later boundary and is removed only after
+            // the staged tree is either restored or deleted successfully.
+            let staged_directory = if should_delete_files {
+                let deletion_target = self.validate_environment_file_deletion(&env).await?;
+                let parent = deletion_target
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("Environment directory has no parent"))?;
+                let staged = parent.join(format!(".simm-delete-{}", Uuid::new_v4()));
+                let entry = self
+                    .create_environment_deletion_journal(&env, &deletion_target, &staged)
+                    .await?;
+                if let Err(stage_error) = tokio::fs::rename(&deletion_target, &staged).await {
+                    let clear_result = self.clear_environment_deletion_journal(id).await;
+                    return match clear_result {
+                        Ok(()) => Err(stage_error).with_context(|| {
+                            format!(
+                                "Failed to stage environment directory {}",
+                                deletion_target.display()
+                            )
+                        }),
+                        Err(clear_error) => Err(anyhow::anyhow!(
+                            "Failed to stage environment directory {}; deletion journal remains for recovery: {:#}; journal cleanup also failed: {:#}",
+                            deletion_target.display(),
+                            stage_error,
+                            clear_error
+                        )),
+                    };
+                }
+                if let Err(state_error) = self
+                    .update_environment_deletion_journal(id, "staged", None)
                     .await
-                    .with_context(|| {
-                        format!("Failed to delete output directory: {}", env.output_dir)
-                    })?;
+                {
+                    let restore_result =
+                        self.restore_staged_environment_deletion(&entry, &env).await;
+                    if restore_result.is_ok() {
+                        let _ = self.clear_environment_deletion_journal(id).await;
+                    }
+                    return Err(match restore_result {
+                        Ok(()) => anyhow::anyhow!(
+                            "Failed to record staged environment deletion and restored the original directory: {state_error:#}"
+                        ),
+                        Err(restore_error) => anyhow::anyhow!(
+                            "Failed to record staged environment deletion; recovery journal retained after restore failure: {state_error:#}; restore error: {restore_error:#}"
+                        ),
+                    });
+                }
+                Some(entry)
+            } else {
+                None
+            };
+
+            let mutation = async {
+                let mut transaction = self
+                    .pool
+                    .begin()
+                    .await
+                    .context("Failed to begin environment deletion")?;
+                Self::clear_environment_metadata_in_transaction(&mut transaction, id).await?;
+                sqlx::query("DELETE FROM environment_profiles WHERE environment_id = ?")
+                    .bind(id)
+                    .execute(&mut *transaction)
+                    .await
+                    .context("Failed to clear environment profile mapping")?;
+                let deleted = sqlx::query("DELETE FROM environments WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *transaction)
+                    .await
+                    .context("Failed to delete environment")?;
+                if deleted.rows_affected() != 1 {
+                    anyhow::bail!("Environment {} disappeared during deletion", id);
+                }
+                if staged_directory.is_some() {
+                    let updated = sqlx::query(
+                        "UPDATE environment_deletion_journal \
+                         SET state = 'metadata_deleted', last_error = NULL, updated_at = ? \
+                         WHERE environment_id = ?",
+                    )
+                    .bind(Utc::now().to_rfc3339())
+                    .bind(id)
+                    .execute(&mut *transaction)
+                    .await
+                    .context("Failed to commit environment deletion recovery state")?;
+                    if updated.rows_affected() != 1 {
+                        anyhow::bail!("Environment deletion journal disappeared before commit");
+                    }
+                }
+                if take_delete_failure(DELETE_FAILURE_DB_COMMIT) {
+                    transaction
+                        .rollback()
+                        .await
+                        .context("Failed to roll back injected environment deletion failure")?;
+                    anyhow::bail!("Injected environment deletion failure at database commit");
+                }
+                transaction
+                    .commit()
+                    .await
+                    .context("Failed to commit environment deletion")
+            }
+            .await;
+
+            if let Err(error) = mutation {
+                if let Some(entry) = staged_directory.as_ref() {
+                    let error_text = format!("{error:#}");
+                    let _ = self
+                        .update_environment_deletion_journal(
+                            id,
+                            "restore_required",
+                            Some(&error_text),
+                        )
+                        .await;
+                    match self.restore_staged_environment_deletion(entry, &env).await {
+                        Ok(()) => {
+                            if let Err(clear_error) =
+                                self.clear_environment_deletion_journal(id).await
+                            {
+                                return Err(anyhow::anyhow!(
+                                    "Environment deletion failed and files were restored, but its recovery journal remains: {error:#}; journal error: {clear_error:#}"
+                                ));
+                            }
+                        }
+                        Err(restore_error) => {
+                            let restore_text = format!("{restore_error:#}");
+                            let _ = self
+                                .update_environment_deletion_journal(
+                                    id,
+                                    "restore_required",
+                                    Some(&restore_text),
+                                )
+                                .await;
+                            return Err(anyhow::anyhow!(
+                                "Environment deletion transaction failed and the staged directory could not be restored; durable recovery is pending: {error:#}; restore error: {restore_error:#}"
+                            ));
+                        }
+                    }
+                }
+                return Err(error);
             }
 
-            sqlx::query("DELETE FROM environments WHERE id = ?")
-                .bind(id)
-                .execute(&*self.pool)
-                .await
-                .context("Failed to delete environment")?;
-
-            self.clear_environment_metadata(id).await?;
+            crate::services::mods_snapshot_cache::remove(id).await;
+            if let Some(entry) = staged_directory {
+                if let Err(error) = self
+                    .finalize_staged_environment_deletion(&entry, &env)
+                    .await
+                {
+                    let error_text = format!("{error:#}");
+                    let journal_error = self
+                        .update_environment_deletion_journal(
+                            id,
+                            "metadata_deleted",
+                            Some(&error_text),
+                        )
+                        .await
+                        .err();
+                    notify_scheduler_of_environment_change();
+                    return Err(match journal_error {
+                        Some(journal_error) => anyhow::anyhow!(
+                            "Environment metadata was deleted, but staged file finalization failed and recovery-state update also failed: {error:#}; journal error: {journal_error:#}"
+                        ),
+                        None => anyhow::anyhow!(
+                            "Environment metadata was deleted, but staged files remain under durable recovery state at {}: {error:#}",
+                            entry.staged_path
+                        ),
+                    });
+                }
+            }
             notify_scheduler_of_environment_change();
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    /// Validates a recursive-deletion target without mutating the database. The
+    /// only filesystem mutation it may perform is a constrained one-time ownership
+    /// marker migration for a strict child of the configured managed download root.
+    /// The command wrapper calls this before stopping watchers and
+    /// `delete_environment` calls it again immediately before staging.
+    pub async fn validate_environment_file_deletion(&self, env: &Environment) -> Result<PathBuf> {
+        if env.environment_type != Some(EnvironmentType::DepotDownloader) {
+            return Err(anyhow::anyhow!(
+                "File deletion is only supported for SIMM-managed DepotDownloader environments"
+            ));
+        }
+
+        let configured_path = Path::new(&env.output_dir);
+        let metadata = tokio::fs::symlink_metadata(configured_path)
+            .await
+            .context("Failed to inspect environment directory")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Environment directory must be a real directory before deletion"
+            ));
+        }
+
+        let canonical_target = tokio::fs::canonicalize(configured_path)
+            .await
+            .context("Failed to resolve environment directory")?;
+        if canonical_target.parent().is_none() {
+            return Err(anyhow::anyhow!("Refusing to delete a filesystem root"));
+        }
+
+        let protected_roots = self.protected_deletion_roots().await?;
+        if protected_roots.iter().any(|protected| {
+            canonical_target == *protected || protected.starts_with(&canonical_target)
+        }) {
+            return Err(anyhow::anyhow!(
+                "Refusing to delete a protected SIMM, home, or filesystem root"
+            ));
+        }
+
+        if Self::is_below_steam_library(&canonical_target) {
+            return Err(anyhow::anyhow!(
+                "Refusing to delete a path inside a Steam library"
+            ));
+        }
+
+        Self::validate_depot_installation_artifacts(&canonical_target).await?;
+        self.ensure_ownership_marker(env, &canonical_target).await?;
+
+        // Resolve and validate once more after any legacy migration. This is the
+        // final lookup before the caller stages the directory for deletion.
+        let final_metadata = tokio::fs::symlink_metadata(configured_path)
+            .await
+            .context("Failed to re-inspect environment directory before deletion")?;
+        if final_metadata.file_type().is_symlink() || !final_metadata.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Environment directory changed before deletion"
+            ));
+        }
+        let final_target = tokio::fs::canonicalize(configured_path)
+            .await
+            .context("Failed to re-resolve environment directory before deletion")?;
+        if !Self::paths_equal(&canonical_target, &final_target) {
+            return Err(anyhow::anyhow!(
+                "Environment directory changed before deletion"
+            ));
+        }
+        Self::validate_depot_installation_artifacts(&final_target).await?;
+        Self::validate_ownership_marker_at(env, &final_target, &final_target).await?;
+
+        Ok(final_target)
+    }
+
+    async fn validate_staged_environment_file_deletion(
+        &self,
+        env: &Environment,
+        original_canonical_root: &Path,
+        staged_path: &Path,
+    ) -> Result<PathBuf> {
+        let metadata = tokio::fs::symlink_metadata(staged_path)
+            .await
+            .context("Failed to inspect staged environment directory")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Staged environment directory must be a real directory"
+            ));
+        }
+        let canonical_staged = tokio::fs::canonicalize(staged_path)
+            .await
+            .context("Failed to resolve staged environment directory")?;
+        let original_parent = original_canonical_root
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Environment directory has no parent"))?;
+        let staged_parent = canonical_staged
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Staged environment directory has no parent"))?;
+        if !Self::paths_equal(&canonical_staged, staged_path)
+            || !Self::paths_equal(staged_parent, original_parent)
+        {
+            return Err(anyhow::anyhow!(
+                "Staged environment directory escaped its validated parent"
+            ));
+        }
+
+        Self::validate_depot_installation_artifacts(&canonical_staged).await?;
+        Self::validate_ownership_marker_at(env, &canonical_staged, original_canonical_root).await?;
+        Ok(canonical_staged)
+    }
+
+    async fn protected_deletion_roots(&self) -> Result<Vec<PathBuf>> {
+        let mut roots = Vec::new();
+        if let Ok(data_dir) = crate::db::get_data_dir() {
+            if let Ok(canonical) = tokio::fs::canonicalize(data_dir).await {
+                roots.push(canonical);
+            }
+        }
+        if let Some(home_dir) = dirs::home_dir() {
+            if let Ok(canonical) = tokio::fs::canonicalize(home_dir).await {
+                roots.push(canonical);
+            }
+        }
+
+        if let Ok(current_dir) = std::env::current_dir() {
+            if let Some(root) = current_dir.ancestors().last() {
+                roots.push(root.to_path_buf());
+            }
+        }
+
+        Ok(roots)
+    }
+
+    fn is_below_steam_library(path: &Path) -> bool {
+        path.ancestors().any(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("steamapps"))
+        })
     }
 }
 
@@ -1080,6 +2139,114 @@ mod tests {
         }
     }
 
+    struct DeleteFailureGuard;
+
+    impl DeleteFailureGuard {
+        fn inject(flags: u8) -> Self {
+            DELETE_FAILURES.store(flags, Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for DeleteFailureGuard {
+        fn drop(&mut self) {
+            DELETE_FAILURES.store(0, Ordering::SeqCst);
+        }
+    }
+
+    fn depot_environment(id: impl Into<String>, output_dir: &Path) -> Environment {
+        Environment {
+            id: id.into(),
+            name: "Managed fixture".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: output_dir.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        }
+    }
+
+    fn settings_with_download_root(root: &Path) -> Settings {
+        let mut settings = crate::services::settings::SettingsService::default_settings();
+        settings.default_download_dir = root.to_string_lossy().to_string();
+        settings
+    }
+
+    async fn create_deletable_environment(
+        service: &EnvironmentService,
+        output_dir: &Path,
+    ) -> Result<Environment> {
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        fs::create_dir_all(output_dir.join(".DepotDownloader")).await?;
+        fs::write(output_dir.join("Schedule I.exe"), b"game").await?;
+        Ok(env)
+    }
+
+    async fn assert_finalization_failure_is_restart_recoverable(
+        failure: u8,
+        expected_boundary: &str,
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+        let output_dir = temp.path().join("managed").join("recover-finalize");
+        let env = create_deletable_environment(&service, &output_dir).await?;
+
+        let failure_guard = DeleteFailureGuard::inject(failure);
+        let error = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("finalization failure must be returned to the caller");
+        assert!(error.to_string().contains(expected_boundary));
+        assert!(service.get_environment(&env.id).await?.is_none());
+        assert!(!output_dir.exists());
+
+        let entry = service
+            .list_environment_deletion_journals()
+            .await?
+            .into_iter()
+            .find(|entry| entry.environment_id == env.id)
+            .expect("committed deletion must retain a recovery journal");
+        assert_eq!(entry.state, "metadata_deleted");
+        assert!(Path::new(&entry.staged_path).exists());
+
+        drop(failure_guard);
+        let report = service.recover_pending_environment_deletions().await?;
+        assert_eq!(report.finalized, 1);
+        assert_eq!(report.restored, 0);
+        assert_eq!(report.pending, 0);
+        assert!(!Path::new(&entry.staged_path).exists());
+        assert!(service
+            .list_environment_deletion_journals()
+            .await?
+            .is_empty());
+        Ok(())
+    }
+
     #[tokio::test]
     #[serial]
     async fn create_and_fetch_environment() -> Result<()> {
@@ -1113,6 +2280,155 @@ mod tests {
 
         let stored = service.get_environment(&env.id).await?;
         assert!(stored.is_some());
+        let canonical_root = fs::canonicalize(&output_dir).await?;
+        let marker_content = fs::read(canonical_root.join(MANAGED_ENVIRONMENT_MARKER_FILE)).await?;
+        let marker: ManagedEnvironmentOwnershipMarker = serde_json::from_slice(&marker_content)?;
+        assert_eq!(marker.environment_id, env.id);
+        assert_eq!(
+            marker.environment_uuid,
+            EnvironmentService::managed_environment_uuid(&env.id).map(|uuid| uuid.to_string())
+        );
+        assert_eq!(
+            EnvironmentService::normalize_path(&marker.canonical_root),
+            EnvironmentService::normalize_path(canonical_root.to_string_lossy().as_ref())
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_rejects_arbitrary_directory_with_generic_depot_artifacts(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let managed_root = temp.path().join("managed-downloads");
+        fs::create_dir_all(&managed_root).await?;
+        let service = EnvironmentService::new(pool.clone())?
+            .with_runtime_settings(settings_with_download_root(&managed_root));
+
+        let arbitrary_dir = temp.path().join("arbitrary-custom-install");
+        fs::create_dir_all(arbitrary_dir.join(".DepotDownloader")).await?;
+        fs::write(arbitrary_dir.join("Schedule I.exe"), b"game").await?;
+        let env = depot_environment(format!("3164500-main-{}", Uuid::new_v4()), &arbitrary_dir);
+        service.upsert_environment(&env).await?;
+
+        let error = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("generic artifacts outside the managed root must not grant deletion");
+        assert!(error.to_string().contains("ownership marker is missing"));
+        assert!(arbitrary_dir.exists());
+        assert!(service.get_environment(&env.id).await?.is_some());
+        assert!(!arbitrary_dir.join(MANAGED_ENVIRONMENT_MARKER_FILE).exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_migrates_legacy_timestamp_id_only_under_managed_root() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let managed_root = temp.path().join("managed-downloads");
+        let legacy_dir = managed_root.join("legacy-main");
+        fs::create_dir_all(legacy_dir.join(".DepotDownloader")).await?;
+        fs::write(legacy_dir.join("Schedule I.exe"), b"game").await?;
+        let service = EnvironmentService::new(pool.clone())?
+            .with_runtime_settings(settings_with_download_root(&managed_root));
+        let env = depot_environment("3164500-main-1712345678901", &legacy_dir);
+        service.upsert_environment(&env).await?;
+
+        let validated = service.validate_environment_file_deletion(&env).await?;
+        assert!(EnvironmentService::paths_equal(&validated, &legacy_dir));
+        let marker_content = fs::read(legacy_dir.join(MANAGED_ENVIRONMENT_MARKER_FILE)).await?;
+        let marker: ManagedEnvironmentOwnershipMarker = serde_json::from_slice(&marker_content)?;
+        assert_eq!(marker.environment_id, env.id);
+        assert_eq!(marker.environment_uuid, None);
+
+        assert!(service.delete_environment(&env.id, true).await?);
+        assert!(!legacy_dir.exists());
+        assert!(service.get_environment(&env.id).await?.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_rejects_ownership_marker_for_another_environment() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+        let output_dir = temp.path().join("managed").join("marker-mismatch");
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        fs::create_dir_all(output_dir.join(".DepotDownloader")).await?;
+        fs::write(output_dir.join("Schedule I.exe"), b"game").await?;
+
+        let marker_path = output_dir.join(MANAGED_ENVIRONMENT_MARKER_FILE);
+        let mut marker: ManagedEnvironmentOwnershipMarker =
+            serde_json::from_slice(&fs::read(&marker_path).await?)?;
+        marker.environment_id = format!("3164500-main-{}", Uuid::new_v4());
+        fs::write(&marker_path, serde_json::to_vec_pretty(&marker)?).await?;
+
+        let error = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("a mismatched ownership marker must be rejected");
+        assert!(error.to_string().contains("does not match"));
+        assert!(output_dir.exists());
+        assert!(service.get_environment(&env.id).await?.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_rejects_a_moved_managed_root() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+        let original_dir = temp.path().join("managed").join("original");
+        let moved_dir = temp.path().join("managed").join("moved");
+        let env = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                original_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        fs::create_dir_all(original_dir.join(".DepotDownloader")).await?;
+        fs::write(original_dir.join("Schedule I.exe"), b"game").await?;
+        fs::rename(&original_dir, &moved_dir).await?;
+
+        let mut moved_env = env.clone();
+        moved_env.output_dir = moved_dir.to_string_lossy().to_string();
+        service.upsert_environment(&moved_env).await?;
+        let error = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("a marker bound to the original canonical root must reject a move");
+        assert!(error.to_string().contains("does not match"));
+        assert!(moved_dir.exists());
+        assert!(service.get_environment(&env.id).await?.is_some());
 
         Ok(())
     }
@@ -1287,9 +2603,6 @@ mod tests {
         let service = EnvironmentService::new(pool.clone())?;
 
         let output_dir = temp.path().join("envs").join("env-4");
-        fs::create_dir_all(&output_dir).await?;
-        fs::write(output_dir.join("file.txt"), b"test").await?;
-
         let env = service
             .create_environment(
                 schedule_i_config().app_id,
@@ -1299,6 +2612,10 @@ mod tests {
                 None,
             )
             .await?;
+        fs::write(output_dir.join("file.txt"), b"test").await?;
+        fs::create_dir_all(output_dir.join(".DepotDownloader")).await?;
+        fs::write(output_dir.join("Schedule I.exe"), b"game").await?;
+        assert!(output_dir.join(MANAGED_ENVIRONMENT_MARKER_FILE).is_file());
 
         sqlx::query(
             "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, 'mods', ?, ?)",
@@ -1306,6 +2623,18 @@ mod tests {
         .bind(&env.id)
         .bind("example.dll")
         .bind("{}")
+        .execute(&*pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO profiles (id, name, runtime, is_default, manifest, created_at, updated_at) \
+             VALUES ('profile-delete-test', 'Delete test', 'IL2CPP', 0, '{}', '2026-01-01', '2026-01-01')",
+        )
+        .execute(&*pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_profiles (environment_id, active_profile_id) VALUES (?, 'profile-delete-test')",
+        )
+        .bind(&env.id)
         .execute(&*pool)
         .await?;
 
@@ -1320,9 +2649,287 @@ mod tests {
                 .fetch_one(&*pool)
                 .await?;
         assert_eq!(metadata_count, 0);
+        let profile_mapping_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM environment_profiles WHERE environment_id = ?",
+        )
+        .bind(&env.id)
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(profile_mapping_count, 0);
 
         let deleted_missing = service.delete_environment("missing", true).await?;
         assert!(!deleted_missing);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_journals_staged_revalidation_failure_for_restart() -> Result<()> {
+        assert_finalization_failure_is_restart_recoverable(
+            DELETE_FAILURE_STAGED_REVALIDATION,
+            "staged revalidation",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_journals_remove_failure_for_restart() -> Result<()> {
+        assert_finalization_failure_is_restart_recoverable(
+            DELETE_FAILURE_REMOVE,
+            "staged tree removal",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_db_commit_failure_restores_files_and_row() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+        let output_dir = temp.path().join("managed").join("commit-rollback");
+        let env = create_deletable_environment(&service, &output_dir).await?;
+
+        let _failure_guard = DeleteFailureGuard::inject(DELETE_FAILURE_DB_COMMIT);
+        let error = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("injected commit failure must be returned");
+
+        assert!(error.to_string().contains("database commit"));
+        assert!(service.get_environment(&env.id).await?.is_some());
+        assert!(output_dir.exists());
+        assert!(service
+            .list_environment_deletion_journals()
+            .await?
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_restore_failure_remains_journaled_and_restart_repairs_it(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+        let output_dir = temp.path().join("managed").join("restore-retry");
+        let env = create_deletable_environment(&service, &output_dir).await?;
+
+        let failure_guard =
+            DeleteFailureGuard::inject(DELETE_FAILURE_DB_COMMIT | DELETE_FAILURE_RESTORE_RENAME);
+        let error = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("commit plus restore failure must remain recoverable");
+
+        assert!(error.to_string().contains("durable recovery is pending"));
+        assert!(service.get_environment(&env.id).await?.is_some());
+        assert!(!output_dir.exists());
+        let entry = service
+            .list_environment_deletion_journals()
+            .await?
+            .into_iter()
+            .find(|entry| entry.environment_id == env.id)
+            .expect("restore failure must retain its journal");
+        assert_eq!(entry.state, "restore_required");
+        assert!(Path::new(&entry.staged_path).exists());
+
+        drop(failure_guard);
+        let report = service.recover_pending_environment_deletions().await?;
+        assert_eq!(report.restored, 1);
+        assert_eq!(report.finalized, 0);
+        assert_eq!(report.pending, 0);
+        assert!(output_dir.exists());
+        assert!(!Path::new(&entry.staged_path).exists());
+        assert!(service.get_environment(&env.id).await?.is_some());
+        assert!(service
+            .list_environment_deletion_journals()
+            .await?
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn concurrent_field_updates_preserve_disjoint_environment_changes() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool)?;
+        let environment = service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                temp.path()
+                    .join("environment")
+                    .to_string_lossy()
+                    .to_string(),
+                Some("Original".to_string()),
+                None,
+            )
+            .await?;
+
+        let first = service.update_environment(
+            &environment.id,
+            vec![("name".to_string(), serde_json::json!("Renamed"))],
+        );
+        let second = service.update_environment(
+            &environment.id,
+            vec![("status".to_string(), serde_json::json!("downloading"))],
+        );
+        let (first_result, second_result) = tokio::join!(first, second);
+        first_result?;
+        second_result?;
+
+        let persisted = service
+            .get_environment(&environment.id)
+            .await?
+            .expect("environment should still exist");
+        assert_eq!(persisted.name, "Renamed");
+        assert!(matches!(persisted.status, EnvironmentStatus::Downloading));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_rejects_unmanaged_or_protected_directories() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+
+        let local_dir = temp.path().join("local-install");
+        fs::create_dir_all(&local_dir).await?;
+        fs::write(local_dir.join("Schedule I.exe"), b"game").await?;
+        let local_env = Environment {
+            id: "local-delete-guard".to_string(),
+            name: "Local".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: local_dir.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: Some(EnvironmentType::Local),
+        };
+        service.upsert_environment(&local_env).await?;
+
+        let err = service
+            .delete_environment(&local_env.id, true)
+            .await
+            .expect_err("local imports must never receive recursive cleanup");
+        assert!(err.to_string().contains("SIMM-managed DepotDownloader"));
+        assert!(local_dir.exists());
+        assert!(service.get_environment(&local_env.id).await?.is_some());
+
+        fs::create_dir_all(data_dir.join(".DepotDownloader")).await?;
+        fs::write(data_dir.join("Schedule I.exe"), b"game").await?;
+        let protected_env = Environment {
+            id: "protected-delete-guard".to_string(),
+            name: "Protected".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: data_dir.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+        service.upsert_environment(&protected_env).await?;
+        let err = service
+            .delete_environment(&protected_env.id, true)
+            .await
+            .expect_err("SIMM data root must be protected");
+        assert!(err.to_string().contains("protected"));
+        assert!(data_dir.exists());
+        assert!(service.get_environment(&protected_env.id).await?.is_some());
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn delete_environment_rejects_a_symlinked_depot_target() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = EnvironmentService::new(pool.clone())?;
+
+        let target = temp.path().join("outside");
+        fs::create_dir_all(target.join(".DepotDownloader")).await?;
+        fs::write(target.join("Schedule I.exe"), b"game").await?;
+        let link = temp.path().join("environment-link");
+        symlink(&target, &link)?;
+
+        let env = Environment {
+            id: "symlink-delete-guard".to_string(),
+            name: "Linked".to_string(),
+            description: None,
+            app_id: schedule_i_config().app_id,
+            branch: "main".to_string(),
+            output_dir: link.to_string_lossy().to_string(),
+            runtime: Runtime::Il2cpp,
+            status: EnvironmentStatus::Completed,
+            last_updated: None,
+            size: None,
+            last_manifest_id: None,
+            last_update_check: None,
+            update_available: None,
+            remote_manifest_id: None,
+            remote_build_id: None,
+            current_game_version: None,
+            update_game_version: None,
+            melon_loader_version: None,
+            steamapps_dir: None,
+            steam_manifest_path: None,
+            environment_type: Some(EnvironmentType::DepotDownloader),
+        };
+        service.upsert_environment(&env).await?;
+
+        let err = service
+            .delete_environment(&env.id, true)
+            .await
+            .expect_err("symlinked environment must be rejected");
+        assert!(err.to_string().contains("real directory"));
+        assert!(target.exists());
+        assert!(service.get_environment(&env.id).await?.is_some());
 
         Ok(())
     }

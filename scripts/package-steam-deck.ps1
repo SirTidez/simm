@@ -27,6 +27,30 @@ if ([string]::IsNullOrWhiteSpace($packageVersion)) {
     throw "Could not read the SIMM version from package.json."
 }
 
+$expectedAppImageName = "SIMM_${packageVersion}_x86_64.AppImage"
+if ([System.IO.Path]::GetFileName($sourceAppImage) -cne $expectedAppImageName) {
+    throw "Steam Deck packaging requires the versioned Linux release artifact '$expectedAppImageName', not '$([System.IO.Path]::GetFileName($sourceAppImage))'."
+}
+
+$sourceChecksumManifest = Join-Path (Split-Path -Parent $sourceAppImage) "SHA256SUMS"
+if (-not (Test-Path -LiteralPath $sourceChecksumManifest -PathType Leaf)) {
+    throw "Steam Deck packaging requires the release checksum manifest next to the AppImage: $sourceChecksumManifest"
+}
+
+$checksumEntries = @(Get-Content -LiteralPath $sourceChecksumManifest | ForEach-Object {
+    if ($_ -match '^(?<hash>[A-Fa-f0-9]{64})\s+\*?(?<name>.+)$') {
+        [pscustomobject]@{ Hash = $Matches.hash.ToLowerInvariant(); Name = $Matches.name.Trim() }
+    }
+})
+$expectedChecksumEntries = @($checksumEntries | Where-Object { $_.Name -ceq $expectedAppImageName })
+if ($expectedChecksumEntries.Count -ne 1) {
+    throw "SHA256SUMS must contain exactly one checksum for '$expectedAppImageName'."
+}
+$actualSourceHash = (Get-FileHash -LiteralPath $sourceAppImage -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualSourceHash -cne $expectedChecksumEntries[0].Hash) {
+    throw "AppImage checksum does not match SHA256SUMS for '$expectedAppImageName'."
+}
+
 if (-not [string]::IsNullOrWhiteSpace($PackageLabel) -and $PackageLabel -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
     throw "PackageLabel may contain only letters, numbers, periods, underscores, and hyphens."
 }
@@ -54,7 +78,7 @@ if (Test-Path -LiteralPath $zipPath) {
 
 New-Item -ItemType Directory -Path $packageRoot | Out-Null
 
-$appImageName = "SIMM_${packageVersion}_x86_64.AppImage"
+$appImageName = $expectedAppImageName
 
 $packagedAppImage = Join-Path $packageRoot $appImageName
 Copy-Item -LiteralPath $sourceAppImage -Destination $packagedAppImage

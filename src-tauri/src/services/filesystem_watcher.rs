@@ -5,7 +5,7 @@ use crate::services::settings::RuntimeSettingsState;
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sqlx::SqlitePool;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::{Mutex, RwLock};
@@ -223,11 +223,15 @@ impl FileSystemWatcherService {
         // Stop existing watcher if any
         self.stop_watching(environment_id, watch_type).await?;
 
-        if !dir_path.exists() {
-            // Directory doesn't exist yet, but we'll still set up the watch
-            // The watch will start working once the directory is created
-            return Ok(());
-        }
+        // A managed subdirectory commonly does not exist until a runtime or
+        // mod loader creates it.  Watch the nearest existing ancestor
+        // recursively so that creation *and* nested changes are observed.
+        let watch_target = nearest_existing_ancestor(&dir_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not find an existing ancestor for watcher target {}",
+                dir_path.display()
+            )
+        })?;
 
         // Capture Tokio runtime handle for spawning from notify's callback thread.
         // The notify callback runs in a separate OS thread (not in Tokio runtime), so we cannot
@@ -263,10 +267,15 @@ impl FileSystemWatcherService {
 
         <RecommendedWatcher as Watcher>::watch(
             &mut watcher,
-            &dir_path,
-            RecursiveMode::NonRecursive,
+            &watch_target,
+            RecursiveMode::Recursive,
         )
-        .context("Failed to start watching directory")?;
+        .with_context(|| {
+            format!(
+                "Failed to start watching directory {}",
+                watch_target.display()
+            )
+        })?;
 
         let mut watchers = self.watchers.write().await;
         watchers.insert(watch_key, watcher);
@@ -300,6 +309,12 @@ impl FileSystemWatcherService {
     }
 }
 
+fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|candidate| candidate.is_dir())
+        .map(PathBuf::from)
+}
+
 impl Default for FileSystemWatcherService {
     fn default() -> Self {
         Self::new()
@@ -325,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_watching_missing_dir_is_noop() -> Result<()> {
+    async fn start_watching_missing_dir_arms_existing_ancestor() -> Result<()> {
         let service = FileSystemWatcherService::new();
         let temp = tempdir()?;
         let missing = temp.path().join("missing");
@@ -333,8 +348,20 @@ mod tests {
         service
             .start_watching("env-1", missing.to_string_lossy().as_ref(), "mods")
             .await?;
+        assert_eq!(service.watchers.read().await.len(), 1);
         service.stop_all().await?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn nearest_existing_ancestor_handles_missing_nested_layout() -> Result<()> {
+        let temp = tempdir()?;
+        let nested = temp.path().join("Mods").join("Mono").join("nested");
+        assert_eq!(
+            nearest_existing_ancestor(&nested),
+            Some(temp.path().to_path_buf())
+        );
         Ok(())
     }
 

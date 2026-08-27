@@ -32,11 +32,18 @@ static USERNAME_KEY_RE: Lazy<Regex> = Lazy::new(|| {
 static USERNAME_ARG_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)(-username\s+)(\S+)"#).expect("username arg regex"));
 static SECRET_KEY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)\b(password|steamguard|token|api[-_ ]?key)\s*[:=]\s*(?:"[^"]*"|[^\s,|]+)"#)
+    Regex::new(r#"(?i)\b(password|pass|steamguard|token|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|api[-_ ]?key|nexus[-_ ]?api[-_ ]?key|authorization|secret|credentials?|cookie|set[-_ ]?cookie)\s*[:=]\s*(?:"[^"]*"|[^\s,|]+)"#)
         .expect("secret key regex")
 });
+static JSON_SECRET_KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(["'](?:username|user|login|password|pass|steamguard|token|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|api[-_ ]?key|nexus[-_ ]?api[-_ ]?key|authorization|secret|credentials?|cookie|set[-_ ]?cookie)["']\s*:\s*)(?:"[^"]*"|[^\s,|}\]]+)"#,
+    )
+    .expect("JSON secret key regex")
+});
 static SECRET_ARG_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(-(?:password|steamguard|token|api-key)\s+)(\S+)"#).expect("secret arg regex")
+    Regex::new(r#"(?i)(-(?:password|pass|steamguard|token|access-token|refresh-token|id-token|api-key|nexus-api-key|authorization|secret|credential|cookie)\s+)(\S+)"#)
+        .expect("secret arg regex")
 });
 static EMAIL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b"#).expect("email regex")
@@ -160,8 +167,44 @@ impl LoggerService {
                 )
             })
             .to_string();
+        sanitized = JSON_SECRET_KEY_RE
+            .replace_all(&sanitized, "${1}\"<redacted>\"")
+            .to_string();
 
         sanitized
+    }
+
+    fn is_sensitive_data_key(key: &str) -> bool {
+        let normalized = key
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+
+        matches!(
+            normalized.as_str(),
+            "username"
+                | "user"
+                | "login"
+                | "password"
+                | "pass"
+                | "steamguard"
+                | "token"
+                | "accesstoken"
+                | "refreshtoken"
+                | "idtoken"
+                | "apikey"
+                | "authorization"
+                | "secret"
+                | "credentials"
+                | "credential"
+                | "cookie"
+                | "setcookie"
+        ) || normalized.ends_with("password")
+            || normalized.ends_with("token")
+            || normalized.ends_with("apikey")
+            || normalized.ends_with("secret")
+            || normalized.ends_with("credential")
     }
 
     fn sanitize_log_data(data: serde_json::Value) -> serde_json::Value {
@@ -178,16 +221,7 @@ impl LoggerService {
             serde_json::Value::Object(map) => serde_json::Value::Object(
                 map.into_iter()
                     .map(|(key, value)| {
-                        let lower_key = key.to_ascii_lowercase();
-                        let sanitized_value = if lower_key.contains("password")
-                            || lower_key.contains("steamguard")
-                            || lower_key.contains("token")
-                            || lower_key.contains("api_key")
-                            || lower_key.contains("apikey")
-                            || lower_key == "username"
-                            || lower_key == "login"
-                            || lower_key == "user"
-                        {
+                        let sanitized_value = if Self::is_sensitive_data_key(&key) {
                             serde_json::Value::String("<redacted>".to_string())
                         } else {
                             Self::sanitize_log_data(value)
@@ -557,6 +591,53 @@ mod tests {
         assert!(!sanitized.contains("/home/alice"));
         assert!(!sanitized.contains("/var/lib/simm"));
         assert!(sanitized.contains("setting=<path:private.txt>"));
+    }
+
+    #[test]
+    fn sanitize_log_data_recursively_redacts_nested_secret_keys() {
+        let sanitized = LoggerService::sanitize_log_data(serde_json::json!({
+            "outer": [
+                { "Password": "secret-password", "tokenCount": 3 },
+                { "nested": { "nexusApiKey": "secret-key", "refresh_token": "secret-token" } }
+            ],
+            "username": "steam-user",
+            "passwordHint": "harmless lookalike"
+        }));
+
+        assert_eq!(sanitized["outer"][0]["Password"], "<redacted>");
+        assert_eq!(sanitized["outer"][0]["tokenCount"], 3);
+        assert_eq!(sanitized["outer"][1]["nested"]["nexusApiKey"], "<redacted>");
+        assert_eq!(
+            sanitized["outer"][1]["nested"]["refresh_token"],
+            "<redacted>"
+        );
+        assert_eq!(sanitized["username"], "<redacted>");
+        assert_eq!(sanitized["passwordHint"], "harmless lookalike");
+    }
+
+    #[test]
+    fn sanitize_log_text_redacts_quoted_json_secret_keys() {
+        let sanitized = LoggerService::sanitize_log_text(
+            r#"payload={"password":"secret-pass","apiKey":"secret-key","refresh_token":"refresh-value","accessToken":"access-value","idToken":"id-value","authorization":"Bearer secret","cookie":"session=secret","credential":"secret-credential","nexusApiKey":"nexus-key","tokenCount":2}"#,
+        );
+
+        for secret in [
+            "secret-pass",
+            "secret-key",
+            "refresh-value",
+            "access-value",
+            "id-value",
+            "Bearer secret",
+            "session=secret",
+            "secret-credential",
+            "nexus-key",
+        ] {
+            assert!(
+                !sanitized.contains(secret),
+                "secret {secret} leaked into text log"
+            );
+        }
+        assert!(sanitized.contains("tokenCount"));
     }
 
     #[tokio::test]

@@ -101,7 +101,7 @@ const exportFileName = (steamId: string, slotNumber: number) => {
 const backupVersionLabel = (backup: GameSaveBackup, index: number) => {
   const pathSegments = backup.path.split(/[\\/]/).filter(Boolean);
   const folderName = pathSegments[pathSegments.length - 1] ?? 'Game backup';
-  const timestamp = folderName.match(/^(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})$/);
+  const timestamp = folderName.match(/^(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})(?:-.+)?$/);
   if (timestamp) {
     const date = new Date(`${timestamp[1]}T${timestamp[2].replace(/-/g, ':')}`);
     const formatted = Number.isNaN(date.getTime())
@@ -122,7 +122,6 @@ function SaveDetail({ label, value }: { label: string; value: string | null }) {
 type PendingRestore = {
   preview: GameSaveRestorePreview;
   source: 'gameBackup' | 'zip';
-  backupPath?: string;
   zipPath?: string;
 };
 
@@ -194,6 +193,11 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
   ), [selectedBackupPath, selectedSlot]);
   const localSaveCount = selectedAccount?.slots.filter((slot) => slot.exists).length ?? 0;
   const busy = backupInProgress || exportInProgress || previewInProgress || restoreInProgress;
+  // Keep the identity displayed by the confirmation dialog stable. The backend
+  // independently verifies the opaque token, but disabling the selectors makes
+  // it impossible for the visible account/slot to drift while a destructive
+  // restore is awaiting confirmation.
+  const selectionLocked = busy || pendingRestore !== null;
 
   const handleBackup = async () => {
     if (!selectedAccount || !selectedSlot?.exists) return;
@@ -270,7 +274,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
         selectedSlot.slotNumber,
         selectedGameBackup.path,
       );
-      setPendingRestore({ preview, source: 'gameBackup', backupPath: selectedGameBackup.path });
+      setPendingRestore({ preview, source: 'gameBackup' });
     } catch (requestError) {
       setError(getErrorMessage(requestError, 'Could not preview the game backup.'));
     } finally {
@@ -309,10 +313,13 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
     setNotice(null);
     try {
       if (pendingRestore.source === 'gameBackup') {
+        if (!pendingRestore.preview.restoreToken) {
+          throw new Error('The backup preview is missing its restore identity. Preview the backup again.');
+        }
         await ApiService.restoreGameSaveBackup(
           pendingRestore.preview.steamId,
           pendingRestore.preview.slotNumber,
-          pendingRestore.backupPath,
+          pendingRestore.preview.restoreToken,
         );
       } else if (pendingRestore.zipPath) {
         await ApiService.restoreGameSaveFromZip(pendingRestore.preview.steamId, pendingRestore.preview.slotNumber, pendingRestore.zipPath);
@@ -334,7 +341,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
         title="Save Management"
         description="Inspect, back up, export, and explicitly restore the five Schedule I save slots."
       >
-        <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void refresh()} disabled={loading || busy}>
+        <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void refresh()} disabled={loading || selectionLocked}>
           <Icon name="rotate" /> Refresh
         </SimmButton>
         <SimmButton type="button" className="btn btn-secondary btn-small" onClick={() => void handleOpenSaveFolder()} disabled={!selectedAccount}>
@@ -374,7 +381,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
             </div>
             <label>
               <span>Steam account</span>
-              <select value={selectedAccount.steamId} onChange={(event) => setSelectedSteamId(event.target.value)}>
+              <select value={selectedAccount.steamId} onChange={(event) => setSelectedSteamId(event.target.value)} disabled={selectionLocked}>
                 {status.accounts.map((account) => <option key={account.steamId} value={account.steamId}>{accountLabel(account)}</option>)}
               </select>
               <small>{selectedAccount.displayName ? `Steam ID ${selectedAccount.steamId}` : 'Steam display name is unavailable for this profile.'}</small>
@@ -384,7 +391,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
               <select
                 value={backupRetentionLimit ?? 'all'}
                 onChange={(event) => setBackupRetentionLimit(event.target.value === 'all' ? null : Number(event.target.value))}
-                disabled={busy}
+                disabled={selectionLocked}
               >
                 <option value="all">Keep all</option>
                 <option value="3">3 newest</option>
@@ -412,6 +419,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
                       variant="ghost"
                       className={`save-backups-workspace__slot${selected ? ' save-backups-workspace__slot--selected' : ''}${slot.exists ? '' : ' save-backups-workspace__slot--missing'}`}
                       onClick={() => setSelectedSlotNumber(slot.slotNumber)}
+                      disabled={selectionLocked}
                       aria-current={selected ? 'page' : undefined}
                     >
                       <span className="save-backups-workspace__slot-number">{slot.slotNumber}</span>
@@ -460,7 +468,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
                         <select
                           value={selectedGameBackup.path}
                           onChange={(event) => setSelectedBackupPath(event.target.value)}
-                          disabled={busy}
+                          disabled={selectionLocked}
                           aria-label="Select a game backup version to restore"
                         >
                           {selectedSlot.backups.map((backup, index) => (
@@ -477,7 +485,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
                       tabIndex={0}
                       role="img"
                       aria-label="Backup and restore information"
-                      title={`Game backups are timestamped snapshots in backups\\SaveGame_${selectedSlot.slotNumber}. Restores replace the active save and never create an automatic copy.`}
+                      title={`Game backups are timestamped snapshots in backups\\SaveGame_${selectedSlot.slotNumber}. Restores create an automatic rollback backup before replacing the active save.`}
                     >
                       <Icon name="circleInfo" />
                     </span>
@@ -534,7 +542,7 @@ export function SaveBackupsWorkspace({ onClose }: { onClose: () => void }) {
                 ))}</tbody>
               </table>
             </div>
-            <p className="save-restore-preview__warning"><Icon name="triangleExclamation" /> Restoring replaces the active slot. SIMM will not create an automatic backup.</p>
+            <p className="save-restore-preview__warning"><Icon name="triangleExclamation" /> Restoring replaces the active slot. SIMM will first create and validate an automatic rollback backup.</p>
           </div>}
           <DialogFooter className="app-dialog__footer"><div className="app-dialog__actions">
             <SimmButton type="button" className="btn btn-secondary" onClick={() => setPendingRestore(null)} disabled={restoreInProgress}>Cancel</SimmButton>

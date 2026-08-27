@@ -118,6 +118,20 @@ const NEXUS_OAUTH_LAST_CALLBACK_KEY: &str = "nexus_oauth_last_callback";
 const NEXUS_NXM_PENDING_DOWNLOAD_KEY: &str = "nexus_nxm_pending_download";
 const NEXUS_NXM_PROTOCOL_BACKUP_KEY: &str = "nexus_nxm_protocol_backup";
 const THEMES_DIR_NAME: &str = "themes";
+const INSTALLATION_KEY_FILE_NAME: &str = "credentials.key";
+const INSTALLATION_KEY_ENVELOPE_PREFIX: &str = "SIMM_INSTALLATION_KEY_V1:";
+const WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX: &str = "SIMM_INSTALLATION_KEY_V2:DPAPI:";
+const CREDENTIALS_ENVELOPE_PREFIX: &str = "v2";
+const AES_GCM_NONCE_BYTES: usize = 12;
+const AES_GCM_TAG_BYTES: usize = 16;
+// Stored API keys and auth sessions are intentionally small. Bound the value
+// before hex decoding so a damaged database cannot trigger an unbounded
+// allocation while trying to recover credentials.
+const MAX_ENCRYPTED_SECRET_BYTES: usize = 1024 * 1024;
+// This was the historic implicit production key. It is intentionally retained
+// only to read existing ciphertext so it can be immediately re-encrypted with
+// the per-installation key below.
+const LEGACY_FALLBACK_ENCRYPTION_KEY: &str = "default-key-change-in-production";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -185,7 +199,8 @@ impl SettingsService {
                 last_resolved_url: None,
                 snoozed_until: None,
                 skipped_version_normalized: None,
-                channel: Some(AppUpdateChannel::Beta),
+                channel: Some(AppUpdateChannel::Stable),
+                by_channel: None,
             }),
             experience_mode: Some(crate::types::ExperienceMode::Player),
             show_advanced_game_tools: Some(false),
@@ -194,15 +209,270 @@ impl SettingsService {
         }
     }
 
-    fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
-        let key_str = std::env::var("ENCRYPTION_KEY")
-            .unwrap_or_else(|_| "default-key-change-in-production".to_string());
-
+    fn key_from_material(key_str: &str) -> Key<Aes256Gcm> {
         let mut hasher = Sha256::new();
         hasher.update(key_str.as_bytes());
         let key_bytes = hasher.finalize();
 
-        Ok(*Key::<Aes256Gcm>::from_slice(&key_bytes))
+        *Key::<Aes256Gcm>::from_slice(&key_bytes)
+    }
+
+    fn configured_encryption_key() -> Option<Key<Aes256Gcm>> {
+        std::env::var("ENCRYPTION_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| Self::key_from_material(&value))
+    }
+
+    fn installation_key_path() -> Result<PathBuf> {
+        Ok(crate::db::get_data_dir()?.join(INSTALLATION_KEY_FILE_NAME))
+    }
+
+    fn parse_raw_installation_key(contents: &str) -> Result<Key<Aes256Gcm>> {
+        let encoded = contents
+            .trim()
+            .strip_prefix(INSTALLATION_KEY_ENVELOPE_PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported SIMM installation key format"))?;
+        let bytes = hex::decode(encoded).context("Failed to decode SIMM installation key")?;
+        if bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "SIMM installation key has an invalid length"
+            ));
+        }
+
+        Ok(*Key::<Aes256Gcm>::from_slice(&bytes))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
+        use winapi::um::dpapi::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN};
+        use winapi::um::winbase::LocalFree;
+        use winapi::um::wincrypt::DATA_BLOB;
+
+        let mut input = DATA_BLOB {
+            cbData: u32::try_from(data.len()).context("SIMM installation key is too large")?,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = DATA_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let succeeded = unsafe {
+            CryptProtectData(
+                &mut input,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows DPAPI failed to protect the SIMM installation key");
+        }
+
+        let protected =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+        let free_result = unsafe { LocalFree(output.pbData as _) };
+        if !free_result.is_null() {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows DPAPI output buffer could not be released");
+        }
+        Ok(protected)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
+        use winapi::um::dpapi::{CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN};
+        use winapi::um::winbase::LocalFree;
+        use winapi::um::wincrypt::DATA_BLOB;
+
+        let mut input = DATA_BLOB {
+            cbData: u32::try_from(data.len())
+                .context("SIMM protected installation key is too large")?,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = DATA_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let succeeded = unsafe {
+            CryptUnprotectData(
+                &mut input,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if succeeded == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows DPAPI could not unprotect the SIMM installation key");
+        }
+
+        let plaintext =
+            unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
+        unsafe { LocalFree(output.pbData as _) };
+        Ok(plaintext)
+    }
+
+    fn parse_installation_key(contents: &str) -> Result<(Key<Aes256Gcm>, bool)> {
+        #[cfg(target_os = "windows")]
+        if let Some(protected) = contents
+            .trim()
+            .strip_prefix(WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX)
+        {
+            let decoded = hex::decode(protected).context("Failed to decode protected SIMM key")?;
+            let raw = Self::dpapi_unprotect(&decoded)?;
+            if raw.len() != 32 {
+                return Err(anyhow::anyhow!(
+                    "Windows DPAPI returned an invalid SIMM key length"
+                ));
+            }
+            return Ok((*Key::<Aes256Gcm>::from_slice(&raw), false));
+        }
+
+        // V1 stores raw key material. It remains readable only long enough to
+        // re-wrap it on Windows; new writes never use this format there.
+        Ok((
+            Self::parse_raw_installation_key(contents)?,
+            cfg!(target_os = "windows"),
+        ))
+    }
+
+    fn serialized_installation_key(key: &Key<Aes256Gcm>) -> Result<String> {
+        #[cfg(target_os = "windows")]
+        {
+            return Ok(format!(
+                "{}{}\n",
+                WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX,
+                hex::encode(Self::dpapi_protect(key.as_slice())?)
+            ));
+        }
+        #[cfg(not(target_os = "windows"))]
+        Ok(format!(
+            "{}{}\n",
+            INSTALLATION_KEY_ENVELOPE_PREFIX,
+            hex::encode(key.as_slice())
+        ))
+    }
+
+    fn write_installation_key(path: &Path, key: &Key<Aes256Gcm>) -> Result<()> {
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("SIMM installation key has no parent directory"))?;
+        std::fs::create_dir_all(parent).context("Failed to create SIMM data directory")?;
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut file = options
+            .open(path)
+            .context("Failed to create SIMM installation key")?;
+        file.write_all(Self::serialized_installation_key(key)?.as_bytes())
+            .context("Failed to write SIMM installation key")?;
+        file.sync_all()
+            .context("Failed to flush SIMM installation key")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .context("Failed to restrict SIMM installation key permissions")?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn rewrap_legacy_installation_key(path: &Path, key: &Key<Aes256Gcm>) -> Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+
+        let suffix = uuid::Uuid::new_v4();
+        let staged = path.with_file_name(format!("credentials.key.{suffix}.staged"));
+        Self::write_installation_key(&staged, key)?;
+
+        let to_wide = |value: &Path| {
+            value
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        let path_wide = to_wide(path);
+        let staged_wide = to_wide(&staged);
+        let replaced = unsafe {
+            MoveFileExW(
+                staged_wide.as_ptr(),
+                path_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if replaced == 0 {
+            return Err(std::io::Error::last_os_error()).context(
+                "Failed to atomically re-wrap the legacy SIMM installation key with DPAPI",
+            );
+        }
+        Ok(())
+    }
+
+    fn installation_encryption_key() -> Result<Key<Aes256Gcm>> {
+        let path = Self::installation_key_path()?;
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let (key, _needs_dpapi_rewrap) = Self::parse_installation_key(&contents)?;
+                #[cfg(target_os = "windows")]
+                if _needs_dpapi_rewrap {
+                    Self::rewrap_legacy_installation_key(&path, &key)?;
+                }
+                Ok(key)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let key = Aes256Gcm::generate_key(&mut OsRng);
+                match Self::write_installation_key(&path, &key) {
+                    Ok(()) => Ok(key),
+                    Err(error)
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|io_error| {
+                                io_error.kind() == std::io::ErrorKind::AlreadyExists
+                            }) =>
+                    {
+                        let contents = std::fs::read_to_string(&path)
+                            .context("Failed to read concurrently-created SIMM installation key")?;
+                        Self::parse_installation_key(&contents).map(|(key, _)| key)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error).context("Failed to read SIMM installation key"),
+        }
+    }
+
+    fn get_encryption_key() -> Result<Key<Aes256Gcm>> {
+        if let Some(key) = Self::configured_encryption_key() {
+            return Ok(key);
+        }
+
+        Self::installation_encryption_key()
+    }
+
+    fn get_legacy_encryption_key() -> Key<Aes256Gcm> {
+        Self::configured_encryption_key()
+            .unwrap_or_else(|| Self::key_from_material(LEGACY_FALLBACK_ENCRYPTION_KEY))
     }
 
     async fn encrypt_credentials(data: &str) -> Result<String> {
@@ -215,14 +485,19 @@ impl SettingsService {
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         Ok(format!(
-            "{}:{}",
+            "{}:{}:{}",
+            CREDENTIALS_ENVELOPE_PREFIX,
             hex::encode(nonce),
             hex::encode(ciphertext)
         ))
     }
 
-    async fn decrypt_credentials(encrypted: &str) -> Result<String> {
-        let key = Self::get_encryption_key()?;
+    async fn decrypt_credentials(encrypted: &str) -> Result<(String, bool)> {
+        let (key, encrypted, legacy) =
+            match encrypted.strip_prefix(&format!("{}:", CREDENTIALS_ENVELOPE_PREFIX)) {
+                Some(versioned) => (Self::get_encryption_key()?, versioned, false),
+                None => (Self::get_legacy_encryption_key(), encrypted, true),
+            };
         let cipher = Aes256Gcm::new(&key);
 
         let parts: Vec<&str> = encrypted.split(':').collect();
@@ -231,14 +506,30 @@ impl SettingsService {
         }
 
         let nonce_bytes = hex::decode(parts[0]).context("Failed to decode nonce")?;
+        if nonce_bytes.len() != AES_GCM_NONCE_BYTES {
+            return Err(anyhow::anyhow!(
+                "Invalid credential nonce length: expected {AES_GCM_NONCE_BYTES} bytes"
+            ));
+        }
+        if parts[1].len() > MAX_ENCRYPTED_SECRET_BYTES * 2 {
+            return Err(anyhow::anyhow!("Encrypted credential value is too large"));
+        }
         let ciphertext = hex::decode(parts[1]).context("Failed to decode ciphertext")?;
+        if ciphertext.len() < AES_GCM_TAG_BYTES {
+            return Err(anyhow::anyhow!(
+                "Invalid credential ciphertext length: expected at least {AES_GCM_TAG_BYTES} bytes"
+            ));
+        }
 
         let nonce = Nonce::from_slice(&nonce_bytes);
         let plaintext = cipher
             .decrypt(nonce, ciphertext.as_ref())
             .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
 
-        String::from_utf8(plaintext).context("Invalid UTF-8 in decrypted data")
+        Ok((
+            String::from_utf8(plaintext).context("Invalid UTF-8 in decrypted data")?,
+            legacy,
+        ))
     }
 
     fn sanitize_legacy_settings_value(mut value: serde_json::Value) -> serde_json::Value {
@@ -677,6 +968,19 @@ impl SettingsService {
         Ok(())
     }
 
+    /// Reads a secret encrypted by either the current per-installation key or
+    /// the historic format. A successfully decoded legacy value is upgraded
+    /// before it is returned, so the public legacy fallback is never used for
+    /// a subsequent write.
+    async fn decrypt_secret(&self, key: &str, encrypted: &str) -> Result<String> {
+        let (decrypted, legacy) = Self::decrypt_credentials(encrypted).await?;
+        if legacy {
+            let migrated = Self::encrypt_credentials(&decrypted).await?;
+            self.set_secret(key, &migrated).await?;
+        }
+        Ok(decrypted)
+    }
+
     pub async fn get_credentials(&self) -> Result<Option<(String, String)>> {
         let encrypted = match self.get_secret(STEAM_CREDENTIALS_KEY).await? {
             Some(value) => value,
@@ -687,7 +991,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(STEAM_CREDENTIALS_KEY, &encrypted)
+            .await?;
         let creds: serde_json::Value =
             serde_json::from_str(&decrypted).context("Failed to parse credentials")?;
 
@@ -730,7 +1036,7 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self.decrypt_secret(NEXUS_MODS_API_KEY, &encrypted).await?;
         Ok(Some(decrypted))
     }
 
@@ -752,7 +1058,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_OAUTH_SESSION_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus oauth session json")?;
         Ok(Some(parsed))
@@ -777,7 +1085,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_OAUTH_PENDING_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus oauth pending json")?;
         Ok(Some(parsed))
@@ -808,7 +1118,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_OAUTH_LAST_CALLBACK_KEY, &encrypted)
+            .await?;
         Ok(Some(decrypted))
     }
 
@@ -826,20 +1138,84 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus nxm pending download json")?;
         Ok(Some(parsed))
     }
 
-    pub async fn save_nexus_nxm_pending_download(&self, pending: &serde_json::Value) -> Result<()> {
+    /// Atomically reserves the single pending Nexus manual-download slot.
+    ///
+    /// Nexus invokes SIMM's protocol callback without the originating session
+    /// id, so more than one pending session cannot be correlated safely. An
+    /// insert-on-conflict preserves the first session instead of allowing a
+    /// concurrent start to overwrite it.
+    pub async fn save_nexus_nxm_pending_download_if_absent(
+        &self,
+        pending: &serde_json::Value,
+    ) -> Result<bool> {
         let encrypted = Self::encrypt_credentials(&pending.to_string()).await?;
-        self.set_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY, &encrypted)
-            .await
+        let result = sqlx::query(
+            "INSERT INTO secrets (key, encrypted) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(NEXUS_NXM_PENDING_DOWNLOAD_KEY)
+        .bind(encrypted)
+        .execute(&*self.pool)
+        .await
+        .context("Failed to reserve nexus nxm pending download")?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn clear_nexus_nxm_pending_download(&self) -> Result<()> {
         self.clear_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await
+    }
+
+    /// Clear a pending manual-download row only if it is still the exact
+    /// session observed by the caller. The encrypted value is included in the
+    /// DELETE predicate as a compare-and-swap version, preventing a newly
+    /// saved session from being removed between the identity check and delete.
+    pub async fn clear_nexus_nxm_pending_download_if_identity(
+        &self,
+        expected_session_id: &str,
+        expected_created_at: i64,
+    ) -> Result<bool> {
+        let Some(encrypted) = self.get_secret(NEXUS_NXM_PENDING_DOWNLOAD_KEY).await? else {
+            return Ok(false);
+        };
+        if encrypted.is_empty() {
+            return Ok(false);
+        }
+
+        let (decrypted, _) = Self::decrypt_credentials(&encrypted).await?;
+        let pending: serde_json::Value = serde_json::from_str(&decrypted)
+            .context("Failed to parse nexus nxm pending download json")?;
+        let current_session_id = pending
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let current_created_at = pending
+            .get("createdAt")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let identity_matches = if expected_session_id.is_empty() {
+            current_session_id.is_empty() && current_created_at == expected_created_at
+        } else {
+            current_session_id == expected_session_id
+        };
+        if !identity_matches {
+            return Ok(false);
+        }
+
+        let result = sqlx::query("DELETE FROM secrets WHERE key = ? AND encrypted = ?")
+            .bind(NEXUS_NXM_PENDING_DOWNLOAD_KEY)
+            .bind(&encrypted)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to conditionally clear nexus nxm pending download")?;
+        Ok(result.rows_affected() == 1)
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -853,7 +1229,9 @@ impl SettingsService {
             return Ok(None);
         }
 
-        let decrypted = Self::decrypt_credentials(&encrypted).await?;
+        let decrypted = self
+            .decrypt_secret(NEXUS_NXM_PROTOCOL_BACKUP_KEY, &encrypted)
+            .await?;
         let parsed = serde_json::from_str::<serde_json::Value>(&decrypted)
             .context("Failed to parse nexus nxm protocol backup json")?;
         Ok(Some(parsed))
@@ -899,6 +1277,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, original }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -909,6 +1293,20 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    async fn encrypt_legacy_credentials_for_test(data: &str) -> Result<String> {
+        let key = SettingsService::get_legacy_encryption_key();
+        let cipher = Aes256Gcm::new(&key);
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, data.as_bytes())
+            .map_err(|error| anyhow::anyhow!("legacy encryption failed: {error}"))?;
+        Ok(format!(
+            "{}:{}",
+            hex::encode(nonce),
+            hex::encode(ciphertext)
+        ))
     }
 
     #[tokio::test]
@@ -1337,6 +1735,158 @@ mod tests {
             .expect("nexus_mods_api_key stored");
         assert!(nexus.contains(':'));
         assert_ne!(nexus, "nexus");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn new_secrets_use_a_per_installation_key_envelope() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        service
+            .save_credentials("user".to_string(), "pass".to_string())
+            .await?;
+
+        let stored: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+            .bind(STEAM_CREDENTIALS_KEY)
+            .fetch_one(&*pool)
+            .await?;
+        assert!(stored.starts_with("v2:"));
+
+        let key_file = data_dir.join(INSTALLATION_KEY_FILE_NAME);
+        let key_contents = std::fs::read_to_string(key_file)?;
+        #[cfg(target_os = "windows")]
+        assert!(key_contents.starts_with(WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX));
+        #[cfg(not(target_os = "windows"))]
+        assert!(key_contents.starts_with(INSTALLATION_KEY_ENVELOPE_PREFIX));
+        assert_eq!(
+            service.get_credentials().await?,
+            Some(("user".to_string(), "pass".to_string()))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(target_os = "windows")]
+    fn windows_rewraps_the_legacy_raw_installation_key_with_dpapi() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        std::fs::create_dir_all(&data_dir)?;
+        let raw_key = Aes256Gcm::generate_key(&mut OsRng);
+        let key_path = data_dir.join(INSTALLATION_KEY_FILE_NAME);
+        std::fs::write(
+            &key_path,
+            format!(
+                "{}{}\n",
+                INSTALLATION_KEY_ENVELOPE_PREFIX,
+                hex::encode(raw_key.as_slice())
+            ),
+        )?;
+
+        let loaded = SettingsService::installation_encryption_key()?;
+
+        assert_eq!(loaded.as_slice(), raw_key.as_slice());
+        let rewrapped = std::fs::read_to_string(key_path)?;
+        assert!(rewrapped.starts_with(WINDOWS_INSTALLATION_KEY_ENVELOPE_PREFIX));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reading_legacy_secret_reencrypts_it_with_the_installation_key() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+        let legacy = encrypt_legacy_credentials_for_test(
+            r#"{"username":"legacy-user","password":"legacy-pass"}"#,
+        )
+        .await?;
+        service.set_secret(STEAM_CREDENTIALS_KEY, &legacy).await?;
+
+        assert_eq!(
+            service.get_credentials().await?,
+            Some(("legacy-user".to_string(), "legacy-pass".to_string()))
+        );
+
+        let migrated: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+            .bind(STEAM_CREDENTIALS_KEY)
+            .fetch_one(&*pool)
+            .await?;
+        assert!(migrated.starts_with("v2:"));
+        assert_ne!(migrated, legacy);
+        assert!(data_dir.join(INSTALLATION_KEY_FILE_NAME).is_file());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn malformed_current_credentials_do_not_overwrite_stored_values() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::set("ENCRYPTION_KEY", "test-key");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        for malformed in [
+            "v2:00:00112233445566778899aabbccddeeff",
+            "v2:000000000000000000000000:00",
+        ] {
+            service.set_secret(STEAM_CREDENTIALS_KEY, malformed).await?;
+
+            assert!(service.get_credentials().await.is_err());
+            let stored: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+                .bind(STEAM_CREDENTIALS_KEY)
+                .fetch_one(&*pool)
+                .await?;
+            assert_eq!(stored, malformed);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn malformed_legacy_credentials_do_not_overwrite_stored_values() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let _key_guard = EnvVarGuard::unset("ENCRYPTION_KEY");
+        let pool = initialize_pool().await?;
+        let service = SettingsService::new(pool.clone())?;
+
+        for malformed in [
+            "00:00112233445566778899aabbccddeeff",
+            "000000000000000000000000:00",
+        ] {
+            service.set_secret(STEAM_CREDENTIALS_KEY, malformed).await?;
+
+            assert!(service.get_credentials().await.is_err());
+            let stored: String = sqlx::query_scalar("SELECT encrypted FROM secrets WHERE key = ?")
+                .bind(STEAM_CREDENTIALS_KEY)
+                .fetch_one(&*pool)
+                .await?;
+            assert_eq!(stored, malformed);
+        }
 
         Ok(())
     }

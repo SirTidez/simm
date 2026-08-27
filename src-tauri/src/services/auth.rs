@@ -2,13 +2,22 @@ use crate::utils::depot_downloader_detector::detect_depot_downloader;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{ExitStatus, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Runtime};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::process::{Child, Command};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+
+const PASSWORD_AUTH_TIMEOUT: Duration = Duration::from_secs(120);
+const QR_AUTH_TIMEOUT: Duration = Duration::from_secs(300);
+const AUTH_OUTPUT_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_AUTH_OUTPUT_BYTES: usize = 128 * 1024;
+const PASSWORD_AUTH_TIMEOUT_ERROR: &str =
+    "Steam authentication timed out. Please check Steam Guard and try again.";
+const QR_AUTH_TIMEOUT_ERROR: &str =
+    "Steam QR authentication timed out. Start a new QR login and scan the new code.";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuthResult {
@@ -17,6 +26,45 @@ pub struct AuthResult {
     pub requires_steam_guard: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthProcessCompletion {
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct AuthProcessOutput {
+    completion: AuthProcessCompletion,
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+/// Keeps cancellation connected to the task that owns the child process. If
+/// the command future is dropped, the task still receives the cancellation
+/// signal and performs kill, reap, and pipe-reader cleanup.
+struct AuthProcessTask {
+    cancel: Option<oneshot::Sender<()>>,
+    handle: JoinHandle<Result<AuthProcessOutput>>,
+}
+
+impl AuthProcessTask {
+    async fn finish(mut self) -> Result<AuthProcessOutput> {
+        let joined = (&mut self.handle).await;
+        self.cancel.take();
+        joined.context("Steam authentication process task failed")?
+    }
+}
+
+impl Drop for AuthProcessTask {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -55,12 +103,11 @@ impl AuthService {
 
     fn build_auth_args(
         username: String,
-        password: Option<String>,
+        remember_credentials: bool,
         steam_guard: Option<String>,
     ) -> Vec<String> {
         let config = crate::types::schedule_i_config();
         let auth_branch = Self::auth_branch();
-        let password = Self::trimmed_optional(password);
         let steam_guard = Self::trimmed_optional(steam_guard);
 
         let mut args = vec![
@@ -70,13 +117,11 @@ impl AuthService {
             username,
         ];
 
-        if let Some(password) = password {
-            args.push("-password".to_string());
-            args.push(password);
+        if remember_credentials {
+            args.push("-remember-password".to_string());
         }
 
         args.extend([
-            "-remember-password".to_string(),
             "-loginid".to_string(),
             Self::login_id(),
             "-manifest-only".to_string(),
@@ -91,19 +136,22 @@ impl AuthService {
         args
     }
 
-    fn build_qr_auth_args() -> Vec<String> {
+    fn build_qr_auth_args(remember_credentials: bool) -> Vec<String> {
         let config = crate::types::schedule_i_config();
-        vec![
+        let mut args = vec![
             "-app".to_string(),
             config.app_id,
             "-qr".to_string(),
-            "-remember-password".to_string(),
             "-loginid".to_string(),
             Self::login_id(),
             "-manifest-only".to_string(),
             "-branch".to_string(),
             Self::auth_branch(),
-        ]
+        ];
+        if remember_credentials {
+            args.push("-remember-password".to_string());
+        }
+        args
     }
 
     fn success(username: Option<String>) -> AuthResult {
@@ -149,22 +197,33 @@ impl AuthService {
             .collect()
     }
 
-    async fn emit_qr_output_line<R: Runtime>(
-        app: &AppHandle<R>,
-        output: &Arc<Mutex<String>>,
-        line: String,
-    ) {
-        output.lock().await.push_str(&format!("{}\n", line));
+    fn append_capped_output(output: &mut String, value: &str) {
+        let remaining = MAX_AUTH_OUTPUT_BYTES.saturating_sub(output.len());
+        if remaining == 0 {
+            return;
+        }
+
+        let mut end = remaining.min(value.len());
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&value[..end]);
+    }
+
+    fn emit_qr_output_line<R: Runtime>(app: &AppHandle<R>, output: &mut String, line: String) {
+        Self::append_capped_output(output, &line);
+        Self::append_capped_output(output, "\n");
         let _ = crate::events::emit_steam_auth_qr_line(app, line);
     }
 
-    async fn pump_qr_output<R, S>(app: AppHandle<R>, mut stream: S, output: Arc<Mutex<String>>)
+    async fn pump_qr_output<R, S>(app: AppHandle<R>, mut stream: S) -> String
     where
         R: Runtime,
-        S: AsyncRead + Unpin,
+        S: AsyncRead + Unpin + Send + 'static,
     {
         let mut buffer = [0_u8; 4096];
         let mut pending = String::new();
+        let mut output = String::new();
 
         loop {
             let read = match stream.read(&mut buffer).await {
@@ -189,13 +248,205 @@ impl AuthService {
                 if line.ends_with('\n') {
                     line.pop();
                 }
-                Self::emit_qr_output_line(&app, &output, line).await;
+                Self::emit_qr_output_line(&app, &mut output, line);
+            }
+
+            // A process can write indefinitely without a newline. Emit a
+            // bounded partial line so the framing buffer cannot grow without
+            // limit while the pipe continues to be drained.
+            if pending.len() >= MAX_AUTH_OUTPUT_BYTES {
+                let line = std::mem::take(&mut pending);
+                Self::emit_qr_output_line(&app, &mut output, line);
             }
         }
 
         if !pending.is_empty() {
-            Self::emit_qr_output_line(&app, &output, pending).await;
+            Self::emit_qr_output_line(&app, &mut output, pending);
         }
+
+        output
+    }
+
+    async fn read_capped_output<S>(mut stream: S) -> Vec<u8>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut buffer = [0_u8; 4096];
+        let mut output = Vec::new();
+
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(read) => {
+                    let remaining = MAX_AUTH_OUTPUT_BYTES.saturating_sub(output.len());
+                    output.extend_from_slice(&buffer[..read.min(remaining)]);
+                }
+                Err(error) => {
+                    warn_with_location(format!("Steam auth output stream read failed: {}", error));
+                    break;
+                }
+            }
+        }
+
+        output
+    }
+
+    async fn join_output_reader<T: Default>(label: &str, mut handle: Option<JoinHandle<T>>) -> T {
+        let Some(mut handle) = handle.take() else {
+            return T::default();
+        };
+
+        match tokio::time::timeout(AUTH_OUTPUT_JOIN_TIMEOUT, &mut handle).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                warn_with_location(format!(
+                    "Steam auth {} output reader failed: {}",
+                    label, error
+                ));
+                T::default()
+            }
+            Err(_) => {
+                warn_with_location(format!(
+                    "Steam auth {} output reader did not close after process exit",
+                    label
+                ));
+                handle.abort();
+                let _ = handle.await;
+                T::default()
+            }
+        }
+    }
+
+    async fn kill_and_reap(child: &mut Child) -> Result<ExitStatus> {
+        if let Err(kill_error) = child.start_kill() {
+            if child
+                .try_wait()
+                .context("Failed to inspect Steam authentication process")?
+                .is_none()
+            {
+                return Err(kill_error).context("Failed to terminate Steam authentication process");
+            }
+        }
+
+        child
+            .wait()
+            .await
+            .context("Failed to reap Steam authentication process")
+    }
+
+    async fn wait_for_child(
+        child: &mut Child,
+        deadline: Duration,
+        mut cancel: oneshot::Receiver<()>,
+    ) -> Result<(AuthProcessCompletion, ExitStatus)> {
+        tokio::select! {
+            status = child.wait() => {
+                Ok((
+                    AuthProcessCompletion::Exited,
+                    status.context("Failed while waiting for Steam authentication process")?,
+                ))
+            }
+            _ = tokio::time::sleep(deadline) => {
+                let status = Self::kill_and_reap(child).await?;
+                Ok((AuthProcessCompletion::TimedOut, status))
+            }
+            _ = &mut cancel => {
+                let status = Self::kill_and_reap(child).await?;
+                Ok((AuthProcessCompletion::Cancelled, status))
+            }
+        }
+    }
+
+    async fn run_password_process(
+        mut child: Child,
+        stdin_lines: Vec<String>,
+        deadline: Duration,
+    ) -> Result<AuthProcessOutput> {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let stdout_task = child
+                .stdout
+                .take()
+                .map(|stdout| tokio::spawn(Self::read_capped_output(stdout)));
+            let stderr_task = child
+                .stderr
+                .take()
+                .map(|stderr| tokio::spawn(Self::read_capped_output(stderr)));
+            let stdin_task = if stdin_lines.is_empty() {
+                None
+            } else {
+                child.stdin.take().map(|mut stdin| {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        use tokio::io::AsyncWriteExt;
+                        let _ = stdin
+                            .write_all(format!("{}\n", stdin_lines.join("\n")).as_bytes())
+                            .await;
+                    })
+                })
+            };
+
+            let (completion, status) =
+                Self::wait_for_child(&mut child, deadline, cancel_rx).await?;
+
+            if let Some(stdin_task) = stdin_task {
+                stdin_task.abort();
+                let _ = stdin_task.await;
+            }
+            let stdout = Self::join_output_reader("stdout", stdout_task).await;
+            let stderr = Self::join_output_reader("stderr", stderr_task).await;
+
+            Ok(AuthProcessOutput {
+                completion,
+                status,
+                stdout: Self::decode_depotdownloader_output(&stdout),
+                stderr: Self::decode_depotdownloader_output(&stderr),
+            })
+        });
+
+        AuthProcessTask {
+            cancel: Some(cancel_tx),
+            handle,
+        }
+        .finish()
+        .await
+    }
+
+    async fn run_qr_process<R: Runtime>(
+        app: AppHandle<R>,
+        mut child: Child,
+        deadline: Duration,
+    ) -> Result<AuthProcessOutput> {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let stdout_task = child.stdout.take().map(|stdout| {
+                let app = app.clone();
+                tokio::spawn(Self::pump_qr_output(app, stdout))
+            });
+            let stderr_task = child.stderr.take().map(|stderr| {
+                let app = app.clone();
+                tokio::spawn(Self::pump_qr_output(app, stderr))
+            });
+
+            let (completion, status) =
+                Self::wait_for_child(&mut child, deadline, cancel_rx).await?;
+            let stdout = Self::join_output_reader("QR stdout", stdout_task).await;
+            let stderr = Self::join_output_reader("QR stderr", stderr_task).await;
+
+            Ok(AuthProcessOutput {
+                completion,
+                status,
+                stdout,
+                stderr,
+            })
+        });
+
+        AuthProcessTask {
+            cancel: Some(cancel_tx),
+            handle,
+        }
+        .finish()
+        .await
     }
 
     pub async fn authenticate(
@@ -203,6 +454,7 @@ impl AuthService {
         username: String,
         password: Option<String>,
         steam_guard: Option<String>,
+        remember_credentials: bool,
     ) -> Result<AuthResult> {
         let detector_info = detect_depot_downloader().await?;
         if !detector_info.installed || detector_info.path.is_none() {
@@ -214,8 +466,12 @@ impl AuthService {
         }
 
         let executable_path = detector_info.path.unwrap();
+        let password = Self::trimmed_optional(password);
         let steam_guard = Self::trimmed_optional(steam_guard);
-        let args = Self::build_auth_args(username, password, steam_guard.clone());
+        // DepotDownloader accepts interactive password input on stdin. Keep it
+        // out of the OS command line, which can otherwise be inspected by
+        // other local processes while authentication is running.
+        let args = Self::build_auth_args(username, remember_credentials, steam_guard.clone());
 
         // Get depots directory from SIMM folder
         let depots_dir = crate::utils::directory_init::get_depots_dir()
@@ -229,7 +485,7 @@ impl AuthService {
             })?;
 
         #[cfg(target_os = "windows")]
-        let mut child = ({
+        let child = ({
             #[allow(unused_imports)] // Required for CommandExt trait methods
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
@@ -238,6 +494,7 @@ impl AuthService {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .kill_on_drop(true)
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
                 .context("Failed to spawn DepotDownloader process")
@@ -251,12 +508,13 @@ impl AuthService {
         })?;
 
         #[cfg(not(target_os = "windows"))]
-        let mut child = Command::new(&executable_path)
+        let child = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .context("Failed to spawn DepotDownloader process")
             .map_err(|error| {
@@ -267,30 +525,29 @@ impl AuthService {
                 error
             })?;
 
-        if let Some(steam_guard) = steam_guard {
-            if let Some(mut stdin) = child.stdin.take() {
-                tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
-                    use tokio::io::AsyncWriteExt;
-                    let _ = stdin
-                        .write_all(format!("{}\n", steam_guard).as_bytes())
-                        .await;
-                });
-            }
-        }
-
-        let output = child.wait_with_output().await.map_err(|error| {
-            error_with_location(format!(
-                "Steam auth failed while waiting for DepotDownloader output: {}",
+        let stdin_lines = [password, steam_guard]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let output = Self::run_password_process(child, stdin_lines, PASSWORD_AUTH_TIMEOUT)
+            .await
+            .map_err(|error| {
+                error_with_location(format!("Steam auth process management failed: {}", error));
                 error
-            ));
-            error
-        })?;
-        let all_output = String::from_utf8_lossy(&output.stdout).to_string()
-            + &String::from_utf8_lossy(&output.stderr).to_string();
+            })?;
+        let all_output = output.stdout + &output.stderr;
         let sanitized_output =
             crate::services::logger::LoggerService::sanitize_log_text(&all_output);
         let lower_output = all_output.to_lowercase();
+
+        if output.completion == AuthProcessCompletion::TimedOut {
+            warn_with_location(format!(
+                "Steam authentication timed out after {} seconds: {}",
+                PASSWORD_AUTH_TIMEOUT.as_secs(),
+                sanitized_output
+            ));
+            return Ok(Self::failure(PASSWORD_AUTH_TIMEOUT_ERROR.to_string(), None));
+        }
 
         if output.status.success()
             || lower_output.contains("logged in")
@@ -328,7 +585,11 @@ impl AuthService {
         }
     }
 
-    pub async fn authenticate_qr<R: Runtime>(&self, app: AppHandle<R>) -> Result<AuthResult> {
+    pub async fn authenticate_qr<R: Runtime>(
+        &self,
+        app: AppHandle<R>,
+        remember_credentials: bool,
+    ) -> Result<AuthResult> {
         let detector_info = detect_depot_downloader().await?;
         if !detector_info.installed || detector_info.path.is_none() {
             warn_with_location("Steam QR auth rejected because DepotDownloader is not installed");
@@ -339,7 +600,7 @@ impl AuthService {
         }
 
         let executable_path = detector_info.path.unwrap();
-        let args = Self::build_qr_auth_args();
+        let args = Self::build_qr_auth_args(remember_credentials);
 
         let depots_dir = crate::utils::directory_init::get_depots_dir()
             .context("Failed to get depots directory")
@@ -352,7 +613,7 @@ impl AuthService {
             })?;
 
         #[cfg(target_os = "windows")]
-        let mut child = ({
+        let child = ({
             #[allow(unused_imports)]
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
@@ -360,6 +621,7 @@ impl AuthService {
                 .current_dir(&depots_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .kill_on_drop(true)
                 .creation_flags(0x08000000)
                 .spawn()
                 .context("Failed to spawn DepotDownloader QR auth process")
@@ -373,11 +635,12 @@ impl AuthService {
         })?;
 
         #[cfg(not(target_os = "windows"))]
-        let mut child = Command::new(&executable_path)
+        let child = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .context("Failed to spawn DepotDownloader QR auth process")
             .map_err(|error| {
@@ -388,44 +651,30 @@ impl AuthService {
                 error
             })?;
 
-        let output = Arc::new(Mutex::new(String::new()));
-        let mut stdout_task = None;
-        if let Some(stdout) = child.stdout.take() {
-            let app = app.clone();
-            let output = output.clone();
-            stdout_task = Some(tokio::spawn(async move {
-                Self::pump_qr_output(app, stdout, output).await;
-            }));
-        }
-
-        let mut stderr_task = None;
-        if let Some(stderr) = child.stderr.take() {
-            let app = app.clone();
-            let output = output.clone();
-            stderr_task = Some(tokio::spawn(async move {
-                Self::pump_qr_output(app, stderr, output).await;
-            }));
-        }
-
-        let status = child.wait().await.map_err(|error| {
-            error_with_location(format!(
-                "Steam QR auth failed while waiting for DepotDownloader: {}",
+        let output = Self::run_qr_process(app, child, QR_AUTH_TIMEOUT)
+            .await
+            .map_err(|error| {
+                error_with_location(format!(
+                    "Steam QR auth process management failed: {}",
+                    error
+                ));
                 error
-            ));
-            error
-        })?;
-
-        if let Some(handle) = stdout_task {
-            let _ = handle.await;
-        }
-        if let Some(handle) = stderr_task {
-            let _ = handle.await;
-        }
-
-        let all_output = output.lock().await.clone();
+            })?;
+        let all_output = output.stdout + &output.stderr;
         let lower_output = all_output.to_lowercase();
 
-        if status.success()
+        if output.completion == AuthProcessCompletion::TimedOut {
+            let sanitized_output =
+                crate::services::logger::LoggerService::sanitize_log_text(&all_output);
+            warn_with_location(format!(
+                "Steam QR authentication timed out after {} seconds: {}",
+                QR_AUTH_TIMEOUT.as_secs(),
+                sanitized_output
+            ));
+            return Ok(Self::failure(QR_AUTH_TIMEOUT_ERROR.to_string(), None));
+        }
+
+        if output.status.success()
             || lower_output.contains("logged in")
             || lower_output.contains("authentication successful")
             || lower_output.contains("login successful")
@@ -463,7 +712,7 @@ impl AuthService {
 
     #[allow(dead_code)]
     pub async fn check_authentication_status(&self, username: String) -> Result<bool> {
-        let result = self.authenticate(username, None, None).await?;
+        let result = self.authenticate(username, None, None, false).await?;
         Ok(result.success)
     }
 }
@@ -479,6 +728,8 @@ mod tests {
     use super::*;
     #[cfg(target_os = "windows")]
     use serial_test::serial;
+    use std::io::Write;
+    use tauri::test::mock_app;
     #[cfg(target_os = "windows")]
     use tempfile::tempdir;
 
@@ -535,6 +786,75 @@ mod tests {
             .map(|window| window[1].as_str())
     }
 
+    fn spawn_timeout_fixture() -> Result<Child> {
+        let executable = std::env::current_exe().context("Failed to locate auth test binary")?;
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "services::auth::tests::auth_timeout_child_fixture",
+                "--nocapture",
+            ])
+            .env("SIMM_AUTH_TIMEOUT_FIXTURE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+            .spawn()
+            .context("Failed to spawn auth timeout fixture")
+    }
+
+    #[test]
+    fn auth_timeout_child_fixture() {
+        if std::env::var_os("SIMM_AUTH_TIMEOUT_FIXTURE").is_none() {
+            return;
+        }
+
+        println!("auth timeout fixture stdout");
+        eprintln!("auth timeout fixture stderr");
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn password_auth_timeout_kills_and_reaps_child() -> Result<()> {
+        let child = spawn_timeout_fixture()?;
+        let started = tokio::time::Instant::now();
+
+        let output = AuthService::run_password_process(
+            child,
+            vec!["fixture-password-not-an-argument".to_string()],
+            Duration::from_millis(750),
+        )
+        .await?;
+
+        assert_eq!(output.completion, AuthProcessCompletion::TimedOut);
+        assert!(!output.status.success());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(output.stdout.contains("auth timeout fixture stdout"));
+        assert!(output.stderr.contains("auth timeout fixture stderr"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn qr_auth_timeout_kills_and_reaps_child_after_streaming_output() -> Result<()> {
+        let child = spawn_timeout_fixture()?;
+        let app = mock_app();
+        let handle = app.handle().clone();
+        let started = tokio::time::Instant::now();
+
+        let output = AuthService::run_qr_process(handle, child, Duration::from_millis(750)).await?;
+
+        assert_eq!(output.completion, AuthProcessCompletion::TimedOut);
+        assert!(!output.status.success());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(output.stdout.contains("auth timeout fixture stdout"));
+        assert!(output.stderr.contains("auth timeout fixture stderr"));
+        Ok(())
+    }
+
     #[tokio::test]
     #[serial]
     #[cfg(target_os = "windows")]
@@ -549,7 +869,9 @@ mod tests {
             EnvVarGuard::set("PROGRAMFILES", temp.path().to_string_lossy().as_ref());
 
         let service = AuthService::new();
-        let result = service.authenticate("user".to_string(), None, None).await?;
+        let result = service
+            .authenticate("user".to_string(), None, None, false)
+            .await?;
 
         assert!(!result.success);
         assert!(result
@@ -564,19 +886,15 @@ mod tests {
 
     #[test]
     fn build_auth_args_uses_a_configured_schedule_i_branch() {
-        let args = AuthService::build_auth_args(
-            "steam-user".to_string(),
-            Some("secret-pass".to_string()),
-            Some("guard".to_string()),
-        );
+        let args =
+            AuthService::build_auth_args("steam-user".to_string(), true, Some("guard".to_string()));
 
         assert!(args.windows(2).any(|window| {
             window[0] == "-branch"
                 && window[1] == crate::types::schedule_i_config().branches[0].name
         }));
-        assert!(args
-            .windows(2)
-            .any(|window| window[0] == "-password" && window[1] == "secret-pass"));
+        assert!(!args.iter().any(|arg| arg == "-password"));
+        assert!(!args.iter().any(|arg| arg == "secret-pass"));
         let login_id = login_id_arg(&args).expect("auth args should include -loginid");
         assert!(login_id.parse::<u32>().is_ok());
         assert!(args.iter().any(|arg| arg == "-remember-password"));
@@ -587,19 +905,17 @@ mod tests {
 
     #[test]
     fn build_auth_args_omits_blank_steam_guard() {
-        let args = AuthService::build_auth_args(
-            "steam-user".to_string(),
-            Some("secret-pass".to_string()),
-            Some("   ".to_string()),
-        );
+        let args =
+            AuthService::build_auth_args("steam-user".to_string(), false, Some("   ".to_string()));
 
         assert!(!args.iter().any(|arg| arg == "-no-mobile"));
         assert!(!args.iter().any(|arg| arg == "-steamguard"));
+        assert!(!args.iter().any(|arg| arg == "-remember-password"));
     }
 
     #[test]
     fn build_qr_auth_args_omits_username_uses_qr_and_unique_login_id() {
-        let args = AuthService::build_qr_auth_args();
+        let args = AuthService::build_qr_auth_args(true);
 
         assert!(args.iter().any(|arg| arg == "-qr"));
         assert!(args.iter().any(|arg| arg == "-remember-password"));
@@ -608,6 +924,12 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-manifest-only"));
         assert!(!args.iter().any(|arg| arg == "-username"));
         assert!(!args.iter().any(|arg| arg == "-password"));
+    }
+
+    #[test]
+    fn qr_auth_args_honor_one_time_credentials_setting() {
+        let args = AuthService::build_qr_auth_args(false);
+        assert!(!args.iter().any(|arg| arg == "-remember-password"));
     }
 
     #[test]

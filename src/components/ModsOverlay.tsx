@@ -608,8 +608,10 @@ export function ModsOverlay({
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
   const [activeSecurityReport, setActiveSecurityReport] = useState<SecurityReportWorkspaceRequest | null>(null);
   const [securityActionBusy, setSecurityActionBusy] = useState(false);
+  const securityReportOperationRef = useRef(0);
   const [, setToastMessage] = useState<string | null>(null);
   const [profileExport, setProfileExport] = useState<ProfileExportState>(emptyProfileExportState);
+  const profileExportOperationRef = useRef(0);
 
   // Search state
   const [environment, setEnvironment] = useState<Environment | null>(null);
@@ -785,6 +787,7 @@ export function ModsOverlay({
     : 'Adding...';
 
   const openSecurityReport = useCallback((request: SecurityReportWorkspaceRequest) => {
+    securityReportOperationRef.current += 1;
     if (onOpenSecurityReport) {
       onOpenSecurityReport(request);
       return;
@@ -798,23 +801,32 @@ export function ModsOverlay({
       return;
     }
 
+    securityReportOperationRef.current += 1;
     activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
   };
 
   const handleSecurityReportConfirm = async () => {
-    if (!activeSecurityReport?.onConfirm) {
+    const request = activeSecurityReport;
+    if (!request?.onConfirm) {
       return;
     }
 
+    const operationId = securityReportOperationRef.current;
     setSecurityActionBusy(true);
     try {
-      await activeSecurityReport.onConfirm();
-      setActiveSecurityReport(null);
+      await request.onConfirm();
+      if (operationId === securityReportOperationRef.current) {
+        setActiveSecurityReport(null);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to continue after reviewing the MLVScan findings.');
+      if (operationId === securityReportOperationRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to continue after reviewing the MLVScan findings.');
+      }
     } finally {
-      setSecurityActionBusy(false);
+      if (operationId === securityReportOperationRef.current) {
+        setSecurityActionBusy(false);
+      }
     }
   };
 
@@ -1334,6 +1346,7 @@ export function ModsOverlay({
   };
 
   const handleShareProfile = async () => {
+    const operationId = ++profileExportOperationRef.current;
     setProfileExport({
       isOpen: true,
       manifest: null,
@@ -1344,6 +1357,7 @@ export function ModsOverlay({
     });
     try {
       const manifest = await ApiService.exportEnvironmentProfile(environmentId);
+      if (operationId !== profileExportOperationRef.current) return;
       setProfileExport({
         isOpen: true,
         manifest,
@@ -1354,10 +1368,16 @@ export function ModsOverlay({
       });
       setError(null);
     } catch (err) {
+      if (operationId !== profileExportOperationRef.current) return;
       setProfileExport(emptyProfileExportState);
       setError(err instanceof Error ? err.message : 'Failed to export profile.');
     }
   };
+
+  const closeProfileExport = useCallback(() => {
+    profileExportOperationRef.current += 1;
+    setProfileExport(emptyProfileExportState);
+  }, []);
 
   const handleToggleProfileItem = (item: ModProfileItem, index: number, checked: boolean) => {
     const key = profileItemKey(item, index);
@@ -1412,12 +1432,19 @@ export function ModsOverlay({
     }
   };
 
-  const handleUpdateMod = async (mod: ModInfo) => {
+  const handleUpdateMod = async (mod: ModInfo, securityOverride = false): Promise<void> => {
     setUpdatingMod(mod.fileName);
     setError(null);
     try {
-      const result = await ApiService.updateMod(environmentId, mod.fileName);
+      const result = await ApiService.updateMod(environmentId, mod.fileName, securityOverride);
       if (!result.success) {
+        if (handleSecurityGateResponse(
+          `Security Findings - ${mod.name}`,
+          result,
+          () => handleUpdateMod(mod, true),
+        )) {
+          return;
+        }
         if (result.errorCode === 'nexus_auth_required' && onOpenAccounts) {
           setConfirmDialog({
             title: 'Nexus Login Required',
@@ -3230,7 +3257,7 @@ export function ModsOverlay({
         selectedItemKeys={profileExport.selectedItemKeys}
         inputId="mods-profile-export-name"
         saveDisabled={profileExport.loading || profileExport.saving || !adjustedProfileManifest || adjustedProfileManifest.items.length === 0}
-        onClose={() => setProfileExport(emptyProfileExportState)}
+        onClose={closeProfileExport}
         onProfileNameChange={(profileName) => setProfileExport((previous) => ({
           ...previous,
           profileName,

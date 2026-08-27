@@ -54,13 +54,35 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         }
     };
 
-    if crate::services::telemetry::telemetry_feature_enabled() {
-        crate::services::game_session_monitor::GameSessionMonitor::new(pool.clone(), app.clone())
-            .start();
-        log::info!("Live telemetry game-session monitor initialized");
-    } else {
-        log::info!("Live telemetry is disabled by the SIMM_ENABLE_TELEMETRY feature flag");
+    let env_service = match EnvironmentService::new(pool.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Failed to create EnvironmentService: {}", e);
+            log::info!("Application initialization complete");
+            return Ok(());
+        }
+    };
+
+    // Reconcile interrupted environment deletions before reading environments or
+    // arming filesystem watchers. Rows that survived a failed transaction regain
+    // their staged tree; committed deletions finish removing their verified tree.
+    match env_service.recover_pending_environment_deletions().await {
+        Ok(report) => {
+            if report.restored > 0 || report.finalized > 0 || report.pending > 0 {
+                log::info!(
+                    "Environment deletion recovery completed (restored={}, finalized={}, pending={})",
+                    report.restored,
+                    report.finalized,
+                    report.pending
+                );
+            }
+        }
+        Err(error) => log::error!(
+            "Failed to load durable environment deletion recovery state: {}",
+            error
+        ),
     }
+
     let runtime_settings = match app.try_state::<crate::services::settings::RuntimeSettingsState>()
     {
         Some(state) => state.inner().clone(),
@@ -68,21 +90,6 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
             log::error!(
                 "Runtime settings state not registered; skipping background update scheduler"
             );
-            return Ok(());
-        }
-    };
-    crate::services::runtime_update_scheduler::start(
-        pool.clone(),
-        app.clone(),
-        runtime_settings.clone(),
-    );
-    log::info!("Background update scheduler initialized");
-
-    let env_service = match EnvironmentService::new(pool.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("Failed to create EnvironmentService: {}", e);
-            log::info!("Application initialization complete");
             return Ok(());
         }
     };
@@ -184,6 +191,24 @@ pub async fn initialize_services(app: AppHandle) -> Result<()> {
         Err(e) => {
             log::error!("Failed to get environments: {:?}", e);
         }
+    }
+
+    crate::services::runtime_update_scheduler::start(
+        pool.clone(),
+        app.clone(),
+        runtime_settings.clone(),
+    );
+    log::info!("Background update scheduler initialized after environment recovery");
+
+    // The telemetry monitor's interval also ticks immediately and reads environment
+    // paths. Start it after deletion recovery and watcher reconciliation for the
+    // same reason as the update scheduler.
+    if crate::services::telemetry::telemetry_feature_enabled() {
+        crate::services::game_session_monitor::GameSessionMonitor::new(pool.clone(), app.clone())
+            .start();
+        log::info!("Live telemetry game-session monitor initialized");
+    } else {
+        log::info!("Live telemetry capability is unavailable in this SIMM package");
     }
 
     let maintenance_mods_service =

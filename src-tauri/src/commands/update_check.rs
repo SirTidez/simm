@@ -36,6 +36,10 @@ async fn acquire_update_check_run(kind: &str) -> tokio::sync::MutexGuard<'static
 }
 
 async fn flush_queued_telemetry_uploads(pool: Arc<SqlitePool>) {
+    if !crate::services::telemetry::telemetry_feature_enabled() {
+        return;
+    }
+
     match TelemetryUploadService::new(pool)
         .flush_queued_uploads()
         .await

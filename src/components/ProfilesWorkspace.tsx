@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -111,6 +111,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
   const [createDraftManifest, setCreateDraftManifest] = useState<ModProfileManifest | null>(null);
   const [createSelectedItemKeys, setCreateSelectedItemKeys] = useState<Set<string>>(() => new Set());
   const [captureName, setCaptureName] = useState('');
+  const targetSelectionGenerationRef = useRef(0);
   const preferredEnvironment = useMemo(
     () => environments.find((environment) => environment.id === preferredEnvironmentId) ?? null,
     [environments, preferredEnvironmentId],
@@ -198,6 +199,10 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
   }, [selectedProfile, selectedRuntime]);
 
   useEffect(() => {
+    targetSelectionGenerationRef.current += 1;
+  }, [selectedProfileId, targetEnvironmentId]);
+
+  useEffect(() => {
     setCreateDraftManifest(null);
     setCreateSelectedItemKeys(new Set());
   }, [targetEnvironmentId]);
@@ -252,14 +257,22 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
 
   const previewProfile = useCallback(async () => {
     const profile = requireSelection();
-    const nextPlan = await ApiService.previewModProfileApply(profile.id, targetEnvironmentId);
+    const targetId = targetEnvironmentId;
+    const targetGeneration = targetSelectionGenerationRef.current;
+    const nextPlan = await ApiService.previewModProfileApply(profile.id, targetId);
+    if (targetGeneration !== targetSelectionGenerationRef.current) return null;
     setPlan(nextPlan);
     return 'Profile preview refreshed.';
   }, [requireSelection, targetEnvironmentId]);
 
   const applyProfile = useCallback(async () => {
     const profile = requireSelection();
-    const result = await ApiService.applyModProfile(profile.id, targetEnvironmentId);
+    const targetId = targetEnvironmentId;
+    const targetGeneration = targetSelectionGenerationRef.current;
+    const result = await ApiService.applyModProfile(profile.id, targetId);
+    if (targetGeneration !== targetSelectionGenerationRef.current) {
+      return null;
+    }
     setPlan(result.plan);
     await refreshEnvironments();
     await loadProfiles();
@@ -268,11 +281,19 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
 
   const applyAndLaunch = useCallback(async () => {
     const profile = requireSelection();
-    const result = await ApiService.applyModProfile(profile.id, targetEnvironmentId);
+    const targetId = targetEnvironmentId;
+    const targetGeneration = targetSelectionGenerationRef.current;
+    const result = await ApiService.applyModProfile(profile.id, targetId);
+    if (targetGeneration !== targetSelectionGenerationRef.current) {
+      return null;
+    }
     setPlan(result.plan);
     await refreshEnvironments();
     await loadProfiles();
-    const launch = await ApiService.launchGame(targetEnvironmentId, 'steam');
+    if (targetGeneration !== targetSelectionGenerationRef.current) {
+      return null;
+    }
+    const launch = await ApiService.launchGame(targetId, 'steam');
     return launch.success
       ? `Applied ${profile.name} and launched the game.`
       : `Applied ${profile.name}, but launch did not complete.`;
@@ -310,13 +331,16 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
 
   const captureNewProfile = useCallback(async () => {
     if (!targetEnvironmentId) throw new Error('Choose a compatible target environment first.');
+    const targetId = targetEnvironmentId;
+    const targetGeneration = targetSelectionGenerationRef.current;
     const name = captureName.trim();
     if (!name) throw new Error('Name the captured profile first.');
     const captured = await ApiService.captureModProfile({
-      environmentId: targetEnvironmentId,
+      environmentId: targetId,
       name,
       includeDisabled: true,
     });
+    if (targetGeneration !== targetSelectionGenerationRef.current) return null;
     await loadProfiles();
     setSelectedProfileId(captured.id);
     setSelectedRuntime(runtimeKey(captured.runtime));
@@ -325,8 +349,11 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
 
   const loadCreateDraft = useCallback(async () => {
     if (!targetEnvironmentId) throw new Error('Choose a compatible target environment first.');
+    const targetId = targetEnvironmentId;
+    const targetGeneration = targetSelectionGenerationRef.current;
     setCreatePanelOpen(true);
-    const manifest = await ApiService.exportEnvironmentProfile(targetEnvironmentId);
+    const manifest = await ApiService.exportEnvironmentProfile(targetId);
+    if (targetGeneration !== targetSelectionGenerationRef.current) return null;
     setCreateDraftManifest(manifest);
     setCreateSelectedItemKeys(new Set(manifest.items.map((item, index) => profileItemKey(item, index))));
     setCreateProfileName((current) => current.trim() || manifest.profile.name);
@@ -383,12 +410,15 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
 
   const updateSelectedFromTarget = useCallback(async () => {
     if (!selectedProfile || !targetEnvironmentId) throw new Error('Choose a profile and compatible target environment first.');
+    const targetId = targetEnvironmentId;
+    const targetGeneration = targetSelectionGenerationRef.current;
     const captured = await ApiService.captureModProfile({
-      environmentId: targetEnvironmentId,
+      environmentId: targetId,
       profileId: selectedProfile.id,
       name: selectedProfile.name,
       includeDisabled: true,
     });
+    if (targetGeneration !== targetSelectionGenerationRef.current) return null;
     await loadProfiles();
     setSelectedProfileId(captured.id);
     return `Updated ${captured.name} from the selected environment.`;
@@ -479,6 +509,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
                       setSelectedRuntime(runtimeKey(profile.runtime));
                       setUserChoseTarget(false);
                     }}
+                    disabled={busyAction !== null}
                   >
                     <span className="profiles-workspace__profile-copy">
                       <strong>{profile.name}</strong>
@@ -505,7 +536,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
                   setTargetEnvironmentId(event.target.value);
                   setUserChoseTarget(true);
                 }}
-                disabled={!selectedProfile || environmentsLoading}
+                disabled={!selectedProfile || environmentsLoading || busyAction !== null}
               >
                 <option value="">Choose target</option>
                 {environments.map((environment) => {

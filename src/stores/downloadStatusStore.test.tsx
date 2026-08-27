@@ -13,12 +13,38 @@ const eventMocks = vi.hoisted(() => ({
   onError: vi.fn(),
   onTrackedDownloadUpdated: vi.fn(),
 }));
+const listenerScopeMocks = vi.hoisted(() => ({
+  createAsyncListenerScope: vi.fn((onError?: (error: unknown) => void) => {
+    let disposed = false;
+    const unlisteners = new Set<() => void>();
+    return {
+      register: (subscribe: () => Promise<() => void>) => {
+        void subscribe().then((unlisten) => {
+          if (disposed) {
+            unlisten();
+            return;
+          }
+          unlisteners.add(unlisten);
+        }).catch(onError);
+      },
+      dispose: () => {
+        disposed = true;
+        unlisteners.forEach((unlisten) => unlisten());
+        unlisteners.clear();
+      },
+      isActive: () => !disposed,
+    };
+  }),
+}));
 
 vi.mock('./environmentStore', () => ({
   useEnvironmentStore: environmentStoreMocks.useEnvironmentStore,
 }));
 
-vi.mock('../services/events', () => eventMocks);
+vi.mock('../services/events', () => ({
+  ...eventMocks,
+  createAsyncListenerScope: listenerScopeMocks.createAsyncListenerScope,
+}));
 
 function Consumer() {
   const { downloads } = useDownloadStatusStore();
@@ -35,6 +61,7 @@ function Consumer() {
       <div data-testid="count">{downloads.length}</div>
       <div data-testid="order">{downloads.map((download) => download.id).join(',')}</div>
       <div data-testid="labels">{downloads.map((download) => `${download.label}|${download.contextLabel}`).join(',')}</div>
+      <div data-testid="statuses">{downloads.map((download) => `${download.id}:${download.status}`).join(',')}</div>
       <div data-testid="summary">{summary.downloaded}/{summary.total}</div>
     </div>
   );
@@ -226,5 +253,123 @@ describe('DownloadStatusStore', () => {
     });
 
     expect(screen.getByTestId('order').textContent?.startsWith('active-1')).toBe(true);
+  });
+
+  it('disposes a listener that resolves after the status provider unmounts', async () => {
+    let resolveProgress: ((unlisten: () => void) => void) | undefined;
+    const lateUnlisten = vi.fn();
+    eventMocks.onProgress.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveProgress = resolve;
+    }));
+
+    const view = render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>,
+    );
+    await flushListeners();
+    view.unmount();
+
+    await act(async () => {
+      resolveProgress?.(lateUnlisten);
+    });
+    expect(lateUnlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a completed game download terminal when delayed progress arrives', async () => {
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+
+    await flushListeners();
+
+    await act(async () => {
+      progressHandler?.({
+        downloadId: 'env-1',
+        status: 'completed',
+        progress: 100,
+        downloadedFiles: 10,
+        totalFiles: 10,
+        message: 'Download complete',
+      });
+      progressHandler?.({
+        downloadId: 'env-1',
+        status: 'downloading',
+        progress: 50,
+        downloadedFiles: 5,
+        totalFiles: 10,
+        message: 'Late output',
+      });
+    });
+
+    expect(screen.getByTestId('statuses').textContent).toBe('game:env-1:completed');
+    expect(screen.getByTestId('summary').textContent).toBe('10/10');
+  });
+
+  it('keeps a tracked terminal row terminal when a stale active event arrives', async () => {
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+
+    await flushListeners();
+
+    await act(async () => {
+      trackedDownloadHandler?.({
+        id: 'mod-2',
+        kind: 'mod',
+        label: 'Example.zip',
+        contextLabel: 'Nexus Mods',
+        status: 'cancelled',
+        progress: 20,
+        downloadedFiles: 0,
+        totalFiles: 1,
+        startedAt: Date.now() - 100,
+        finishedAt: Date.now(),
+      });
+      trackedDownloadHandler?.({
+        id: 'mod-2',
+        kind: 'mod',
+        label: 'Example.zip',
+        contextLabel: 'Nexus Mods',
+        status: 'downloading',
+        progress: 80,
+        downloadedFiles: 1,
+        totalFiles: 1,
+        startedAt: Date.now() - 100,
+        finishedAt: null,
+      });
+    });
+
+    expect(screen.getByTestId('statuses').textContent).toBe('mod-2:cancelled');
+  });
+
+  it('does not let a stale active event cancel a terminal row removal timer', async () => {
+    vi.useFakeTimers();
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+    await flushListeners();
+
+    await act(async () => {
+      trackedDownloadHandler?.({
+        id: 'mod-3', kind: 'mod', label: 'Example.zip', contextLabel: 'Nexus Mods',
+        status: 'completed', progress: 100, downloadedFiles: 1, totalFiles: 1,
+        startedAt: Date.now() - 100, finishedAt: Date.now(),
+      });
+      trackedDownloadHandler?.({
+        id: 'mod-3', kind: 'mod', label: 'Example.zip', contextLabel: 'Nexus Mods',
+        status: 'downloading', progress: 50, downloadedFiles: 0, totalFiles: 1,
+        startedAt: Date.now() - 100, finishedAt: null,
+      });
+      vi.advanceTimersByTime(10_000);
+    });
+
+    expect(screen.getByTestId('count').textContent).toBe('0');
   });
 });

@@ -33,11 +33,11 @@ import {
 } from '../utils/uxSettings';
 import { getErrorMessage, isSteamShortcutReloadError } from '../utils/errors';
 import { sortEnvironmentsForDisplay } from '../utils/environmentOrdering';
-import { telemetryFeatureEnabled } from '../utils/featureFlags';
 import type {
   Environment,
   ExperienceMode,
   AppUpdateChannel,
+  AppUpdateChannelPreferences,
   AppUpdatePreferences,
   AppUpdateStatus,
   RuntimeSwitchResult,
@@ -59,7 +59,9 @@ import type { ModLibraryNavigationState } from './ModLibraryOverlay';
 import type { ModsOverlayNavigationState } from './ModsOverlay';
 import type { SecurityReportWorkspaceRequest } from './SecurityScanReportPage';
 
-const APP_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const APP_UPDATE_CHECK_REQUEST_EVENT = 'simm:check-app-update';
+const MIN_APP_UPDATE_CHECK_INTERVAL_MINUTES = 1;
+const MAX_APP_UPDATE_CHECK_INTERVAL_MINUTES = 1440;
 const LAST_ENV_KEY = 'simm:lastEnvId';
 const SHELL_NAV_COLLAPSED_KEY = 'simm:shellNavCollapsed';
 const CONSUMED_NEXUS_OAUTH_CALLBACKS_KEY = 'simm:consumedNexusOAuthCallbacks';
@@ -342,28 +344,40 @@ function StartupGate({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-const normalizeVersionCore = (value: string) => {
-  const match = value.trim().match(/\d+(?:\.\d+)*/i);
-  return match?.[0] ?? value.trim();
-};
-
-const compareVersionCores = (left: string, right: string) => {
-  const leftParts = normalizeVersionCore(left).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
-  const rightParts = normalizeVersionCore(right).split('.').filter(Boolean).map((segment) => Number(segment) || 0);
-  const maxLength = Math.max(leftParts.length, rightParts.length);
-
-  for (let index = 0; index < maxLength; index += 1) {
-    const leftValue = leftParts[index] ?? 0;
-    const rightValue = rightParts[index] ?? 0;
-    if (leftValue > rightValue) {
-      return 1;
-    }
-    if (leftValue < rightValue) {
-      return -1;
-    }
+const getAppUpdateChannelPreferences = (
+  preferences: AppUpdatePreferences | null | undefined,
+  channel: AppUpdateChannel,
+): AppUpdateChannelPreferences => {
+  const channelPreferences = preferences?.byChannel?.[channel];
+  if (channelPreferences) {
+    return channelPreferences;
   }
 
-  return 0;
+  // Existing settings stored one flat record. Treat that record as belonging
+  // only to its recorded channel so it can never suppress the other feed.
+  const legacyChannel = preferences?.channel ?? 'beta';
+  return legacyChannel === channel
+    ? {
+        lastCheckedAt: preferences?.lastCheckedAt ?? null,
+        lastSeenVersionRaw: preferences?.lastSeenVersionRaw ?? null,
+        lastResolvedUrl: preferences?.lastResolvedUrl ?? null,
+        lastSeenVersionNormalized: preferences?.lastSeenVersionNormalized ?? null,
+        snoozedUntil: preferences?.snoozedUntil ?? null,
+        skippedVersionNormalized: preferences?.skippedVersionNormalized ?? null,
+      }
+    : {};
+};
+
+const appUpdateReleaseIdentity = (result: AppUpdateStatus) => result.version.trim();
+
+const appUpdateIntervalMs = (value: number | undefined) => {
+  const minutes = Number.isFinite(value)
+    ? Math.min(
+        MAX_APP_UPDATE_CHECK_INTERVAL_MINUTES,
+        Math.max(MIN_APP_UPDATE_CHECK_INTERVAL_MINUTES, Math.trunc(value as number)),
+      )
+    : 60;
+  return minutes * 60 * 1000;
 };
 
 function parseDashboardTime(value: string | number | undefined) {
@@ -1390,11 +1404,12 @@ function AppContent() {
   const [runtimeSwitchNotice, setRuntimeSwitchNotice] = useState<RuntimeSwitchResult | null>(null);
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle', result: null });
-  const [dismissedAppUpdateVersion, setDismissedAppUpdateVersion] = useState<string | null>(null);
+  const [dismissedAppUpdateVersions, setDismissedAppUpdateVersions] = useState<Partial<Record<AppUpdateChannel, string>>>({});
   const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string | null>(null);
   const [environmentFocusRequestId, setEnvironmentFocusRequestId] = useState(0);
   const [launchingEnvironmentId, setLaunchingEnvironmentId] = useState<string | null>(null);
+  const [telemetryAvailable, setTelemetryAvailable] = useState(false);
   const [shellNavCollapsed, setShellNavCollapsed] = useState(readStoredShellNavCollapsed);
   const [shellNavAnimating, setShellNavAnimating] = useState(false);
   const [shellNavExpandedContentVisible, setShellNavExpandedContentVisible] = useState(() => !readStoredShellNavCollapsed());
@@ -1456,6 +1471,22 @@ function AppContent() {
     if (shellNavAnimationFrameRef.current !== null) {
       cancelShellAnimationFrame(shellNavAnimationFrameRef.current);
     }
+  }, []);
+  useEffect(() => {
+    let disposed = false;
+    void ApiService.getTelemetryCapability()
+      .then((capability) => {
+        if (!disposed) setTelemetryAvailable(capability.available);
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setTelemetryAvailable(false);
+          logger.warn('Telemetry capability lookup failed', {
+            error: getErrorMessage(error, 'backend capability lookup failed'),
+          });
+        }
+      });
+    return () => { disposed = true; };
   }, []);
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -1762,6 +1793,9 @@ function AppContent() {
     requestedKind?: 'library' | 'install';
     error?: string;
     nxmUrl?: string;
+    securityScan?: unknown;
+    securityScanConfirmationRequired?: boolean;
+    securityScanBlocked?: boolean;
   }) => {
     window.dispatchEvent(new CustomEvent('nexus-manual-download-result', { detail }));
   }, []);
@@ -1784,10 +1818,21 @@ function AppContent() {
     updateSettingsRef.current = updateSettings;
   }, [updateSettings]);
 
-  const persistAppUpdateSettings = useCallback(async (updates: Partial<AppUpdatePreferences>) => {
-    const mergedSettings = {
-      ...(appUpdateSettingsRef.current ?? {}),
-      ...updates,
+  const persistAppUpdateSettings = useCallback(async (
+    channel: AppUpdateChannel,
+    updates: Partial<AppUpdateChannelPreferences>,
+  ) => {
+    const currentSettings = appUpdateSettingsRef.current ?? {};
+    const mergedSettings: AppUpdatePreferences = {
+      ...currentSettings,
+      channel,
+      byChannel: {
+        ...(currentSettings.byChannel ?? {}),
+        [channel]: {
+          ...getAppUpdateChannelPreferences(currentSettings, channel),
+          ...updates,
+        },
+      },
     };
     appUpdateSettingsRef.current = mergedSettings;
     await updateSettingsRef.current({
@@ -1795,7 +1840,7 @@ function AppContent() {
     });
   }, []);
 
-  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'beta';
+  const appUpdateChannel: AppUpdateChannel = settings?.appUpdate?.channel ?? 'stable';
 
   const completeSetupGuide = useCallback(async (mode: ExperienceMode) => {
     await updateSettings(buildSetupGuideSettings(mode));
@@ -1815,63 +1860,55 @@ function AppContent() {
     }
 
     let cancelled = false;
+    const automaticChecksEnabled = settings?.autoCheckUpdates !== false;
 
     const runAppUpdateCheck = async () => {
       try {
-        setAppUpdateState((previous) =>
-          previous.status === 'available' ? previous : { status: 'checking', result: null },
-        );
+        // Never retain an available result while a selected-channel check is
+        // in flight: the result belongs to the currently selected feed only.
+        setAppUpdateState({ status: 'checking', result: null });
 
         const result = await ApiService.checkAppUpdate(appUpdateChannel);
-        if (cancelled) {
+        if (cancelled || result.channel !== appUpdateChannel) {
           return;
         }
 
         const currentAppUpdateSettings = appUpdateSettingsRef.current ?? {};
+        const currentChannelPreferences = getAppUpdateChannelPreferences(
+          currentAppUpdateSettings,
+          appUpdateChannel,
+        );
         const expiredSnooze =
-          !!currentAppUpdateSettings.snoozedUntil
-          && Number.isFinite(Date.parse(currentAppUpdateSettings.snoozedUntil))
-          && Date.parse(currentAppUpdateSettings.snoozedUntil) <= Date.now();
-        const skippedVersionNormalized =
-          currentAppUpdateSettings.skippedVersionNormalized
-            && result.versionNormalized
-            && currentAppUpdateSettings.skippedVersionNormalized !== result.versionNormalized
-            && compareVersionCores(
-              currentAppUpdateSettings.skippedVersionNormalized,
-              result.versionNormalized,
-            ) < 0
-            ? null
-            : currentAppUpdateSettings.skippedVersionNormalized ?? null;
+          !!currentChannelPreferences.snoozedUntil
+          && Number.isFinite(Date.parse(currentChannelPreferences.snoozedUntil))
+          && Date.parse(currentChannelPreferences.snoozedUntil) <= Date.now();
+        const releaseIdentity = appUpdateReleaseIdentity(result);
+        const skippedVersionNormalized = currentChannelPreferences.skippedVersionNormalized;
+        const skipMatchesRelease = skippedVersionNormalized === releaseIdentity
+          || skippedVersionNormalized === result.versionNormalized;
 
-        const nextSettings = {
+        const nextChannelPreferences = {
           lastCheckedAt: result.checkedAt,
           lastSeenVersionRaw: result.version,
           lastSeenVersionNormalized: result.versionNormalized,
           lastResolvedUrl: result.manifestUrl,
-          snoozedUntil: expiredSnooze ? null : (currentAppUpdateSettings.snoozedUntil ?? null),
-          skippedVersionNormalized,
-          channel: appUpdateChannel,
+          snoozedUntil: expiredSnooze ? null : (currentChannelPreferences.snoozedUntil ?? null),
+          skippedVersionNormalized: skipMatchesRelease ? (skippedVersionNormalized ?? null) : null,
         };
 
-        const previousSerialized = JSON.stringify({
-          lastCheckedAt: currentAppUpdateSettings.lastCheckedAt ?? null,
-          lastSeenVersionRaw: currentAppUpdateSettings.lastSeenVersionRaw ?? null,
-          lastSeenVersionNormalized: currentAppUpdateSettings.lastSeenVersionNormalized ?? null,
-          lastResolvedUrl: currentAppUpdateSettings.lastResolvedUrl ?? null,
-          snoozedUntil: currentAppUpdateSettings.snoozedUntil ?? null,
-          skippedVersionNormalized: currentAppUpdateSettings.skippedVersionNormalized ?? null,
-          channel: currentAppUpdateSettings.channel ?? null,
-        });
-        const nextSerialized = JSON.stringify(nextSettings);
+        const previousSerialized = JSON.stringify(currentChannelPreferences);
+        const nextSerialized = JSON.stringify(nextChannelPreferences);
         if (previousSerialized !== nextSerialized) {
-          void persistAppUpdateSettings(nextSettings).catch((error) => {
+          void persistAppUpdateSettings(appUpdateChannel, nextChannelPreferences).catch((error) => {
             logger.warn('Failed to persist app update settings', error);
           });
         }
 
-        setDismissedAppUpdateVersion((previous) =>
-          previous && previous !== result.versionNormalized ? null : previous,
-        );
+        setDismissedAppUpdateVersions((previous) => (
+          previous[appUpdateChannel] && previous[appUpdateChannel] !== releaseIdentity
+            ? { ...previous, [appUpdateChannel]: undefined }
+            : previous
+        ));
         setAppUpdateState(result.updateAvailable
           ? { status: 'available', result }
           : { status: 'upToDate', result: null });
@@ -1887,52 +1924,91 @@ function AppContent() {
       }
     };
 
-    void runAppUpdateCheck();
-    const intervalId = window.setInterval(() => {
+    const handleManualCheck = () => {
       void runAppUpdateCheck();
-    }, APP_UPDATE_CHECK_INTERVAL_MS);
+    };
+    window.addEventListener(APP_UPDATE_CHECK_REQUEST_EVENT, handleManualCheck);
+
+    let intervalId: number | null = null;
+    if (automaticChecksEnabled) {
+      void runAppUpdateCheck();
+      intervalId = window.setInterval(() => {
+        void runAppUpdateCheck();
+      }, appUpdateIntervalMs(settings?.updateCheckInterval));
+    } else {
+      setAppUpdateState({ status: 'idle', result: null });
+    }
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      window.removeEventListener(APP_UPDATE_CHECK_REQUEST_EVENT, handleManualCheck);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
     };
-  }, [appUpdateChannel, environmentsLoading, hasSettings, persistAppUpdateSettings]);
+  }, [
+    appUpdateChannel,
+    environmentsLoading,
+    hasSettings,
+    persistAppUpdateSettings,
+    settings?.autoCheckUpdates,
+    settings?.updateCheckInterval,
+  ]);
 
   const handleSkipAppUpdateVersion = useCallback(() => {
-    if (appUpdateState.status !== 'available') {
+    if (
+      appUpdateState.status !== 'available'
+      || appUpdateState.result.channel !== appUpdateChannel
+    ) {
       return;
     }
-    const latestVersionNormalized = appUpdateState.result.versionNormalized;
-    setDismissedAppUpdateVersion(latestVersionNormalized);
-    void persistAppUpdateSettings({
-      skippedVersionNormalized: latestVersionNormalized,
+    const channel = appUpdateState.result.channel;
+    const releaseIdentity = appUpdateReleaseIdentity(appUpdateState.result);
+    setDismissedAppUpdateVersions((previous) => ({
+      ...previous,
+      [channel]: releaseIdentity,
+    }));
+    void persistAppUpdateSettings(channel, {
+      skippedVersionNormalized: releaseIdentity,
       snoozedUntil: null,
     }).catch((error) => {
       logger.warn('Failed to persist skipped app update version', error);
     });
-  }, [appUpdateState, persistAppUpdateSettings]);
+  }, [appUpdateChannel, appUpdateState, persistAppUpdateSettings]);
 
   const handleSnoozeAppUpdate = useCallback((days: number) => {
-    if (appUpdateState.status !== 'available') {
+    if (
+      appUpdateState.status !== 'available'
+      || appUpdateState.result.channel !== appUpdateChannel
+    ) {
       return;
     }
+    const channel = appUpdateState.result.channel;
     const snoozedUntil = new Date(Date.now() + (days * 24 * 60 * 60 * 1000)).toISOString();
-    setDismissedAppUpdateVersion(appUpdateState.result.versionNormalized);
-    void persistAppUpdateSettings({
+    setDismissedAppUpdateVersions((previous) => ({
+      ...previous,
+      [channel]: appUpdateReleaseIdentity(appUpdateState.result),
+    }));
+    void persistAppUpdateSettings(channel, {
       snoozedUntil,
     }).catch((error) => {
       logger.warn('Failed to persist app update snooze state', error);
     });
-  }, [appUpdateState, persistAppUpdateSettings]);
+  }, [appUpdateChannel, appUpdateState, persistAppUpdateSettings]);
 
   const handleInstallAppUpdate = useCallback(async () => {
-    if (appUpdateState.status !== 'available' || installingAppUpdate) {
+    if (
+      appUpdateState.status !== 'available'
+      || installingAppUpdate
+      || appUpdateState.result.channel !== appUpdateChannel
+    ) {
       return;
     }
 
-    const releaseChannelLabel = appUpdateState.result.channel === 'beta' ? 'beta' : 'stable';
+    const result = appUpdateState.result;
+    const releaseChannelLabel = result.channel === 'beta' ? 'beta' : 'stable';
     const shouldInstall = await confirm(
-      `Download and install SIMM ${appUpdateState.result.version} from the ${releaseChannelLabel} channel now?`,
+      `Download and install SIMM ${result.version} from the ${releaseChannelLabel} channel now?`,
       {
         title: 'Install SIMM Update',
         kind: 'info',
@@ -1945,9 +2021,16 @@ function AppContent() {
       return;
     }
 
+    // Re-read the persisted selection after confirmation. A channel switch
+    // while the dialog is open must not install the now-stale result.
+    const currentChannel = appUpdateSettingsRef.current?.channel ?? 'stable';
+    if (currentChannel !== result.channel) {
+      return;
+    }
+
     try {
       setInstallingAppUpdate(true);
-      const installResult = await ApiService.installAppUpdate(appUpdateState.result.channel);
+      const installResult = await ApiService.installAppUpdate(result.channel);
       if (!installResult.installed) {
         throw new Error('Updater did not install an update.');
       }
@@ -1965,7 +2048,7 @@ function AppContent() {
     } finally {
       setInstallingAppUpdate(false);
     }
-  }, [appUpdateState, installingAppUpdate]);
+  }, [appUpdateChannel, appUpdateState, installingAppUpdate]);
 
   const handleNexusOAuthCallback = useCallback(async (callbackUrl: string) => {
     if (!callbackUrl.startsWith('simm://oauth/nexus/callback')) {
@@ -2051,12 +2134,21 @@ function AppContent() {
         return;
       }
       if (!result.success) {
-        completedNxmCallbackRef.current.add(nxmUrl);
+        const securityGateResponse = Boolean(
+          result.securityScanConfirmationRequired || result.securityScanBlocked,
+        );
+        if (!securityGateResponse) {
+          completedNxmCallbackRef.current.add(nxmUrl);
+        }
         dispatchNexusManualDownloadResult({
           success: false,
+          result,
           error: result.error || 'Failed to complete Nexus manual download',
           requestedKind: result.requestedKind,
           nxmUrl,
+          securityScan: result.securityScan,
+          securityScanConfirmationRequired: result.securityScanConfirmationRequired,
+          securityScanBlocked: result.securityScanBlocked,
         });
         return;
       }
@@ -2097,12 +2189,21 @@ function AppContent() {
     try {
       const result = await ApiService.completeNexusManualDownloadSession(pending.nxmUrl, runtime);
       if (!result.success) {
-        completedNxmCallbackRef.current.add(pending.nxmUrl);
+        const securityGateResponse = Boolean(
+          result.securityScanConfirmationRequired || result.securityScanBlocked,
+        );
+        if (!securityGateResponse) {
+          completedNxmCallbackRef.current.add(pending.nxmUrl);
+        }
         dispatchNexusManualDownloadResult({
           success: false,
+          result,
           error: result.error || 'Failed to complete Nexus manual download',
           requestedKind: result.requestedKind ?? pending.kind,
           nxmUrl: pending.nxmUrl,
+          securityScan: result.securityScan,
+          securityScanConfirmationRequired: result.securityScanConfirmationRequired,
+          securityScanBlocked: result.securityScanBlocked,
         });
         return;
       }
@@ -2276,7 +2377,7 @@ function AppContent() {
           />
         );
       case 'telemetry':
-        return telemetryFeatureEnabled ? <TelemetryWorkspace onClose={onCloseHandler} /> : null;
+        return telemetryAvailable ? <TelemetryWorkspace onClose={onCloseHandler} /> : null;
       case 'profiles':
         return (
           <ProfilesWorkspace preferredEnvironmentId={selectedEnvironmentId} />
@@ -2360,24 +2461,32 @@ function AppContent() {
       default:
         return null;
     }
-  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, updateWorkspaceEntry]);
+  }, [completeSetupGuide, environmentFocusRequestId, getEnvironmentById, openLibraryFromLogs, openLibraryWorkspace, openSecurityReportWorkspace, openWorkspace, pushWorkspace, selectedEnvironmentId, settings, skipSetupGuide, telemetryAvailable, updateWorkspaceEntry]);
 
   const renderWorkspacePanel = () => {
     return renderWorkspacePanelFor(activeEntry, popWorkspace);
   };
 
   const appUpdatePreferences = settings?.appUpdate ?? null;
-  const appUpdateSnoozedUntil = appUpdatePreferences?.snoozedUntil
-    && Number.isFinite(Date.parse(appUpdatePreferences.snoozedUntil))
-    ? Date.parse(appUpdatePreferences.snoozedUntil)
+  const appUpdateChannelPreferences = getAppUpdateChannelPreferences(
+    appUpdatePreferences,
+    appUpdateChannel,
+  );
+  const appUpdateSnoozedUntil = appUpdateChannelPreferences.snoozedUntil
+    && Number.isFinite(Date.parse(appUpdateChannelPreferences.snoozedUntil))
+    ? Date.parse(appUpdateChannelPreferences.snoozedUntil)
     : null;
   const isAppUpdateSnoozed = appUpdateState.status === 'available'
     && appUpdateSnoozedUntil !== null
     && appUpdateSnoozedUntil > Date.now();
   const isAppUpdateSkipped = appUpdateState.status === 'available'
-    && appUpdatePreferences?.skippedVersionNormalized === appUpdateState.result.versionNormalized;
+    && (
+      appUpdateChannelPreferences.skippedVersionNormalized === appUpdateReleaseIdentity(appUpdateState.result)
+      || appUpdateChannelPreferences.skippedVersionNormalized === appUpdateState.result.versionNormalized
+    );
   const isAppUpdateDismissedForSession = appUpdateState.status === 'available'
-    && dismissedAppUpdateVersion === appUpdateState.result.versionNormalized;
+    && dismissedAppUpdateVersions[appUpdateState.result.channel]
+      === appUpdateReleaseIdentity(appUpdateState.result);
   const showAppUpdateToast = appUpdateState.status === 'available'
     && !isAppUpdateSnoozed
     && !isAppUpdateSkipped
@@ -2599,7 +2708,7 @@ function AppContent() {
       disabled: false,
       title: 'Open help and troubleshooting guidance',
     },
-    ...(telemetryFeatureEnabled ? [telemetryUtilityAction] : []),
+    ...(telemetryAvailable ? [telemetryUtilityAction] : []),
     {
       key: 'settings',
       label: 'Settings',
@@ -2691,7 +2800,10 @@ function AppContent() {
           onUpdate={() => void handleInstallAppUpdate()}
           onSkip={handleSkipAppUpdateVersion}
           onSnooze={handleSnoozeAppUpdate}
-          onDismiss={() => setDismissedAppUpdateVersion(appUpdateState.result.versionNormalized)}
+          onDismiss={() => setDismissedAppUpdateVersions((previous) => ({
+            ...previous,
+            [appUpdateState.result.channel]: appUpdateReleaseIdentity(appUpdateState.result),
+          }))}
         />
       )}
 

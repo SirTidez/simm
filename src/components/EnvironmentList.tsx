@@ -31,6 +31,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import { SimmButton, SimmDialogContent } from './primitives';
 import {
+  createAsyncListenerScope,
   onAuthWaiting,
   onAuthSuccess,
   onAuthError,
@@ -41,12 +42,20 @@ import {
   onComplete as onCompleteEvent,
   onUpdateAvailable,
   onUpdateCheckComplete,
+  onModsSnapshotUpdated,
   onPluginsChanged,
   onUserLibsChanged
 } from '../services/events';
 
 type InstalledModsResponse = Awaited<ReturnType<typeof ApiService.getMods>>;
 type LaunchMethod = 'steam' | 'steam_restart' | 'direct';
+type EnvironmentLocalProbeSnapshot = {
+  unmanagedLocalMods: Map<string, number>;
+  plugins: Map<string, number>;
+  userLibs: Map<string, number>;
+  melonLoader: Map<string, MelonLoaderStatus>;
+};
+type CompletedEnvironmentProbeKey = Pick<Environment, 'id' | 'outputDir' | 'runtime'>;
 type ProfileExportState = {
   isOpen: boolean;
   environmentId: string | null;
@@ -201,6 +210,50 @@ function countUnmanagedLocalMods(installedMods: InstalledModsResponse | null | u
   return (installedMods?.mods || []).filter((mod) => !mod.managed && (mod.source === 'local' || !mod.source)).length;
 }
 
+async function loadEnvironmentLocalProbeSnapshot(
+  environmentIds: readonly string[],
+): Promise<EnvironmentLocalProbeSnapshot> {
+  const unmanagedLocalMods = new Map<string, number>();
+  const plugins = new Map<string, number>();
+  const userLibs = new Map<string, number>();
+  const melonLoader = new Map<string, MelonLoaderStatus>();
+
+  for (const environmentId of environmentIds) {
+    try {
+      const installedMods = await ApiService.getMods(environmentId, false);
+      unmanagedLocalMods.set(environmentId, countUnmanagedLocalMods(installedMods));
+    } catch {
+      unmanagedLocalMods.set(environmentId, 0);
+    }
+
+    try {
+      const result = await ApiService.getPluginsCount(environmentId);
+      plugins.set(environmentId, result.count);
+    } catch {
+      plugins.set(environmentId, 0);
+    }
+
+    try {
+      const result = await ApiService.getUserLibsCount(environmentId);
+      userLibs.set(environmentId, result.count);
+    } catch {
+      userLibs.set(environmentId, 0);
+    }
+
+    try {
+      melonLoader.set(environmentId, await ApiService.getMelonLoaderStatus(environmentId));
+    } catch {
+      melonLoader.set(environmentId, { installed: false });
+    }
+  }
+
+  return { unmanagedLocalMods, plugins, userLibs, melonLoader };
+}
+
+function getCompletedEnvironmentIds(signature: string): string[] {
+  return (JSON.parse(signature) as CompletedEnvironmentProbeKey[]).map(({ id }) => id);
+}
+
 async function buildEnvironmentCardModSnapshot(
   environmentId: string,
   library: ModLibraryResult | null | undefined,
@@ -210,18 +263,21 @@ async function buildEnvironmentCardModSnapshot(
 
   try {
     const installedMods = await ApiService.getMods(environmentId, refreshInstalledMods);
+    const unmanagedLocalMods = countUnmanagedLocalMods(installedMods);
     return {
       ...snapshot,
-      userMods: snapshot.userMods + countUnmanagedLocalMods(installedMods),
+      unmanagedLocalMods,
+      userMods: snapshot.userMods + unmanagedLocalMods,
     };
   } catch {
-    return snapshot;
+    return { ...snapshot, unmanagedLocalMods: 0 };
   }
 }
 
 const LAST_ENV_KEY = 'simm:lastEnvId';
 
 const environmentCountCache = {
+  unmanagedLocalMods: new Map<string, number>(),
   mods: new Map<string, number>(),
   featuredDownloads: new Map<string, number>(),
   modUpdates: new Map<string, number>(),
@@ -278,7 +334,6 @@ export function EnvironmentList({
   const { library, ensureLibrary, refreshLibrary } = useModLibraryStore();
   const { settings } = useSettingsStore();
   const [authModal, setAuthModal] = useState<{ isOpen: boolean; envId: string | null; waiting: boolean; message?: string }>({ isOpen: false, envId: null, waiting: false });
-  const [, setAuthCredentials] = useState<{ username: string; password: string; steamGuard: string; saveCredentials: boolean } | null>(null);
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
   const [descriptionValue, setDescriptionValue] = useState<string>('');
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -292,6 +347,11 @@ export function EnvironmentList({
   const [logsOverlay, setLogsOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [configOverlay, setConfigOverlay] = useState<{ isOpen: boolean; envId: string | null }>({ isOpen: false, envId: null });
   const [profileExport, setProfileExport] = useState<ProfileExportState>(emptyProfileExportState);
+  const profileExportOperationRef = useRef(0);
+  const [unmanagedLocalModsCounts, setUnmanagedLocalModsCountsState] = useState<Map<string, number>>(
+    () => new Map(environmentCountCache.unmanagedLocalMods),
+  );
+  const [ensuredLibrary, setEnsuredLibrary] = useState<ModLibraryResult | null>(null);
   const [modsCounts, setModsCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.mods));
   const [featuredDownloadCounts, setFeaturedDownloadCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.featuredDownloads));
   const [modUpdatesCounts, setModUpdatesCountsState] = useState<Map<string, number>>(() => new Map(environmentCountCache.modUpdates));
@@ -309,6 +369,14 @@ export function EnvironmentList({
     ),
   } : null;
   const directLaunchSupported = (settings?.platform ?? 'windows') !== 'linux';
+
+  const setUnmanagedLocalModsCounts = useCallback((updater: MapStateUpdater<number>) => {
+    setUnmanagedLocalModsCountsState((previous) => {
+      const next = resolveMapState(previous, updater);
+      environmentCountCache.unmanagedLocalMods = new Map(next);
+      return next;
+    });
+  }, []);
 
   const setModsCounts = useCallback((updater: MapStateUpdater<number>) => {
     setModsCountsState((previous) => {
@@ -361,12 +429,32 @@ export function EnvironmentList({
   // Debounce timers for filesystem change events
   const pluginsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const userLibsRefreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const localProbeGenerationRef = useRef(0);
+  const localProbeRequestRef = useRef<{
+    signature: string;
+    promise: Promise<EnvironmentLocalProbeSnapshot>;
+    unmanagedLocalModsEpochs: Map<string, number>;
+  } | null>(null);
+  const unmanagedLocalModsEpochRef = useRef<Map<string, number>>(new Map());
+  const libraryBootstrapRequestRef = useRef<Promise<ModLibraryResult> | null>(null);
 
   // Use refs to access latest environments without causing effect re-runs
   const environmentsRef = useRef(environments);
   useEffect(() => {
     environmentsRef.current = environments;
   }, [environments]);
+  const authModalRef = useRef(authModal);
+  useEffect(() => {
+    authModalRef.current = authModal;
+  }, [authModal]);
+  const ensureEnvironmentsRef = useRef(ensureEnvironments);
+  useEffect(() => {
+    ensureEnvironmentsRef.current = ensureEnvironments;
+  }, [ensureEnvironments]);
+  const settingsRef = useRef(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
   const melonLoaderPrefetchStartedRef = useRef(false);
   const autoInstallMelonLoaderInFlightRef = useRef<Set<string>>(new Set());
   const autoInstallMelonLoaderRef = useRef<((environmentId: string) => Promise<void>) | null>(null);
@@ -384,6 +472,8 @@ export function EnvironmentList({
   const [showMelonLoaderVersionSelector, setShowMelonLoaderVersionSelector] = useState<string | null>(null);
   const [selectedMelonLoaderVersion, setSelectedMelonLoaderVersion] = useState<Map<string, string>>(new Map());
   const [installingMelonLoader, setInstallingMelonLoader] = useState<Set<string>>(new Set());
+  const [launchingEnvironmentIds, setLaunchingEnvironmentIds] = useState<Set<string>>(new Set());
+  const launchingEnvironmentIdsRef = useRef<Set<string>>(new Set());
   const [messageOverlay, setMessageOverlay] = useState<{ isOpen: boolean; title: string; message: string; type: 'success' | 'error' | 'info' }>({ isOpen: false, title: '', message: '', type: 'info' });
   const [confirmOverlay, setConfirmOverlay] = useState<{ isOpen: boolean; title: string; message: string; confirmText?: string; onConfirm: () => void }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
   const [deleteConfirm, setDeleteConfirm] = useState<{ isOpen: boolean; env: Environment | null; deleteFiles: boolean }>({ isOpen: false, env: null, deleteFiles: false });
@@ -404,6 +494,12 @@ export function EnvironmentList({
   const activeGameDownloadName = activeGameDownloadId
     ? environments.find((environment) => environment.id === activeGameDownloadId)?.name ?? 'another environment'
     : null;
+  const completedEnvironmentSignature = JSON.stringify(
+    environments
+      .filter((environment) => environment.status === 'completed')
+      .map(({ id, outputDir, runtime }) => ({ id, outputDir, runtime }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  );
 
   // Save preferred launch method to localStorage when it changes
   useEffect(() => {
@@ -571,9 +667,9 @@ export function EnvironmentList({
   };
 
   const handleAuthenticated = async (credentials: { username: string; password: string; steamGuard: string; saveCredentials: boolean }) => {
-    if (!authModal.envId) return;
+    const environmentId = authModal.envId;
+    if (!environmentId) return;
 
-    setAuthCredentials(credentials);
     // Switch to waiting state
     setAuthModal(prev => ({ ...prev, waiting: true, message: 'Authenticating with Steam...' }));
 
@@ -582,31 +678,20 @@ export function EnvironmentList({
       // Authentication is handled in the modal's handleSubmit, so by the time we get here,
       // authentication should be complete. Now start the download.
       setAuthModal(prev => ({ ...prev, waiting: true, message: 'Starting download...' }));
-      await startDownload(authModal.envId);
+      await startDownload(environmentId, credentials);
       // Close modal - download started
       setAuthModal({ isOpen: false, envId: null, waiting: false });
-      setAuthCredentials(null);
     } catch (err) {
       setAuthModal(prev => ({ ...prev, waiting: false }));
       showMessage('Download Failed', `Failed to start download: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
-      setAuthCredentials(null);
     }
   };
 
   // Listen for Tauri auth events and password prompts
   useEffect(() => {
-    let unlistenWaiting: (() => void) | null = null;
-    let unlistenSuccess: (() => void) | null = null;
-    let unlistenError: (() => void) | null = null;
-    let unlistenProgress: (() => void) | null = null;
-    let unlistenMelonLoaderInstalling: (() => void) | null = null;
-    let unlistenMelonLoaderInstalled: (() => void) | null = null;
-    let unlistenMelonLoaderError: (() => void) | null = null;
-    let unlistenComplete: (() => void) | null = null;
-    let unlistenUpdateAvailable: (() => void) | null = null;
-    let unlistenUpdateCheckComplete: (() => void) | null = null;
-    let unlistenPluginsChanged: (() => void) | null = null;
-    let unlistenUserLibsChanged: (() => void) | null = null;
+    const listeners = createAsyncListenerScope((error) => {
+      console.error('Failed to set up event listener:', error);
+    });
 
     const handleBatchUpdateCheckStarted = (event: Event) => {
       const customEvent = event as CustomEvent<{ environmentIds?: string[] }>;
@@ -617,57 +702,53 @@ export function EnvironmentList({
 
     window.addEventListener(batchUpdateCheckEventName, handleBatchUpdateCheckStarted as EventListener);
 
-    const setupListeners = async () => {
-      try {
-        unlistenWaiting = await onAuthWaiting((data) => {
-          const env = environments.find(e => e.id === data.downloadId);
-          if (env && authModal.envId === data.downloadId) {
+        listeners.register(() => onAuthWaiting((data) => {
+          const env = environmentsRef.current.find(e => e.id === data.downloadId);
+          if (env && authModalRef.current.envId === data.downloadId) {
             setAuthModal(prev => ({ ...prev, waiting: true, message: data.message }));
           }
-        });
+        }));
 
-        unlistenSuccess = await onAuthSuccess((data) => {
-          if (data.downloadId === authModal.envId) {
+        listeners.register(() => onAuthSuccess((data) => {
+          if (data.downloadId === authModalRef.current.envId) {
             setAuthModal({ isOpen: false, envId: null, waiting: false });
-            setAuthCredentials(null);
           }
-        });
+        }));
 
-        unlistenError = await onAuthError((data) => {
-          const env = environments.find(e => e.id === data.downloadId);
+        listeners.register(() => onAuthError((data) => {
+          const env = environmentsRef.current.find(e => e.id === data.downloadId);
           if (data.error.toLowerCase().includes('password') || data.error.toLowerCase().includes('credential')) {
-            if (env && !authModal.isOpen) {
+            if (env && !authModalRef.current.isOpen) {
               setAuthModal({ isOpen: true, envId: data.downloadId, waiting: false });
-            } else if (authModal.envId === data.downloadId) {
+            } else if (authModalRef.current.envId === data.downloadId) {
               setAuthModal(prev => ({ ...prev, waiting: false }));
             }
-          } else if (authModal.envId === data.downloadId) {
+          } else if (authModalRef.current.envId === data.downloadId) {
             setAuthModal(prev => ({ ...prev, waiting: false }));
             showMessage('Authentication Failed', data.error, 'error');
-            setAuthCredentials(null);
           }
-        });
+        }));
 
-        unlistenProgress = await onProgressEvent((progress) => {
+        listeners.register(() => onProgressEvent((progress) => {
           if (progress.error && (progress.error.toLowerCase().includes('password') ||
               progress.message?.toLowerCase().includes('enter account password'))) {
-            const env = environments.find(e => e.id === progress.downloadId);
-            if (env && !authModal.isOpen) {
+            const env = environmentsRef.current.find(e => e.id === progress.downloadId);
+            if (env && !authModalRef.current.isOpen) {
               setAuthModal({ isOpen: true, envId: progress.downloadId, waiting: false });
             }
           }
-        });
+        }));
 
-        unlistenMelonLoaderInstalling = await onMelonLoaderInstalling((data) => {
-          const env = environments.find(e => e.id === data.environmentId);
+        listeners.register(() => onMelonLoaderInstalling((data) => {
+          const env = environmentsRef.current.find(e => e.id === data.environmentId);
           if (env) {
             setInstallingMelonLoader((previous) => new Set(previous).add(data.environmentId));
             console.log(`MelonLoader installing for ${data.environmentId}: ${data.message}`);
           }
-        });
+        }));
 
-        unlistenMelonLoaderInstalled = await onMelonLoaderInstalled(async (data) => {
-          const env = environments.find(e => e.id === data.environmentId);
+        listeners.register(() => onMelonLoaderInstalled(async (data) => {
+          const env = environmentsRef.current.find(e => e.id === data.environmentId);
           if (env) {
             console.log(`MelonLoader installed for ${data.environmentId}: ${data.message}`);
             try {
@@ -687,10 +768,10 @@ export function EnvironmentList({
               });
             }
           }
-        });
+        }));
 
-        unlistenMelonLoaderError = await onMelonLoaderError((data) => {
-          const env = environments.find(e => e.id === data.environmentId);
+        listeners.register(() => onMelonLoaderError((data) => {
+          const env = environmentsRef.current.find(e => e.id === data.environmentId);
           if (env) {
             setInstallingMelonLoader((previous) => {
               const next = new Set(previous);
@@ -705,17 +786,17 @@ export function EnvironmentList({
               'error',
             );
           }
-        });
+        }));
 
-        unlistenComplete = await onCompleteEvent(async ({ downloadId }) => {
-          const env = environments.find(e => e.id === downloadId);
+        listeners.register(() => onCompleteEvent(async ({ downloadId }) => {
+          const env = environmentsRef.current.find(e => e.id === downloadId);
           if (env) {
             void autoInstallMelonLoaderRef.current?.(downloadId);
           }
           if (env && env.updateAvailable) {
             setTimeout(async () => {
               try {
-                const updatedEnvs = await ensureEnvironments();
+                const updatedEnvs = await ensureEnvironmentsRef.current();
                 const updatedEnv = updatedEnvs.find(e => e.id === downloadId);
                 if (updatedEnv) {
                   // Use ConfirmOverlay instead of blocking confirm()
@@ -735,12 +816,12 @@ export function EnvironmentList({
               }
             }, 1000);
           }
-        });
+        }));
 
         const handleUpdateCheckStart = () => {
           const now = Date.now();
-          const checkIntervalMs = (settings?.updateCheckInterval || 60) * 60 * 1000;
-          const dueEnvironmentIds = environments
+          const checkIntervalMs = (settingsRef.current?.updateCheckInterval || 60) * 60 * 1000;
+          const dueEnvironmentIds = environmentsRef.current
             .filter(env => {
               if (env.status !== 'completed') return false;
               if (!env.lastUpdateCheck) return true;
@@ -779,17 +860,33 @@ export function EnvironmentList({
           });
         };
 
-        unlistenUpdateAvailable = await onUpdateAvailable((data) => {
+        listeners.register(() => onUpdateAvailable((data) => {
           handleFirstUpdateEvent();
           handleUpdateEventComplete({ environmentId: data.environmentId });
-        });
+        }));
 
-        unlistenUpdateCheckComplete = await onUpdateCheckComplete((data) => {
+        listeners.register(() => onUpdateCheckComplete((data) => {
           handleFirstUpdateEvent();
           handleUpdateEventComplete({ environmentId: data.environmentId });
-        });
+        }));
 
-        unlistenPluginsChanged = await onPluginsChanged((data) => {
+        listeners.register(() => onModsSnapshotUpdated((data) => {
+          const environment = environmentsRef.current.find(({ id }) => id === data.environmentId);
+          if (environment?.status !== 'completed') {
+            return;
+          }
+
+          const nextEpochs = new Map(unmanagedLocalModsEpochRef.current);
+          nextEpochs.set(data.environmentId, (nextEpochs.get(data.environmentId) ?? 0) + 1);
+          unmanagedLocalModsEpochRef.current = nextEpochs;
+          setUnmanagedLocalModsCounts((previous) => {
+            const next = new Map(previous);
+            next.set(data.environmentId, countUnmanagedLocalMods(data.snapshot));
+            return next;
+          });
+        }));
+
+        listeners.register(() => onPluginsChanged((data) => {
           // Use ref to get latest environments without causing effect dependency
           const env = environmentsRef.current.find(e => e.id === data.environmentId);
           if (env && env.status === 'completed') {
@@ -818,9 +915,9 @@ export function EnvironmentList({
 
             pluginsRefreshTimers.current.set(data.environmentId, timer);
           }
-        });
+        }));
 
-        unlistenUserLibsChanged = await onUserLibsChanged((data) => {
+        listeners.register(() => onUserLibsChanged((data) => {
           // Use ref to get latest environments without causing effect dependency
           const env = environmentsRef.current.find(e => e.id === data.environmentId);
           if (env && env.status === 'completed') {
@@ -849,31 +946,14 @@ export function EnvironmentList({
 
             userLibsRefreshTimers.current.set(data.environmentId, timer);
           }
-        });
-      } catch (error) {
-        console.error('Failed to set up event listeners:', error);
-      }
-    };
-
-    setupListeners();
+        }));
 
       const pluginsRefreshTimerMap = pluginsRefreshTimers.current;
     const userLibsRefreshTimerMap = userLibsRefreshTimers.current;
 
     return () => {
       window.removeEventListener(batchUpdateCheckEventName, handleBatchUpdateCheckStarted as EventListener);
-      if (unlistenWaiting) unlistenWaiting();
-      if (unlistenSuccess) unlistenSuccess();
-      if (unlistenError) unlistenError();
-      if (unlistenProgress) unlistenProgress();
-      if (unlistenMelonLoaderInstalling) unlistenMelonLoaderInstalling();
-      if (unlistenMelonLoaderInstalled) unlistenMelonLoaderInstalled();
-      if (unlistenMelonLoaderError) unlistenMelonLoaderError();
-      if (unlistenComplete) unlistenComplete();
-      if (unlistenUpdateAvailable) unlistenUpdateAvailable();
-      if (unlistenUpdateCheckComplete) unlistenUpdateCheckComplete();
-      if (unlistenPluginsChanged) unlistenPluginsChanged();
-      if (unlistenUserLibsChanged) unlistenUserLibsChanged();
+      listeners.dispose();
 
       // Clear all debounce timers
       pluginsRefreshTimerMap.forEach(timer => clearTimeout(timer));
@@ -882,18 +962,10 @@ export function EnvironmentList({
       userLibsRefreshTimerMap.clear();
     };
   }, [
-    authModal.isOpen,
-    authModal.envId,
-    environments,
-    ensureEnvironments,
-    progress,
-    setFeaturedDownloadCounts,
     setMelonLoaderStatus,
-    setModUpdatesCounts,
-    setModsCounts,
     setPluginsCounts,
+    setUnmanagedLocalModsCounts,
     setUserLibsCounts,
-    settings?.updateCheckInterval,
     showMessage,
   ]);
 
@@ -1037,6 +1109,10 @@ export function EnvironmentList({
   };
 
   const handleLaunchGame = async (env: Environment, method: LaunchMethod = 'steam') => {
+    if (launchingEnvironmentIdsRef.current.has(env.id)) return;
+    launchingEnvironmentIdsRef.current.add(env.id);
+    setLaunchingEnvironmentIds((current) => new Set(current).add(env.id));
+
     try {
       const result = await ApiService.launchGame(env.id, method);
       if (!result.success) {
@@ -1068,6 +1144,13 @@ export function EnvironmentList({
       }
 
       showMessage('Launch Failed', `Failed to launch game: ${errorMessage}`, 'error');
+    } finally {
+      launchingEnvironmentIdsRef.current.delete(env.id);
+      setLaunchingEnvironmentIds((current) => {
+        const next = new Set(current);
+        next.delete(env.id);
+        return next;
+      });
     }
   };
 
@@ -1107,101 +1190,197 @@ export function EnvironmentList({
     }
   }, []);
 
-  // Load mods count, plugins count, userlibs count, and MelonLoader status for completed environments
+  // Hydrate the shared library once when this workspace is the first library consumer.
+  // A later shared-library identity change is handled by the pure derivation below.
   useEffect(() => {
-    const loadCounts = async () => {
-      const modCounts = new Map<string, number>();
-      const featuredDownloadCountsMap = new Map<string, number>();
-      const modUpdatesCountsMap = new Map<string, number>();
-      const pluginCounts = new Map<string, number>();
-      const userLibsCounts = new Map<string, number>();
-      const melonLoaderStatuses = new Map<string, { installed: boolean; version?: string }>();
-      const librarySnapshot = library ?? await ensureLibrary().catch(() => null);
-      for (const env of environments) {
-        if (env.status === 'completed') {
-          const modSnapshot = await buildEnvironmentCardModSnapshot(env.id, librarySnapshot);
-          modCounts.set(env.id, modSnapshot.userMods);
-          featuredDownloadCountsMap.set(env.id, modSnapshot.featuredDownloads);
-          modUpdatesCountsMap.set(env.id, modSnapshot.updateCount);
-          try {
-            const pluginResult = await ApiService.getPluginsCount(env.id);
-            pluginCounts.set(env.id, pluginResult.count);
-          } catch {
-            pluginCounts.set(env.id, 0);
-          }
-          try {
-            const userLibsResult = await ApiService.getUserLibsCount(env.id);
-            userLibsCounts.set(env.id, userLibsResult.count);
-          } catch {
-            userLibsCounts.set(env.id, 0);
-          }
-          try {
-            const statusResult = await ApiService.getMelonLoaderStatus(env.id);
-            melonLoaderStatuses.set(env.id, statusResult);
-          } catch {
-            melonLoaderStatuses.set(env.id, { installed: false });
-          }
-        }
-      }
-      setModsCounts(modCounts);
-      setFeaturedDownloadCounts(featuredDownloadCountsMap);
-      setModUpdatesCounts(modUpdatesCountsMap);
-      setPluginsCounts(pluginCounts);
-      setUserLibsCounts(userLibsCounts);
-      setMelonLoaderStatus(melonLoaderStatuses);
+    const completedEnvironmentIds = getCompletedEnvironmentIds(completedEnvironmentSignature);
+    if (library || loading || error || completedEnvironmentIds.length === 0) {
+      return;
+    }
 
-      // Load releases for environments with MelonLoader installed (so we can show/hide the Change Version button)
-      for (const env of environments) {
-        if (
-          env.status === 'completed'
-          && melonLoaderStatuses.get(env.id)?.installed
-          && !melonLoaderPrefetchStartedRef.current
-        ) {
-          melonLoaderPrefetchStartedRef.current = true;
-          loadMelonLoaderReleases(env.id).catch(err => {
-            console.error(`Failed to load MelonLoader releases for ${env.id}:`, err);
-          });
-        }
-      }
+    let disposed = false;
+    let request = libraryBootstrapRequestRef.current;
+    if (!request) {
+      request = ensureLibrary();
+      libraryBootstrapRequestRef.current = request;
+      void request.then(
+        () => {
+          if (libraryBootstrapRequestRef.current === request) {
+            libraryBootstrapRequestRef.current = null;
+          }
+        },
+        () => {
+          if (libraryBootstrapRequestRef.current === request) {
+            libraryBootstrapRequestRef.current = null;
+          }
+        },
+      );
+    }
 
-      notifyInitialDetectionComplete();
+    void request.then((snapshot) => {
+      if (!disposed) {
+        setEnsuredLibrary(snapshot);
+      }
+    }).catch(() => {
+      // The shared store retains and exposes its last library error.
+    });
+
+    return () => {
+      disposed = true;
     };
+  }, [completedEnvironmentSignature, ensureLibrary, error, library, loading]);
+
+  // Environment-local probes are keyed by completed environment IDs and the
+  // path/runtime fields that determine their directory and MelonLoader state.
+  // Reuse an in-flight pass across StrictMode effect replay and ignore stale completions.
+  useEffect(() => {
+    const generation = ++localProbeGenerationRef.current;
+    let disposed = false;
+    const completedEnvironmentIds = getCompletedEnvironmentIds(completedEnvironmentSignature);
 
     if (loading) {
-      return;
+      return () => {
+        disposed = true;
+      };
     }
 
     if (error) {
       notifyInitialDetectionComplete();
-      return;
+      return () => {
+        disposed = true;
+      };
     }
 
-    const hasCompletedEnvironment = environments.some(env => env.status === 'completed');
-    if (!hasCompletedEnvironment) {
+    if (completedEnvironmentIds.length === 0) {
+      unmanagedLocalModsEpochRef.current = new Map();
+      setUnmanagedLocalModsCounts(new Map());
+      setPluginsCounts(new Map());
+      setUserLibsCounts(new Map());
+      setMelonLoaderStatus(new Map());
       notifyInitialDetectionComplete();
-      return;
+      return () => {
+        disposed = true;
+      };
     }
 
-    if (environments.length > 0) {
-      loadCounts().catch((err) => {
-        console.error('Failed to load environment counts during startup detection:', err);
-        notifyInitialDetectionComplete();
-      });
+    let request = localProbeRequestRef.current;
+    if (!request || request.signature !== completedEnvironmentSignature) {
+      const promise = loadEnvironmentLocalProbeSnapshot(completedEnvironmentIds);
+      const unmanagedLocalModsEpochs = new Map(
+        completedEnvironmentIds.map((environmentId) => [
+          environmentId,
+          unmanagedLocalModsEpochRef.current.get(environmentId) ?? 0,
+        ]),
+      );
+      request = { signature: completedEnvironmentSignature, promise, unmanagedLocalModsEpochs };
+      localProbeRequestRef.current = request;
+      void promise.then(
+        () => {
+          if (localProbeRequestRef.current?.promise === promise) {
+            localProbeRequestRef.current = null;
+          }
+        },
+        () => {
+          if (localProbeRequestRef.current?.promise === promise) {
+            localProbeRequestRef.current = null;
+          }
+        },
+      );
     }
+
+    void request.promise.then((snapshot) => {
+      if (disposed || generation !== localProbeGenerationRef.current) {
+        return;
+      }
+
+      const completedEnvironmentEpochs = new Map(
+        completedEnvironmentIds.map((environmentId) => [
+          environmentId,
+          unmanagedLocalModsEpochRef.current.get(environmentId) ?? 0,
+        ]),
+      );
+      unmanagedLocalModsEpochRef.current = completedEnvironmentEpochs;
+      setUnmanagedLocalModsCounts((previous) => {
+        const next = new Map<string, number>();
+        for (const environmentId of completedEnvironmentIds) {
+          const probeEpoch = request.unmanagedLocalModsEpochs.get(environmentId) ?? 0;
+          const currentEpoch = completedEnvironmentEpochs.get(environmentId) ?? 0;
+          if (probeEpoch === currentEpoch) {
+            next.set(environmentId, snapshot.unmanagedLocalMods.get(environmentId) ?? 0);
+          } else if (previous.has(environmentId)) {
+            next.set(environmentId, previous.get(environmentId) ?? 0);
+          }
+        }
+        return next;
+      });
+      setPluginsCounts(snapshot.plugins);
+      setUserLibsCounts(snapshot.userLibs);
+      setMelonLoaderStatus(snapshot.melonLoader);
+
+      const melonLoaderEnvironmentId = completedEnvironmentIds.find(
+        (environmentId) => snapshot.melonLoader.get(environmentId)?.installed,
+      );
+      if (melonLoaderEnvironmentId && !melonLoaderPrefetchStartedRef.current) {
+        melonLoaderPrefetchStartedRef.current = true;
+        loadMelonLoaderReleases(melonLoaderEnvironmentId).catch((cause) => {
+          console.error(`Failed to load MelonLoader releases for ${melonLoaderEnvironmentId}:`, cause);
+        });
+      }
+
+      notifyInitialDetectionComplete();
+    }).catch((cause) => {
+      if (disposed || generation !== localProbeGenerationRef.current) {
+        return;
+      }
+      console.error('Failed to load environment counts during startup detection:', cause);
+      notifyInitialDetectionComplete();
+    });
+
+    return () => {
+      disposed = true;
+    };
   }, [
+    completedEnvironmentSignature,
     error,
-    environments,
-    ensureLibrary,
-    library,
     loadMelonLoaderReleases,
     loading,
     notifyInitialDetectionComplete,
-    setFeaturedDownloadCounts,
     setMelonLoaderStatus,
+    setPluginsCounts,
+    setUnmanagedLocalModsCounts,
+    setUserLibsCounts,
+  ]);
+
+  // Library changes only update derived managed/featured/update counts. They must
+  // never restart environment-local probes and their read-driven backend events.
+  useEffect(() => {
+    const completedEnvironmentIds = getCompletedEnvironmentIds(completedEnvironmentSignature);
+    const effectiveLibrary = library ?? ensuredLibrary;
+    const modCounts = new Map<string, number>();
+    const featuredDownloadCountsMap = new Map<string, number>();
+    const modUpdatesCountsMap = new Map<string, number>();
+
+    for (const environmentId of completedEnvironmentIds) {
+      const snapshot = buildEnvironmentModSnapshot(effectiveLibrary, environmentId);
+      modCounts.set(
+        environmentId,
+        snapshot.userMods + (unmanagedLocalModsCounts.get(environmentId) ?? 0),
+      );
+      featuredDownloadCountsMap.set(environmentId, snapshot.featuredDownloads);
+      modUpdatesCountsMap.set(environmentId, snapshot.updateCount);
+    }
+
+    setModsCounts(modCounts);
+    setFeaturedDownloadCounts(featuredDownloadCountsMap);
+    setModUpdatesCounts(modUpdatesCountsMap);
+  }, [
+    completedEnvironmentSignature,
+    ensuredLibrary,
+    library,
+    setFeaturedDownloadCounts,
     setModUpdatesCounts,
     setModsCounts,
-    setPluginsCounts,
-    setUserLibsCounts,
+    unmanagedLocalModsCounts,
   ]);
 
   const handleOpenModsOverlay = (envId: string) => {
@@ -1221,6 +1400,11 @@ export function EnvironmentList({
         refreshLibrary()
           .then((library) => buildEnvironmentCardModSnapshot(env.id, library, true))
           .then((snapshot) => {
+            setUnmanagedLocalModsCounts(prev => {
+              const next = new Map(prev);
+              next.set(env.id, snapshot.unmanagedLocalMods);
+              return next;
+            });
             setModsCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, snapshot.userMods);
@@ -1238,6 +1422,11 @@ export function EnvironmentList({
             });
           })
           .catch(() => {
+            setUnmanagedLocalModsCounts(prev => {
+              const next = new Map(prev);
+              next.set(env.id, 0);
+              return next;
+            });
             setModsCounts(prev => {
               const next = new Map(prev);
               next.set(env.id, 0);
@@ -1336,6 +1525,7 @@ export function EnvironmentList({
   };
 
   const handleShareProfile = async (env: Environment) => {
+    const operationId = ++profileExportOperationRef.current;
     setProfileExport({
       isOpen: true,
       environmentId: env.id,
@@ -1347,6 +1537,7 @@ export function EnvironmentList({
     });
     try {
       const manifest = await ApiService.exportEnvironmentProfile(env.id);
+      if (operationId !== profileExportOperationRef.current) return;
       setProfileExport({
         isOpen: true,
         environmentId: env.id,
@@ -1357,10 +1548,16 @@ export function EnvironmentList({
         saving: false,
       });
     } catch (err) {
+      if (operationId !== profileExportOperationRef.current) return;
       setProfileExport(emptyProfileExportState);
       showMessage('Share Profile Failed', getErrorMessage(err, 'Failed to export profile.'), 'error');
     }
   };
+
+  const closeProfileExport = useCallback(() => {
+    profileExportOperationRef.current += 1;
+    setProfileExport(emptyProfileExportState);
+  }, []);
 
   const handleToggleProfileItem = (item: ModProfileItem, index: number, checked: boolean) => {
     const key = profileItemKey(item, index);
@@ -1770,6 +1967,7 @@ export function EnvironmentList({
     const launchTitle = launchMethod === 'steam'
       ? 'Launch through Steam'
       : 'Launch this local install directly';
+    const isLaunching = launchingEnvironmentIds.has(env.id);
     const modCount = modsCounts.get(env.id) ?? 0;
     const featuredDownloadCount = featuredDownloadCounts.get(env.id) ?? 0;
     const totalModCount = modCount + featuredDownloadCount;
@@ -2031,9 +2229,11 @@ export function EnvironmentList({
                   onClick={() => handleLaunchGame(env, launchMethod)}
                   className="btn btn-primary environment-card__hero-action"
                   title={launchTitle}
+                  disabled={isLaunching}
+                  aria-busy={isLaunching}
                 >
-                  <Icon name="fas fa-play" />
-                  <span>Launch</span>
+                  <Icon name={isLaunching ? 'fas fa-spinner fa-spin' : 'fas fa-play'} />
+                  <span>{isLaunching ? 'Launching…' : 'Launch'}</span>
                 </SimmButton>
                 <SimmButton
                   variant="secondary"
@@ -2215,7 +2415,6 @@ export function EnvironmentList({
         onClose={() => {
           if (!authModal.waiting) {
             setAuthModal({ isOpen: false, envId: null, waiting: false });
-            setAuthCredentials(null);
           }
         }}
         onAuthenticated={handleAuthenticated}
@@ -2504,7 +2703,7 @@ export function EnvironmentList({
         selectedItemKeys={profileExport.selectedItemKeys}
         inputId="profile-export-name"
         saveDisabled={profileExport.loading || profileExport.saving || !adjustedProfileManifest || adjustedProfileManifest.items.length === 0}
-        onClose={() => setProfileExport(emptyProfileExportState)}
+        onClose={closeProfileExport}
         onProfileNameChange={(profileName) => setProfileExport((previous) => ({
           ...previous,
           profileName,

@@ -15,10 +15,13 @@ mod types;
 mod utils;
 
 use sqlx::SqlitePool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+
+static DEPOT_SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     // Initialize global logger FIRST to capture all output
@@ -155,6 +158,7 @@ fn main() {
             commands::app_init::get_linux_readiness_status,
             commands::app_init::repair_linux_desktop_integration,
             commands::app_init::get_home_directory,
+            commands::app_init::get_backups_directory,
             commands::tray::hide_main_window,
             commands::tray::quit_simm,
             // DepotDownloader
@@ -167,6 +171,7 @@ fn main() {
             commands::settings::repair_database,
             commands::settings::get_custom_themes,
             commands::settings::get_themes_directory,
+            commands::telemetry::get_telemetry_capability,
             commands::telemetry::get_telemetry_preferences,
             commands::telemetry::save_telemetry_preferences,
             commands::telemetry::list_telemetry_mod_policies,
@@ -377,8 +382,27 @@ fn main() {
             std::process::exit(1);
         });
 
-    app.run(|app_handle, event| {
-        if let RunEvent::Exit = event {
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { code, api, .. }
+            if DEPOT_SHUTDOWN_STARTED
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok() =>
+        {
+            api.prevent_exit();
+            let app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::commands::downloads::shutdown_downloads(&app_handle).await;
+                app_handle.exit(code.unwrap_or(0));
+            });
+        }
+        RunEvent::Exit => {
+            // Forced exits may skip ExitRequested. Keep a synchronous bounded
+            // fallback so SIMM never intentionally leaves its child process.
+            if !DEPOT_SHUTDOWN_STARTED.swap(true, Ordering::AcqRel) {
+                tauri::async_runtime::block_on(crate::commands::downloads::shutdown_downloads(
+                    app_handle,
+                ));
+            }
             if let Some(pool) = app_handle.try_state::<Arc<SqlitePool>>() {
                 if let Err(error) = tauri::async_runtime::block_on(
                     crate::commands::nexus_mods::cleanup_nxm_runtime_registration(
@@ -389,5 +413,6 @@ fn main() {
                 }
             }
         }
+        _ => {}
     });
 }

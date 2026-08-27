@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react';
 
 import { ApiService } from '../services/api';
 import { onSteamAuthQrLine } from '../services/events';
-import { useSettingsStore } from '../stores/settingsStore';
 import {
   Dialog,
   DialogDescription,
@@ -65,7 +64,6 @@ export function AuthenticationModal({
   authMessage,
   nested = false,
 }: Props) {
-  const { updateSettings } = useSettingsStore();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [steamGuard, setSteamGuard] = useState('');
@@ -151,13 +149,6 @@ export function AuthenticationModal({
 
       if (result.success) {
         const authenticatedUsername = authMode === 'qr' ? result.username || '' : username;
-
-        if (authMode === 'password' && saveCredentials && username && password) {
-          await ApiService.saveCredentials(username, password);
-          await updateSettings({ steamUsername: username });
-        } else if (authMode === 'qr' && saveCredentials && authenticatedUsername) {
-          await updateSettings({ steamUsername: authenticatedUsername });
-        }
 
         onAuthenticated({
           username: authenticatedUsername,

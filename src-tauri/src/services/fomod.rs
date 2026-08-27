@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use quick_xml::de::from_str;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -253,6 +253,9 @@ pub struct FomodInstallEntry {
     pub is_folder: bool,
     pub priority: i32,
     pub runtime: Option<String>,
+    // Captures XML declaration order so equal-priority conflicts have a
+    // deterministic and explainable winner.
+    pub(crate) declaration_order: usize,
 }
 
 /// FOMOD detection result
@@ -468,19 +471,23 @@ impl FomodService {
             }
         }
 
-        entries.sort_by_key(|entry| {
-            (
-                entry.destination.to_ascii_lowercase(),
-                entry.source.to_ascii_lowercase(),
-                entry.is_folder,
-                std::cmp::Reverse(entry.priority),
-            )
+        // FOMOD priority applies to *destinations*, not merely duplicate
+        // source/destination tuples. Select exactly one mapping per target;
+        // declared order wins ties so the result is stable regardless of hash
+        // or filesystem enumeration order.
+        entries.sort_by(|left, right| {
+            Self::install_target_key(left)
+                .cmp(&Self::install_target_key(right))
+                .then_with(|| right.priority.cmp(&left.priority))
+                .then_with(|| left.declaration_order.cmp(&right.declaration_order))
+                .then_with(|| {
+                    left.source
+                        .to_ascii_lowercase()
+                        .cmp(&right.source.to_ascii_lowercase())
+                })
         });
-        entries.dedup_by(|right, left| {
-            right.source.eq_ignore_ascii_case(&left.source)
-                && right.destination.eq_ignore_ascii_case(&left.destination)
-                && right.is_folder == left.is_folder
-        });
+        let mut resolved_targets = HashSet::new();
+        entries.retain(|entry| resolved_targets.insert(Self::install_target_key(entry)));
         Ok(entries)
     }
 
@@ -597,6 +604,7 @@ impl FomodService {
                 is_folder: true,
                 priority: folder.priority.unwrap_or(0),
                 runtime: runtime.map(str::to_string),
+                declaration_order: output.len(),
             });
         }
 
@@ -618,6 +626,7 @@ impl FomodService {
                 is_folder: false,
                 priority: file.priority.unwrap_or(0),
                 runtime: runtime.map(str::to_string),
+                declaration_order: output.len(),
             });
         }
     }
@@ -716,6 +725,31 @@ impl FomodService {
             .trim_start_matches("./")
             .trim_matches('/')
             .to_string()
+    }
+
+    fn install_target_key(entry: &FomodInstallEntry) -> String {
+        let destination = Self::normalize_path_value(&entry.destination);
+        let source = Self::normalize_path_value(&entry.source);
+        // File mappings to a bucket/directory have an implicit target file
+        // name. Resolve that name before conflict resolution: `Mods` plus
+        // `IL2CPP/A.dll` and `Mods` plus `Mono/B.dll` are distinct targets,
+        // while two mappings to `Mods/A.dll` deliberately compete.
+        let destination = if destination.is_empty() {
+            source
+        } else if entry.is_folder || Path::new(&destination).extension().is_some() {
+            destination
+        } else {
+            let source_name = Path::new(&source)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(source.as_str());
+            format!("{destination}/{source_name}")
+        };
+        format!(
+            "{}:{}",
+            if entry.is_folder { "folder" } else { "file" },
+            destination.to_ascii_lowercase()
+        )
     }
 }
 
@@ -911,6 +945,69 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, "data/override.dll");
         assert_eq!(entries[0].priority, 10);
+    }
+
+    #[test]
+    fn build_install_entries_chooses_one_destination_winner_by_priority_then_order() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config><installSteps><installStep name="Overrides"><requiredInstallFiles>
+  <file source="data/a-low.dll" destination="Mods/Example.dll" priority="1" />
+  <file source="data/z-high.dll" destination="Mods/Example.dll" priority="10" />
+  <file source="data/second-tie.dll" destination="Mods/Tie.dll" priority="5" />
+  <file source="data/first-tie.dll" destination="Mods/Tie.dll" priority="5" />
+</requiredInstallFiles></installStep></installSteps></config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let entries = service
+            .build_install_entries(&config, None)
+            .expect("expected deterministic conflict resolution");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.destination == "Mods/Example.dll")
+                .map(|entry| entry.source.as_str()),
+            Some("data/z-high.dll")
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.destination == "Mods/Tie.dll")
+                .map(|entry| entry.source.as_str()),
+            Some("data/second-tie.dll"),
+            "first XML declaration wins equal-priority ties"
+        );
+    }
+
+    #[test]
+    fn build_install_entries_preserves_distinct_files_in_the_same_destination_directory() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config><installSteps><installStep name="Runtime variants"><requiredInstallFiles>
+  <file source="IL2CPP/PackRat.IL2CPP.dll" destination="Mods" priority="0" />
+  <file source="Mono/PackRat.Mono.dll" destination="Mods" priority="0" />
+</requiredInstallFiles></installStep></installSteps></config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let entries = service
+            .build_install_entries(&config, None)
+            .expect("directory mappings should remain distinct files");
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "IL2CPP/PackRat.IL2CPP.dll"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.source == "Mono/PackRat.Mono.dll"));
     }
 
     #[test]

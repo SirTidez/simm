@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone)]
 struct ParsedSection {
@@ -72,10 +73,11 @@ impl ConfigService {
 
     pub async fn apply_config_edits(
         &self,
+        game_dir: &str,
         file_path: &str,
         operations: Vec<ConfigEditOperation>,
     ) -> Result<()> {
-        let path = Self::normalize_path(file_path)?;
+        let path = Self::managed_config_file(game_dir, file_path).await?;
         let file_type = self.detect_file_type(&path);
         let mut parsed = self.parse_config_file_internal(&path).await?;
 
@@ -93,48 +95,181 @@ impl ConfigService {
             bail!("Config file could not be re-parsed cleanly after applying edits");
         }
 
-        fs::write(&path, rendered)
+        Self::atomic_write_managed_config(game_dir, &path, rendered.as_bytes())
             .await
-            .context("Failed to write config file")?;
-
-        Ok(())
+            .context("Failed to write config file")
     }
 
-    pub async fn save_raw_config(&self, file_path: &str, content: &str) -> Result<()> {
-        let path = Self::normalize_path(file_path)?;
-        fs::write(path, content)
+    pub async fn save_raw_config(
+        &self,
+        game_dir: &str,
+        file_path: &str,
+        content: &str,
+    ) -> Result<()> {
+        let path = Self::managed_config_file(game_dir, file_path).await?;
+        Self::atomic_write_managed_config(game_dir, &path, content.as_bytes())
             .await
             .context("Failed to write raw config file")
+    }
+
+    async fn atomic_write_managed_config(
+        game_dir: &str,
+        target: &Path,
+        content: &[u8],
+    ) -> Result<()> {
+        Self::atomic_write_managed_config_with(game_dir, target, content, || Ok(())).await
+    }
+
+    async fn atomic_write_managed_config_with<F>(
+        game_dir: &str,
+        target: &Path,
+        content: &[u8],
+        before_revalidate: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let revalidated_before_staging =
+            Self::managed_config_file(game_dir, target.to_string_lossy().as_ref()).await?;
+        if !Self::paths_equal(target, &revalidated_before_staging) {
+            bail!("Config file changed before the update could be prepared");
+        }
+        let target = revalidated_before_staging;
+        let parent = target
+            .parent()
+            .ok_or_else(|| anyhow!("Config file has no parent directory"))?;
+        let file_name = target
+            .file_name()
+            .ok_or_else(|| anyhow!("Config file has no file name"))?
+            .to_string_lossy();
+        let temp_path = parent.join(format!(".{}.simm-{}.tmp", file_name, uuid::Uuid::new_v4()));
+        let permissions = fs::metadata(&target)
+            .await
+            .context("Failed to inspect config file permissions")?
+            .permissions();
+
+        let write_result = async {
+            let mut temp_file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .await
+                .context("Failed to create temporary config file")?;
+            temp_file
+                .write_all(content)
+                .await
+                .context("Failed to stage config content")?;
+            temp_file
+                .flush()
+                .await
+                .context("Failed to flush staged config content")?;
+            temp_file
+                .sync_all()
+                .await
+                .context("Failed to persist staged config content")?;
+            drop(temp_file);
+
+            fs::set_permissions(&temp_path, permissions)
+                .await
+                .context("Failed to preserve config file permissions")?;
+
+            before_revalidate()?;
+
+            // This is intentionally the final path lookup before replacement.
+            // If the caller-visible file was exchanged for a symlink/reparse
+            // point while the content was prepared, containment validation fails
+            // without following that link for the mutation.
+            let revalidated =
+                Self::managed_config_file(game_dir, target.to_string_lossy().as_ref()).await?;
+            if !Self::paths_equal(&target, &revalidated) {
+                bail!("Config file changed while the update was being prepared");
+            }
+
+            Self::replace_file_atomically(&temp_path, &target).await
+        }
+        .await;
+
+        if write_result.is_err() {
+            let _ = fs::remove_file(&temp_path).await;
+        }
+
+        write_result
+    }
+
+    async fn replace_file_atomically(replacement: &Path, target: &Path) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::ffi::OsStr;
+            use std::iter;
+            use std::os::windows::ffi::OsStrExt;
+            use winapi::um::winbase::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+
+            let target_wide: Vec<u16> = OsStr::new(target)
+                .encode_wide()
+                .chain(iter::once(0))
+                .collect();
+            let replacement_wide: Vec<u16> = OsStr::new(replacement)
+                .encode_wide()
+                .chain(iter::once(0))
+                .collect();
+            let replaced = unsafe {
+                MoveFileExW(
+                    replacement_wide.as_ptr(),
+                    target_wide.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if replaced == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("Failed to atomically replace config file");
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            fs::rename(replacement, target)
+                .await
+                .context("Failed to atomically replace config file")
+        }
     }
 
     async fn discover_config_files(
         &self,
         game_dir: &str,
     ) -> Result<Vec<(PathBuf, ConfigFileType)>> {
-        let game_path = Path::new(game_dir);
+        let game_path = Self::canonical_game_root(game_dir).await?;
         let userdata_path = game_path.join("UserData");
         let mut config_files = Vec::new();
 
         if userdata_path.exists() {
             let melon_prefs_path = userdata_path.join("MelonPreferences.cfg");
-            if melon_prefs_path.exists() {
+            if Self::safe_discovered_config_file(&game_path, &melon_prefs_path)
+                .await
+                .is_some()
+            {
                 config_files.push((melon_prefs_path, ConfigFileType::MelonPreferences));
             }
         }
 
         let loader_cfg_path = game_path.join("MelonLoader").join("Loader.cfg");
-        if loader_cfg_path.exists() {
+        if Self::safe_discovered_config_file(&game_path, &loader_cfg_path)
+            .await
+            .is_some()
+        {
             config_files.push((loader_cfg_path, ConfigFileType::LoaderConfig));
         }
 
         if userdata_path.exists() {
-            self.collect_userdata_config_files(&userdata_path, &mut config_files)
+            self.collect_userdata_config_files(&game_path, &userdata_path, &mut config_files)
                 .await?;
         }
 
         let mods_path = game_path.join("Mods");
         if mods_path.exists() {
-            self.collect_mods_config_files(&mods_path, &mut config_files)
+            self.collect_mods_config_files(&game_path, &mods_path, &mut config_files)
                 .await?;
         }
 
@@ -551,6 +686,7 @@ impl ConfigService {
 
     async fn collect_userdata_config_files(
         &self,
+        game_root: &Path,
         directory: &Path,
         config_files: &mut Vec<(PathBuf, ConfigFileType)>,
     ) -> Result<()> {
@@ -564,10 +700,17 @@ impl ConfigService {
 
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                let metadata = match entry.metadata().await {
+                let metadata = match fs::symlink_metadata(&path).await {
                     Ok(metadata) => metadata,
                     Err(_) => continue,
                 };
+
+                // Never discover a config behind a symlink/reparse point.  In
+                // addition to avoiding escapes, this keeps catalog paths stable
+                // between discovery and a later save.
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
 
                 if metadata.is_dir() {
                     pending.push(path);
@@ -591,6 +734,13 @@ impl ConfigService {
                     continue;
                 }
 
+                if Self::safe_discovered_config_file(game_root, &path)
+                    .await
+                    .is_none()
+                {
+                    continue;
+                }
+
                 if path.file_name().and_then(|name| name.to_str()) == Some("MelonPreferences.cfg") {
                     continue;
                 }
@@ -605,6 +755,7 @@ impl ConfigService {
 
     async fn collect_mods_config_files(
         &self,
+        game_root: &Path,
         directory: &Path,
         config_files: &mut Vec<(PathBuf, ConfigFileType)>,
     ) -> Result<()> {
@@ -618,10 +769,14 @@ impl ConfigService {
 
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                let metadata = match entry.metadata().await {
+                let metadata = match fs::symlink_metadata(&path).await {
                     Ok(metadata) => metadata,
                     Err(_) => continue,
                 };
+
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
 
                 if metadata.is_dir() {
                     pending.push(path);
@@ -647,6 +802,13 @@ impl ConfigService {
                     .unwrap_or(false);
 
                 if !is_cfg && !is_json {
+                    continue;
+                }
+
+                if Self::safe_discovered_config_file(game_root, &path)
+                    .await
+                    .is_none()
+                {
                     continue;
                 }
 
@@ -759,8 +921,62 @@ impl ConfigService {
     }
 
     fn paths_equal(a: &Path, b: &Path) -> bool {
-        a.to_string_lossy()
-            .eq_ignore_ascii_case(&b.to_string_lossy())
+        #[cfg(target_os = "windows")]
+        {
+            return a
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy());
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            a == b
+        }
+    }
+
+    async fn canonical_game_root(game_dir: &str) -> Result<PathBuf> {
+        let game_path = Path::new(game_dir);
+        // A configured game root can itself be a mount/link. Its canonical
+        // location is the containment root; only discovered child entries are
+        // prohibited from being symlinks/reparse points.
+        let metadata = fs::metadata(game_path)
+            .await
+            .context("Failed to inspect game directory")?;
+        if !metadata.is_dir() {
+            bail!("Game directory is not a directory");
+        }
+        fs::canonicalize(game_path)
+            .await
+            .context("Failed to resolve game directory")
+    }
+
+    async fn safe_discovered_config_file(game_root: &Path, candidate: &Path) -> Option<PathBuf> {
+        let metadata = fs::symlink_metadata(candidate).await.ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return None;
+        }
+        let canonical_candidate = fs::canonicalize(candidate).await.ok()?;
+        canonical_candidate
+            .starts_with(game_root)
+            .then_some(canonical_candidate)
+    }
+
+    async fn managed_config_file(game_dir: &str, file_path: &str) -> Result<PathBuf> {
+        let game_root = Self::canonical_game_root(game_dir).await?;
+        let requested = Self::normalize_path(file_path)?;
+        let metadata = fs::symlink_metadata(&requested)
+            .await
+            .context("Failed to inspect config file")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("Config file must be a real file within the game directory");
+        }
+        let canonical_requested = fs::canonicalize(&requested)
+            .await
+            .context("Failed to resolve config file path")?;
+        if !canonical_requested.starts_with(&game_root) {
+            bail!("Config file resolves outside the game directory");
+        }
+        Ok(canonical_requested)
     }
 }
 
@@ -1005,6 +1221,7 @@ mod tests {
         let service = ConfigService::new();
         service
             .apply_config_edits(
+                temp.path().to_string_lossy().as_ref(),
                 file_path.to_string_lossy().as_ref(),
                 vec![
                     ConfigEditOperation::SetValue {
@@ -1069,6 +1286,7 @@ mod tests {
         let service = ConfigService::new();
         service
             .save_raw_config(
+                temp.path().to_string_lossy().as_ref(),
                 file_path.to_string_lossy().as_ref(),
                 "[General]\nfoo = baz\n",
             )
@@ -1076,6 +1294,133 @@ mod tests {
 
         let updated = fs::read_to_string(&file_path).await?;
         assert!(updated.contains("foo = baz"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn raw_save_atomic_replace_does_not_follow_hardlink_swap() -> Result<()> {
+        let temp = tempdir()?;
+        let game_dir = temp.path().join("game");
+        let config_path = game_dir.join("UserData").join("raw.cfg");
+        let outside_file = temp.path().join("outside.cfg");
+        fs::create_dir_all(config_path.parent().expect("config parent")).await?;
+        fs::write(&config_path, "inside = original").await?;
+        fs::write(&outside_file, "outside = unchanged").await?;
+
+        let validated = ConfigService::managed_config_file(
+            game_dir.to_string_lossy().as_ref(),
+            config_path.to_string_lossy().as_ref(),
+        )
+        .await?;
+        let swap_path = config_path.clone();
+        let swap_target = outside_file.clone();
+        ConfigService::atomic_write_managed_config_with(
+            game_dir.to_string_lossy().as_ref(),
+            &validated,
+            b"inside = replacement",
+            move || {
+                std::fs::remove_file(&swap_path)?;
+                std::fs::hard_link(&swap_target, &swap_path)?;
+                Ok(())
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            fs::read_to_string(&outside_file).await?,
+            "outside = unchanged"
+        );
+        assert_eq!(
+            fs::read_to_string(&config_path).await?,
+            "inside = replacement"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn raw_save_revalidates_after_symlink_swap_before_replace() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir()?;
+        let game_dir = temp.path().join("game");
+        let config_path = game_dir.join("UserData").join("raw.cfg");
+        let outside_file = temp.path().join("outside.cfg");
+        fs::create_dir_all(config_path.parent().expect("config parent")).await?;
+        fs::write(&config_path, "inside = original").await?;
+        fs::write(&outside_file, "outside = unchanged").await?;
+
+        let validated = ConfigService::managed_config_file(
+            game_dir.to_string_lossy().as_ref(),
+            config_path.to_string_lossy().as_ref(),
+        )
+        .await?;
+        let swap_path = config_path.clone();
+        let swap_target = outside_file.clone();
+        let err = ConfigService::atomic_write_managed_config_with(
+            game_dir.to_string_lossy().as_ref(),
+            &validated,
+            b"inside = replacement",
+            move || {
+                std::fs::remove_file(&swap_path)?;
+                symlink(&swap_target, &swap_path)?;
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("a symlink swap before replacement must be rejected");
+
+        assert!(err.to_string().contains("real file"));
+        assert_eq!(
+            fs::read_to_string(&outside_file).await?,
+            "outside = unchanged"
+        );
+        let staged_files = std::fs::read_dir(config_path.parent().expect("config parent"))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".simm-"))
+            .count();
+        assert_eq!(staged_files, 0, "failed saves must clean staged files");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn catalog_and_writes_reject_config_symlinks_outside_game_directory() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir()?;
+        let game_dir = temp.path().join("game");
+        let userdata_dir = game_dir.join("UserData");
+        let outside_file = temp.path().join("outside.cfg");
+        fs::create_dir_all(&userdata_dir).await?;
+        fs::write(&outside_file, "outside = unchanged").await?;
+        symlink(&outside_file, userdata_dir.join("escaped.cfg"))?;
+
+        let service = ConfigService::new();
+        let catalog = service
+            .get_config_catalog(game_dir.to_string_lossy().as_ref())
+            .await?;
+        assert!(catalog.iter().all(|entry| entry.name != "escaped.cfg"));
+
+        let err = service
+            .save_raw_config(
+                game_dir.to_string_lossy().as_ref(),
+                userdata_dir.join("escaped.cfg").to_string_lossy().as_ref(),
+                "outside = overwritten",
+            )
+            .await
+            .expect_err("symlinked config must be rejected");
+        assert!(err.to_string().contains("real file"));
+        assert_eq!(
+            fs::read_to_string(&outside_file).await?,
+            "outside = unchanged"
+        );
 
         Ok(())
     }

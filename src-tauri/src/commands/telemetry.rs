@@ -7,9 +7,19 @@ use crate::services::telemetry::{ensure_telemetry_feature_enabled, TelemetryServ
 use crate::services::telemetry_upload::TelemetryUploadService;
 use crate::types::{
     LiveTelemetryEvent, LiveTelemetryExport, LiveTelemetryStatus, ModTelemetryCaptureRequest,
-    ModTelemetrySnapshot, ModTelemetrySnapshotSummary, TelemetryModPolicyItem,
+    ModTelemetrySnapshot, ModTelemetrySnapshotSummary, TelemetryCapability, TelemetryModPolicyItem,
     TelemetryModRuleUpdate, TelemetryPreferences, TelemetryPreferencesUpdate,
 };
+
+/// The renderer uses this runtime capability as its sole telemetry visibility
+/// source. Consent remains disabled until the user explicitly changes
+/// persisted preferences.
+#[tauri::command]
+pub fn get_telemetry_capability() -> TelemetryCapability {
+    TelemetryCapability {
+        available: crate::services::telemetry::telemetry_feature_enabled(),
+    }
+}
 
 #[tauri::command]
 pub async fn get_telemetry_preferences(
@@ -29,6 +39,9 @@ pub async fn save_telemetry_preferences(
     updates: TelemetryPreferencesUpdate,
 ) -> Result<TelemetryPreferences, String> {
     ensure_telemetry_feature_enabled().map_err(|error| error.to_string())?;
+    if updates.field_count() != 1 {
+        return Err("Update exactly one telemetry preference at a time".to_string());
+    }
     let policy_changed = updates.protect_local_mods.is_some();
     let preferences = TelemetryService::new(db.inner().clone())
         .save_preferences(updates)
@@ -175,4 +188,22 @@ pub async fn export_live_telemetry_history(
         .export_live_history(environment_id)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::EnvVarGuard;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn capability_reflects_the_runtime_feature_flag() {
+        let disabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "false");
+        assert!(!get_telemetry_capability().available);
+        drop(disabled);
+
+        let _enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
+        assert!(get_telemetry_capability().available);
+    }
 }

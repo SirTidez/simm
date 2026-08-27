@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -41,6 +41,32 @@ pub struct RuntimeModSwitchSummary {
     pub installed_items: usize,
     pub missing_items: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetEnvironmentFingerprint {
+    id: String,
+    output_dir: String,
+    runtime: Runtime,
+    branch: String,
+}
+
+impl TargetEnvironmentFingerprint {
+    fn capture(environment: &Environment) -> Self {
+        Self {
+            id: environment.id.clone(),
+            output_dir: environment.output_dir.clone(),
+            runtime: environment.runtime.clone(),
+            branch: environment.branch.clone(),
+        }
+    }
+
+    fn matches(&self, environment: &Environment) -> bool {
+        self.id == environment.id
+            && self.output_dir == environment.output_dir
+            && self.runtime == environment.runtime
+            && self.branch == environment.branch
+    }
 }
 
 impl ModProfilesService {
@@ -392,10 +418,12 @@ impl ModProfilesService {
 
     pub async fn preview_import(
         &self,
-        manifest: ModProfileManifest,
+        mut manifest: ModProfileManifest,
         target_environment_id: Option<String>,
     ) -> Result<ModProfileImportPlan> {
         validate_manifest(&manifest)?;
+        let manifest_runtime = manifest.profile.runtime.clone();
+        normalize_profile_items(&mut manifest, Some(&manifest_runtime));
         let target_environment = self
             .load_target_environment(target_environment_id.as_deref())
             .await?;
@@ -441,6 +469,7 @@ impl ModProfilesService {
             .load_target_environment(Some(&target_environment_id))
             .await?
             .ok_or_else(|| anyhow!("Target environment not found"))?;
+        let target_fingerprint = TargetEnvironmentFingerprint::capture(&target_environment);
         if request.manifest.profile.runtime != target_environment.runtime {
             return Err(anyhow!(
                 "Profile runtime {:?} cannot be applied to {:?} environment",
@@ -450,6 +479,8 @@ impl ModProfilesService {
         }
         let plan = self
             .preview_import(request.manifest, Some(target_environment_id.clone()))
+            .await?;
+        self.revalidate_target_environment(&target_fingerprint)
             .await?;
         let mods_service = self.mods_service();
         let mut installed = 0usize;
@@ -463,14 +494,24 @@ impl ModProfilesService {
                 ModProfileImportStatus::ReadyToInstall => {
                     if let Some(storage_id) = item.resolved_storage_id.as_deref() {
                         if installed_storage_ids.insert(storage_id.to_string()) {
-                            mods_service
+                            self.revalidate_target_environment(&target_fingerprint)
+                                .await?;
+                            match mods_service
                                 .install_storage_mod_to_envs(
                                     storage_id,
                                     vec![target_environment_id.clone()],
                                 )
                                 .await
-                                .with_context(|| format!("Failed to install {}", item.item.name))?;
-                            installed += 1;
+                            {
+                                Ok(_) => installed += 1,
+                                Err(error) => {
+                                    unresolved += 1;
+                                    messages.push(format!(
+                                        "{}: failed to install into the frozen target: {}",
+                                        item.item.name, error
+                                    ));
+                                }
+                            }
                         } else {
                             skipped += 1;
                         }
@@ -488,7 +529,12 @@ impl ModProfilesService {
             }
         }
 
-        self.sync_profile_enabled_state(&target_environment, &plan)
+        let toggle_errors = self
+            .sync_profile_enabled_state(&target_environment, &plan)
+            .await?;
+        unresolved += toggle_errors.len();
+        messages.extend(toggle_errors);
+        self.revalidate_target_environment(&target_fingerprint)
             .await?;
 
         let refreshed_plan = self
@@ -509,6 +555,11 @@ impl ModProfilesService {
         profile_id: &str,
         target_environment_id: String,
     ) -> Result<ModProfileApplyResult> {
+        let target_environment = self
+            .load_target_environment(Some(&target_environment_id))
+            .await?
+            .ok_or_else(|| anyhow!("Target environment not found"))?;
+        let target_fingerprint = TargetEnvironmentFingerprint::capture(&target_environment);
         let profile = self.get_profile(profile_id).await?;
         let mut request = ModProfileApplyRequest {
             manifest: profile.manifest,
@@ -516,6 +567,8 @@ impl ModProfilesService {
         };
         request.manifest.profile_id = Some(profile.id.clone());
         let result = self.apply_import(request).await?;
+        self.revalidate_target_environment(&target_fingerprint)
+            .await?;
         self.set_environment_active_profile(&target_environment_id, &profile.id)
             .await?;
         Ok(result)
@@ -560,6 +613,24 @@ impl ModProfilesService {
             .await?
             .map(Some)
             .ok_or_else(|| anyhow!("Target environment not found"))
+    }
+
+    /// Protects the final profile mutations from a target whose runtime,
+    /// branch, or materialization path changed after the preview was built.
+    async fn revalidate_target_environment(
+        &self,
+        expected: &TargetEnvironmentFingerprint,
+    ) -> Result<()> {
+        let actual = self
+            .load_target_environment(Some(&expected.id))
+            .await?
+            .ok_or_else(|| anyhow!("Target environment not found"))?;
+        if !expected.matches(&actual) {
+            return Err(anyhow!(
+                "Profile target changed while the operation was in flight; retry against the current environment"
+            ));
+        }
+        Ok(())
     }
 
     async fn set_environment_active_profile(
@@ -719,7 +790,7 @@ impl ModProfilesService {
         &self,
         environment: &Environment,
         plan: &ModProfileImportPlan,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let mods_service = self.mods_service();
         let snapshot =
             build_installed_snapshot(self.pool.clone(), &mods_service, environment).await?;
@@ -733,26 +804,46 @@ impl ModProfilesService {
             .map(|item| (profile_item_identity(&item.item), item.item.enabled))
             .collect();
 
+        let mut errors = Vec::new();
         for item in &plan.items {
             if desired.contains_key(&profile_item_identity(&item.item)) {
-                let _ = toggle_profile_item(
+                if let Err(error) = toggle_profile_item(
                     self.pool.clone(),
                     environment,
                     &item.item,
                     item.item.enabled,
                 )
-                .await;
+                .await
+                {
+                    errors.push(format!(
+                        "{}: failed to {}: {}",
+                        profile_item_error_label(&item.item),
+                        if item.item.enabled {
+                            "enable"
+                        } else {
+                            "disable"
+                        },
+                        error
+                    ));
+                }
             }
         }
 
-        for installed in installed_snapshot_items(&snapshot) {
+        for installed in installed_snapshot_items(&snapshot, &environment.runtime) {
             let key = profile_item_identity(&installed);
             if !desired.contains_key(&key) && installed.enabled {
-                let _ =
-                    toggle_profile_item(self.pool.clone(), environment, &installed, false).await;
+                if let Err(error) =
+                    toggle_profile_item(self.pool.clone(), environment, &installed, false).await
+                {
+                    errors.push(format!(
+                        "{}: failed to disable: {}",
+                        profile_item_error_label(&installed),
+                        error
+                    ));
+                }
             }
         }
-        Ok(())
+        Ok(errors)
     }
 }
 
@@ -1230,26 +1321,63 @@ fn installed_storage_id(
 }
 
 fn profile_item_identity(item: &ModProfileItem) -> String {
-    format!(
-        "{:?}:{}",
-        item.item_type,
-        normalize_file_identity(
-            item.file_name
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(item.name.as_str())
-        )
-    )
+    let path = normalize_managed_relative_identity(
+        item.file_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(item.name.as_str()),
+    );
+    let runtime = item
+        .runtime
+        .as_ref()
+        .map(Runtime::canonical_label)
+        .unwrap_or("any");
+    let storage = item
+        .storage_id
+        .as_deref()
+        .or(item.source_id.as_deref())
+        .unwrap_or("unmanaged")
+        .trim()
+        .to_ascii_lowercase();
+    format!("{:?}:{runtime}:{storage}:{path}", item.item_type)
 }
 
-fn installed_snapshot_items(snapshot: &Value) -> Vec<ModProfileItem> {
+fn profile_item_error_label(item: &ModProfileItem) -> String {
+    let Some(file_name) = item
+        .file_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return item.name.clone();
+    };
+    if file_name.eq_ignore_ascii_case(&item.name) {
+        item.name.clone()
+    } else {
+        format!("{} ({})", item.name, file_name)
+    }
+}
+
+fn installed_snapshot_items(snapshot: &Value, runtime: &Runtime) -> Vec<ModProfileItem> {
     let mut items = Vec::new();
-    collect_installed_snapshot_items(snapshot, "mods", ModProfileItemType::Mod, &mut items);
-    collect_installed_snapshot_items(snapshot, "plugins", ModProfileItemType::Plugin, &mut items);
+    collect_installed_snapshot_items(
+        snapshot,
+        "mods",
+        ModProfileItemType::Mod,
+        runtime,
+        &mut items,
+    );
+    collect_installed_snapshot_items(
+        snapshot,
+        "plugins",
+        ModProfileItemType::Plugin,
+        runtime,
+        &mut items,
+    );
     collect_installed_snapshot_items(
         snapshot,
         "userLibs",
         ModProfileItemType::Userlib,
+        runtime,
         &mut items,
     );
     items
@@ -1259,6 +1387,7 @@ fn collect_installed_snapshot_items(
     snapshot: &Value,
     collection: &str,
     item_type: ModProfileItemType,
+    runtime: &Runtime,
     items: &mut Vec<ModProfileItem>,
 ) {
     let Some(values) = snapshot.get(collection).and_then(Value::as_array) else {
@@ -1281,7 +1410,7 @@ fn collect_installed_snapshot_items(
             source_id: read_string(value, "sourceId"),
             source_version: read_string(value, "version"),
             source_url: read_string(value, "sourceUrl"),
-            runtime: None,
+            runtime: Some(runtime.clone()),
             storage_id: read_string(value, "modStorageId"),
             nexus_file_id: None,
             manual_reason: None,
@@ -1355,7 +1484,7 @@ fn installed_profile_file_present(installed_mods: &Value, item: &ModProfileItem)
     let Some(item_file) = item.file_name.as_deref().or(Some(item.name.as_str())) else {
         return false;
     };
-    let item_file = normalize_file_identity(item_file);
+    let item_file = normalize_managed_relative_identity(item_file);
     if item_file.is_empty() {
         return false;
     }
@@ -1368,7 +1497,7 @@ fn installed_profile_file_present(installed_mods: &Value, item: &ModProfileItem)
         .any(|value| {
             read_string(value, "fileName")
                 .or_else(|| read_string(value, "name"))
-                .map(|file_name| normalize_file_identity(&file_name) == item_file)
+                .map(|file_name| normalize_managed_relative_identity(&file_name) == item_file)
                 .unwrap_or(false)
         })
 }
@@ -1713,15 +1842,23 @@ fn storage_id_for_runtime(entry: &ModLibraryEntry, runtime: &Runtime) -> Option<
 }
 
 fn normalize_file_identity(value: &str) -> String {
-    let file_name = Path::new(value)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(value)
-        .trim();
-    file_name
-        .strip_suffix(".disabled")
-        .unwrap_or(file_name)
-        .to_ascii_lowercase()
+    normalize_managed_relative_identity(value)
+}
+
+fn normalize_managed_relative_identity(value: &str) -> String {
+    let mut parts: Vec<String> = value
+        .trim()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .map(|part| part.to_ascii_lowercase())
+        .collect();
+    if let Some(last) = parts.last_mut() {
+        if let Some(enabled) = last.strip_suffix(".disabled") {
+            *last = enabled.to_string();
+        }
+    }
+    parts.join("/")
 }
 
 fn version_eq(left: &str, right: &str) -> bool {
@@ -1753,10 +1890,7 @@ fn is_disabled(value: &Value) -> bool {
 }
 
 fn runtime_key(runtime: &Runtime) -> &'static str {
-    match runtime {
-        Runtime::Il2cpp => "IL2CPP",
-        Runtime::Mono => "Mono",
-    }
+    runtime.canonical_label()
 }
 
 fn mod_source_key(source: &ModSource) -> &'static str {
@@ -1921,6 +2055,107 @@ mod tests {
             resolve_runtime_switch_storage_id(&[entry], &item, &Runtime::Il2cpp).as_deref(),
             Some("il2cpp-storage")
         );
+    }
+
+    #[test]
+    fn profile_identity_keeps_nested_paths_runtime_and_storage_distinct() {
+        let mut mono = profile_item();
+        mono.file_name = Some("Mono/Shared.dll".to_string());
+        mono.storage_id = Some("shared-storage".to_string());
+        mono.runtime = Some(Runtime::Mono);
+
+        let mut net35 = mono.clone();
+        net35.file_name = Some("Net35/Shared.dll.disabled".to_string());
+        let mut il2cpp = mono.clone();
+        il2cpp.runtime = Some(Runtime::Il2cpp);
+
+        assert_ne!(profile_item_identity(&mono), profile_item_identity(&net35));
+        assert_ne!(profile_item_identity(&mono), profile_item_identity(&il2cpp));
+        assert_eq!(
+            normalize_managed_relative_identity("Mono\\Shared.dll.disabled"),
+            "mono/shared.dll"
+        );
+    }
+
+    #[test]
+    fn target_fingerprint_detects_runtime_or_path_replacement() {
+        let environment = test_environment(Runtime::Mono);
+        let frozen = TargetEnvironmentFingerprint::capture(&environment);
+        assert!(frozen.matches(&environment));
+
+        let mut replaced = environment.clone();
+        replaced.output_dir = "E:/new-target".to_string();
+        assert!(!frozen.matches(&replaced));
+        replaced.output_dir = environment.output_dir.clone();
+        replaced.runtime = Runtime::Il2cpp;
+        assert!(!frozen.matches(&replaced));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn revalidate_target_environment_rejects_a_replaced_target() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let environment_service = EnvironmentService::new(pool.clone())?;
+        let environment = environment_service
+            .create_environment(
+                crate::types::schedule_i_config().app_id,
+                "alternate".to_string(),
+                temp.path().join("original").to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+        let frozen = TargetEnvironmentFingerprint::capture(&environment);
+        let mut replaced = environment;
+        replaced.output_dir = temp
+            .path()
+            .join("replacement")
+            .to_string_lossy()
+            .to_string();
+        environment_service.upsert_environment(&replaced).await?;
+
+        let error = ModProfilesService::new(pool)
+            .revalidate_target_environment(&frozen)
+            .await
+            .expect_err("a changed target must invalidate the in-flight apply");
+        assert!(error.to_string().contains("target changed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn sync_profile_enabled_state_surfaces_each_toggle_failure() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let mut environment = test_environment(Runtime::Mono);
+        environment.output_dir = temp.path().to_string_lossy().to_string();
+        let service = ModProfilesService::new(initialize_pool().await?);
+        let mut item = profile_item();
+        item.file_name = Some("Missing.dll".to_string());
+        let plan = ModProfileImportPlan {
+            profile: profile_manifest().profile,
+            target_environment_id: Some(environment.id.clone()),
+            items: vec![ModProfileImportPlanItem {
+                item,
+                status: ModProfileImportStatus::AlreadyInstalled,
+                resolved_storage_id: Some("missing-storage".to_string()),
+                message: "fixture".to_string(),
+            }],
+            summary: ModProfileImportSummary::default(),
+        };
+
+        let errors = service
+            .sync_profile_enabled_state(&environment, &plan)
+            .await?;
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("Missing.dll"));
+        Ok(())
     }
 
     fn test_environment(runtime: Runtime) -> Environment {

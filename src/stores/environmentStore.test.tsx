@@ -17,6 +17,24 @@ const apiMocks = vi.hoisted(() => ({
 }));
 
 const eventMocks = vi.hoisted(() => ({
+  createAsyncListenerScope: () => {
+    let active = true;
+    const unlisteners = new Set<() => void>();
+    return {
+      register: (subscribe: () => Promise<() => void>) => {
+        void subscribe().then((unlisten) => {
+          if (active) unlisteners.add(unlisten);
+          else unlisten();
+        });
+      },
+      dispose: () => {
+        active = false;
+        unlisteners.forEach((unlisten) => unlisten());
+        unlisteners.clear();
+      },
+      isActive: () => active,
+    };
+  },
   onProgress: vi.fn(),
   onComplete: vi.fn(),
   onError: vi.fn(),
@@ -44,7 +62,7 @@ const baseEnv: Environment = {
 };
 
 function Consumer() {
-  const { environments, loading, progress, startDownload, checkAllUpdates, ensureEnvironments, createEnvironment } = useEnvironmentStore();
+  const { environments, loading, progress, startDownload, cancelDownload, checkAllUpdates, ensureEnvironments, createEnvironment, deleteEnvironment } = useEnvironmentStore();
   const [cachedRuntime, setCachedRuntime] = React.useState('none');
   return (
     <div>
@@ -62,6 +80,23 @@ function Consumer() {
       >
         Start
       </button>
+      <button
+        data-testid="start-download-one-time"
+        onClick={() => environments[0] && startDownload(environments[0].id, {
+          username: 'steam-user',
+          password: 'one-time-password',
+          steamGuard: '12345',
+          saveCredentials: false,
+        })}
+      >
+        Start one-time
+      </button>
+      <button
+        data-testid="cancel-download"
+        onClick={() => environments[0] && void cancelDownload(environments[0].id)}
+      >
+        Cancel
+      </button>
       <button data-testid="check-all" onClick={() => checkAllUpdates(true)}>
         CheckAll
       </button>
@@ -78,6 +113,12 @@ function Consumer() {
         onClick={() => void createEnvironment({ appId: '3164500', branch: 'main', outputDir: 'C:/env' })}
       >
         Create environment
+      </button>
+      <button
+        data-testid="delete-environment"
+        onClick={() => void deleteEnvironment('env-1')}
+      >
+        Delete environment
       </button>
     </div>
   );
@@ -150,6 +191,113 @@ describe('EnvironmentStore', () => {
 
     expect(screen.getByTestId('env-status').textContent).toBe('completed');
     expect(screen.getByTestId('env-version').textContent).toBe('1.0.0');
+  });
+
+  it('passes one-time credentials, including an explicit no-save consent signal, to the download API', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+    apiMocks.startDownload.mockResolvedValueOnce({ success: true, downloadId: 'env-1' });
+    apiMocks.updateEnvironment.mockResolvedValueOnce({ ...baseEnv, status: 'downloading' });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    fireEvent.click(screen.getByTestId('start-download-one-time'));
+
+    await waitFor(() => {
+      expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1', {
+        username: 'steam-user',
+        password: 'one-time-password',
+        steamGuard: '12345',
+        saveCredentials: false,
+      });
+    });
+  });
+
+  it('keeps an ordinary download API call free of credential arguments', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([baseEnv]);
+    apiMocks.startDownload.mockResolvedValueOnce({ success: true, downloadId: 'env-1' });
+    apiMocks.updateEnvironment.mockResolvedValueOnce({ ...baseEnv, status: 'downloading' });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading').textContent).toBe('false');
+    });
+    fireEvent.click(screen.getByTestId('start-download'));
+
+    await waitFor(() => {
+      expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1');
+    });
+  });
+
+  it('does not regress a completed event when start resolves afterwards', async () => {
+    let resolveStart: (() => void) | undefined;
+    apiMocks.getEnvironments
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'downloading' }])
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'completed' }]);
+    apiMocks.startDownload.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveStart = resolve;
+    }));
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => expect(completeHandler).not.toBeNull());
+    fireEvent.click(screen.getByTestId('start-download'));
+    await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1'));
+
+    void completeHandler?.({ downloadId: 'env-1' });
+    await waitFor(() => expect(screen.getByTestId('env-status').textContent).toBe('completed'));
+
+    resolveStart?.();
+    await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('env-status').textContent).toBe('completed');
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalledWith(
+      'env-1',
+      expect.objectContaining({ status: 'downloading' }),
+    );
+  });
+
+  it('retains progress and refreshes the completed backend state when cancellation is rejected', async () => {
+    apiMocks.getEnvironments
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'downloading' }])
+      .mockResolvedValueOnce([{ ...baseEnv, status: 'completed' }]);
+    apiMocks.cancelDownload.mockResolvedValueOnce({ success: false });
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('false'));
+    progressHandler?.({ downloadId: 'env-1', status: 'downloading', progress: 95 });
+    await waitFor(() => expect(screen.getByTestId('progress-count').textContent).toBe('1'));
+
+    fireEvent.click(screen.getByTestId('cancel-download'));
+
+    await waitFor(() => {
+      expect(apiMocks.cancelDownload).toHaveBeenCalledWith('env-1');
+      expect(screen.getByTestId('env-status').textContent).toBe('completed');
+    });
+    expect(screen.getByTestId('progress-count').textContent).toBe('1');
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalledWith(
+      'env-1',
+      expect.objectContaining({ status: 'not_downloaded' }),
+    );
   });
 
   it('coalesces duplicate initial environment refreshes while one request is pending', async () => {
@@ -444,6 +592,31 @@ describe('EnvironmentStore', () => {
     resolveInitialFetch([{ ...baseEnv, runtime: 'IL2CPP' }]);
     await waitFor(() => expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2));
     expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
+  });
+
+  it('does not resurrect a deleted environment from an older in-flight refresh', async () => {
+    let resolveInitialFetch: (value: Environment[]) => void = () => {};
+    apiMocks.getEnvironments
+      .mockReturnValueOnce(new Promise<Environment[]>((resolve) => {
+        resolveInitialFetch = resolve;
+      }))
+      .mockResolvedValueOnce([]);
+    apiMocks.deleteEnvironment.mockResolvedValueOnce(true);
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+
+    await waitFor(() => expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId('delete-environment'));
+    resolveInitialFetch([baseEnv]);
+
+    await waitFor(() => {
+      expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('env-status').textContent).toBe('none');
+    });
   });
 
   it('retries once when a completion event invalidates an in-flight environment fetch', async () => {

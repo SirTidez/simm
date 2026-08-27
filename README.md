@@ -191,10 +191,10 @@ For an offline transfer package, build the AppImage and package it with its inst
 
 ```powershell
 .\scripts\build-linux-container.cmd
-.\scripts\package-steam-deck.ps1 -AppImage .\target\release\bundle\appimage\*.AppImage
+.\scripts\package-steam-deck.ps1 -AppImage .\artifacts\linux\SIMM_0.8.6_x86_64.AppImage
 ```
 
-The generated zip under `target/steam-deck/` contains the AppImage, `SHA256SUMS`, `install.sh`, and Deck-specific instructions. On the Deck, extract it and run `bash install.sh --appimage-file ./SIMM_<version>_x86_64.AppImage`.
+The Steam Deck packager accepts only the versioned Linux release artifact together with its release-generated `SHA256SUMS`; it deliberately rejects raw or stale Tauri bundle output. The generated zip under `target/steam-deck/` contains the AppImage, `SHA256SUMS`, `install.sh`, and Deck-specific instructions. On the Deck, extract it and run `bash install.sh --appimage-file ./SIMM_<version>_x86_64.AppImage`.
 
 ### Linux Build Dependencies
 

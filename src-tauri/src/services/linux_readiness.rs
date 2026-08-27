@@ -318,19 +318,22 @@ async fn query_linux_default_scheme_handler(protocol: &str) -> Result<Option<Str
 }
 
 pub(crate) fn linux_desktop_id_looks_like_simm(desktop_id: &str) -> bool {
-    let normalized = desktop_id
-        .trim()
-        .trim_end_matches(".desktop")
-        .to_ascii_lowercase()
-        .replace(['_', '-'], " ");
-    let compact = normalized.replace(' ', "");
+    // These IDs are emitted by the Tauri deep-link plugin, the AppImage
+    // installer, and the Flatpak manifest. Keep the list exact: readiness is
+    // asserting ownership of a protocol handler, not doing a fuzzy product
+    // name search that could accept another application's desktop file.
+    const SIMM_DESKTOP_IDS: &[&str] = &[
+        "simm.desktop",
+        "simmrust.desktop",
+        "simmrust-handler.desktop",
+        "dev.lockwirelabs.simm.desktop",
+        "com.s1devenvmanager.app.desktop",
+        "schedule i mod manager.desktop",
+        "schedule-i-mod-manager.desktop",
+    ];
 
-    compact == "simm"
-        || compact == "simmrust"
-        || compact == "com.s1devenvmanager.app"
-        || (normalized.contains("schedule")
-            && normalized.contains("mod")
-            && normalized.contains("manager"))
+    let normalized = desktop_id.trim().to_ascii_lowercase();
+    SIMM_DESKTOP_IDS.contains(&normalized.as_str())
 }
 
 async fn command_status(program: &str, args: &[&str]) -> bool {
@@ -361,9 +364,16 @@ mod tests {
             "com.s1devenvmanager.app.desktop"
         ));
         assert!(linux_desktop_id_looks_like_simm("simmrust.desktop"));
+        assert!(linux_desktop_id_looks_like_simm("simmrust-handler.desktop"));
+        assert!(linux_desktop_id_looks_like_simm(
+            "dev.lockwirelabs.simm.desktop"
+        ));
         assert!(linux_desktop_id_looks_like_simm("simm.desktop"));
         assert!(!linux_desktop_id_looks_like_simm("vortex.desktop"));
         assert!(!linux_desktop_id_looks_like_simm("nexusmods-app.desktop"));
+        assert!(!linux_desktop_id_looks_like_simm(
+            "another-schedule-mod-manager.desktop"
+        ));
     }
 
     #[test]

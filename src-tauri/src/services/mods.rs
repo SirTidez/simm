@@ -454,19 +454,12 @@ impl ModsService {
     }
 
     fn runtime_label(runtime: &crate::types::Runtime) -> &'static str {
-        match runtime {
-            crate::types::Runtime::Il2cpp => RUNTIME_IL2CPP,
-            crate::types::Runtime::Mono => RUNTIME_MONO,
-        }
+        runtime.canonical_label()
     }
 
     /// Parses user-supplied runtime strings (case-insensitive). Returns `None` if unknown.
     fn parse_runtime_string(runtime: &str) -> Option<crate::types::Runtime> {
-        match runtime.trim().to_ascii_lowercase().as_str() {
-            "il2cpp" => Some(crate::types::Runtime::Il2cpp),
-            "mono" => Some(crate::types::Runtime::Mono),
-            _ => None,
-        }
+        crate::types::Runtime::parse_label(runtime)
     }
 
     /// Resolves target runtime for zip install: explicit parse first, else same chain as
@@ -2977,6 +2970,51 @@ impl ModsService {
         Ok(summary)
     }
 
+    fn storage_payload_is_materializable(summary: &StoragePayloadSummary) -> bool {
+        if !summary.primary_files.is_empty() {
+            return true;
+        }
+
+        summary
+            .attached_userlibs
+            .iter()
+            .chain(summary.attached_userdata.iter())
+            .any(|path| !Self::is_non_payload_archive_entry(path))
+    }
+
+    fn is_non_payload_archive_entry(path: &str) -> bool {
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(path)
+            .trim()
+            .to_ascii_lowercase();
+        matches!(
+            name.as_str(),
+            "manifest.json"
+                | "readme"
+                | "readme.md"
+                | "readme.txt"
+                | "changelog.md"
+                | "license"
+                | "license.md"
+                | "license.txt"
+                | "icon.png"
+        )
+    }
+
+    async fn rollback_staged_storage(storage_path: &Path) {
+        if storage_path.exists() {
+            if let Err(error) = fs::remove_dir_all(storage_path).await {
+                log::warn!(
+                    "Failed to roll back staged mod storage {}: {}",
+                    storage_path.display(),
+                    error
+                );
+            }
+        }
+    }
+
     async fn collect_storage_relative_files_recursive(
         &self,
         root: &Path,
@@ -3814,6 +3852,16 @@ impl ModsService {
     async fn remove_path_if_exists(&self, path: &Path) -> Result<bool> {
         if !self.path_exists_or_symlink(path).await {
             return Ok(false);
+        }
+
+        // Files locked by Windows or denied by an ACL are not reproducible on every
+        // CI host. Keep the failure path covered with a test-only, exact-path fault
+        // injection; production builds have no environment-variable behavior here.
+        #[cfg(test)]
+        if std::env::var_os("SIMMRUST_TEST_FAIL_REMOVE_PATH")
+            .is_some_and(|value| PathBuf::from(value) == path)
+        {
+            anyhow::bail!("test-injected failure removing {}", path.display())
         }
 
         let meta = fs::symlink_metadata(path).await?;
@@ -5703,7 +5751,11 @@ impl ModsService {
                 runtime.as_ref(),
             )
             .await;
-        let mod_storage_base = mod_storage_dir.join(&mod_id);
+        // Materialize into an unpublishable sibling first. A library reader can
+        // never resolve a half-extracted archive by its storage ID, and the
+        // final rename happens only after payload and metadata validation.
+        let final_storage_base = mod_storage_dir.join(&mod_id);
+        let mod_storage_base = mod_storage_dir.join(format!(".staging-{}", Uuid::new_v4()));
         let mod_storage_mods = mod_storage_base.join("Mods");
         let mod_storage_plugins = mod_storage_base.join("Plugins");
         let mod_storage_userlibs = mod_storage_base.join("UserLibs");
@@ -5721,8 +5773,13 @@ impl ModsService {
         fs::create_dir_all(&mod_storage_userdata)
             .await
             .context("Failed to create mod storage UserData directory")?;
-        self.store_source_archive_snapshot(&mod_storage_base, archive_path, original_file_name)
-            .await?;
+        if let Err(error) = self
+            .store_source_archive_snapshot(&mod_storage_base, archive_path, original_file_name)
+            .await
+        {
+            Self::rollback_staged_storage(&mod_storage_base).await;
+            return Err(error);
+        }
 
         let file_ext = archive_format_for_path(archive_path);
 
@@ -5747,9 +5804,13 @@ impl ModsService {
             };
 
             let dest_path = target_dir.join(&file_name);
-            fs::copy(&archive_path, &dest_path)
+            if let Err(error) = fs::copy(&archive_path, &dest_path)
                 .await
-                .context("Failed to store DLL file")?;
+                .context("Failed to store DLL file")
+            {
+                Self::rollback_staged_storage(&mod_storage_base).await;
+                return Err(error);
+            }
             installed_files.push(file_name);
         } else {
             let temp_dir = std::env::temp_dir().join(format!("mod-store-{}", Uuid::new_v4()));
@@ -5809,7 +5870,30 @@ impl ModsService {
             };
 
             let _ = fs::remove_dir_all(&temp_dir).await;
-            installed_files = result?;
+            installed_files = match result {
+                Ok(files) => files,
+                Err(error) => {
+                    Self::rollback_staged_storage(&mod_storage_base).await;
+                    return Err(error);
+                }
+            };
+        }
+
+        let payload_summary = match self
+            .collect_storage_payload_summary(&mod_storage_base)
+            .await
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                Self::rollback_staged_storage(&mod_storage_base).await;
+                return Err(error);
+            }
+        };
+        if !Self::storage_payload_is_materializable(&payload_summary) {
+            Self::rollback_staged_storage(&mod_storage_base).await;
+            return Err(anyhow::anyhow!(
+                "Archive did not contain an installable mod, plugin, UserLib, or UserData payload"
+            ));
         }
 
         let metadata_ref = metadata.as_ref();
@@ -5866,8 +5950,21 @@ impl ModsService {
             security_scan: metadata_ref.and_then(Self::security_scan_summary_from_metadata),
         };
 
-        self.save_storage_metadata(&mod_storage_base, &storage_metadata)
-            .await?;
+        if let Err(error) = self
+            .save_storage_metadata(&mod_storage_base, &storage_metadata)
+            .await
+        {
+            Self::rollback_staged_storage(&mod_storage_base).await;
+            return Err(error);
+        }
+
+        if let Err(error) = fs::rename(&mod_storage_base, &final_storage_base)
+            .await
+            .context("Failed to commit staged mod storage")
+        {
+            Self::rollback_staged_storage(&mod_storage_base).await;
+            return Err(error);
+        }
 
         log::debug!(
             "Stored new mod archive: original_file_name={}, storage_id={}, source_id={:?}, source_version={:?}, requested_runtime={:?}, installed_files={:?}",
@@ -6173,9 +6270,15 @@ impl ModsService {
                 .path_matches_storage_source(&dest_path, &source_path)
                 .await
             {
-                if let Ok(did_remove) = self.remove_path_if_exists(&dest_path).await {
-                    removed |= did_remove;
-                }
+                removed |= self
+                    .remove_path_if_exists(&dest_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to remove managed environment payload {}",
+                            dest_path.display()
+                        )
+                    })?;
             }
             let disabled_path = if file_name.ends_with(".disabled") {
                 None
@@ -6190,9 +6293,15 @@ impl ModsService {
                     .path_matches_storage_source(&disabled, &source_path)
                     .await
                 {
-                    if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await {
-                        removed |= did_remove;
-                    }
+                    removed |= self
+                        .remove_path_if_exists(&disabled)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Failed to remove disabled managed environment payload {}",
+                                disabled.display()
+                            )
+                        })?;
                 }
             }
 
@@ -6637,9 +6746,13 @@ exit 1
                             || explicit_managed_path
                             || matches_source_path
                         {
-                            if let Ok(did_remove) = self.remove_path_if_exists(path).await {
-                                removed |= did_remove;
-                            }
+                            removed |=
+                                self.remove_path_if_exists(path).await.with_context(|| {
+                                    format!(
+                                        "Failed to remove managed environment payload {}",
+                                        path.display()
+                                    )
+                                })?;
                         }
                         if let Some(disabled) = disabled_path {
                             let matches_disabled_source_path = if let Some(source_path) = self
@@ -6669,10 +6782,9 @@ exit 1
                                 || explicit_disabled_managed_path
                                 || matches_disabled_source_path
                             {
-                                if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await
-                                {
-                                    removed |= did_remove;
-                                }
+                                removed |= self.remove_path_if_exists(&disabled).await.with_context(|| {
+                                    format!("Failed to remove disabled managed environment payload {}", disabled.display())
+                                })?;
                             }
                         }
                     }
@@ -6706,19 +6818,22 @@ exit 1
                             )))
                         };
                         if self.path_matches_storage_source(&path, &source_path).await {
-                            if let Ok(did_remove) = self.remove_path_if_exists(&path).await {
-                                removed |= did_remove;
-                            }
+                            removed |=
+                                self.remove_path_if_exists(&path).await.with_context(|| {
+                                    format!(
+                                        "Failed to remove managed environment payload {}",
+                                        path.display()
+                                    )
+                                })?;
                         }
                         if let Some(disabled) = disabled_path {
                             if self
                                 .path_matches_storage_source(&disabled, &source_path)
                                 .await
                             {
-                                if let Ok(did_remove) = self.remove_path_if_exists(&disabled).await
-                                {
-                                    removed |= did_remove;
-                                }
+                                removed |= self.remove_path_if_exists(&disabled).await.with_context(|| {
+                                    format!("Failed to remove disabled managed environment payload {}", disabled.display())
+                                })?;
                             }
                         }
                     }
@@ -7293,6 +7408,7 @@ exit 1
                     Ok(files) => files,
                     Err(e) => {
                         let _ = fs::remove_dir_all(&temp_dir).await;
+                        Self::rollback_staged_storage(&mod_storage_base).await;
                         let error_msg = format!("7z extraction failed: {}", e);
                         eprintln!("[ERROR] {}", error_msg);
                         return Ok(serde_json::json!({
@@ -7318,6 +7434,7 @@ exit 1
                     Ok(files) => files,
                     Err(e) => {
                         let _ = fs::remove_dir_all(&temp_dir).await;
+                        Self::rollback_staged_storage(&mod_storage_base).await;
                         let error_msg = format!("tar.gz extraction failed: {}", e);
                         eprintln!("[ERROR] {}", error_msg);
                         return Ok(serde_json::json!({
@@ -7343,6 +7460,7 @@ exit 1
                     Ok(files) => files,
                     Err(e) => {
                         let _ = fs::remove_dir_all(&temp_dir).await;
+                        Self::rollback_staged_storage(&mod_storage_base).await;
                         let error_msg = format!("RAR extraction failed: {}", e);
                         eprintln!("[ERROR] {}", error_msg);
                         return Ok(serde_json::json!({
@@ -7370,6 +7488,7 @@ exit 1
                     Ok(files) => files,
                     Err(e) => {
                         let _ = fs::remove_dir_all(&temp_dir).await;
+                        Self::rollback_staged_storage(&mod_storage_base).await;
                         let error_msg = format!("ZIP extraction failed: {}", e);
                         eprintln!("[ERROR] {}", error_msg);
                         return Ok(serde_json::json!({
@@ -7383,6 +7502,24 @@ exit 1
 
         // Clean up temp directory
         let _ = fs::remove_dir_all(&temp_dir).await;
+
+        let payload_summary = match self
+            .collect_storage_payload_summary(&mod_storage_base)
+            .await
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                Self::rollback_staged_storage(&mod_storage_base).await;
+                return Err(error);
+            }
+        };
+        if !Self::storage_payload_is_materializable(&payload_summary) {
+            Self::rollback_staged_storage(&mod_storage_base).await;
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "Archive did not contain an installable mod, plugin, UserLib, or UserData payload"
+            }));
+        }
 
         // Copy all installed files from shared storage into the environment.
         let mut managed_paths = Vec::new();
@@ -14040,6 +14177,76 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn uninstall_failure_keeps_metadata_and_storage_for_retry() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let env_service = EnvironmentService::new(pool.clone())?;
+        let service = ModsService::new(pool.clone());
+        let output_dir = temp.path().join("envs/env-uninstall-failure");
+        let env = env_service
+            .create_environment(
+                schedule_i_config().app_id,
+                "main".to_string(),
+                output_dir.to_string_lossy().to_string(),
+                None,
+                None,
+            )
+            .await?;
+
+        let mods_dir = output_dir.join("Mods");
+        fs::create_dir_all(&mods_dir).await?;
+        let storage_id = "storage-locked";
+        let storage_file = service
+            .get_mods_storage_dir()
+            .await?
+            .join(storage_id)
+            .join("Mods")
+            .join("Locked.dll");
+        fs::create_dir_all(storage_file.parent().expect("storage mods")).await?;
+        fs::write(&storage_file, b"managed data").await?;
+        let installed_file = mods_dir.join("Locked.dll");
+        service
+            .copy_managed_file(&storage_file, &installed_file)
+            .await?;
+        let mut metadata = HashMap::new();
+        let mut meta = sample_metadata(Some(storage_id), Some("source"), Some("1.0.0"));
+        meta.managed_paths = Some(vec![installed_file.to_string_lossy().to_string()]);
+        metadata.insert("Locked.dll".to_string(), meta);
+        service.save_mod_metadata(&mods_dir, &metadata).await?;
+
+        let _failure_guard = EnvVarGuard::set(
+            "SIMMRUST_TEST_FAIL_REMOVE_PATH",
+            installed_file.to_string_lossy().as_ref(),
+        );
+        let error = service
+            .delete_downloaded_mod(storage_id)
+            .await
+            .expect_err("a physical removal failure must stop ownership cleanup");
+        assert!(error
+            .to_string()
+            .contains("Failed to remove managed environment payload"));
+        assert!(
+            installed_file.exists(),
+            "failed payload remains visible for retry"
+        );
+        assert!(
+            storage_file.exists(),
+            "shared storage remains owned for retry"
+        );
+        let stored_metadata = service.load_mod_metadata(&mods_dir).await?;
+        assert!(
+            stored_metadata.contains_key("Locked.dll"),
+            "metadata must not be discarded when removal fails"
+        );
+        assert!(env.output_dir.ends_with("env-uninstall-failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn delete_downloaded_mod_removes_storage_dir() -> Result<()> {
         let temp = tempdir()?;
         let data_dir = temp.path().join("simmrust");
@@ -14508,6 +14715,51 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn store_mod_archive_rejects_payloadless_archives_and_rolls_back_storage() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "defaultDownloadDir": download_dir.to_string_lossy().to_string()
+            }))
+            .await?;
+
+        for (name, entries) in [
+            ("empty.zip", Vec::<(&str, &[u8])>::new()),
+            (
+                "readme-only.zip",
+                vec![("README.md", b"not a payload" as &[u8])],
+            ),
+        ] {
+            let archive = temp.path().join(name);
+            write_zip_fixture(&archive, &entries)?;
+            let error = service
+                .store_mod_archive(
+                    archive.to_string_lossy().as_ref(),
+                    name,
+                    Some(Runtime::Mono),
+                    None,
+                    None,
+                )
+                .await
+                .expect_err("payloadless archives must not be committed");
+            assert!(error.to_string().contains("did not contain an installable"));
+        }
+
+        let storage_dir = service.get_mods_storage_dir().await?;
+        let entries = std::fs::read_dir(storage_dir)?.count();
+        assert_eq!(entries, 0, "rejected archives leave no storage entries");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn try_extract_fomod_content_returns_none_when_no_payload_is_materialized() -> Result<()>
     {
         let temp = tempdir()?;
@@ -14569,6 +14821,7 @@ mod tests {
             is_folder: false,
             priority: 0,
             runtime: None,
+            declaration_order: 0,
         };
 
         let (kind, relative, explicit_file_target) = service.resolve_fomod_destination(&entry)?;
@@ -14589,6 +14842,7 @@ mod tests {
             is_folder: false,
             priority: 0,
             runtime: None,
+            declaration_order: 0,
         };
 
         let error = service
@@ -14608,6 +14862,7 @@ mod tests {
             is_folder: false,
             priority: 0,
             runtime: None,
+            declaration_order: 0,
         };
 
         let (kind, relative, explicit_file_target) = service.resolve_fomod_destination(&entry)?;

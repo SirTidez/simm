@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::config::telemetry_upload::{upload_base_url, validate_upload_base_url};
-use crate::services::telemetry::TelemetryService;
+use crate::services::telemetry::{ensure_telemetry_feature_enabled, TelemetryService};
 use crate::types::{
     TelemetryUploadEnvelope, TelemetryUploadPreview, TelemetryUploadReceipt, TelemetryUploadState,
 };
@@ -245,6 +245,7 @@ impl TelemetryUploadService {
             ));
         }
         ensure_upload_envelope_is_safe(&envelope)?;
+        self.ensure_sessions_are_durably_ended(&envelope).await?;
 
         let preferences = TelemetryService::new(self.pool.clone())
             .get_preferences()
@@ -274,6 +275,31 @@ impl TelemetryUploadService {
         upload.into_receipt()
     }
 
+    /// A renderer-supplied review payload is never sufficient proof that a
+    /// session ended. Each referenced session must still exist locally with a
+    /// committed end timestamp before it becomes queue-eligible.
+    async fn ensure_sessions_are_durably_ended(
+        &self,
+        envelope: &TelemetryUploadEnvelope,
+    ) -> Result<()> {
+        for session in &envelope.sessions {
+            let ended = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM telemetry_sessions WHERE id = ? AND ended_at IS NOT NULL",
+            )
+            .bind(&session.session_id)
+            .fetch_one(self.pool.as_ref())
+            .await
+            .context("Failed to verify telemetry upload session completion")?;
+            if ended != 1 {
+                return Err(anyhow!(
+                    "Telemetry session {} is not durably ended and cannot be queued",
+                    session.session_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn retry_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
         let preferences = TelemetryService::new(self.pool.clone())
             .get_preferences()
@@ -287,6 +313,11 @@ impl TelemetryUploadService {
     }
 
     pub async fn flush_queued_uploads(&self) -> Result<Vec<TelemetryUploadReceipt>> {
+        // Update checks call this service directly, bypassing the Tauri command
+        // boundary. Keep the runtime flag at the send boundary so queued data
+        // cannot leave the device unless telemetry was explicitly enabled.
+        ensure_telemetry_feature_enabled()?;
+
         let preferences = TelemetryService::new(self.pool.clone())
             .get_preferences()
             .await?;
@@ -349,6 +380,10 @@ impl TelemetryUploadService {
     }
 
     async fn send_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
+        // `retry_upload` reaches this method directly, so this is the final
+        // non-bypassable guard before a queued payload can leave the device.
+        ensure_telemetry_feature_enabled()?;
+
         let receipt = self.get_upload(id).await?;
         if receipt.state == TelemetryUploadState::Accepted {
             return receipt.into_receipt();

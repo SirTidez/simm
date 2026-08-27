@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -53,6 +54,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 const eventMocks = vi.hoisted(() => ({
+  createAsyncListenerScope: vi.fn(() => ({
+    register: vi.fn(),
+    dispose: vi.fn(),
+    isActive: () => true,
+  })),
   onProgress: vi.fn(),
   onComplete: vi.fn(),
   onError: vi.fn(),
@@ -197,6 +203,7 @@ async function chooseAvailableLibraryVersion(optionName: RegExp) {
 }
 
 vi.mock("../services/events", () => ({
+  createAsyncListenerScope: eventMocks.createAsyncListenerScope,
   onProgress: eventMocks.onProgress,
   onComplete: eventMocks.onComplete,
   onError: eventMocks.onError,
@@ -632,6 +639,50 @@ describe("ModLibraryOverlay", () => {
       screen.getByText("Select a mod to review details and actions."),
     ).toBeTruthy();
     expect(screen.getByText("Updated Jan 2, 2025")).toBeTruthy();
+  });
+
+  it("publishes only the latest overlapping Thunderstore search", async () => {
+    const firstSearch = createDeferred<{
+      packagesByRuntime: Record<"IL2CPP" | "Mono", ReturnType<typeof makeThunderstorePackage>[]>;
+    }>();
+    apiMocks.searchThunderstoreByRuntime.mockImplementation(
+      async (_gameId, query) => {
+        if (query === "old") {
+          return firstSearch.promise;
+        }
+        return {
+          packagesByRuntime: {
+            IL2CPP: [],
+            Mono: [makeThunderstorePackage("NewResult", "1.0.0")],
+          },
+        };
+      },
+    );
+
+    renderLibraryOverlay({ libraryTab: "discover" });
+    fireEvent.click(screen.getByRole("button", { name: "Thunderstore" }));
+
+    const search = screen.getByPlaceholderText("Search or browse Thunderstore mods...");
+    fireEvent.change(search, { target: { value: "old" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.change(search, { target: { value: "new" } });
+    // Enter remains reachable while the button is disabled by the first request.
+    fireEvent.keyDown(search, { key: "Enter" });
+
+    expect(await screen.findByText("NewResult")).toBeTruthy();
+
+    await act(async () => {
+      firstSearch.resolve({
+        packagesByRuntime: {
+          IL2CPP: [],
+          Mono: [makeThunderstorePackage("OldResult", "1.0.0")],
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("OldResult")).toBeNull();
+    expect(screen.getByText("NewResult")).toBeTruthy();
   });
 
   it("does not re-publish navigation state when only the callback identity changes", async () => {
@@ -2895,7 +2946,7 @@ describe("ModLibraryOverlay", () => {
     expect(screen.getByText("Mono • alternate")).toBeTruthy();
   });
 
-  it("treats alternate beta environments as Mono install targets in the library dialog", async () => {
+  it("uses the backend Mono runtime for custom-branch library install targets", async () => {
     const refreshController: {
       resolve?: (value: { downloaded: ModLibraryEntry[] }) => void;
     } = {};
@@ -2911,7 +2962,7 @@ describe("ModLibraryOverlay", () => {
         name: "Alternate Beta",
         path: "C:/envs/alternate-beta",
         branch: "alternate-beta",
-        runtime: "IL2CPP",
+        runtime: "MONO",
         modCount: 0,
       },
     ]);

@@ -4,6 +4,7 @@ use crate::services::github_releases::GitHubReleasesService;
 use crate::services::mod_profiles::ModProfilesService;
 use crate::services::mods::ModsService;
 use crate::services::mods_snapshot_cache;
+use crate::services::mods_snapshot_refresh;
 use crate::services::settings::RuntimeSettingsState;
 use crate::types::{
     LocalModOwnershipCandidate, LocalModSourcePreview, ModLibraryResult, SecurityScanReport,
@@ -27,6 +28,111 @@ static FS_SERVICE: Lazy<AsyncMutex<Option<Arc<FileSystemService>>>> =
     Lazy::new(|| AsyncMutex::new(None));
 static MOD_LIBRARY_CACHE: Lazy<AsyncMutex<Option<ModLibraryCacheEntry>>> =
     Lazy::new(|| AsyncMutex::new(None));
+
+#[cfg(test)]
+struct SecurityScanTestHook {
+    file_path: String,
+    report: SecurityScanReport,
+    call_count: usize,
+}
+
+#[cfg(test)]
+static SECURITY_SCAN_TEST_HOOK: Lazy<std::sync::Mutex<Option<SecurityScanTestHook>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+pub(crate) struct SecurityScanTestHookGuard {
+    file_path: String,
+}
+
+#[cfg(test)]
+impl SecurityScanTestHookGuard {
+    pub(crate) fn call_count(&self) -> usize {
+        SECURITY_SCAN_TEST_HOOK
+            .lock()
+            .expect("security scan test hook lock")
+            .as_ref()
+            .filter(|hook| hook.file_path == self.file_path)
+            .map(|hook| hook.call_count)
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+impl Drop for SecurityScanTestHookGuard {
+    fn drop(&mut self) {
+        let mut hook = SECURITY_SCAN_TEST_HOOK
+            .lock()
+            .expect("security scan test hook lock");
+        if hook
+            .as_ref()
+            .is_some_and(|active| active.file_path == self.file_path)
+        {
+            *hook = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_security_scan_test_hook(
+    file_path: impl Into<String>,
+    report: SecurityScanReport,
+) -> SecurityScanTestHookGuard {
+    let file_path = file_path.into();
+    let mut hook = SECURITY_SCAN_TEST_HOOK
+        .lock()
+        .expect("security scan test hook lock");
+    assert!(
+        hook.is_none(),
+        "only one deterministic security scan test hook may be active"
+    );
+    *hook = Some(SecurityScanTestHook {
+        file_path: file_path.clone(),
+        report,
+        call_count: 0,
+    });
+    SecurityScanTestHookGuard { file_path }
+}
+
+#[cfg(test)]
+pub(crate) fn blocked_security_scan_report_for_test() -> SecurityScanReport {
+    SecurityScanReport {
+        summary: crate::types::SecurityScanSummary {
+            state: crate::types::SecurityScanState::Unavailable,
+            verified: false,
+            disposition: None,
+            highest_severity: None,
+            total_findings: 0,
+            threat_family_count: 0,
+            scanned_at: None,
+            scanner_version: None,
+            schema_version: None,
+            status_message: Some("Test scanner unavailable".to_string()),
+        },
+        policy: crate::types::SecurityScanPolicy {
+            enabled: true,
+            requires_confirmation: false,
+            blocked: true,
+            prompt_on_high_findings: true,
+            block_critical_findings: true,
+            status_message: Some("Test scanner unavailable".to_string()),
+        },
+        files: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+fn security_scan_test_report_for(file_path: &str) -> Option<SecurityScanReport> {
+    let mut hook = SECURITY_SCAN_TEST_HOOK
+        .lock()
+        .expect("security scan test hook lock");
+    let hook = hook.as_mut()?;
+    if hook.file_path != file_path {
+        return None;
+    }
+    hook.call_count += 1;
+    Some(hook.report.clone())
+}
 
 const MOD_LIBRARY_CACHE_TTL: Duration = Duration::from_millis(750);
 
@@ -130,8 +236,8 @@ async fn upload_mod_impl(
     environment_id: String,
     file_path: String,
     original_file_name: String,
-    runtime: String,
-    branch: String,
+    _runtime: String,
+    _branch: String,
     metadata: Option<serde_json::Value>,
     security_override: Option<bool>,
 ) -> Result<serde_json::Value, String> {
@@ -145,6 +251,12 @@ async fn upload_mod_impl(
     if env.output_dir.is_empty() {
         return Err("Output directory not set".to_string());
     }
+
+    // The environment record is the runtime authority. In particular, custom
+    // branches are valid and cannot safely be inferred from their name or a
+    // stale UI label supplied with this request.
+    let runtime = env.runtime.canonical_label().to_string();
+    let branch = env.branch.clone();
 
     let mods_service = ModsService::new(db.clone()).with_runtime_settings(settings.clone());
 
@@ -198,11 +310,7 @@ async fn upload_mod_impl(
 }
 
 fn parse_runtime_label(runtime: Option<&str>) -> Option<crate::types::Runtime> {
-    runtime.and_then(|value| match value.trim().to_lowercase().as_str() {
-        "il2cpp" => Some(crate::types::Runtime::Il2cpp),
-        "mono" => Some(crate::types::Runtime::Mono),
-        _ => None,
-    })
+    runtime.and_then(crate::types::Runtime::parse_label)
 }
 
 fn build_s1api_library_metadata(version_tag: &str) -> serde_json::Value {
@@ -233,21 +341,6 @@ fn ensure_metadata_object(
     metadata
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default()
-}
-
-fn should_skip_security_scan(metadata: &Option<serde_json::Value>) -> bool {
-    let source_id = metadata
-        .as_ref()
-        .and_then(|value| value.get("sourceId"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-
-    matches!(
-        source_id.as_str(),
-        "ifbars/mlvscan" | "ifbars/mlvscan.devcli"
-    )
 }
 
 fn security_scan_summary_value(report: &SecurityScanReport) -> Result<serde_json::Value, String> {
@@ -284,13 +377,17 @@ pub(crate) async fn prepare_security_scan_with_settings(
     metadata: Option<serde_json::Value>,
     security_override: bool,
 ) -> Result<SecurityGateResult, String> {
-    if should_skip_security_scan(&metadata) {
-        return Ok(SecurityGateResult::Continue {
-            metadata,
-            report: None,
-        });
-    }
+    #[cfg(test)]
+    let report = if let Some(report) = security_scan_test_report_for(file_path) {
+        report
+    } else {
+        crate::commands::security_scanner::scan_artifact_for_security_with_settings(
+            settings, file_path,
+        )
+        .await?
+    };
 
+    #[cfg(not(test))]
     let report = crate::commands::security_scanner::scan_artifact_for_security_with_settings(
         settings, file_path,
     )
@@ -303,7 +400,7 @@ pub(crate) async fn prepare_security_scan_with_settings(
         });
     }
 
-    if !security_override {
+    if report.policy.blocked || (!security_override && report.policy.requires_confirmation) {
         if let Some(response) = security_gate_response(&report) {
             return Ok(SecurityGateResult::EarlyResponse(response));
         }
@@ -422,54 +519,35 @@ pub async fn get_mods(
     refresh: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let settings = runtime_settings.snapshot().await;
+    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
+
+    // Never serve a cached projection before proving that its owning
+    // environment still exists.  Deletion invalidates the cache as well, but
+    // this guard closes races with an in-flight cache read.
+    let existing_environment = env_service
+        .get_environment(&environment_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if existing_environment.is_none() {
+        mods_snapshot_cache::remove(&environment_id).await;
+        return Err("Environment not found".to_string());
+    }
+
     if !refresh.unwrap_or(false) {
         if let Some(cached) = mods_snapshot_cache::get(&environment_id).await {
-            let db_pool = db.inner().clone();
-            let environment_id_for_refresh = environment_id.clone();
-            let app_for_refresh = app.clone();
-            let refresh_settings = settings.clone();
-
-            tokio::spawn(async move {
-                let env_service = match EnvironmentService::new(db_pool.clone()) {
-                    Ok(service) => service,
-                    Err(_) => return,
-                };
-
-                let env = match env_service
-                    .get_environment(&environment_id_for_refresh)
-                    .await
-                {
-                    Ok(Some(env)) => env,
-                    _ => return,
-                };
-
-                if env.output_dir.is_empty() {
-                    return;
-                }
-
-                let mods_service =
-                    ModsService::new(db_pool).with_runtime_settings(refresh_settings);
-                if let Ok(snapshot) = mods_service.list_mods(&env.output_dir).await {
-                    mods_snapshot_cache::set(environment_id_for_refresh.clone(), snapshot.clone())
-                        .await;
-                    let _ = crate::events::emit_mods_snapshot_updated(
-                        &app_for_refresh,
-                        environment_id_for_refresh,
-                        snapshot,
-                    );
-                }
-            });
+            mods_snapshot_refresh::request_mods_snapshot_refresh(
+                app,
+                db.inner().clone(),
+                environment_id,
+                "get_mods cache revalidation",
+            )
+            .await;
 
             return Ok(cached);
         }
     }
 
-    let env_service = EnvironmentService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    let env = env_service
-        .get_environment(&environment_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Environment not found".to_string())?;
+    let env = existing_environment.expect("environment presence checked above");
 
     if env.output_dir.is_empty() {
         return Err("Output directory not set".to_string());
@@ -1804,9 +1882,11 @@ pub async fn uninstall_s1api(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mlvscan_library_metadata, build_s1api_library_metadata, detect_upload_kind,
+        blocked_security_scan_report_for_test, build_mlvscan_library_metadata,
+        build_s1api_library_metadata, detect_upload_kind, install_security_scan_test_hook,
         invalidate_mod_library_cache, parse_runtime_label, persist_security_scan_report,
-        upload_mod_impl, ModLibraryCacheEntry, UploadKind, MOD_LIBRARY_CACHE,
+        prepare_security_scan_with_settings, upload_mod_impl, ModLibraryCacheEntry,
+        SecurityGateResult, UploadKind, MOD_LIBRARY_CACHE,
     };
     use crate::db::initialize_pool;
     use crate::services::environment::EnvironmentService;
@@ -1932,6 +2012,106 @@ mod tests {
             metadata.get("sourceVersion").and_then(|v| v.as_str()),
             Some("v0.9.1")
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn security_scan_does_not_trust_caller_provided_mlvscan_source_id() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let mut settings_service = SettingsService::new(pool)?;
+        settings_service
+            .save_settings(serde_json::json!({
+                "enableSecurityScanner": true,
+                "autoInstallSecurityScanner": false
+            }))
+            .await?;
+        let settings = settings_service.load_settings().await?;
+        let artifact = temp.path().join("spoofed-mlvscan.dll");
+        fs::write(&artifact, b"not-a-scanner").await?;
+
+        let result = prepare_security_scan_with_settings(
+            &settings,
+            artifact.to_string_lossy().as_ref(),
+            Some(serde_json::json!({ "sourceId": "ifBars/MLVScan" })),
+            false,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        match result {
+            SecurityGateResult::EarlyResponse(response) => {
+                assert_eq!(
+                    response
+                        .get("securityScanBlocked")
+                        .and_then(|value| value.as_bool()),
+                    Some(true)
+                );
+            }
+            SecurityGateResult::Continue { .. } => {
+                anyhow::bail!("caller-provided MLVScan source metadata bypassed the scanner")
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn blocked_security_scan_cannot_be_overridden() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let artifact = temp.path().join("blocked-override.dll");
+        fs::write(&artifact, b"blocked").await?;
+        let scan_hook = install_security_scan_test_hook(
+            artifact.to_string_lossy().to_string(),
+            blocked_security_scan_report_for_test(),
+        );
+        let settings = SettingsService::default_settings();
+
+        let result = prepare_security_scan_with_settings(
+            &settings,
+            artifact.to_string_lossy().as_ref(),
+            None,
+            true,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert!(matches!(result, SecurityGateResult::EarlyResponse(_)));
+        assert_eq!(scan_hook.call_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn security_review_confirmation_can_be_overridden() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let artifact = temp.path().join("review-override.dll");
+        fs::write(&artifact, b"review").await?;
+        let mut review_report = blocked_security_scan_report_for_test();
+        review_report.summary.state = SecurityScanState::Review;
+        review_report.policy.blocked = false;
+        review_report.policy.requires_confirmation = true;
+        let scan_hook =
+            install_security_scan_test_hook(artifact.to_string_lossy().to_string(), review_report);
+        let settings = SettingsService::default_settings();
+
+        let result = prepare_security_scan_with_settings(
+            &settings,
+            artifact.to_string_lossy().as_ref(),
+            None,
+            true,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert!(matches!(result, SecurityGateResult::Continue { .. }));
+        assert_eq!(scan_hook.call_count(), 1);
+        Ok(())
     }
 
     #[tokio::test]

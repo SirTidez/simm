@@ -3,6 +3,7 @@ use regex::Regex;
 use serial_test::serial;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::time::{timeout, Duration};
 
 use crate::db::initialize_pool;
 use crate::services::telemetry::TelemetryService;
@@ -11,6 +12,30 @@ use crate::services::telemetry_upload::{
 };
 use crate::test_helpers::EnvVarGuard;
 use crate::types::{TelemetryPreferencesUpdate, TelemetryUploadEnvelope, TelemetryUploadState};
+
+async fn persist_durably_ended_fixture_session(
+    pool: &std::sync::Arc<sqlx::SqlitePool>,
+) -> Result<()> {
+    let session_id = "session-1a2b3c4d5e6f7890a1b2c3d4e5f60708";
+    let environment_id = "fixture-environment";
+    sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+        .bind(environment_id)
+        .bind("C:\\fixture")
+        .bind("{}")
+        .execute(pool.as_ref())
+        .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_sessions (id, environment_id, started_at, ended_at, data) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(session_id)
+    .bind(environment_id)
+    .bind("2026-07-14T18:00:00.000Z")
+    .bind("2026-07-14T18:20:00.000Z")
+    .bind("{}")
+    .execute(pool.as_ref())
+    .await?;
+    Ok(())
+}
 
 #[tokio::test]
 #[serial]
@@ -26,6 +51,35 @@ async fn queueing_requires_collection_and_upload_opt_in() -> Result<()> {
     let result = service.queue_upload(None).await;
 
     assert!(result.unwrap_err().to_string().contains("upload opt-in"));
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn reviewed_payload_cannot_queue_a_session_without_a_durable_end_row() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(true),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+
+    let error = TelemetryUploadService::new(pool)
+        .queue_reviewed_upload(include_str!(
+            "../../../test-fixtures/live-telemetry-v1.json"
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not durably ended"));
     Ok(())
 }
 
@@ -68,6 +122,7 @@ async fn retry_reuses_one_upload_id_and_never_rebuilds_the_payload() -> Result<(
         "SIMMRUST_DATA_DIR",
         temp.path().join("simmrust").to_string_lossy().as_ref(),
     );
+    let _telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
     let pool = initialize_pool().await?;
     let telemetry = TelemetryService::new(pool.clone());
     telemetry
@@ -254,6 +309,7 @@ async fn queued_fixture_payload_matches_api_v1_contract_semantics() -> Result<()
             protect_local_mods: Some(false),
         })
         .await?;
+    persist_durably_ended_fixture_session(&pool).await?;
 
     let receipt = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string())
         .queue_reviewed_upload(include_str!(
@@ -315,6 +371,7 @@ async fn renderer_facing_receipts_never_serialize_the_private_payload() -> Resul
         "SIMMRUST_DATA_DIR",
         temp.path().join("simmrust").to_string_lossy().as_ref(),
     );
+    let _telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
     let pool = initialize_pool().await?;
     TelemetryService::new(pool.clone())
         .save_preferences(TelemetryPreferencesUpdate {
@@ -325,6 +382,7 @@ async fn renderer_facing_receipts_never_serialize_the_private_payload() -> Resul
             protect_local_mods: Some(false),
         })
         .await?;
+    persist_durably_ended_fixture_session(&pool).await?;
     let service = TelemetryUploadService::with_base_url(pool, "not a url".to_string());
     let private_message = "private telemetry message that must stay local";
     let mut payload: serde_json::Value = serde_json::from_str(include_str!(
@@ -472,6 +530,7 @@ async fn update_check_flush_marks_a_misconfigured_queued_item_failed() -> Result
         "SIMMRUST_DATA_DIR",
         temp.path().join("simmrust").to_string_lossy().as_ref(),
     );
+    let _telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
     let pool = initialize_pool().await?;
     TelemetryService::new(pool.clone())
         .save_preferences(TelemetryPreferencesUpdate {
@@ -544,6 +603,7 @@ async fn a_successful_http_response_marks_the_local_item_accepted() -> Result<()
         "SIMMRUST_DATA_DIR",
         temp.path().join("simmrust").to_string_lossy().as_ref(),
     );
+    let _telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
     let pool = initialize_pool().await?;
     TelemetryService::new(pool.clone())
         .save_preferences(TelemetryPreferencesUpdate {
@@ -589,6 +649,7 @@ async fn a_finished_session_is_queued_then_uploaded_during_a_flush() -> Result<(
         "SIMMRUST_DATA_DIR",
         temp.path().join("simmrust").to_string_lossy().as_ref(),
     );
+    let _telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
     let pool = initialize_pool().await?;
     TelemetryService::new(pool.clone())
         .save_preferences(TelemetryPreferencesUpdate {
@@ -676,6 +737,86 @@ async fn a_finished_session_is_queued_then_uploaded_during_a_flush() -> Result<(
     assert_eq!(flushed.len(), 1);
     assert_eq!(flushed[0].state, TelemetryUploadState::Accepted);
     server.await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn disabled_feature_flag_does_not_flush_or_send_queued_uploads() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _data_dir = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+    let service = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
+    let queued = service.queue_upload(None).await?;
+    assert_eq!(queued.state, TelemetryUploadState::Pending);
+
+    drop(telemetry_enabled);
+    let _telemetry_disabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "false");
+    let error = service.flush_queued_uploads().await.unwrap_err();
+    assert!(error.to_string().contains("SIMM_ENABLE_TELEMETRY=1"));
+
+    let queued_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM telemetry_upload_queue WHERE id = ? AND state = 'pending'",
+    )
+    .bind(&queued.id)
+    .fetch_one(pool.as_ref())
+    .await?;
+    assert_eq!(queued_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn disabled_feature_flag_prevents_retry_from_sending_a_queued_upload() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let temp = tempfile::tempdir()?;
+    let _data_dir = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+    let service = TelemetryUploadService::with_base_url(pool.clone(), base_url);
+    let queued = service.queue_upload(None).await?;
+
+    drop(telemetry_enabled);
+    let _telemetry_disabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "false");
+    let error = service.retry_upload(&queued.id).await.unwrap_err();
+    assert!(error.to_string().contains("SIMM_ENABLE_TELEMETRY=1"));
+    assert!(timeout(Duration::from_millis(150), listener.accept())
+        .await
+        .is_err());
+
+    let (state, attempts): (String, i64) =
+        sqlx::query_as("SELECT state, attempts FROM telemetry_upload_queue WHERE id = ?")
+            .bind(&queued.id)
+            .fetch_one(pool.as_ref())
+            .await?;
+    assert_eq!(state, "pending");
+    assert_eq!(attempts, 0);
     Ok(())
 }
 

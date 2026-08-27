@@ -91,14 +91,15 @@ describe("ModLibraryStoreProvider", () => {
     expect(screen.getByText("second:0:0")).toBeTruthy();
   });
 
-  it("coalesces a mods changed and snapshot watcher batch into one refresh", async () => {
+  it("settles a raw mods edge with one bounded refresh when no snapshot event follows", async () => {
     apiMocks.getModLibrary
       .mockResolvedValueOnce({ downloaded: [] })
-      .mockResolvedValueOnce({ downloaded: [{ storageId: "new-entry" }] });
+      .mockResolvedValueOnce({ downloaded: [] });
 
     render(
       <ModLibraryStoreProvider>
         <LibraryProbe label="library" />
+        <LibraryActions />
       </ModLibraryStoreProvider>,
     );
 
@@ -107,16 +108,64 @@ describe("ModLibraryStoreProvider", () => {
     await act(async () => {
       modsChangedHandler?.();
     });
-    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(modsSnapshotHandler).not.toBeNull());
-    await act(async () => {
-      modsSnapshotHandler?.();
-    });
 
     await waitFor(() =>
       expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(2),
     );
+    expect(await screen.findByText("library:0:1")).toBeTruthy();
+
+    // The raw-edge refresh clears staleRef. A later ensure and additional
+    // microtasks must not restart the refresh loop.
+    await act(async () => {
+      await Promise.resolve();
+      screen.getByRole("button", { name: "Ensure library" }).click();
+      await Promise.resolve();
+    });
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds a raw edge plus snapshot-complete burst to one authoritative follow-up", async () => {
+    let resolveRawRefresh: (value: { downloaded: unknown[] }) => void = () => {};
+    apiMocks.getModLibrary
+      .mockResolvedValueOnce({ downloaded: [] })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveRawRefresh = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({ downloaded: [{ storageId: "new-entry" }] });
+
+    render(
+      <ModLibraryStoreProvider>
+        <LibraryProbe label="library" />
+        <LibraryActions />
+      </ModLibraryStoreProvider>,
+    );
+
+    await screen.findByText("library:0:0");
+    await waitFor(() => expect(modsChangedHandler).not.toBeNull());
+    await waitFor(() => expect(modsSnapshotHandler).not.toBeNull());
+    await act(async () => {
+      modsChangedHandler?.();
+      modsSnapshotHandler?.();
+    });
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveRawRefresh({ downloaded: [] });
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(3),
+    );
     expect(await screen.findByText("library:1:2")).toBeTruthy();
+
+    await act(async () => {
+      await Promise.resolve();
+      screen.getByRole("button", { name: "Ensure library" }).click();
+      await Promise.resolve();
+    });
+    expect(apiMocks.getModLibrary).toHaveBeenCalledTimes(3);
   });
 
   it("reuses a current snapshot for sequential ensures while explicit refresh bypasses it", async () => {

@@ -19,6 +19,7 @@ const MOD_INFO_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const MOD_FILES_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const GAME_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const GAMES_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const NEXUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct NexusModsService {
@@ -44,6 +45,7 @@ impl NexusModsService {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .connect_timeout(NEXUS_CONNECT_TIMEOUT)
             .user_agent(http_identity::user_agent())
             .build()
             .expect("failed to build Nexus Mods HTTP client");
@@ -1213,6 +1215,7 @@ impl NexusModsService {
         );
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .connect_timeout(NEXUS_CONNECT_TIMEOUT)
             .build()
             .map_err(|e| {
                 let message = format!("Failed to build Nexus OAuth download link client: {}", e);

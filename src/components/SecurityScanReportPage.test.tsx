@@ -80,4 +80,37 @@ describe('SecurityScanReportPage', () => {
       errorSpy.mockRestore();
     }
   });
+
+  it('locks Back until the confirmed continuation has completed', async () => {
+    let finishConfirmation: (() => void) | undefined;
+    const onConfirm = vi.fn(() => new Promise<void>((resolve) => {
+      finishConfirmation = resolve;
+    }));
+    const onReturn = vi.fn();
+
+    render(
+      <SecurityScanReportPage
+        title="Security Findings - Example"
+        report={{
+          summary: { state: 'review', verified: false, totalFindings: 1, threatFamilyCount: 0 },
+          policy: {
+            enabled: true,
+            requiresConfirmation: true,
+            blocked: false,
+            promptOnHighFindings: false,
+            blockCriticalFindings: false,
+          },
+          files: [],
+        }}
+        onConfirm={onConfirm}
+        onReturn={onReturn}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue Anyway' }));
+    expect(screen.getByRole('button', { name: /Back/i })).toBeDisabled();
+
+    finishConfirmation?.();
+    await waitFor(() => expect(onReturn).toHaveBeenCalledTimes(1));
+  });
 });

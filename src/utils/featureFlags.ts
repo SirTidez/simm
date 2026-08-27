@@ -1,7 +1,5 @@
 /**
- * Compile-time flags shared by the desktop shell. The telemetry flag is
- * deliberately off unless the Tauri process is launched with
- * `SIMM_ENABLE_TELEMETRY=1` (or `true`).
+ * Static telemetry feature flags were removed. Availability is reported by
+ * `get_telemetry_capability`; consent remains persisted separately.
  */
-export const telemetryFeatureEnabled =
-  typeof __SIMM_TELEMETRY_ENABLED__ !== 'undefined' && __SIMM_TELEMETRY_ENABLED__;
+export {};

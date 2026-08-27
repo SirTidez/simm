@@ -138,9 +138,12 @@ export function ModLibraryStoreProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    // Filesystem watchers emit mods_changed before their complete snapshot.
-    // Invalidate on the first edge and reload only at the snapshot boundary.
-    void register(() => onModsChanged(invalidateLibrary));
+    // Filesystem watchers emit mods_changed before their complete snapshot. A
+    // no-op refresh no longer emits mods_snapshot_updated, so the raw edge must
+    // also settle the store's stale marker. refreshLibrary coalesces an
+    // overlapping snapshot-complete event and retains one follow-up request
+    // when that event invalidates an in-flight response.
+    void register(() => onModsChanged(refreshAfterInvalidation));
     void register(() => onModsSnapshotUpdated(refreshAfterInvalidation));
     void register(() => onPluginsChanged(refreshAfterInvalidation));
     void register(() => onUserLibsChanged(refreshAfterInvalidation));

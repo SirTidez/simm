@@ -200,32 +200,47 @@ impl SecurityScannerService {
             Err(error) => return Ok(Self::unavailable_report(error.to_string(), settings)),
         };
 
+        // A configured scanner is a security gate, not a best-effort annotation.  Preserve
+        // scanner execution, parsing, collection, and archive-extraction failures as an
+        // explicit unavailable result so callers block materialization rather than silently
+        // proceeding unscanned. Users must restore successful scanning or disable the scanner
+        // policy in settings.
         let files = match archive_kind_for_path_or_signature(file_path) {
-            InputArchiveKind::Dll => vec![
-                self.scan_assembly_file(
+            InputArchiveKind::Dll => self
+                .scan_assembly_file(
                     &executable.path,
                     file_path,
                     file_path.to_string_lossy().as_ref(),
                 )
-                .await?,
-            ],
+                .await
+                .map(|report| vec![report]),
             InputArchiveKind::Zip => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::Zip)
-                    .await?
+                    .await
             }
             InputArchiveKind::Rar => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::Rar)
-                    .await?
+                    .await
             }
             InputArchiveKind::SevenZ => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::SevenZ)
-                    .await?
+                    .await
             }
             InputArchiveKind::TarGz => {
                 self.scan_archive(&executable.path, file_path, ArchiveKind::TarGz)
-                    .await?
+                    .await
             }
-            InputArchiveKind::Unsupported => Vec::new(),
+            InputArchiveKind::Unsupported => Ok(Vec::new()),
+        };
+
+        let files = match files {
+            Ok(files) => files,
+            Err(error) => {
+                return Ok(Self::unavailable_report(
+                    format!("MLVScan could not complete the security scan: {error}"),
+                    settings,
+                ));
+            }
         };
 
         if files.is_empty() {
@@ -825,37 +840,50 @@ impl SecurityScannerService {
         archive_path: &Path,
         kind: ArchiveKind,
     ) -> Result<Vec<SecurityScanFileReport>> {
-        let temp_root = std::env::temp_dir().join(format!("mlvscan-scan-{}", Uuid::new_v4()));
-        fs::create_dir_all(&temp_root)
+        self.scan_archive_in_temp_parent(executable_path, archive_path, kind, &std::env::temp_dir())
             .await
-            .context("Failed to create archive scan temp directory")?;
+    }
 
-        let extract_result = match kind {
+    async fn scan_archive_in_temp_parent(
+        &self,
+        executable_path: &Path,
+        archive_path: &Path,
+        kind: ArchiveKind,
+        temp_parent: &Path,
+    ) -> Result<Vec<SecurityScanFileReport>> {
+        // TempDir removes the extraction tree when this scope exits, including every error
+        // path below.  Keeping the guard alive throughout scanning closes the former leaks on
+        // collection, execution, and output-parsing failures.
+        let temp_root = tempfile::Builder::new()
+            .prefix("mlvscan-scan-")
+            .tempdir_in(temp_parent)
+            .context("Failed to create archive scan temp directory")?;
+        let temp_root_path = temp_root.path();
+
+        match kind {
             ArchiveKind::Zip => {
-                self.extract_zip_to_directory(archive_path, &temp_root)
+                self.extract_zip_to_directory(archive_path, temp_root_path)
                     .await
             }
             ArchiveKind::Rar => {
-                self.extract_rar_to_directory(archive_path, &temp_root)
+                self.extract_rar_to_directory(archive_path, temp_root_path)
                     .await
             }
-            ArchiveKind::SevenZ => self.extract_7z_to_directory(archive_path, &temp_root).await,
+            ArchiveKind::SevenZ => {
+                self.extract_7z_to_directory(archive_path, temp_root_path)
+                    .await
+            }
             ArchiveKind::TarGz => {
-                self.extract_tar_gz_to_directory(archive_path, &temp_root)
+                self.extract_tar_gz_to_directory(archive_path, temp_root_path)
                     .await
             }
-        };
+        }?;
 
-        if let Err(error) = extract_result {
-            let _ = fs::remove_dir_all(&temp_root).await;
-            return Err(error);
-        }
-
-        let dlls = self.collect_dll_files(&temp_root).await?;
+        let dlls = self.collect_dll_files(temp_root_path).await?;
         let mut reports = Vec::new();
         for dll in dlls {
             let relative = dll
-                .strip_prefix(&temp_root)
+                .strip_prefix(temp_root_path)
                 .unwrap_or(&dll)
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -865,7 +893,6 @@ impl SecurityScannerService {
             );
         }
 
-        let _ = fs::remove_dir_all(&temp_root).await;
         Ok(reports)
     }
 
@@ -1230,6 +1257,10 @@ impl SecurityScannerService {
     }
 
     fn unavailable_report(error: String, settings: &Settings) -> SecurityScanReport {
+        let message = format!(
+            "Security scanning is enabled but unavailable: {error}. Installation remains blocked until scanning succeeds or security scanning is disabled in settings."
+        );
+
         SecurityScanReport {
             summary: SecurityScanSummary {
                 state: SecurityScanState::Unavailable,
@@ -1241,15 +1272,15 @@ impl SecurityScannerService {
                 scanned_at: Some(Utc::now()),
                 scanner_version: None,
                 schema_version: None,
-                status_message: Some(error.clone()),
+                status_message: Some(message.clone()),
             },
             policy: SecurityScanPolicy {
                 enabled: settings.enable_security_scanner.unwrap_or(true),
                 requires_confirmation: false,
-                blocked: false,
+                blocked: true,
                 prompt_on_high_findings: settings.prompt_on_high_scans.unwrap_or(true),
                 block_critical_findings: settings.block_critical_scans.unwrap_or(true),
-                status_message: Some(error),
+                status_message: Some(message),
             },
             files: Vec::new(),
         }
@@ -2355,6 +2386,27 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_report_blocks_when_configured_scanner_errors() {
+        let report = SecurityScannerService::unavailable_report(
+            "scanner executable exited before producing a report".to_string(),
+            &test_settings(),
+        );
+
+        assert_eq!(report.summary.state, SecurityScanState::Unavailable);
+        assert!(!report.summary.verified);
+        assert!(report.policy.enabled);
+        assert!(report.policy.blocked);
+        assert!(!report.policy.requires_confirmation);
+        assert!(report
+            .policy
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains(
+                "Installation remains blocked until scanning succeeds or security scanning is disabled in settings."
+            )));
+    }
+
+    #[test]
     fn archive_kind_falls_back_to_zip_signature_when_path_has_no_extension() -> Result<()> {
         let temp = tempdir()?;
         let archive_path = temp.path().join("downloaded-artifact");
@@ -2409,6 +2461,62 @@ mod tests {
         assert!(err.to_string().contains("unsafe path"));
         assert!(!temp.path().join("escape.txt").exists());
         assert!(!target_dir.join("escape.txt").exists());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_archive_cleans_extracted_tree_when_scanner_execution_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("scanner.zip");
+        let temp_parent = temp.path().join("scan-temp-parent");
+        std::fs::create_dir_all(&temp_parent)?;
+        write_zip_with_file(&archive_path, "RootMod.dll", b"fake assembly bytes")?;
+
+        let service = SecurityScannerService::new();
+        let error = service
+            .scan_archive_in_temp_parent(
+                Path::new("definitely-not-an-mlvscan-executable"),
+                &archive_path,
+                ArchiveKind::Zip,
+                &temp_parent,
+            )
+            .await
+            .expect_err("a missing scanner executable should fail the scan");
+
+        assert!(error.to_string().contains("Failed to scan"));
+        assert!(
+            std::fs::read_dir(&temp_parent)?.next().is_none(),
+            "temporary extraction tree should be removed after scanner execution failure"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scan_archive_cleans_extracted_tree_when_extraction_fails() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("unsafe-scanner.zip");
+        let temp_parent = temp.path().join("scan-temp-parent");
+        std::fs::create_dir_all(&temp_parent)?;
+        write_zip_with_file(&archive_path, "../escape.dll", b"unsafe")?;
+
+        let service = SecurityScannerService::new();
+        let error = service
+            .scan_archive_in_temp_parent(
+                Path::new("not-used-when-extraction-fails"),
+                &archive_path,
+                ArchiveKind::Zip,
+                &temp_parent,
+            )
+            .await
+            .expect_err("unsafe archive entry should fail extraction");
+
+        assert!(error.to_string().contains("unsafe path"));
+        assert!(
+            std::fs::read_dir(&temp_parent)?.next().is_none(),
+            "temporary extraction tree should be removed after extraction failure"
+        );
 
         Ok(())
     }

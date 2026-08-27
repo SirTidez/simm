@@ -27,6 +27,7 @@ import type {
   MelonLoaderLaunchVerification,
   ModProfileApplyRequest,
   ModProfileApplyResult,
+  OneTimeDownloadCredentials,
   ModProfileCaptureRequest,
   ModProfileExportRequest,
   ModProfileImportPlan,
@@ -41,6 +42,7 @@ import type {
   LiveTelemetryStatus,
   TelemetryPreferences,
   TelemetryPreferencesUpdate,
+  TelemetryCapability,
   TelemetryModPolicyItem,
   TelemetryModRuleUpdate,
   TelemetryUploadPreview,
@@ -52,6 +54,11 @@ import type {
   GameSaveRestoreResult,
   NexusModFileDependencies,
 } from '../types';
+
+export interface LogWatchSession {
+  sourcePath: string;
+  sessionId: number;
+}
 
 type SecurityGateResponse = {
   securityScan?: SecurityScanSummary | SecurityScanReport;
@@ -75,6 +82,10 @@ export class ApiService {
   // App Init
   static async getHomeDirectory(): Promise<string> {
     return invoke('get_home_directory');
+  }
+
+  static async getBackupsDirectory(): Promise<string> {
+    return invoke('get_backups_directory');
   }
 
   static async getStartupState(): Promise<AppStartupState> {
@@ -135,9 +146,9 @@ export class ApiService {
   static async restoreGameSaveBackup(
     steamId: string,
     slotNumber: number,
-    backupPath?: string | null,
+    restoreToken: string,
   ): Promise<GameSaveRestoreResult> {
-    return invoke('restore_game_save_backup', { steamId, slotNumber, backupPath: backupPath ?? null });
+    return invoke('restore_game_save_backup', { steamId, slotNumber, restoreToken });
   }
 
   static async restoreGameSaveFromZip(steamId: string, slotNumber: number, zipPath: string): Promise<GameSaveRestoreResult> {
@@ -178,6 +189,10 @@ export class ApiService {
   }
 
   // Telemetry
+  static async getTelemetryCapability(): Promise<TelemetryCapability> {
+    return invoke('get_telemetry_capability');
+  }
+
   static async getTelemetryPreferences(): Promise<TelemetryPreferences> {
     return invoke('get_telemetry_preferences');
   }
@@ -376,14 +391,13 @@ export class ApiService {
   // Downloads
   static async startDownload(
     environmentId: string,
-    _credentials?: {
-      username: string;
-      password: string;
-      steamGuard?: string;
-      saveCredentials?: boolean;
-    }
+    oneTimeCredentials?: OneTimeDownloadCredentials,
   ): Promise<{ success: boolean; downloadId: string }> {
-    return invoke('start_download', { environmentId });
+    // Do not add an undefined field to legacy calls: no-credential downloads
+    // retain their existing IPC payload exactly.
+    return invoke('start_download', oneTimeCredentials
+      ? { environmentId, oneTimeCredentials }
+      : { environmentId });
   }
 
   static async cancelDownload(downloadId: string): Promise<{ success: boolean }> {
@@ -1124,7 +1138,8 @@ export class ApiService {
 
   static async completeNexusManualDownloadSession(
     nxmUrl: string,
-    runtimeOverride?: 'IL2CPP' | 'Mono' | 'Both'
+    runtimeOverride?: 'IL2CPP' | 'Mono' | 'Both',
+    securityOverride?: boolean,
   ): Promise<{
     success: boolean;
     error?: string;
@@ -1142,10 +1157,14 @@ export class ApiService {
     modName?: string;
     fileName?: string;
     version?: string;
+    securityScan?: SecurityScanSummary | SecurityScanReport;
+    securityScanConfirmationRequired?: boolean;
+    securityScanBlocked?: boolean;
   }> {
     return invoke('complete_nexus_manual_download_session', {
       nxmUrl,
       runtimeOverride: runtimeOverride ?? null,
+      securityOverride: securityOverride ?? false,
     });
   }
 
@@ -1289,7 +1308,8 @@ export class ApiService {
 
   static async updateMod(
     environmentId: string,
-    modFileName: string
+    modFileName: string,
+    securityOverride = false,
   ): Promise<{
     success: boolean;
     message?: string;
@@ -1302,8 +1322,8 @@ export class ApiService {
     runtime?: 'IL2CPP' | 'Mono';
     recoveryUrl?: string;
     alreadyUpToDate?: boolean;
-  }> {
-    return invoke('update_mod', { environmentId, modFileName });
+  } & SecurityGateResponse> {
+    return invoke('update_mod', { environmentId, modFileName, securityOverride });
   }
 
   static async getAvailableModUpdates(environmentId: string): Promise<{
@@ -1862,12 +1882,12 @@ export class ApiService {
     return invoke('read_log_file', { logPath, maxLines });
   }
 
-  static async watchLogFile(logPath: string): Promise<void> {
+  static async watchLogFile(logPath: string): Promise<LogWatchSession> {
     return invoke('watch_log_file', { logPath });
   }
 
-  static async stopWatchingLog(): Promise<void> {
-    return invoke('stop_watching_log');
+  static async stopWatchingLog(sessionId: number): Promise<boolean> {
+    return invoke('stop_watching_log', { sessionId });
   }
 
   static async exportLogs(

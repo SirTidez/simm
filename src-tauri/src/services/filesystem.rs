@@ -1,10 +1,17 @@
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc::SyncSender, Mutex};
 use std::time::{Duration, SystemTime};
 
 const STEAM_SHORTCUT_TAG: &str = "SIMM";
+static ACTIVE_DIRECT_LAUNCHES: Lazy<Mutex<HashMap<PathBuf, u64>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static NEXT_DIRECT_LAUNCH_TOKEN: AtomicU64 = AtomicU64::new(1);
 const STEAM_SHORTCUT_MANAGED_KEYS: &[&str] = &[
     "appid",
     "appname",
@@ -94,12 +101,43 @@ impl FileSystemService {
     pub async fn open_path(&self, path: &str) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", path])
-                .creation_flags(0x08000000)
-                .spawn()
-                .context("Failed to open path")?;
+            // Do not route paths through `cmd /C start`: valid Windows file names can
+            // contain command metacharacters such as `&`, which makes command parsing
+            // an execution boundary. ShellExecuteW receives the path as a single wide
+            // string and never invokes a command interpreter.
+            use std::ffi::OsStr;
+            use std::iter;
+            use std::os::windows::ffi::OsStrExt;
+            use winapi::um::shellapi::ShellExecuteW;
+            use winapi::um::winuser::SW_SHOWNORMAL;
+
+            let operation: Vec<u16> = OsStr::new("open")
+                .encode_wide()
+                .chain(iter::once(0))
+                .collect();
+            let target: Vec<u16> = OsStr::new(path)
+                .encode_wide()
+                .chain(iter::once(0))
+                .collect();
+            let result = unsafe {
+                ShellExecuteW(
+                    std::ptr::null_mut(),
+                    operation.as_ptr(),
+                    target.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    SW_SHOWNORMAL,
+                )
+            } as isize;
+
+            // ShellExecute returns an error code of 32 or less rather than setting
+            // GetLastError. See https://learn.microsoft.com/windows/win32/api/shellapi/nf-shellapi-shellexecutew.
+            if result <= 32 {
+                return Err(anyhow::anyhow!(
+                    "Failed to open path (ShellExecuteW returned {})",
+                    result
+                ));
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -1185,63 +1223,122 @@ impl FileSystemService {
             return Err(anyhow::anyhow!(message));
         }
 
+        let launch_key = tokio::fs::canonicalize(&executable_path)
+            .await
+            .context("Failed to resolve game executable path")?;
+        let launch_token = Self::reserve_direct_launch(&launch_key)?;
+        let tracker = match Self::start_direct_launch_tracker(launch_key.clone(), launch_token) {
+            Ok(tracker) => tracker,
+            Err(error) => {
+                Self::release_direct_launch(&launch_key, launch_token);
+                return Err(error);
+            }
+        };
+
         #[cfg(target_os = "windows")]
-        {
+        let child_result = {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new(&executable_path)
+            std::process::Command::new(&launch_key)
                 .current_dir(game_dir)
                 .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
                 .spawn()
                 .context("Failed to launch game")
-                .map_err(|error| {
-                    error_with_location(format!(
-                        "Failed to spawn game executable {}: {}",
-                        crate::services::logger::LoggerService::sanitize_log_text(
-                            &executable_path.to_string_lossy()
-                        ),
-                        error
-                    ));
-                    error
-                })?;
-        }
+        };
 
         #[cfg(target_os = "macos")]
-        {
+        let child_result = {
             std::process::Command::new("open")
-                .arg(&executable_path)
+                .arg("-W")
+                .arg(&launch_key)
                 .spawn()
                 .context("Failed to launch game")
-                .map_err(|error| {
-                    error_with_location(format!(
-                        "Failed to spawn game executable {}: {}",
-                        crate::services::logger::LoggerService::sanitize_log_text(
-                            &executable_path.to_string_lossy()
-                        ),
-                        error
-                    ));
-                    error
-                })?;
-        }
+        };
 
         #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new(&executable_path)
+        let child_result = {
+            std::process::Command::new(&launch_key)
                 .current_dir(game_dir)
                 .spawn()
                 .context("Failed to launch game")
-                .map_err(|error| {
-                    error_with_location(format!(
-                        "Failed to spawn game executable {}: {}",
-                        crate::services::logger::LoggerService::sanitize_log_text(
-                            &executable_path.to_string_lossy()
-                        ),
-                        error
-                    ));
+        };
+
+        let child = match child_result {
+            Ok(child) => child,
+            Err(error) => {
+                drop(tracker);
+                Self::release_direct_launch(&launch_key, launch_token);
+                error_with_location(format!(
+                    "Failed to spawn game executable {}: {}",
+                    crate::services::logger::LoggerService::sanitize_log_text(
+                        &executable_path.to_string_lossy()
+                    ),
                     error
-                })?;
+                ));
+                return Err(error);
+            }
+        };
+
+        if let Err(send_error) = tracker.send(child) {
+            let mut child = send_error.0;
+            let _ = child.kill();
+            let _ = child.wait();
+            Self::release_direct_launch(&launch_key, launch_token);
+            return Err(anyhow::anyhow!(
+                "Game was stopped because direct-launch lifecycle tracking failed"
+            ));
         }
 
         Ok(executable_path.to_string_lossy().to_string())
+    }
+
+    fn reserve_direct_launch(launch_key: &Path) -> Result<u64> {
+        let mut active = ACTIVE_DIRECT_LAUNCHES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(launch_key) {
+            let message = format!(
+                "Direct launch is already in progress for {}",
+                crate::services::logger::LoggerService::sanitize_log_text(
+                    &launch_key.to_string_lossy()
+                )
+            );
+            warn_with_location(&message);
+            return Err(anyhow::anyhow!(message));
+        }
+
+        let token = NEXT_DIRECT_LAUNCH_TOKEN.fetch_add(1, Ordering::Relaxed);
+        active.insert(launch_key.to_path_buf(), token);
+        Ok(token)
+    }
+
+    fn release_direct_launch(launch_key: &Path, launch_token: u64) {
+        let mut active = ACTIVE_DIRECT_LAUNCHES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.get(launch_key).copied() == Some(launch_token) {
+            active.remove(launch_key);
+        }
+    }
+
+    fn start_direct_launch_tracker(
+        launch_key: PathBuf,
+        launch_token: u64,
+    ) -> Result<SyncSender<std::process::Child>> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<std::process::Child>(1);
+        std::thread::Builder::new()
+            .name(format!("simm-direct-launch-{launch_token}"))
+            .spawn(move || {
+                if let Ok(mut child) = receiver.recv() {
+                    if let Err(error) = child.wait() {
+                        warn_with_location(format!(
+                            "Failed to wait for directly launched game process: {error}"
+                        ));
+                    }
+                }
+                Self::release_direct_launch(&launch_key, launch_token);
+            })
+            .context("Failed to initialize direct-launch lifecycle tracking")?;
+        Ok(sender)
     }
 }
 
@@ -1664,6 +1761,81 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Game directory is required for Steam restart launch"));
+    }
+
+    #[test]
+    fn direct_launch_guard_allows_only_one_simultaneous_reservation() {
+        use std::sync::{Arc, Barrier};
+
+        const CONTENDERS: usize = 8;
+        let temp = tempdir().expect("temp dir");
+        let launch_key = temp.path().join("Schedule I.exe");
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+        let mut workers = Vec::new();
+
+        for _ in 0..CONTENDERS {
+            let barrier = Arc::clone(&barrier);
+            let launch_key = launch_key.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                FileSystemService::reserve_direct_launch(&launch_key).ok()
+            }));
+        }
+
+        let winners: Vec<u64> = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().expect("reservation worker"))
+            .collect();
+        assert_eq!(winners.len(), 1, "only one concurrent launch may reserve");
+
+        let launch_token = winners[0];
+        FileSystemService::release_direct_launch(&launch_key, launch_token.wrapping_add(1));
+        let err = FileSystemService::reserve_direct_launch(&launch_key)
+            .expect_err("a stale lifecycle token must not release an active launch");
+        assert!(err.to_string().contains("already in progress"));
+
+        FileSystemService::release_direct_launch(&launch_key, launch_token);
+        let next_token = FileSystemService::reserve_direct_launch(&launch_key)
+            .expect("the exact lifecycle token should release the launch");
+        FileSystemService::release_direct_launch(&launch_key, next_token);
+    }
+
+    #[tokio::test]
+    async fn direct_launch_guard_releases_when_tracked_child_exits() -> Result<()> {
+        let temp = tempdir()?;
+        let launch_key = temp.path().join("Schedule I.exe");
+        let launch_token = FileSystemService::reserve_direct_launch(&launch_key)?;
+        let tracker =
+            FileSystemService::start_direct_launch_tracker(launch_key.clone(), launch_token)?;
+
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd").args(["/C", "exit", "0"]).spawn()?;
+        #[cfg(unix)]
+        let child = Command::new("sh").args(["-c", "exit 0"]).spawn()?;
+
+        tracker
+            .send(child)
+            .map_err(|_| anyhow::anyhow!("failed to hand child to launch tracker"))?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let is_active = ACTIVE_DIRECT_LAUNCHES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&launch_key)
+                .copied()
+                == Some(launch_token);
+            if !is_active {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                FileSystemService::release_direct_launch(&launch_key, launch_token);
+                anyhow::bail!("tracked child exit did not release the direct-launch guard");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        Ok(())
     }
 
     #[test]

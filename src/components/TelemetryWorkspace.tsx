@@ -3,7 +3,7 @@ import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } fr
 import { ApiService } from '../services/api';
 import { onLiveTelemetryEvent, onLiveTelemetryStatus } from '../services/events';
 import { useEnvironmentStore } from '../stores/environmentStore';
-import type { LiveTelemetryEvent, LiveTelemetryExport, LiveTelemetryStatus, TelemetryModCaptureMode, TelemetryModPolicyItem, TelemetryPreferences, TelemetryUploadPreview, TelemetryUploadReceipt } from '../types';
+import type { LiveTelemetryEvent, LiveTelemetryExport, LiveTelemetryStatus, TelemetryCapability, TelemetryModCaptureMode, TelemetryModPolicyItem, TelemetryPreferences, TelemetryUploadPreview, TelemetryUploadReceipt } from '../types';
 import { ConfirmOverlay } from './ConfirmOverlay';
 import { Icon } from './Icon';
 import { SimmButton, SimmDialogContent } from './primitives';
@@ -12,6 +12,7 @@ import { WorkspacePageHeader } from './WorkspacePageHeader';
 export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const { environments } = useEnvironmentStore();
   const [preferences, setPreferences] = useState<TelemetryPreferences | null>(null);
+  const [capability, setCapability] = useState<TelemetryCapability | null>(null);
   const [events, setEvents] = useState<LiveTelemetryEvent[]>([]);
   const [statuses, setStatuses] = useState<LiveTelemetryStatus[]>([]);
   const [uploads, setUploads] = useState<TelemetryUploadReceipt[]>([]);
@@ -20,6 +21,7 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const [severity, setSeverity] = useState('all');
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [feedbackTone, setFeedbackTone] = useState<'status' | 'error'>('status');
   const [exportPreview, setExportPreview] = useState<TelemetryUploadPreview | null>(null);
   const [clearConfirmationOpen, setClearConfirmationOpen] = useState(false);
   const [modPolicyOpen, setModPolicyOpen] = useState(false);
@@ -27,27 +29,44 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const [modRuleScopes, setModRuleScopes] = useState<Record<string, 'environment' | 'global'>>({});
 
   const refresh = useCallback(async () => {
-    const [nextPreferences, nextStatuses, nextEvents, nextUploads, nextCaptureHistory] = await Promise.all([
-      ApiService.getTelemetryPreferences(),
-      ApiService.getLiveTelemetryStatus(),
-      ApiService.listLiveTelemetryEvents(environmentId || null, 500),
-      ApiService.listTelemetryUploads(),
-      ApiService.exportLiveTelemetryHistory(environmentId || null),
-    ]);
-    setPreferences(nextPreferences);
-    setStatuses(nextStatuses);
-    setEvents(nextEvents);
-    setUploads(nextUploads);
-    setCaptureHistory(nextCaptureHistory);
+    try {
+      const nextCapability = await ApiService.getTelemetryCapability();
+      setCapability(nextCapability);
+      if (!nextCapability.available) {
+        setFeedback('Telemetry is not available in this SIMM package.');
+        setFeedbackTone('error');
+        return;
+      }
+      const [nextPreferences, nextStatuses, nextEvents, nextUploads, nextCaptureHistory] = await Promise.all([
+        ApiService.getTelemetryPreferences(),
+        ApiService.getLiveTelemetryStatus(),
+        ApiService.listLiveTelemetryEvents(environmentId || null, 500),
+        ApiService.listTelemetryUploads(),
+        ApiService.exportLiveTelemetryHistory(environmentId || null),
+      ]);
+      setPreferences(nextPreferences);
+      setStatuses(nextStatuses);
+      setEvents(nextEvents);
+      setUploads(nextUploads);
+      setCaptureHistory(nextCaptureHistory);
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'Failed to refresh local telemetry. Retry when SIMM is ready.');
+      setFeedbackTone('error');
+    }
   }, [environmentId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
+    let disposed = false;
     let unlistenEvent: (() => void) | undefined;
     let unlistenStatus: (() => void) | undefined;
-    void onLiveTelemetryEvent(() => void refresh()).then((unlisten) => { unlistenEvent = unlisten; });
-    void onLiveTelemetryStatus(() => void refresh()).then((unlisten) => { unlistenStatus = unlisten; });
-    return () => { unlistenEvent?.(); unlistenStatus?.(); };
+    void onLiveTelemetryEvent(() => void refresh()).then((unlisten) => {
+      if (disposed) unlisten(); else unlistenEvent = unlisten;
+    }).catch((error) => reportActionError(error, 'Failed to listen for telemetry events.'));
+    void onLiveTelemetryStatus(() => void refresh()).then((unlisten) => {
+      if (disposed) unlisten(); else unlistenStatus = unlisten;
+    }).catch((error) => reportActionError(error, 'Failed to listen for telemetry status updates.'));
+    return () => { disposed = true; unlistenEvent?.(); unlistenStatus?.(); };
   }, [refresh]);
 
   const filteredEvents = useMemo(
@@ -59,6 +78,7 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const capturedModCount = captureHistory?.sessions.reduce((count, session) => count + session.mods.length, 0) ?? 0;
   const collectionEnabled = preferences?.collectionEnabled ?? false;
   const uploadEnabled = preferences?.uploadEnabled ?? false;
+  const telemetryAvailable = capability?.available ?? false;
   const failedUpload = uploads.find((upload) => upload.state === 'failed');
   const queuedUploadCount = uploads.filter((upload) => upload.state === 'pending' || upload.state === 'failed').length;
   const latestUpload = uploads[0];
@@ -74,12 +94,19 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
           ? 'Last update-check sync accepted'
           : 'Queued for update check';
 
+  const reportActionError = (error: unknown, fallback: string) => {
+    setFeedback(error instanceof Error ? error.message : fallback);
+    setFeedbackTone('error');
+  };
+
   const updatePreferences = async (updates: Partial<TelemetryPreferences>) => {
     setBusy(true);
     try {
       const next = await ApiService.saveTelemetryPreferences(updates);
       setPreferences(next);
       await refresh();
+    } catch (error) {
+      reportActionError(error, 'Failed to update telemetry consent.');
     } finally { setBusy(false); }
   };
 
@@ -88,7 +115,10 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
     try {
       await ApiService.clearLiveTelemetryHistory(environmentId || null);
       setFeedback('Local telemetry history cleared. Future sessions remain unaffected.');
+      setFeedbackTone('status');
       await refresh();
+    } catch (error) {
+      reportActionError(error, 'Failed to clear local telemetry history.');
     } finally { setBusy(false); }
   };
 
@@ -97,6 +127,8 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
     try {
       const preview = await ApiService.previewTelemetryUpload(environmentId || null);
       setExportPreview(preview);
+    } catch (error) {
+      reportActionError(error, 'Failed to prepare the telemetry export preview.');
     } finally { setBusy(false); }
   };
 
@@ -110,6 +142,8 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
       const policies = await ApiService.listTelemetryModPolicies(environmentId);
       setModPolicies(policies);
       setModPolicyOpen(true);
+    } catch (error) {
+      reportActionError(error, 'Failed to load mod telemetry rules.');
     } finally { setBusy(false); }
   };
 
@@ -130,6 +164,8 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
       const policies = await ApiService.listTelemetryModPolicies(environmentId);
       setModPolicies(policies);
       await refresh();
+    } catch (error) {
+      reportActionError(error, 'Failed to save the mod telemetry rule.');
     } finally { setBusy(false); }
   };
 
@@ -144,7 +180,23 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
         : receipts.length > 0
           ? `${accepted} queued upload${accepted === 1 ? '' : 's'} accepted.`
           : 'There is no queued telemetry to upload.');
+      setFeedbackTone(failed > 0 ? 'error' : 'status');
       await refresh();
+    } catch (error) {
+      reportActionError(error, 'Failed to retry queued telemetry uploads.');
+    } finally { setBusy(false); }
+  };
+
+  const retryFailedUpload = async () => {
+    if (!failedUpload) return;
+    setBusy(true);
+    try {
+      const receipt = await ApiService.retryTelemetryUpload(failedUpload.id);
+      setFeedback(receipt.state === 'accepted' ? 'Telemetry upload accepted.' : 'Telemetry upload remains queued for retry.');
+      setFeedbackTone(receipt.state === 'accepted' ? 'status' : 'error');
+      await refresh();
+    } catch (error) {
+      reportActionError(error, 'Failed to retry the telemetry upload.');
     } finally { setBusy(false); }
   };
 
@@ -217,14 +269,16 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
         <select value={severity} onChange={(event) => setSeverity(event.target.value)} aria-label="Telemetry severity">
           <option value="all">All severities</option><option value="WARN">Warnings</option><option value="ERROR">Errors</option><option value="FATAL">Fatal</option>
         </select>
-        <SimmButton className="btn btn-secondary btn-small" disabled={busy || !environmentId} onClick={() => void openModPolicyManager()}><Icon name="cog" /> Manage mod data</SimmButton>
-        <SimmButton className="btn btn-secondary btn-small" disabled={busy || !collectionEnabled} onClick={() => void viewExport()}><Icon name="copy" /> View export</SimmButton>
+        <SimmButton className="btn btn-secondary btn-small" disabled={busy || !telemetryAvailable || !environmentId} onClick={() => void openModPolicyManager()}><Icon name="cog" /> Manage mod data</SimmButton>
+        <SimmButton className="btn btn-secondary btn-small" disabled={busy || !telemetryAvailable || !collectionEnabled} onClick={() => void viewExport()}><Icon name="copy" /> View export</SimmButton>
         {/* TEST-ONLY: remove this direct upload control before shipping telemetry. */}
-        <SimmButton className="btn btn-secondary btn-small telemetry-workspace__test-upload" disabled={busy || !collectionEnabled || !uploadEnabled} onClick={() => void uploadQueuedTelemetryForTesting()}><Icon name="upload" /> Test-only: upload now</SimmButton>
-        <SimmButton className="btn btn-danger btn-small" disabled={busy || events.length === 0} onClick={() => setClearConfirmationOpen(true)}><Icon name="trash" /> Clear history</SimmButton>
+        <SimmButton className="btn btn-secondary btn-small telemetry-workspace__test-upload" disabled={busy || !telemetryAvailable || !collectionEnabled || !uploadEnabled} onClick={() => void uploadQueuedTelemetryForTesting()}><Icon name="upload" /> Test-only: upload now</SimmButton>
+        <SimmButton className="btn btn-danger btn-small" disabled={busy || !telemetryAvailable || events.length === 0} onClick={() => setClearConfirmationOpen(true)}><Icon name="trash" /> Clear history</SimmButton>
       </section>
 
-      {feedback && <p className="telemetry-workspace__feedback" role="status">{feedback}</p>}
+      {feedback && <p className="telemetry-workspace__feedback" role={feedbackTone === 'error' ? 'alert' : 'status'}>{feedback}</p>}
+      {feedbackTone === 'error' && <SimmButton className="btn btn-secondary btn-small" disabled={busy} onClick={() => void refresh()}><Icon name="rotate" /> Retry refresh</SimmButton>}
+      {failedUpload && <SimmButton className="btn btn-secondary btn-small" disabled={busy || !collectionEnabled || !uploadEnabled} onClick={() => void retryFailedUpload()}><Icon name="rotate" /> Retry failed upload</SimmButton>}
 
       <div className="telemetry-workspace__history">
         <section className="telemetry-workspace__sessions" aria-label="Telemetry sessions">

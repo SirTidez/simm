@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { EnvironmentList } from './EnvironmentList';
-import type { Environment } from '../types';
+import type { Environment, ModLibraryResult } from '../types';
 import { normalizeLibraryFeaturedDownloads } from '../services/featuredDownloads';
 
 const storeMocks = vi.hoisted(() => ({
@@ -48,9 +49,33 @@ const eventMocks = vi.hoisted(() => ({
   onUpdateAvailable: vi.fn(),
   onUpdateCheckComplete: vi.fn(),
   onModsChanged: vi.fn(),
+  onModsSnapshotUpdated: vi.fn(),
   onModUpdatesChecked: vi.fn(),
   onPluginsChanged: vi.fn(),
   onUserLibsChanged: vi.fn(),
+}));
+const listenerScopeMocks = vi.hoisted(() => ({
+  createAsyncListenerScope: vi.fn((onError?: (error: unknown) => void) => {
+    let disposed = false;
+    const unlisteners = new Set<() => void>();
+    return {
+      register: (subscribe: () => Promise<() => void>) => {
+        void subscribe().then((unlisten) => {
+          if (disposed) {
+            unlisten();
+            return;
+          }
+          unlisteners.add(unlisten);
+        }).catch(onError);
+      },
+      dispose: () => {
+        disposed = true;
+        unlisteners.forEach((unlisten) => unlisten());
+        unlisteners.clear();
+      },
+      isActive: () => !disposed,
+    };
+  }),
 }));
 
 vi.mock('../stores/environmentStore', () => ({
@@ -71,9 +96,29 @@ vi.mock('../services/api', () => ({
 
 vi.mock('@tauri-apps/plugin-dialog', () => dialogMocks);
 
-vi.mock('../services/events', () => eventMocks);
+vi.mock('../services/events', () => ({
+  ...eventMocks,
+  createAsyncListenerScope: listenerScopeMocks.createAsyncListenerScope,
+}));
 
-vi.mock('./AuthenticationModal', () => ({ AuthenticationModal: () => null }));
+vi.mock('./AuthenticationModal', () => ({
+  AuthenticationModal: ({ isOpen, onAuthenticated }: {
+    isOpen: boolean;
+    onAuthenticated: (credentials: { username: string; password: string; steamGuard: string; saveCredentials: boolean }) => void;
+  }) => isOpen ? (
+    <button
+      type="button"
+      onClick={() => onAuthenticated({
+        username: 'steam-user',
+        password: 'one-time-password',
+        steamGuard: '12345',
+        saveCredentials: false,
+      })}
+    >
+      Complete one-time authentication
+    </button>
+  ) : null,
+}));
 vi.mock('./ModsOverlay', () => ({ ModsOverlay: () => null }));
 vi.mock('./PluginsOverlay', () => ({ PluginsOverlay: () => null }));
 vi.mock('./UserLibsOverlay', () => ({ UserLibsOverlay: () => null }));
@@ -119,6 +164,28 @@ const secondCompletedEnv: Environment = {
   outputDir: 'C:/env-2',
 };
 
+function createLibraryEntry(
+  storageId: string,
+  displayName: string,
+  environmentId: string = completedEnv.id,
+): ModLibraryResult['downloaded'][number] {
+  return {
+    storageId,
+    displayName,
+    files: [],
+    attachedUserLibs: [],
+    source: 'thunderstore',
+    sourceId: `author/${storageId}`,
+    sourceVersion: '1.0.0',
+    managed: false,
+    installedIn: [environmentId],
+    availableRuntimes: ['IL2CPP'],
+    storageIdsByRuntime: { IL2CPP: storageId },
+    installedInByRuntime: { IL2CPP: [environmentId] },
+    filesByRuntime: { IL2CPP: [] },
+  };
+}
+
 describe('EnvironmentList', () => {
   const unlistenFns: Array<ReturnType<typeof vi.fn>> = [];
   let completeHandler: ((data: { downloadId: string; manifestId?: string }) => Promise<void> | void) | null = null;
@@ -127,6 +194,7 @@ describe('EnvironmentList', () => {
     unlistenFns.length = 0;
     completeHandler = null;
     localStorage.clear();
+    listenerScopeMocks.createAsyncListenerScope.mockClear();
 
     const mkUnlisten = () => {
       const fn = vi.fn();
@@ -345,6 +413,229 @@ describe('EnvironmentList', () => {
     expect(eventMocks.onModsChanged).not.toHaveBeenCalled();
   });
 
+  it('derives repeated library snapshot identities without repeating environment-local probes', async () => {
+    let currentLibrary: ModLibraryResult = {
+      downloaded: [createLibraryEntry('mod-1', 'Example Mod')],
+    };
+    const ensureLibrary = vi.fn(async () => currentLibrary);
+    storeMocks.useModLibraryStore.mockImplementation(() => ({
+      library: currentLibrary,
+      ensureLibrary,
+      refreshLibrary: vi.fn(async () => currentLibrary),
+    }));
+
+    const { rerender } = render(<EnvironmentList />);
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
+    });
+
+    currentLibrary = {
+      downloaded: [
+        createLibraryEntry('mod-1', 'Example Mod'),
+        createLibraryEntry('mod-2', 'Second Mod'),
+      ],
+    };
+    rerender(<EnvironmentList />);
+    expect(await screen.findByTitle('2 total mods')).toBeInTheDocument();
+
+    for (let snapshotIndex = 0; snapshotIndex < 3; snapshotIndex += 1) {
+      currentLibrary = {
+        downloaded: [...currentLibrary.downloaded],
+      };
+      rerender(<EnvironmentList />);
+    }
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
+    expect(ensureLibrary).not.toHaveBeenCalled();
+  });
+
+  it('updates unmanaged counts from an external mod snapshot without issuing another probe pass', async () => {
+    render(<EnvironmentList />);
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
+      expect(eventMocks.onModsSnapshotUpdated).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByTitle('1 total mods')).toBeInTheDocument();
+
+    const snapshotHandler = eventMocks.onModsSnapshotUpdated.mock.calls[0]?.[0] as (
+      data: {
+        environmentId: string;
+        snapshot: {
+          mods: Array<{
+            name: string;
+            fileName: string;
+            path: string;
+            source?: string;
+            managed?: boolean;
+          }>;
+          modsDirectory: string;
+          count: number;
+        };
+      },
+    ) => void;
+    act(() => {
+      snapshotHandler({
+        environmentId: completedEnv.id,
+        snapshot: {
+          mods: [
+            {
+              name: 'Local One',
+              fileName: 'Local One.dll',
+              path: 'C:/env-1/Mods/Local One.dll',
+              source: 'local',
+              managed: false,
+            },
+            {
+              name: 'Local Two',
+              fileName: 'Local Two.dll',
+              path: 'C:/env-1/Mods/Local Two.dll',
+              managed: false,
+            },
+          ],
+          modsDirectory: 'C:/env-1/Mods',
+          count: 2,
+        },
+      });
+    });
+
+    expect(await screen.findByTitle('3 total mods')).toBeInTheDocument();
+    expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
+    expect(eventMocks.onModsSnapshotUpdated).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a newer snapshot count when an older local probe completes later', async () => {
+    let resolvePlugins: ((value: { count: number }) => void) | undefined;
+    const onInitialDetectionComplete = vi.fn();
+    apiMocks.getMods.mockResolvedValueOnce({
+      mods: [],
+      modsDirectory: 'C:/env-1/Mods',
+      count: 0,
+    });
+    apiMocks.getPluginsCount.mockReturnValueOnce(new Promise((resolve) => {
+      resolvePlugins = resolve;
+    }));
+
+    render(<EnvironmentList onInitialDetectionComplete={onInitialDetectionComplete} />);
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
+      expect(eventMocks.onModsSnapshotUpdated).toHaveBeenCalledTimes(1);
+    });
+    expect(apiMocks.getUserLibsCount).not.toHaveBeenCalled();
+    expect(apiMocks.getMelonLoaderStatus).not.toHaveBeenCalled();
+
+    const snapshotHandler = eventMocks.onModsSnapshotUpdated.mock.calls[0]?.[0] as (
+      data: {
+        environmentId: string;
+        snapshot: {
+          mods: Array<{
+            name: string;
+            fileName: string;
+            path: string;
+            source?: string;
+            managed?: boolean;
+          }>;
+          modsDirectory: string;
+          count: number;
+        };
+      },
+    ) => void;
+    act(() => {
+      snapshotHandler({
+        environmentId: completedEnv.id,
+        snapshot: {
+          mods: [
+            {
+              name: 'New Local One',
+              fileName: 'New Local One.dll',
+              path: 'C:/env-1/Mods/New Local One.dll',
+              source: 'local',
+              managed: false,
+            },
+            {
+              name: 'New Local Two',
+              fileName: 'New Local Two.dll',
+              path: 'C:/env-1/Mods/New Local Two.dll',
+              source: 'local',
+              managed: false,
+            },
+          ],
+          modsDirectory: 'C:/env-1/Mods',
+          count: 2,
+        },
+      });
+    });
+    expect(await screen.findByTitle('3 total mods')).toBeInTheDocument();
+
+    await act(async () => {
+      resolvePlugins?.({ count: 0 });
+    });
+    await waitFor(() => {
+      expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+      expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
+      expect(onInitialDetectionComplete).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.getByTitle('3 total mods')).toBeInTheDocument();
+    expect(apiMocks.getMods).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
+    expect(eventMocks.onModsSnapshotUpdated).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces the environment-local probe pass across StrictMode effect replay', async () => {
+    const currentStore = storeMocks.useEnvironmentStore();
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      ...currentStore,
+      environments: [completedEnv, secondCompletedEnv],
+      ensureEnvironments: vi.fn().mockResolvedValue([completedEnv, secondCompletedEnv]),
+    });
+
+    render(
+      <StrictMode>
+        <EnvironmentList />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getMods).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(2);
+      expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.getMods).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(2);
+  });
+
   it('counts S1API alongside other mods on the home card instead of as a separate tool', async () => {
     apiMocks.getModLibrary.mockResolvedValue({
       downloaded: [
@@ -415,6 +706,29 @@ describe('EnvironmentList', () => {
     expect(screen.getByText('CustomTV')).toBeInTheDocument();
   });
 
+  it('keeps a dismissed profile export closed when a delayed export resolves', async () => {
+    let resolveExport: ((value: Awaited<ReturnType<typeof apiMocks.exportEnvironmentProfile>>) => void) | undefined;
+    apiMocks.exportEnvironmentProfile.mockReturnValueOnce(new Promise((resolve) => {
+      resolveExport = resolve;
+    }));
+
+    render(<EnvironmentList />);
+    fireEvent.click(await screen.findByRole('button', { name: /share/i }));
+    expect(await screen.findByText(/preparing profile/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /close profile export/i }));
+
+    await act(async () => {
+      resolveExport?.({
+        schemaVersion: 1,
+        kind: 'simm.profile',
+        profile: { name: 'Late profile', game: 'schedule-i', runtime: 'IL2CPP', branch: 'main', exportedAt: '2026-05-31T00:00:00Z' },
+        items: [],
+      });
+    });
+
+    expect(screen.queryByText('Export Profile')).toBeNull();
+  });
+
   it('saves an adjusted share profile to a json file', async () => {
     render(<EnvironmentList />);
 
@@ -455,6 +769,27 @@ describe('EnvironmentList', () => {
     await waitFor(() => {
       expect(apiMocks.launchGame).toHaveBeenCalledWith('env-1', 'steam');
     });
+  });
+
+  it('coalesces rapid repeated launches for the same environment card', async () => {
+    let resolveLaunch: ((value: { success: boolean }) => void) | undefined;
+    apiMocks.launchGame.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLaunch = resolve;
+    }));
+
+    render(<EnvironmentList />);
+    const launchButton = await screen.findByRole('button', { name: 'Launch' });
+    fireEvent.click(launchButton);
+    fireEvent.click(launchButton);
+
+    expect(apiMocks.launchGame).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: /launching/i })).toBeDisabled();
+
+    await act(async () => {
+      resolveLaunch?.({ success: true });
+    });
+
+    expect(await screen.findByRole('button', { name: 'Launch' })).toBeEnabled();
   });
 
   it('verifies MelonLoader startup after a card launch returns a start timestamp', async () => {
@@ -718,6 +1053,72 @@ describe('EnvironmentList', () => {
     }
   });
 
+  it('disposes an EnvironmentList listener that resolves after unmount', async () => {
+    let resolveAuthWaiting: ((unlisten: () => void) => void) | undefined;
+    const lateUnlisten = vi.fn();
+    eventMocks.onAuthWaiting.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAuthWaiting = resolve;
+    }));
+
+    const { unmount } = render(<EnvironmentList />);
+    await waitFor(() => expect(eventMocks.onAuthWaiting).toHaveBeenCalled());
+    unmount();
+
+    await act(async () => {
+      resolveAuthWaiting?.(lateUnlisten);
+    });
+    expect(lateUnlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rebuild event subscriptions for progress, environment identity, or authentication state changes', async () => {
+    const listenerNames = [
+      'onAuthWaiting',
+      'onAuthSuccess',
+      'onAuthError',
+      'onProgress',
+      'onMelonLoaderInstalling',
+      'onMelonLoaderInstalled',
+      'onMelonLoaderError',
+      'onComplete',
+      'onUpdateAvailable',
+      'onUpdateCheckComplete',
+      'onModsSnapshotUpdated',
+      'onPluginsChanged',
+      'onUserLibsChanged',
+    ] as const;
+    const initialStore = storeMocks.useEnvironmentStore();
+    const { rerender } = render(<EnvironmentList />);
+
+    await waitFor(() => {
+      for (const listenerName of listenerNames) {
+        expect(eventMocks[listenerName]).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      ...initialStore,
+      environments: [{ ...completedEnv, description: 'New object identity' }],
+      progress: new Map([[
+        completedEnv.id,
+        { downloadId: completedEnv.id, progress: 25, message: 'Downloading' },
+      ]]),
+    });
+    rerender(<EnvironmentList />);
+
+    const authErrorHandler = eventMocks.onAuthError.mock.calls[0]?.[0] as (
+      data: { downloadId: string; error: string },
+    ) => void;
+    act(() => {
+      authErrorHandler({ downloadId: completedEnv.id, error: 'Password required' });
+    });
+    expect(await screen.findByRole('button', { name: 'Complete one-time authentication' })).toBeInTheDocument();
+
+    for (const listenerName of listenerNames) {
+      expect(eventMocks[listenerName]).toHaveBeenCalledTimes(1);
+    }
+    expect(listenerScopeMocks.createAsyncListenerScope).toHaveBeenCalledTimes(1);
+  });
+
   it('routes start download failures through the shared message dialog', async () => {
     const queuedEnv: Environment = {
       ...completedEnv,
@@ -747,6 +1148,50 @@ describe('EnvironmentList', () => {
     await waitFor(() => {
       expect(screen.getByText('Download Failed')).toBeTruthy();
       expect(screen.getByText('Failed to start download: Network unavailable')).toBeTruthy();
+    });
+  });
+
+  it('passes the authentication callback credentials to the requested download without retaining them in component state', async () => {
+    const queuedEnv: Environment = {
+      ...completedEnv,
+      id: 'env-auth-download',
+      name: 'Authenticated Install',
+      status: 'not_downloaded',
+    };
+    const startDownload = vi.fn().mockResolvedValue(undefined);
+    storeMocks.useEnvironmentStore.mockReturnValue({
+      environments: [queuedEnv],
+      loading: false,
+      error: null,
+      progress: new Map(),
+      startDownload,
+      cancelDownload: vi.fn().mockResolvedValue(undefined),
+      deleteEnvironment: vi.fn().mockResolvedValue(undefined),
+      checkAllUpdates: vi.fn().mockResolvedValue(undefined),
+      checkUpdate: vi.fn().mockResolvedValue(undefined),
+      updateEnvironment: vi.fn().mockResolvedValue(undefined),
+      refreshGameVersion: vi.fn().mockResolvedValue(undefined),
+      ensureEnvironments: vi.fn().mockResolvedValue([queuedEnv]),
+    });
+    storeMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        autoCheckUpdates: false,
+        updateCheckInterval: 60,
+        steamUsername: '',
+      },
+    });
+
+    render(<EnvironmentList />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete one-time authentication' }));
+
+    await waitFor(() => {
+      expect(startDownload).toHaveBeenCalledWith('env-auth-download', {
+        username: 'steam-user',
+        password: 'one-time-password',
+        steamGuard: '12345',
+        saveCredentials: false,
+      });
     });
   });
 

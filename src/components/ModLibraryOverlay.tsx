@@ -721,23 +721,7 @@ const formatCompactNumber = (value?: number): string => {
 const getEffectiveEnvironmentRuntime = (
   environment: Pick<Environment, "branch" | "runtime">,
 ): "IL2CPP" | "Mono" => {
-  const normalizedBranch = (environment.branch || "")
-    .toLowerCase()
-    .replace(/[\s_]+/g, "-");
-
-  if (
-    normalizedBranch === "alternate" ||
-    normalizedBranch === "alternate-beta" ||
-    normalizedBranch === "alternatebeta"
-  ) {
-    return "Mono";
-  }
-
-  if (normalizedBranch === "main" || normalizedBranch === "beta") {
-    return "IL2CPP";
-  }
-
-  return environment.runtime === "Mono" ? "Mono" : "IL2CPP";
+  return getNormalizedRuntime(environment);
 };
 
 const normalizeDateLike = (value: DateLike): number => {
@@ -1675,6 +1659,7 @@ export function ModLibraryOverlay({
   const [selectedInstallEnvironmentIds, setSelectedInstallEnvironmentIds] =
     useState<Set<string>>(new Set());
   const [installingTargets, setInstallingTargets] = useState(false);
+  const installOperationRef = useRef(0);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -1689,6 +1674,8 @@ export function ModLibraryOverlay({
   });
   const libraryScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const libraryScrollTopRef = useRef(0);
+  const searchSourceRef = useRef(searchSource);
+  const providerSearchGenerationRef = useRef({ thunderstore: 0, nexusmods: 0 });
   const nexusManualTimeoutRef = useRef<number | null>(null);
   const activeNexusModIdsRef = useRef<Set<number>>(new Set());
   const nexusModsFileRequestTokenRef = useRef(new Map<number, number>());
@@ -1700,6 +1687,7 @@ export function ModLibraryOverlay({
   const pendingSecurityGateResolutionRef = useRef<
     ((result?: any) => void) | null
   >(null);
+  const securityReportOperationRef = useRef(0);
   const pendingNexusManualActionRef = useRef<null | {
     onSuccess: () => Promise<void>;
     onErrorTitle?: string;
@@ -1712,6 +1700,20 @@ export function ModLibraryOverlay({
   useEffect(() => {
     navigationChangeHandlerRef.current = onNavigationStateChange;
   }, [onNavigationStateChange]);
+
+  const selectSearchSource = useCallback((source: "thunderstore" | "nexusmods") => {
+    // Invalidate both providers synchronously with the toggle. A response from
+    // the previous source must not repopulate a view after the user moved on.
+    providerSearchGenerationRef.current.thunderstore += 1;
+    providerSearchGenerationRef.current.nexusmods += 1;
+    searchSourceRef.current = source;
+    setSearchSource(source);
+    setSearching(false);
+    setSearchingNexusMods(false);
+    setShowSearchResults(false);
+    setShowNexusModsResults(false);
+    setActiveModView(null);
+  }, []);
 
   useEffect(() => {
     nexusDependencyStateRef.current = nexusDependencyState;
@@ -2249,6 +2251,7 @@ export function ModLibraryOverlay({
 
   const openSecurityReport = useCallback(
     (request: SecurityReportWorkspaceRequest) => {
+      securityReportOperationRef.current += 1;
       if (onOpenSecurityReport) {
         onOpenSecurityReport(request);
         return;
@@ -2264,20 +2267,25 @@ export function ModLibraryOverlay({
       return;
     }
 
+    securityReportOperationRef.current += 1;
     pendingSecurityGateResolutionRef.current = null;
     activeSecurityReport?.onDismiss?.();
     setActiveSecurityReport(null);
   }, [activeSecurityReport, securityActionBusy]);
 
   const handleSecurityReportConfirm = useCallback(async () => {
-    if (!activeSecurityReport?.onConfirm) {
+    const request = activeSecurityReport;
+    if (!request?.onConfirm) {
       return;
     }
+    const operationId = securityReportOperationRef.current;
 
     setSecurityActionBusy(true);
     try {
-      await activeSecurityReport.onConfirm();
-      setActiveSecurityReport(null);
+      await request.onConfirm();
+      if (operationId === securityReportOperationRef.current) {
+        setActiveSecurityReport(null);
+      }
     } catch (err) {
       console.error("Security action failed:", err);
       showLibraryNotice(
@@ -2553,9 +2561,16 @@ export function ModLibraryOverlay({
           result?: {
             kind?: "library" | "install";
             requestedKind?: "library" | "install";
+            securityScan?: SecurityScanSummary | SecurityScanReport;
+            securityScanConfirmationRequired?: boolean;
+            securityScanBlocked?: boolean;
           };
           requestedKind?: "library" | "install";
           error?: string;
+          nxmUrl?: string;
+          securityScan?: SecurityScanSummary | SecurityScanReport;
+          securityScanConfirmationRequired?: boolean;
+          securityScanBlocked?: boolean;
         }>
       ).detail;
       const pendingAction = pendingNexusManualActionRef.current;
@@ -2565,6 +2580,61 @@ export function ModLibraryOverlay({
         detail?.result?.kind === "library" || requestedKind === "library";
 
       if (pendingAction && isLibraryResult) {
+        const securityScan = detail?.securityScan ?? detail?.result?.securityScan;
+        const securityScanConfirmationRequired =
+          detail?.securityScanConfirmationRequired
+          ?? detail?.result?.securityScanConfirmationRequired;
+        const securityScanBlocked =
+          detail?.securityScanBlocked ?? detail?.result?.securityScanBlocked;
+
+        if (
+          !detail?.success
+          && (securityScanConfirmationRequired || securityScanBlocked)
+        ) {
+          const gateResolution = await handleSecurityGateResult(
+            "Security Findings - Nexus manual download",
+            {
+              success: false,
+              securityScan,
+              securityScanConfirmationRequired,
+              securityScanBlocked,
+              error: detail?.error,
+            },
+            async () => {
+              if (!detail?.nxmUrl) {
+                throw new Error("The Nexus callback URL is unavailable for the security retry.");
+              }
+              const retry = await ApiService.completeNexusManualDownloadSession(
+                detail.nxmUrl,
+                undefined,
+                true,
+              );
+              if (!retry.success) {
+                throw new Error(retry.error || "Security-confirmed Nexus download failed.");
+              }
+              return retry;
+            },
+          );
+
+          if (gateResolution.status === "confirmed") {
+            clearNexusManualTimeout();
+            pendingNexusManualActionRef.current = null;
+            setDownloading(null);
+            setUpdatingGroup(null);
+            try {
+              await pendingAction.onSuccess();
+            } catch (error) {
+              showLibraryNotice(
+                pendingAction.onErrorTitle || "Nexus Download Failed",
+                error instanceof Error
+                  ? error.message
+                  : "Failed to refresh the mod library after the Nexus download completed.",
+              );
+            }
+          }
+          return;
+        }
+
         clearNexusManualTimeout();
         pendingNexusManualActionRef.current = null;
         setDownloading(null);
@@ -2610,6 +2680,7 @@ export function ModLibraryOverlay({
     };
   }, [
     clearNexusManualTimeout,
+    handleSecurityGateResult,
     isOpen,
     notifyLibraryUpdated,
     refreshLibrary,
@@ -2716,6 +2787,7 @@ export function ModLibraryOverlay({
   const runThunderstoreSearch = useCallback(
     async (query: string) => {
       const trimmedQuery = query.trim();
+      const requestGeneration = ++providerSearchGenerationRef.current.thunderstore;
       setSearching(true);
       setShowSearchResults(false);
       setShowNexusModsResults(false);
@@ -2727,6 +2799,13 @@ export function ModLibraryOverlay({
             "schedule-i",
             trimmedQuery,
           );
+
+        if (
+          requestGeneration !== providerSearchGenerationRef.current.thunderstore ||
+          searchSourceRef.current !== "thunderstore"
+        ) {
+          return;
+        }
 
         const merged = new Map<string, ThunderstorePackageGroup>();
         const addRuntime = (
@@ -2776,6 +2855,12 @@ export function ModLibraryOverlay({
         setSearchResults(sortedResults);
         setShowSearchResults(true);
       } catch (err) {
+        if (
+          requestGeneration !== providerSearchGenerationRef.current.thunderstore ||
+          searchSourceRef.current !== "thunderstore"
+        ) {
+          return;
+        }
         console.error("Error searching Thunderstore:", err);
         showLibraryNotice(
           "Thunderstore API Issue",
@@ -2786,7 +2871,9 @@ export function ModLibraryOverlay({
         );
         setSearchResults([]);
       } finally {
-        setSearching(false);
+        if (requestGeneration === providerSearchGenerationRef.current.thunderstore) {
+          setSearching(false);
+        }
       }
     },
     [discoverSort, showLibraryNotice],
@@ -2795,6 +2882,7 @@ export function ModLibraryOverlay({
   const runNexusSearch = useCallback(
     async (query: string) => {
       const trimmedQuery = query.trim();
+      const requestGeneration = ++providerSearchGenerationRef.current.nexusmods;
       setSearchingNexusMods(true);
       setShowNexusModsResults(false);
       setShowSearchResults(false);
@@ -2820,6 +2908,13 @@ export function ModLibraryOverlay({
           );
         }
 
+        if (
+          requestGeneration !== providerSearchGenerationRef.current.nexusmods ||
+          searchSourceRef.current !== "nexusmods"
+        ) {
+          return;
+        }
+
         setNexusModsSearchResults(
           sortNexusMods(
             mods,
@@ -2832,10 +2927,18 @@ export function ModLibraryOverlay({
         );
         setShowNexusModsResults(true);
       } catch (err) {
+        if (
+          requestGeneration !== providerSearchGenerationRef.current.nexusmods ||
+          searchSourceRef.current !== "nexusmods"
+        ) {
+          return;
+        }
         console.error("Error searching NexusMods:", err);
         setNexusModsSearchResults([]);
       } finally {
-        setSearchingNexusMods(false);
+        if (requestGeneration === providerSearchGenerationRef.current.nexusmods) {
+          setSearchingNexusMods(false);
+        }
       }
     },
     [discoverSort],
@@ -4201,6 +4304,7 @@ export function ModLibraryOverlay({
   );
 
   const closeInstallDialog = useCallback(() => {
+    if (installingTargets) return;
     setInstallDialog({
       isOpen: false,
       title: "",
@@ -4212,7 +4316,7 @@ export function ModLibraryOverlay({
       note: undefined,
     });
     setSelectedInstallEnvironmentIds(new Set());
-  }, []);
+  }, [installingTargets]);
 
   const installEntryToEnvironmentIds = useCallback(
     async (
@@ -4767,14 +4871,18 @@ export function ModLibraryOverlay({
       return;
     }
 
+    const operationId = ++installOperationRef.current;
+    const targetEnvironmentIds = Array.from(selectedInstallEnvironmentIds);
+    const entries = installDialog.entries;
+    const mode = installDialog.mode;
     setInstallingTargets(true);
     try {
-      const targetEnvironmentIds = Array.from(selectedInstallEnvironmentIds);
       const results = await Promise.all(
-        installDialog.entries.map((entry) =>
+        entries.map((entry) =>
           installEntryToEnvironmentIds(entry, targetEnvironmentIds),
         ),
       );
+      if (operationId !== installOperationRef.current) return;
       closeInstallDialog();
       const installedEnvironmentNames = Array.from(
         new Set(results.flatMap((result) => result.installedEnvironmentNames)),
@@ -4785,10 +4893,10 @@ export function ModLibraryOverlay({
       } else {
         const noOpNotice = buildInstallNoOpNotice(
           getCompatibleInstallSummary(
-            installDialog.entries[0],
-            installDialog.mode === "installed",
+            entries[0],
+            mode === "installed",
           ),
-          installDialog.mode === "installed",
+          mode === "installed",
         );
         showLibraryNotice(noOpNotice.title, noOpNotice.message);
       }
@@ -4801,7 +4909,9 @@ export function ModLibraryOverlay({
         getErrorMessage(error, "Failed to install the selected environments."),
       );
     } finally {
-      setInstallingTargets(false);
+      if (operationId === installOperationRef.current) {
+        setInstallingTargets(false);
+      }
     }
   }, [
     closeInstallDialog,
@@ -7043,12 +7153,7 @@ export function ModLibraryOverlay({
                         type="button"
                         variant={searchSource === "thunderstore" ? "default" : "secondary"}
                         className={`btn btn-small ${searchSource === "thunderstore" ? "btn-primary" : "btn-secondary"}`}
-                        onClick={() => {
-                          setSearchSource("thunderstore");
-                          setShowSearchResults(false);
-                          setShowNexusModsResults(false);
-                          setActiveModView(null);
-                        }}
+                        onClick={() => selectSearchSource("thunderstore")}
                       >
                         Thunderstore
                       </SimmButton>
@@ -7056,12 +7161,7 @@ export function ModLibraryOverlay({
                         type="button"
                         variant={searchSource === "nexusmods" ? "default" : "secondary"}
                         className={`btn btn-small ${searchSource === "nexusmods" ? "btn-primary" : "btn-secondary"}`}
-                        onClick={() => {
-                          setSearchSource("nexusmods");
-                          setShowSearchResults(false);
-                          setShowNexusModsResults(false);
-                          setActiveModView(null);
-                        }}
+                        onClick={() => selectSearchSource("nexusmods")}
                       >
                         Nexus Mods
                       </SimmButton>

@@ -40,6 +40,19 @@ pub async fn prepare_app(
             error.to_string()
         })?;
 
+    match crate::commands::downloads::reconcile_interrupted_downloads(db_pool.clone()).await {
+        Ok(interrupted_ids) if !interrupted_ids.is_empty() => log::warn!(
+            "Recovered {} stale game download(s) from the previous SIMM session: {}",
+            interrupted_ids.len(),
+            interrupted_ids.join(", ")
+        ),
+        Ok(_) => {}
+        Err(error) => log::warn!(
+            "Failed to reconcile interrupted game downloads during startup: {}",
+            error
+        ),
+    }
+
     let runtime_settings = crate::services::settings::RuntimeSettingsState::new(
         crate::services::settings::SettingsService::default_settings(),
     );
@@ -86,6 +99,18 @@ pub async fn prepare_app(
     };
     app.manage(startup_state.clone());
 
+    // `get_environments` and mutation commands require watcher-managed state.
+    // Do not report the backend ready until that state is registered and the
+    // initial watcher arm pass has completed.
+    crate::services::app_init::initialize_services(app.clone())
+        .await
+        .map_err(|error| {
+            log::error!(
+                "Failed to initialize required application services: {}",
+                error
+            );
+            error.to_string()
+        })?;
     start_post_database_services(app.clone(), db_pool);
 
     log::info!("SIMM application runtime prepared");
@@ -137,12 +162,6 @@ fn start_post_database_services(app: AppHandle, db_pool: Arc<SqlitePool>) {
             if let Err(error) = registration_app.deep_link().register_all() {
                 log::warn!("Failed to register deep-link scheme at runtime: {}", error);
             }
-        }
-    });
-
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::services::app_init::initialize_services(app).await {
-            log::error!("Error during service initialization: {}", e);
         }
     });
 
@@ -205,6 +224,16 @@ pub async fn get_home_directory() -> Result<String, String> {
     dirs::home_dir()
         .map(|p| p.to_string_lossy().to_string())
         .ok_or_else(|| "Could not determine home directory".to_string())
+}
+
+/// Resolve the database backup directory from the same backend-owned data-root
+/// contract as database backup creation. This supports SIMMRUST_DATA_DIR and
+/// avoids frontend path reconstruction with platform-specific separators.
+#[tauri::command]
+pub async fn get_backups_directory() -> Result<String, String> {
+    crate::db::get_backups_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// Mark that the user has seen the welcome message (so we don't show it again)

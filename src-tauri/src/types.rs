@@ -10,6 +10,11 @@ pub struct DepotDownloadOptions {
     pub output_dir: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Whether the caller explicitly permits DepotDownloader to retain its
+    /// session. This must only be set for credentials already stored through
+    /// SIMM's durable credential flow; a username alone is not consent.
+    #[serde(default)]
+    pub remember_credentials: bool,
     pub steam_guard: Option<String>,
     pub validate: Option<bool>,
     pub os: Option<Platform>,
@@ -195,6 +200,10 @@ pub struct GameSaveRestorePreview {
     pub slot_number: u8,
     pub source_label: String,
     pub source_path: String,
+    /// An opaque, backend-issued identity for the exact backup inspected by the
+    /// preview. The restore command revalidates its account, slot, snapshot ID,
+    /// and content fingerprint before it mutates a save slot.
+    pub restore_token: Option<String>,
     pub current: GameSaveSlot,
     pub restored: GameSaveSlot,
 }
@@ -210,6 +219,29 @@ pub enum Runtime {
     Il2cpp,
     #[serde(rename = "MONO", alias = "Mono", alias = "mono")]
     Mono,
+}
+
+impl Runtime {
+    /// Canonical runtime spelling for persisted keys and IPC-adjacent comparisons.
+    /// Keep all string-to-runtime handling here so callers cannot disagree about
+    /// `Mono` versus the serialized `MONO` form.
+    pub const fn canonical_label(&self) -> &'static str {
+        match self {
+            Self::Il2cpp => "IL2CPP",
+            Self::Mono => "Mono",
+        }
+    }
+
+    /// Parses runtime labels case-insensitively. Branch names deliberately do
+    /// not participate: a custom branch must use the runtime already persisted
+    /// on its environment rather than being guessed from its name.
+    pub fn parse_label(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "il2cpp" => Some(Self::Il2cpp),
+            "mono" => Some(Self::Mono),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,9 +289,24 @@ pub struct AppUpdateSettings {
     pub snoozed_until: Option<String>,
     pub skipped_version_normalized: Option<String>,
     pub channel: Option<AppUpdateChannel>,
+    /// Per-channel update state. The flat fields above remain for settings
+    /// written by older releases and are used as a migration fallback.
+    #[serde(default)]
+    pub by_channel: Option<HashMap<AppUpdateChannel, AppUpdateChannelPreferences>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateChannelPreferences {
+    pub last_checked_at: Option<String>,
+    pub last_seen_version_raw: Option<String>,
+    pub last_seen_version_normalized: Option<String>,
+    pub last_resolved_url: Option<String>,
+    pub snoozed_until: Option<String>,
+    pub skipped_version_normalized: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum AppUpdateChannel {
     Stable,
@@ -554,8 +601,11 @@ pub enum ModSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryPreferences {
+    #[serde(default)]
     pub collection_enabled: bool,
+    #[serde(default)]
     pub upload_enabled: bool,
+    #[serde(default)]
     pub error_excerpts_enabled: bool,
     #[serde(default = "default_telemetry_retention_days")]
     pub retention_days: u32,
@@ -604,6 +654,39 @@ pub struct TelemetryPreferencesUpdate {
     pub protect_local_mods: Option<bool>,
 }
 
+impl TelemetryPreferencesUpdate {
+    pub fn field_count(&self) -> usize {
+        [
+            self.collection_enabled.is_some(),
+            self.upload_enabled.is_some(),
+            self.error_excerpts_enabled.is_some(),
+            self.retention_days.is_some(),
+            self.protect_local_mods.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryCapability {
+    /// A package capability, reported by the backend which owns the command
+    /// surface. Collection still requires the separate persisted opt-in.
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetrySessionEndReason {
+    GameExited,
+    CollectionDisabled,
+    EnvironmentRemoved,
+    InterruptedProcessRunning,
+    InterruptedProcessMissing,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TelemetryModCaptureMode {
@@ -640,6 +723,8 @@ pub struct LiveTelemetrySession {
     pub environment_id: String,
     pub started_at: String,
     pub ended_at: Option<String>,
+    #[serde(default)]
+    pub end_reason: Option<TelemetrySessionEndReason>,
     pub environment: ModTelemetryEnvironment,
     pub mods: Vec<ModTelemetryModEntry>,
     pub monitoring: bool,
@@ -1316,6 +1401,15 @@ mod tests {
     }
 
     #[test]
+    fn runtime_label_normalizer_is_case_insensitive_and_does_not_infer_branches() {
+        assert_eq!(Runtime::parse_label("MONO"), Some(Runtime::Mono));
+        assert_eq!(Runtime::parse_label("Mono"), Some(Runtime::Mono));
+        assert_eq!(Runtime::parse_label("il2CPP"), Some(Runtime::Il2cpp));
+        assert_eq!(Runtime::parse_label("feature-1"), None);
+        assert_eq!(Runtime::Mono.canonical_label(), "Mono");
+    }
+
+    #[test]
     fn mod_library_entry_serializes_camel_case_fields() {
         let entry = ModLibraryEntry {
             storage_id: "s-1".to_string(),
@@ -1389,5 +1483,40 @@ mod tests {
         assert!(json.get("startedAt").is_some());
         assert!(json.get("finishedAt").is_some());
         assert!(json.get("context_label").is_none());
+    }
+
+    #[test]
+    fn app_update_settings_preserve_legacy_flat_fields_and_serialize_per_channel_state() {
+        let legacy: AppUpdateSettings = serde_json::from_value(serde_json::json!({
+            "channel": "beta",
+            "lastSeenVersionNormalized": "0.8.6"
+        }))
+        .expect("legacy settings deserialize");
+        assert_eq!(legacy.channel, Some(AppUpdateChannel::Beta));
+        assert!(legacy.by_channel.is_none());
+
+        let mut by_channel = HashMap::new();
+        by_channel.insert(
+            AppUpdateChannel::Stable,
+            AppUpdateChannelPreferences {
+                skipped_version_normalized: Some("0.8.6".to_string()),
+                ..Default::default()
+            },
+        );
+        let settings = AppUpdateSettings {
+            last_checked_at: None,
+            last_seen_version_raw: None,
+            last_seen_version_normalized: None,
+            last_resolved_url: None,
+            snoozed_until: None,
+            skipped_version_normalized: None,
+            channel: Some(AppUpdateChannel::Stable),
+            by_channel: Some(by_channel),
+        };
+        let json = serde_json::to_value(settings).expect("settings serialize");
+        assert_eq!(
+            json["byChannel"]["stable"]["skippedVersionNormalized"],
+            "0.8.6"
+        );
     }
 }

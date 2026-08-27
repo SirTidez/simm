@@ -16,6 +16,7 @@ import {
   onUserLibsChanged,
   onModUpdatesChecked,
   onTrackedDownloadUpdated,
+  createAsyncListenerScope,
   type ProgressEvent,
   type TrackedDownloadUpdatedEvent,
   type UpdateAvailableEvent,
@@ -149,5 +150,22 @@ describe('events', () => {
         kind: 'framework',
       })
     );
+  });
+
+  it('immediately disposes a listener that resolves after its scope closes', async () => {
+    let resolveListener: ((unlisten: () => void) => void) | undefined;
+    const delayedListener = new Promise<() => void>((resolve) => {
+      resolveListener = resolve;
+    });
+    const unlisten = vi.fn();
+    const scope = createAsyncListenerScope();
+
+    scope.register(() => delayedListener);
+    scope.dispose();
+    resolveListener?.(unlisten);
+    await Promise.resolve();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(scope.isActive()).toBe(false);
   });
 });

@@ -113,7 +113,11 @@ describe('LogsOverlay', () => {
     listenMock.mockReset();
     saveMock.mockReset();
 
-    apiMocks.watchLogFile.mockResolvedValue(undefined);
+    let nextWatchSessionId = 1;
+    apiMocks.watchLogFile.mockImplementation(async (sourcePath: string) => ({
+      sourcePath,
+      sessionId: nextWatchSessionId++,
+    }));
     apiMocks.stopWatchingLog.mockResolvedValue(undefined);
     apiMocks.openPath.mockResolvedValue(undefined);
     apiMocks.revealPath.mockResolvedValue(undefined);
@@ -160,6 +164,39 @@ describe('LogsOverlay', () => {
     const viewerHeader = container.querySelector('.logs-panel__viewer-header');
     expect(viewerHeader).toBeTruthy();
     expect(within(viewerHeader as HTMLElement).getByRole('heading', { name: 'Session-latest.log' })).toBeTruthy();
+  });
+
+  it('drops a late event from a previously selected live source', async () => {
+    type LiveLogPayload = {
+      sourcePath: string;
+      sessionId: number;
+      lines: ReturnType<typeof makeLogLine>[];
+    };
+    const listenerCallbacks: Array<(event: { payload: LiveLogPayload }) => void> = [];
+    listenMock.mockImplementation((async (_eventName: string, callback: (event: { payload: LiveLogPayload }) => void) => {
+      listenerCallbacks.push(callback);
+      return () => {};
+    }) as any);
+    apiMocks.getLogFiles.mockResolvedValue([
+      makeLogFile({ name: 'A.log', path: 'C:/Logs/A.log', isLatest: true }),
+      makeLogFile({ name: 'B.log', path: 'C:/Logs/B.log', isLatest: true }),
+    ]);
+    apiMocks.readLogFile.mockResolvedValue([]);
+
+    render(<LogsOverlay isOpen={true} onClose={vi.fn()} environmentId="env-1" environment={environment} />);
+    await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledWith('C:/Logs/A.log'));
+    fireEvent.click(screen.getByRole('button', { name: /b\.log/i }));
+    await waitFor(() => expect(apiMocks.watchLogFile).toHaveBeenCalledWith('C:/Logs/B.log'));
+
+    listenerCallbacks[0]?.({
+      payload: {
+        sourcePath: 'C:/Logs/A.log',
+        sessionId: 1,
+        lines: [makeLogLine({ content: 'late A line' })],
+      },
+    });
+
+    expect(screen.queryByText('late A line')).toBeNull();
   });
 
   it('shows a loading state immediately after selecting a different log file', async () => {

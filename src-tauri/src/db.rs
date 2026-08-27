@@ -1,8 +1,10 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use sqlx::migrate::MigrateError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -16,9 +18,18 @@ const SQLITE_SIDE_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 const DEFAULT_DATABASE_BACKUP_COUNT: usize = 10;
 
 fn normalize_path(path: &str) -> String {
-    path.replace('/', "\\")
-        .trim_end_matches(['\\', '/'])
-        .to_ascii_lowercase()
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    #[cfg(windows)]
+    {
+        trimmed.replace('/', "\\").to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        // POSIX file systems are ordinarily case-sensitive.  Do not collapse
+        // `/tmp/Game` and `/tmp/game` merely because a Windows build needs
+        // case-insensitive identity.
+        trimmed.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +102,7 @@ pub fn get_data_dir() -> Result<PathBuf> {
     Ok(simm_dir)
 }
 
-fn get_backups_dir() -> Result<PathBuf> {
+pub fn get_backups_dir() -> Result<PathBuf> {
     let backups_dir = get_data_dir()?.join("backups");
     std::fs::create_dir_all(&backups_dir).context("Failed to create backups directory")?;
     Ok(backups_dir)
@@ -124,6 +135,82 @@ fn sqlite_bundle_path(base: &Path, suffix: &str) -> PathBuf {
     }
 
     PathBuf::from(format!("{}{}", base.to_string_lossy(), suffix))
+}
+
+fn legacy_migration_marker_path(target_db_path: &Path) -> PathBuf {
+    PathBuf::from(format!(
+        "{}.legacy-migration",
+        target_db_path.to_string_lossy()
+    ))
+}
+
+fn file_sha256(path: &Path) -> Result<[u8; 32]> {
+    let mut file = std::fs::File::open(path).with_context(|| {
+        format!(
+            "Failed to open database member {} for verification",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).with_context(|| {
+            format!(
+                "Failed to read database member {} for verification",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn database_members_match(source: &Path, destination: &Path) -> Result<bool> {
+    let source_metadata = std::fs::metadata(source).with_context(|| {
+        format!(
+            "Failed to inspect source database member {}",
+            source.display()
+        )
+    })?;
+    let destination_metadata = match std::fs::metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect destination database member {}",
+                    destination.display()
+                )
+            })
+        }
+    };
+    if source_metadata.len() != destination_metadata.len() {
+        return Ok(false);
+    }
+    Ok(file_sha256(source)? == file_sha256(destination)?)
+}
+
+fn write_legacy_migration_marker(marker_path: &Path, source_db_path: &Path) -> Result<()> {
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker_path)
+        .with_context(|| {
+            format!(
+                "Failed to create legacy database migration marker {}",
+                marker_path.display()
+            )
+        })?;
+    marker
+        .write_all(source_db_path.to_string_lossy().as_bytes())
+        .context("Failed to write legacy database migration source identity")?;
+    marker
+        .sync_all()
+        .context("Failed to durably flush legacy database migration marker")?;
+    Ok(())
 }
 
 fn current_app_version() -> &'static str {
@@ -503,19 +590,58 @@ pub async fn repair_database(pool: &SqlitePool) -> Result<PathBuf> {
 }
 
 fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
-    if target_db_path.exists() {
-        return Ok(());
-    }
-
     let target_normalized = normalize_path(&target_db_path.to_string_lossy());
-    let source = legacy_database_paths().into_iter().find(|candidate| {
+    let marker_path = legacy_migration_marker_path(target_db_path);
+    let candidates = legacy_database_paths();
+    let candidate_has_bundle = |candidate: &Path| {
         let candidate_normalized = normalize_path(&candidate.to_string_lossy());
-        candidate_normalized != target_normalized && candidate.exists()
-    });
+        candidate_normalized != target_normalized
+            && std::iter::once("")
+                .chain(SQLITE_SIDE_SUFFIXES.iter().copied())
+                .any(|suffix| sqlite_bundle_path(candidate, suffix).exists())
+    };
+
+    let source = if marker_path.exists() {
+        let recorded_source = std::fs::read_to_string(&marker_path).with_context(|| {
+            format!(
+                "Failed to read legacy database migration marker {}",
+                marker_path.display()
+            )
+        })?;
+        let recorded_source = recorded_source.trim();
+        if recorded_source.is_empty() {
+            anyhow::bail!("Legacy database migration marker has no source identity");
+        }
+        let recorded_normalized = normalize_path(recorded_source);
+        let matched = candidates.into_iter().find(|candidate| {
+            normalize_path(&candidate.to_string_lossy()) == recorded_normalized
+                && candidate_has_bundle(candidate)
+        });
+        if matched.is_none() {
+            anyhow::bail!(
+                "Legacy database migration marker source {} is invalid or no longer available",
+                recorded_source
+            );
+        }
+        matched
+    } else {
+        candidates
+            .into_iter()
+            .find(|candidate| candidate_has_bundle(candidate))
+    };
 
     let Some(source_db_path) = source else {
         return Ok(());
     };
+
+    let source_main_exists = source_db_path.exists();
+    // An already-created target with a complete old source is normally an
+    // established current database plus stale historical files.  Resume only
+    // when our marker exists (new migration) or when the old implementation
+    // left sidecars after moving the source main file.
+    if target_db_path.exists() && source_main_exists && !marker_path.exists() {
+        return Ok(());
+    }
 
     if let Some(parent) = target_db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -528,38 +654,108 @@ fn migrate_legacy_database_if_needed(target_db_path: &Path) -> Result<()> {
         target_db_path.display()
     );
 
-    let mut migrated_any = false;
-
-    for suffix in std::iter::once("").chain(SQLITE_SIDE_SUFFIXES.iter().copied()) {
-        let src = sqlite_bundle_path(&source_db_path, suffix);
-        if !src.exists() {
-            continue;
-        }
-
-        let dst = sqlite_bundle_path(target_db_path, suffix);
-        if dst.exists() {
-            std::fs::remove_file(&dst)
-                .with_context(|| format!("Failed to clear existing file {}", dst.display()))?;
-        }
-
-        std::fs::copy(&src, &dst).with_context(|| {
-            format!(
-                "Failed to copy database file from {} to {}",
-                src.display(),
-                dst.display()
-            )
-        })?;
-
-        std::fs::remove_file(&src)
-            .with_context(|| format!("Failed to remove legacy file {}", src.display()))?;
-
-        migrated_any = true;
+    if !marker_path.exists() {
+        write_legacy_migration_marker(&marker_path, &source_db_path)?;
     }
 
-    if !migrated_any {
+    // A SQLite database and its WAL/SHM/journal are one logical unit.  Never
+    // remove a source member while another member is still being copied.  A
+    // process death after the main database is copied therefore resumes from
+    // the intact legacy bundle rather than permanently suppressing its WAL.
+    let mut source_members = Vec::new();
+    for suffix in std::iter::once("").chain(SQLITE_SIDE_SUFFIXES.iter().copied()) {
+        let src = sqlite_bundle_path(&source_db_path, suffix);
+        if src.exists() {
+            source_members.push((suffix, src));
+        }
+    }
+
+    if source_members.is_empty() {
         return Err(anyhow::anyhow!(
-            "Legacy database migration candidate found but no files were copied"
+            "Legacy database migration candidate found but no files were available"
         ));
+    }
+
+    for (suffix, src) in &source_members {
+        let dst = sqlite_bundle_path(target_db_path, suffix);
+        let target_matches = database_members_match(src, &dst)?;
+        if !target_matches {
+            let staged = dst.with_extension(format!(
+                "{}.migrating",
+                dst.extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("sqlite")
+            ));
+            if staged.exists() {
+                std::fs::remove_file(&staged).with_context(|| {
+                    format!(
+                        "Failed to clear incomplete staged database file {}",
+                        staged.display()
+                    )
+                })?;
+            }
+            std::fs::copy(src, &staged).with_context(|| {
+                format!(
+                    "Failed to stage database file from {} to {}",
+                    src.display(),
+                    staged.display()
+                )
+            })?;
+            if !database_members_match(src, &staged)? {
+                anyhow::bail!(
+                    "Staged database file digest did not match {}",
+                    src.display()
+                );
+            }
+            // The legacy source remains untouched until every member has been
+            // promoted, so replacing a stale partial target is recoverable on
+            // Windows too (where rename does not replace an existing file).
+            if dst.exists() {
+                std::fs::remove_file(&dst).with_context(|| {
+                    format!(
+                        "Failed to replace incomplete database member {}",
+                        dst.display()
+                    )
+                })?;
+            }
+            std::fs::rename(&staged, &dst).with_context(|| {
+                format!("Failed to promote staged database file {}", dst.display())
+            })?;
+            if !database_members_match(src, &dst)? {
+                anyhow::bail!(
+                    "Promoted database file digest did not match {}",
+                    src.display()
+                );
+            }
+        }
+    }
+
+    // Only now is every destination member present and verified.  Source
+    // cleanup is best effort: retaining an old bundle is safe, losing its WAL
+    // before promotion is not.
+    for (suffix, src) in source_members {
+        let dst = sqlite_bundle_path(target_db_path, suffix);
+        if !database_members_match(&src, &dst)? {
+            anyhow::bail!(
+                "Refusing to remove unmatched legacy database member {}",
+                src.display()
+            );
+        }
+        if let Err(error) = std::fs::remove_file(&src) {
+            log::warn!(
+                "Legacy database member {} was copied but could not be removed: {}",
+                src.display(),
+                error
+            );
+        }
+    }
+
+    if let Err(error) = std::fs::remove_file(&marker_path) {
+        log::warn!(
+            "Legacy database migration completed but marker {} could not be removed: {}",
+            marker_path.display(),
+            error
+        );
     }
 
     Ok(())
@@ -642,21 +838,82 @@ async fn migrate_from_files(pool: &SqlitePool) -> Result<()> {
         }
     }
 
+    // Legacy JSON can contain duplicate path spellings.  Persist the first
+    // deterministic record and record the skipped IDs before completing the
+    // migration, so one conflicting row cannot trap startup in a retry loop.
+    let mut imported_paths = std::collections::HashSet::new();
+    let mut imported_ids = std::collections::HashSet::new();
+    let mut conflicts = Vec::new();
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("Failed to start legacy environment migration")?;
     for env in &environments {
         let normalized_output_dir = normalize_path(&env.output_dir);
+        if !imported_ids.insert(env.id.clone())
+            || !imported_paths.insert(normalized_output_dir.clone())
+        {
+            conflicts.push(serde_json::json!({
+                "id": env.id,
+                "outputDir": env.output_dir,
+                "reason": "duplicate legacy environment identity or normalized path"
+            }));
+            continue;
+        }
+
         let serialized = serde_json::to_string(env)?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?) \
-             ON CONFLICT(id) DO UPDATE SET output_dir = excluded.output_dir, normalized_output_dir = excluded.normalized_output_dir, data = excluded.data",
+             ON CONFLICT(id) DO NOTHING",
         )
         .bind(&env.id)
         .bind(&env.output_dir)
-        .bind(normalized_output_dir)
-        .bind(serialized)
-        .execute(pool)
-        .await
-        .context("Failed to migrate environments")?;
+        .bind(&normalized_output_dir)
+        .bind(&serialized)
+        .execute(&mut *transaction)
+        .await;
+
+        match inserted {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => conflicts.push(serde_json::json!({
+                "id": env.id,
+                "outputDir": env.output_dir,
+                "reason": "environment id already existed"
+            })),
+            Err(error)
+                if error
+                    .to_string()
+                    .to_lowercase()
+                    .contains("unique constraint") =>
+            {
+                conflicts.push(serde_json::json!({
+                    "id": env.id,
+                    "outputDir": env.output_dir,
+                    "reason": "normalized output path already existed"
+                }));
+            }
+            Err(error) => return Err(error).context("Failed to migrate environments"),
+        }
     }
+    if !conflicts.is_empty() {
+        sqlx::query(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind("storage.migrated.environment_conflicts")
+        .bind(serde_json::to_string(&conflicts)?)
+        .execute(&mut *transaction)
+        .await
+        .context("Failed to record legacy environment migration conflicts")?;
+        log::warn!(
+            "Skipped {} conflicting legacy environment record(s)",
+            conflicts.len()
+        );
+    }
+    transaction
+        .commit()
+        .await
+        .context("Failed to commit legacy environment migration")?;
 
     let mut secrets_written = false;
     for dir in &legacy_dirs {
@@ -725,6 +982,18 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_default_runtime \
             ON profiles(runtime) WHERE is_default = 1",
         "CREATE INDEX IF NOT EXISTS idx_profiles_runtime ON profiles(runtime)",
+        "CREATE TABLE IF NOT EXISTS environment_deletion_journal (\
+            environment_id TEXT PRIMARY KEY, \
+            original_path TEXT NOT NULL, \
+            staged_path TEXT NOT NULL UNIQUE, \
+            environment_data TEXT NOT NULL, \
+            state TEXT NOT NULL CHECK (state IN ('planned', 'staged', 'metadata_deleted', 'restore_required')), \
+            last_error TEXT, \
+            created_at TEXT NOT NULL, \
+            updated_at TEXT NOT NULL\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_environment_deletion_journal_state \
+            ON environment_deletion_journal(state)",
         "CREATE TABLE IF NOT EXISTS environment_profiles (\
             environment_id TEXT PRIMARY KEY, \
             active_profile_id TEXT NOT NULL, \
@@ -802,8 +1071,21 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
             .context("Failed to ensure additive database schema")?;
     }
 
+    // Historical `environment_profiles` rows were not linked to environments.
+    // Remove only dangling mappings during startup repair; valid profile rows
+    // remain intact and future environment deletion clears its mapping in the
+    // same transaction as the environment record.
+    sqlx::query(
+        "DELETE FROM environment_profiles \
+         WHERE environment_id NOT IN (SELECT id FROM environments)",
+    )
+    .execute(pool)
+    .await
+    .context("Failed to remove orphan environment profile mappings")?;
+
     for table in [
         "profiles",
+        "environment_deletion_journal",
         "environment_profiles",
         "telemetry_preferences",
         "telemetry_snapshots",
@@ -1054,6 +1336,19 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn get_backups_dir_uses_the_same_data_root_override() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("custom-data-root");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let backups_dir = get_backups_dir()?;
+        assert_eq!(backups_dir, override_dir.join("backups"));
+        assert!(backups_dir.is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn get_data_dir_defaults_to_simm_home_directory() -> Result<()> {
         let temp = tempdir()?;
         let _data_guard = EnvVarGuard::unset("SIMMRUST_DATA_DIR");
@@ -1111,6 +1406,106 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[serial]
+    fn legacy_database_migration_resumes_a_partial_target_with_wal_members() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let target = target_dir.join("data.db");
+        let source = temp.path().join("simmrust").join("data.db");
+        let target_wal = sqlite_bundle_path(&target, "-wal");
+        let source_wal = sqlite_bundle_path(&source, "-wal");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        std::fs::create_dir_all(source.parent().expect("legacy parent"))?;
+        std::fs::create_dir_all(&target_dir)?;
+        // Simulate a crash that left stale main and WAL members with exactly
+        // the same lengths as their legacy counterparts. Length-only resume
+        // checks must not accept either member as already promoted.
+        std::fs::write(&source, b"source-main")?;
+        std::fs::write(&source_wal, b"source-wal")?;
+        std::fs::write(&target, b"target-main")?;
+        std::fs::write(&target_wal, b"target-wal")?;
+        assert_eq!(
+            std::fs::metadata(&source)?.len(),
+            std::fs::metadata(&target)?.len()
+        );
+        assert_eq!(
+            std::fs::metadata(&source_wal)?.len(),
+            std::fs::metadata(&target_wal)?.len()
+        );
+        assert!(!database_members_match(&source, &target)?);
+        assert!(!database_members_match(&source_wal, &target_wal)?);
+        std::fs::write(
+            legacy_migration_marker_path(&target),
+            source.to_string_lossy().as_bytes(),
+        )?;
+
+        migrate_legacy_database_if_needed(&target)?;
+
+        assert_eq!(std::fs::read(&target)?, b"source-main");
+        assert_eq!(std::fs::read(&target_wal)?, b"source-wal");
+        assert!(!source.exists());
+        assert!(!source_wal.exists());
+        assert!(!legacy_migration_marker_path(&target).exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_database_migration_rejects_marker_for_an_unrecognized_source() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let target = target_dir.join("data.db");
+        let source = temp.path().join("simmrust").join("data.db");
+        let unrecognized_source = temp.path().join("unrecognized").join("data.db");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        std::fs::create_dir_all(source.parent().expect("legacy parent"))?;
+        std::fs::create_dir_all(unrecognized_source.parent().expect("unrecognized parent"))?;
+        std::fs::create_dir_all(&target_dir)?;
+        std::fs::write(&source, b"legacy-main")?;
+        std::fs::write(&unrecognized_source, b"untrusted!!")?;
+        std::fs::write(
+            legacy_migration_marker_path(&target),
+            unrecognized_source.to_string_lossy().as_bytes(),
+        )?;
+
+        let error =
+            migrate_legacy_database_if_needed(&target).expect_err("marker must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("is invalid or no longer available"));
+        assert_eq!(std::fs::read(&source)?, b"legacy-main");
+        assert_eq!(std::fs::read(&unrecognized_source)?, b"untrusted!!");
+        assert!(!target.exists());
+        assert!(legacy_migration_marker_path(&target).exists());
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn legacy_database_migration_does_not_replace_an_established_target() -> Result<()> {
+        let temp = tempdir()?;
+        let target_dir = temp.path().join("SIMM");
+        let target = target_dir.join("data.db");
+        let source = temp.path().join("simmrust").join("data.db");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", target_dir.to_string_lossy().as_ref());
+
+        std::fs::create_dir_all(source.parent().expect("legacy parent"))?;
+        std::fs::create_dir_all(&target_dir)?;
+        std::fs::write(&target, b"current")?;
+        std::fs::write(&source, b"legacy")?;
+
+        migrate_legacy_database_if_needed(&target)?;
+
+        assert_eq!(std::fs::read(&target)?, b"current");
+        assert_eq!(std::fs::read(&source)?, b"legacy");
+        assert!(!legacy_migration_marker_path(&target).exists());
+        Ok(())
+    }
+
     #[tokio::test]
     #[serial]
     async fn initialize_pool_creates_tables() -> Result<()> {
@@ -1130,6 +1525,7 @@ mod tests {
             "environments",
             "secrets",
             "mod_metadata",
+            "environment_deletion_journal",
             "telemetry_preferences",
             "telemetry_snapshots",
             "telemetry_sessions",

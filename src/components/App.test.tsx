@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App, formatDashboardTime, formatDashboardTimeDetail } from './App';
 import type { ReactNode } from 'react';
 
@@ -398,6 +398,7 @@ describe('App', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -411,11 +412,17 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: 'Welcome back to SIMM' })).toBeTruthy();
   });
 
-  it('hides telemetry navigation while the telemetry feature flag is disabled', async () => {
+  it('hides telemetry navigation while the backend capability is unavailable', async () => {
+    invokeMock.mockImplementation((command: string) => (
+      command === 'get_telemetry_capability'
+        ? Promise.resolve({ available: false })
+        : Promise.resolve(false)
+    ));
     render(<App />);
 
     await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
     expect(screen.queryByRole('button', { name: 'Telemetry' })).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('get_telemetry_capability');
   });
 
   it('warns when a Steam runtime switch has no downloaded counterpart', async () => {
@@ -1222,6 +1229,165 @@ describe('App', () => {
     });
   });
 
+  it('does not start automatic app-update checks when the shared update toggle is disabled', async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        appUpdate: { channel: 'stable' },
+        autoCheckUpdates: false,
+        setupGuideCompleted: true,
+      },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Welcome back to SIMM' });
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(0);
+  });
+
+  it('uses the configured app-update interval instead of a fixed six-hour timer', async () => {
+    vi.useFakeTimers();
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        appUpdate: { channel: 'stable' },
+        autoCheckUpdates: true,
+        updateCheckInterval: 5,
+        setupGuideCompleted: true,
+      },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'check_app_update') {
+        return Promise.resolve({
+          currentVersion: '0.8.0',
+          version: '0.8.0',
+          versionNormalized: '0.8.0',
+          updateAvailable: false,
+          channel: 'stable',
+          manifestUrl: 'https://example.test/stable.json',
+          checkedAt: '2026-08-20T00:00:00Z',
+        });
+      }
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    });
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'check_app_update'),
+    ).toHaveLength(2);
+  });
+
+  it('drops a deferred old-channel result immediately when the selected channel changes', async () => {
+    let activeSettings: {
+      appUpdate: { channel: 'stable' | 'beta' };
+      setupGuideCompleted: boolean;
+    } = {
+      appUpdate: { channel: 'beta' },
+      setupGuideCompleted: true,
+    };
+    settingsStoreMocks.useSettingsStore.mockImplementation(() => ({
+      settings: activeSettings,
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    let resolveBeta: ((value: unknown) => void) | undefined;
+    let resolveStable: ((value: unknown) => void) | undefined;
+    invokeMock.mockImplementation((command: string, args?: { channel?: string }) => {
+      if (command === 'check_app_update') {
+        return new Promise((resolve) => {
+          if (args?.channel === 'beta') {
+            resolveBeta = resolve;
+          } else {
+            resolveStable = resolve;
+          }
+        });
+      }
+      return Promise.resolve(false);
+    });
+
+    const view = render(<App />);
+    await waitFor(() => expect(resolveBeta).toBeTypeOf('function'));
+
+    activeSettings = {
+      appUpdate: { channel: 'stable' },
+      setupGuideCompleted: true,
+    };
+    view.rerender(<App />);
+    await waitFor(() => expect(resolveStable).toBeTypeOf('function'));
+
+    await act(async () => {
+      resolveBeta?.({
+        currentVersion: '0.8.0',
+        version: '0.8.1-beta.1',
+        versionNormalized: '0.8.1',
+        updateAvailable: true,
+        channel: 'beta',
+        manifestUrl: 'https://example.test/beta.json',
+        checkedAt: '2026-08-20T00:00:00Z',
+      });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('button', { name: 'Install App Update' })).toBeNull();
+
+    await act(async () => {
+      resolveStable?.({
+        currentVersion: '0.8.0',
+        version: '0.8.1',
+        versionNormalized: '0.8.1',
+        updateAvailable: true,
+        channel: 'stable',
+        manifestUrl: 'https://example.test/stable.json',
+        checkedAt: '2026-08-20T00:00:00Z',
+      });
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole('button', { name: 'Install App Update' })).toBeTruthy();
+  });
+
+  it('does not let a beta skip hide the stable release with the same version core', async () => {
+    settingsStoreMocks.useSettingsStore.mockReturnValue({
+      settings: {
+        appUpdate: {
+          channel: 'stable',
+          byChannel: {
+            beta: { skippedVersionNormalized: '0.8.1-beta.1' },
+          },
+        },
+        setupGuideCompleted: true,
+      },
+      updateSettings: vi.fn().mockResolvedValue(undefined),
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'check_app_update') {
+        return Promise.resolve({
+          currentVersion: '0.8.0',
+          version: '0.8.1',
+          versionNormalized: '0.8.1',
+          updateAvailable: true,
+          channel: 'stable',
+          manifestUrl: 'https://example.test/stable.json',
+          checkedAt: '2026-08-20T00:00:00Z',
+        });
+      }
+      return Promise.resolve(false);
+    });
+
+    render(<App />);
+    expect(await screen.findByRole('button', { name: 'Install App Update' })).toBeTruthy();
+  });
+
   it('does not immediately rerun app update checks when the settings updater identity changes', async () => {
     let updateSettingsVersion = 0;
     const firstUpdateSettings = vi.fn().mockImplementation(async () => {
@@ -1370,6 +1536,7 @@ describe('App', () => {
       expect(invokeMock).toHaveBeenCalledWith('complete_nexus_manual_download_session', {
         nxmUrl,
         runtimeOverride: null,
+        securityOverride: false,
       });
     });
   });

@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use zip::ZipArchive;
@@ -54,10 +54,149 @@ impl PluginsService {
         Path::new(output_dir).join("Mods")
     }
 
+    /// Returns a single safe plugin filename.  `Path::components` alone is not
+    /// sufficient here because a backslash is an ordinary filename character on
+    /// Unix, while the same input is a separator when the environment is later
+    /// used on Windows.  Keep the on-disk plugin contract portable and reject
+    /// both separator styles plus Windows stream/device syntax.
+    fn plugin_file_name(file_name: &str) -> Result<&str> {
+        let trimmed = file_name.trim();
+        if trimmed.is_empty()
+            || trimmed.contains(['/', '\\', ':'])
+            || Path::new(trimmed).is_absolute()
+        {
+            return Err(anyhow::anyhow!("Plugin filename must be a basename"));
+        }
+
+        let mut components = Path::new(trimmed).components();
+        if !matches!(
+            (components.next(), components.next()),
+            (Some(Component::Normal(_)), None)
+        ) {
+            return Err(anyhow::anyhow!("Plugin filename must be a basename"));
+        }
+
+        if !trimmed.to_ascii_lowercase().ends_with(".dll") {
+            return Err(anyhow::anyhow!("Invalid plugin file"));
+        }
+
+        Ok(trimmed)
+    }
+
+    /// Resolve the managed Plugins directory without allowing a Plugins symlink
+    /// (or a symlinked target file) to redirect mutations outside the selected
+    /// environment.  The final canonical containment check is repeated by the
+    /// callers immediately before a mutating operation.
+    async fn managed_plugins_directory(&self, game_dir: &str, create: bool) -> Result<PathBuf> {
+        let game_root = Path::new(game_dir);
+        // The configured environment root may itself be a user-visible link
+        // (for example a Steam/Proton mount). Resolve that root first, but do
+        // not permit the managed `Plugins` child to redirect elsewhere.
+        let game_root_meta = fs::metadata(game_root)
+            .await
+            .context("Failed to inspect environment directory")?;
+        if !game_root_meta.is_dir() {
+            return Err(anyhow::anyhow!("Environment directory is not a directory"));
+        }
+        let canonical_game_root = fs::canonicalize(game_root)
+            .await
+            .context("Failed to resolve environment directory")?;
+
+        let plugins_directory = game_root.join("Plugins");
+        if create && fs::symlink_metadata(&plugins_directory).await.is_err() {
+            fs::create_dir_all(&plugins_directory)
+                .await
+                .context("Failed to create plugins directory")?;
+        }
+
+        let plugins_meta = fs::symlink_metadata(&plugins_directory)
+            .await
+            .context("Failed to inspect plugins directory")?;
+        if plugins_meta.file_type().is_symlink() || !plugins_meta.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Plugins directory must be a real directory within the environment"
+            ));
+        }
+
+        let canonical_plugins_directory = fs::canonicalize(&plugins_directory)
+            .await
+            .context("Failed to resolve plugins directory")?;
+        if !canonical_plugins_directory.starts_with(&canonical_game_root) {
+            return Err(anyhow::anyhow!(
+                "Plugins directory resolves outside the environment"
+            ));
+        }
+
+        Ok(canonical_plugins_directory)
+    }
+
+    async fn existing_managed_plugin_path(
+        &self,
+        game_dir: &str,
+        plugin_file_name: &str,
+        disabled: bool,
+    ) -> Result<(PathBuf, PathBuf)> {
+        let plugin_file_name = Self::plugin_file_name(plugin_file_name)?;
+        let plugins_directory = self.managed_plugins_directory(game_dir, false).await?;
+        let name = if disabled {
+            format!("{}.disabled", plugin_file_name)
+        } else {
+            plugin_file_name.to_string()
+        };
+        let candidate = plugins_directory.join(name);
+        let metadata = fs::symlink_metadata(&candidate)
+            .await
+            .context("Plugin file not found")?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(anyhow::anyhow!(
+                "Plugin target must be a real file within the Plugins directory"
+            ));
+        }
+        let canonical_candidate = fs::canonicalize(&candidate)
+            .await
+            .context("Failed to resolve plugin file")?;
+        if !canonical_candidate.starts_with(&plugins_directory) {
+            return Err(anyhow::anyhow!(
+                "Plugin target resolves outside the Plugins directory"
+            ));
+        }
+
+        Ok((plugins_directory, canonical_candidate))
+    }
+
+    async fn new_managed_plugin_path(
+        &self,
+        game_dir: &str,
+        plugin_file_name: &str,
+        disabled: bool,
+    ) -> Result<(PathBuf, PathBuf)> {
+        let plugin_file_name = Self::plugin_file_name(plugin_file_name)?;
+        let plugins_directory = self.managed_plugins_directory(game_dir, true).await?;
+        let name = if disabled {
+            format!("{}.disabled", plugin_file_name)
+        } else {
+            plugin_file_name.to_string()
+        };
+        Ok((plugins_directory.clone(), plugins_directory.join(name)))
+    }
+
     fn normalize_path(path: &str) -> String {
-        path.replace('/', "\\")
-            .trim_end_matches(['\\', '/'])
-            .to_ascii_lowercase()
+        let trimmed = path.trim_end_matches(['\\', '/']);
+        #[cfg(windows)]
+        {
+            let normalized = trimmed.replace('/', "\\").to_ascii_lowercase();
+            if let Some(unc) = normalized.strip_prefix(r"\\?\unc\") {
+                return format!(r"\\{}", unc);
+            }
+            normalized
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&normalized)
+                .to_string()
+        }
+        #[cfg(not(windows))]
+        {
+            trimmed.to_string()
+        }
     }
 
     async fn environment_id_for_dir(&self, game_dir: &str) -> Result<Option<String>> {
@@ -74,7 +213,7 @@ impl PluginsService {
         .fetch_optional(&*self.pool)
         .await;
 
-        let id = match normalized_query {
+        let direct_id = match normalized_query {
             Ok(id) => id,
             Err(err)
                 if err
@@ -82,23 +221,47 @@ impl PluginsService {
                     .to_lowercase()
                     .contains("no such column: normalized_output_dir") =>
             {
-                let rows = sqlx::query_as::<_, (String, String)>(
-                    "SELECT id, output_dir FROM environments",
-                )
-                .fetch_all(&*self.pool)
-                .await
-                .context("Failed to resolve environment id")?;
-
-                rows.into_iter()
-                    .find(|(_, output_dir)| {
-                        Self::normalize_path(output_dir) == Self::normalize_path(game_dir)
-                    })
-                    .map(|(id, _)| id)
+                None
             }
             Err(err) => return Err(err).context("Failed to resolve environment id"),
         };
 
-        Ok(id)
+        if direct_id.is_some() {
+            return Ok(direct_id);
+        }
+
+        // Containment checks canonicalize the managed Plugins directory before
+        // mutations. On Windows that introduces a verbatim (`\\?\`) prefix,
+        // and a configured environment root may itself be a symlink. Resolve
+        // both representations here so metadata stays attached to the same
+        // registered environment without weakening the filesystem boundary.
+        let rows = sqlx::query_as::<_, (String, String)>("SELECT id, output_dir FROM environments")
+            .fetch_all(&*self.pool)
+            .await
+            .context("Failed to resolve environment id")?;
+        let requested_normalized = Self::normalize_path(game_dir);
+        let requested_canonical = fs::canonicalize(game_dir)
+            .await
+            .ok()
+            .map(|path| Self::normalize_path(path.to_string_lossy().as_ref()));
+
+        for (id, output_dir) in rows {
+            if Self::normalize_path(&output_dir) == requested_normalized {
+                return Ok(Some(id));
+            }
+
+            if let Some(requested_canonical) = requested_canonical.as_ref() {
+                if let Ok(stored_canonical) = fs::canonicalize(&output_dir).await {
+                    if Self::normalize_path(stored_canonical.to_string_lossy().as_ref())
+                        == *requested_canonical
+                    {
+                        return Ok(Some(id));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub async fn load_plugin_metadata(
@@ -697,28 +860,17 @@ impl PluginsService {
     }
 
     pub async fn delete_plugin(&self, game_dir: &str, plugin_file_name: &str) -> Result<()> {
-        let plugins_directory = self.get_plugins_directory(game_dir);
-        let plugin_path = plugins_directory.join(plugin_file_name);
-        let disabled_path = plugins_directory.join(format!("{}.disabled", plugin_file_name));
-
-        // Security: Ensure the file is within the plugins directory and ends with .dll
-        if !plugin_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid plugin file"));
-        }
-
-        let file_to_delete = if plugin_path.exists() {
-            plugin_path
-        } else if disabled_path.exists() {
-            disabled_path
-        } else {
-            return Err(anyhow::anyhow!("Plugin file not found"));
+        let plugin_file_name = Self::plugin_file_name(plugin_file_name)?;
+        let (plugins_directory, file_to_delete) = match self
+            .existing_managed_plugin_path(game_dir, plugin_file_name, false)
+            .await
+        {
+            Ok(paths) => paths,
+            Err(_) => {
+                self.existing_managed_plugin_path(game_dir, plugin_file_name, true)
+                    .await?
+            }
         };
-
-        // Verify it's actually a file
-        let metadata = fs::metadata(&file_to_delete).await?;
-        if !metadata.is_file() {
-            return Err(anyhow::anyhow!("Path is not a file"));
-        }
 
         fs::remove_file(&file_to_delete)
             .await
@@ -737,27 +889,16 @@ impl PluginsService {
     }
 
     pub async fn disable_plugin(&self, game_dir: &str, plugin_file_name: &str) -> Result<()> {
-        let plugins_directory = self.get_plugins_directory(game_dir);
-        let plugin_path = plugins_directory.join(plugin_file_name);
-        let disabled_path = plugins_directory.join(format!("{}.disabled", plugin_file_name));
+        let plugin_file_name = Self::plugin_file_name(plugin_file_name)?;
+        let (_plugins_directory, plugin_path) = self
+            .existing_managed_plugin_path(game_dir, plugin_file_name, false)
+            .await?;
+        let (_, disabled_path) = self
+            .new_managed_plugin_path(game_dir, plugin_file_name, true)
+            .await?;
 
-        // Security: Ensure the file is within the plugins directory and ends with .dll
-        if !plugin_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid plugin file"));
-        }
-
-        if !plugin_path.exists() {
-            return Err(anyhow::anyhow!("Plugin file not found"));
-        }
-
-        if disabled_path.exists() {
+        if fs::symlink_metadata(&disabled_path).await.is_ok() {
             return Err(anyhow::anyhow!("Plugin is already disabled"));
-        }
-
-        // Verify it's actually a file
-        let metadata = fs::metadata(&plugin_path).await?;
-        if !metadata.is_file() {
-            return Err(anyhow::anyhow!("Path is not a file"));
         }
 
         // Rename the file
@@ -769,27 +910,16 @@ impl PluginsService {
     }
 
     pub async fn enable_plugin(&self, game_dir: &str, plugin_file_name: &str) -> Result<()> {
-        let plugins_directory = self.get_plugins_directory(game_dir);
-        let disabled_path = plugins_directory.join(format!("{}.disabled", plugin_file_name));
-        let plugin_path = plugins_directory.join(plugin_file_name);
+        let plugin_file_name = Self::plugin_file_name(plugin_file_name)?;
+        let (_plugins_directory, disabled_path) = self
+            .existing_managed_plugin_path(game_dir, plugin_file_name, true)
+            .await?;
+        let (_, plugin_path) = self
+            .new_managed_plugin_path(game_dir, plugin_file_name, false)
+            .await?;
 
-        // Security: Ensure the file is within the plugins directory and ends with .dll
-        if !plugin_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid plugin file"));
-        }
-
-        if !disabled_path.exists() {
-            return Err(anyhow::anyhow!("Disabled plugin file not found"));
-        }
-
-        if plugin_path.exists() {
+        if fs::symlink_metadata(&plugin_path).await.is_ok() {
             return Err(anyhow::anyhow!("Plugin file already exists (not disabled)"));
-        }
-
-        // Verify it's actually a file
-        let metadata = fs::metadata(&disabled_path).await?;
-        if !metadata.is_file() {
-            return Err(anyhow::anyhow!("Path is not a file"));
         }
 
         // Rename the file back
@@ -808,23 +938,16 @@ impl PluginsService {
         original_file_name: &str,
         metadata: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        let plugins_directory = self.get_plugins_directory(game_dir);
-        fs::create_dir_all(&plugins_directory)
-            .await
-            .context("Failed to create plugins directory")?;
+        let plugin_file_name = Self::plugin_file_name(original_file_name)?;
+        let (plugins_directory, dest_path) = self
+            .new_managed_plugin_path(game_dir, plugin_file_name, false)
+            .await?;
 
         let source_path = Path::new(dll_path);
         if !source_path.exists() {
             return Err(anyhow::anyhow!("Plugin file not found"));
         }
 
-        if !original_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!(
-                "Only .dll files are supported for plugin installation"
-            ));
-        }
-
-        let dest_path = plugins_directory.join(original_file_name);
         fs::copy(source_path, &dest_path)
             .await
             .context("Failed to copy plugin file")?;
@@ -1262,6 +1385,64 @@ mod tests {
             fs::read(plugins_dir.join("ExamplePlugin.dll")).await?,
             b"data"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn plugin_mutations_reject_traversal_and_leave_sibling_untouched() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = PluginsService::new(pool);
+
+        let output_dir = temp.path().join("env");
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&plugins_dir).await?;
+        let outside = output_dir.join("outside.dll");
+        fs::write(&outside, b"must survive").await?;
+
+        let output_dir = output_dir.to_string_lossy().to_string();
+        for name in ["../outside.dll", "..\\outside.dll", "C:\\outside.dll"] {
+            let err = service
+                .delete_plugin(&output_dir, name)
+                .await
+                .expect_err("unsafe plugin name must be rejected");
+            assert!(err.to_string().contains("basename"));
+        }
+
+        assert_eq!(fs::read(&outside).await?, b"must survive");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn plugin_mutations_reject_symlinked_targets() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = PluginsService::new(pool);
+
+        let output_dir = temp.path().join("env");
+        let plugins_dir = output_dir.join("Plugins");
+        fs::create_dir_all(&plugins_dir).await?;
+        let outside = temp.path().join("outside.dll");
+        fs::write(&outside, b"must survive").await?;
+        symlink(&outside, plugins_dir.join("Escaped.dll"))?;
+
+        let err = service
+            .delete_plugin(output_dir.to_string_lossy().as_ref(), "Escaped.dll")
+            .await
+            .expect_err("symlinked plugin target must be rejected");
+        assert!(err.to_string().contains("real file"));
+        assert_eq!(fs::read(&outside).await?, b"must survive");
+        assert!(plugins_dir.join("Escaped.dll").exists());
 
         Ok(())
     }

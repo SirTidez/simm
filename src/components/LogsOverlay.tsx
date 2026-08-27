@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/select';
 
 import { ApiService } from '../services/api';
+import { createAsyncListenerScope } from '../services/events';
 import type { Environment } from '../types';
 import { Icon } from './Icon';
 import { SimmBadge, SimmButton } from './primitives';
@@ -44,6 +45,12 @@ interface LogLine {
   timestamp: string | null;
   modTag: string | null;
   category: 'melonloader' | 'mod' | 'general';
+}
+
+interface LogWatchUpdate {
+  sourcePath: string;
+  sessionId: number;
+  lines: LogLine[];
 }
 
 interface CachedLogFile {
@@ -670,6 +677,7 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const [watchedPath, setWatchedPath] = useState<string | null>(null);
   const isWatchingRef = useRef(isWatching);
   const watchedPathRef = useRef(watchedPath);
+  const watchedSessionIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     isWatchingRef.current = isWatching;
@@ -690,6 +698,8 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   const selectedLogPathRef = useRef<string | null>(null);
   const loadedLogLineLimitRef = useRef(INITIAL_LOG_LINE_LIMIT);
   const loadingOlderRef = useRef(false);
+  const watchGenerationRef = useRef(0);
+  const watchOperationRef = useRef<Promise<void>>(Promise.resolve());
 
   const selectedLogFile = useMemo(
     () => logFiles.find((file) => file.path === selectedLogPath) ?? null,
@@ -951,10 +961,27 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
     }
     setToastMessage(null);
 
-    if (isWatchingRef.current || watchedPathRef.current) {
-      void ApiService.stopWatchingLog().catch((err) => {
-        console.error('Failed to stop watching log file during environment switch:', err);
-      });
+    const generation = ++watchGenerationRef.current;
+    const sessionId = watchedSessionIdRef.current;
+    if (sessionId !== null) {
+      watchOperationRef.current = watchOperationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await ApiService.stopWatchingLog(sessionId);
+          if (generation !== watchGenerationRef.current) return;
+          isWatchingRef.current = false;
+          watchedPathRef.current = null;
+          if (watchedSessionIdRef.current === sessionId) {
+            watchedSessionIdRef.current = null;
+          }
+          setIsWatching(false);
+          setWatchedPath(null);
+        })
+        .catch((err) => {
+          if (generation === watchGenerationRef.current) {
+            console.error('Failed to stop watching log file during environment switch:', err);
+          }
+        });
     }
     setIsWatching(false);
     setWatchedPath(null);
@@ -1126,57 +1153,95 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   };
 
   useEffect(() => {
-    if (!selectedLogFile) return;
+    const generation = ++watchGenerationRef.current;
+    const targetPath = selectedLogFile && isLiveLogFile(selectedLogFile)
+      ? selectedLogFile.path
+      : null;
 
-    const syncWatching = async () => {
-      try {
-        if (isLiveLogFile(selectedLogFile)) {
-          if (watchedPath === selectedLogFile.path && isWatching) {
-            return;
+    // Tauri owns a single global watcher. Serialize source transitions so a
+    // delayed A start cannot win after the user has selected B.
+    watchOperationRef.current = watchOperationRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== watchGenerationRef.current) return;
+
+        const currentPath = watchedPathRef.current;
+        if (currentPath && currentPath !== targetPath) {
+          const sessionId = watchedSessionIdRef.current;
+          if (sessionId !== null) {
+            await ApiService.stopWatchingLog(sessionId);
           }
-          if (isWatching && watchedPath && watchedPath !== selectedLogFile.path) {
-            await ApiService.stopWatchingLog();
+          if (generation !== watchGenerationRef.current) return;
+          isWatchingRef.current = false;
+          watchedPathRef.current = null;
+          if (watchedSessionIdRef.current === sessionId) {
+            watchedSessionIdRef.current = null;
           }
-          await ApiService.watchLogFile(selectedLogFile.path);
-          setIsWatching(true);
-          setWatchedPath(selectedLogFile.path);
-        } else if (isWatching) {
-          await ApiService.stopWatchingLog();
           setIsWatching(false);
           setWatchedPath(null);
         }
-      } catch (err) {
-        console.error('Failed to synchronize live log watching:', err);
-      }
-    };
 
-    void syncWatching();
+        if (!targetPath) return;
+        if (watchedPathRef.current === targetPath && isWatchingRef.current) return;
+
+        const session = await ApiService.watchLogFile(targetPath);
+        if (generation !== watchGenerationRef.current) {
+          // This queued operation was superseded before it completed. The
+          // next serialized operation will establish the current source.
+          await ApiService.stopWatchingLog(session.sessionId);
+          return;
+        }
+
+        isWatchingRef.current = true;
+        watchedPathRef.current = targetPath;
+        watchedSessionIdRef.current = session.sessionId;
+        setIsWatching(true);
+        setWatchedPath(targetPath);
+      })
+      .catch((err) => {
+        if (generation === watchGenerationRef.current) {
+          console.error('Failed to synchronize live log watching:', err);
+        }
+      });
   }, [isLiveLogFile, isWatching, selectedLogFile, watchedPath]);
 
   useEffect(() => {
-    if (!isWatching) return;
+    if (!isWatching || !watchedPath) return;
 
-    let unlisten: (() => void) | null = null;
-    const bindListener = async () => {
-      unlisten = await listen<{ lines: LogLine[] }>('log-update', (event) => {
+    const sourcePath = watchedPath;
+    const sessionId = watchedSessionIdRef.current;
+    if (sessionId === null) return;
+    const listeners = createAsyncListenerScope((error) => {
+      console.error('Failed to bind log-update listener:', error);
+    });
+    listeners.register(() => listen<LogWatchUpdate>('log-update', (event) => {
+        // Both source and session are immutable backend identities. Checking
+        // them protects against an event emitted by A after B is selected,
+        // including a later watch of the same source path.
+        if (
+          !listeners.isActive()
+          || event.payload.sourcePath !== sourcePath
+          || event.payload.sessionId !== sessionId
+          || selectedLogPathRef.current !== sourcePath
+          || watchedPathRef.current !== sourcePath
+          || watchedSessionIdRef.current !== sessionId
+        ) {
+          return;
+        }
         setLogLines((current) => {
           const nextLines = [...current, ...event.payload.lines].slice(-loadedLogLineLimitRef.current);
-          if (selectedLogFile) {
-            cacheLogLines(selectedLogFile, nextLines, loadedLogLineLimitRef.current);
+          const sourceFile = logFiles.find((file) => file.path === sourcePath);
+          if (sourceFile) {
+            cacheLogLines(sourceFile, nextLines, loadedLogLineLimitRef.current);
           }
           return nextLines;
         });
-      });
-    };
-
-    void bindListener();
+      }));
 
     return () => {
-      if (unlisten) {
-        unlisten();
-      }
+      listeners.dispose();
     };
-  }, [cacheLogLines, isWatching, selectedLogFile]);
+  }, [cacheLogLines, isWatching, logFiles, watchedPath]);
 
   useEffect(() => {
     if (selectedModTag && !modActivity.some((item) => normalizeModTag(item.modTag) === normalizeModTag(selectedModTag))) {
@@ -1207,13 +1272,29 @@ export function LogsOverlay({ isOpen, environmentId, environment, onOpenModLibra
   useEffect(() => {
     if (!isOpen) return;
     return () => {
-      if (isWatching) {
-        void ApiService.stopWatchingLog().catch((err) => {
-          console.error('Failed to stop watching log file:', err);
+      const generation = ++watchGenerationRef.current;
+      const sessionId = watchedSessionIdRef.current;
+      if (sessionId === null) return;
+      watchOperationRef.current = watchOperationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await ApiService.stopWatchingLog(sessionId);
+          if (generation !== watchGenerationRef.current) return;
+          isWatchingRef.current = false;
+          watchedPathRef.current = null;
+          if (watchedSessionIdRef.current === sessionId) {
+            watchedSessionIdRef.current = null;
+          }
+          setIsWatching(false);
+          setWatchedPath(null);
+        })
+        .catch((err) => {
+          if (generation === watchGenerationRef.current) {
+            console.error('Failed to stop watching log file:', err);
+          }
         });
-      }
     };
-  }, [isOpen, isWatching]);
+  }, [isOpen]);
 
   const loadOlderLogEntries = useCallback(() => {
     if (!selectedLogFile || loadingOlderRef.current) return;

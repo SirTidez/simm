@@ -1,4 +1,4 @@
-import { useState, useEffect, useId, useRef } from "react";
+import { useState, useEffect, useId, useRef, useCallback } from "react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useEnvironmentStore } from "../stores/environmentStore";
 import { ApiService } from "../services/api";
@@ -17,7 +17,6 @@ import type {
 import type { Settings as AppSettings } from "../types";
 import type { ExperienceMode } from "../types";
 import { resolveExperienceMode, resolveShowAdvancedGameTools } from "../utils/uxSettings";
-import { telemetryFeatureEnabled } from "../utils/featureFlags";
 import { Icon } from './Icon';
 import {
   Dialog,
@@ -96,17 +95,29 @@ function getActiveBuiltInTheme(
 
 function TelemetrySettingsPanel() {
   const [preferences, setPreferences] = useState<TelemetryPreferences | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     const loadPreferences = ApiService.getTelemetryPreferences;
     if (typeof loadPreferences === 'function') {
-      void loadPreferences().then(setPreferences).catch(() => undefined);
+      void loadPreferences().then(setPreferences).catch((error) => {
+        setFeedback(error instanceof Error ? error.message : 'Failed to load telemetry preferences.');
+      });
     }
   }, []);
   const save = async (updates: Partial<TelemetryPreferences>) => {
     const savePreferences = ApiService.saveTelemetryPreferences;
     if (typeof savePreferences === 'function') {
-      const next = await savePreferences(updates);
-      setPreferences(next);
+      setSaving(true);
+      try {
+        const next = await savePreferences(updates);
+        setPreferences(next);
+        setFeedback('Telemetry preference saved.');
+      } catch (error) {
+        setFeedback(error instanceof Error ? error.message : 'Failed to save telemetry preference.');
+      } finally {
+        setSaving(false);
+      }
     }
   };
   return (
@@ -123,6 +134,8 @@ function TelemetrySettingsPanel() {
         <div className="settings-field settings-field--toggle"><SettingsToggle label="Permit sanitized diagnostic excerpts" description="Always send structured error identity. When you enable this, reviewed uploads may also retain a bounded, sanitized readable excerpt for administrator diagnosis." checked={preferences?.errorExcerptsEnabled ?? false} onChange={(errorExcerptsEnabled) => void save({ errorExcerptsEnabled })} /></div>
         <div className="settings-field settings-field--compact"><label>Local retention</label><SettingsSelect ariaLabel="Telemetry retention" value={String(preferences?.retentionDays ?? 30)} onValueChange={(value) => void save({ retentionDays: Number(value) })} options={[{ value: '7', label: '7 days' }, { value: '14', label: '14 days' }, { value: '30', label: '30 days' }, { value: '90', label: '90 days' }]} /></div>
       </div>
+      {feedback && <p className="settings-inline-feedback" role={feedback.includes('Failed') || feedback.includes('not available') ? 'alert' : 'status'}>{feedback}</p>}
+      {saving && <p className="settings-inline-feedback" role="status">Saving telemetry preference…</p>}
     </div>
   );
 }
@@ -266,7 +279,7 @@ function buildFormDataFromSettings(settings: AppSettings): SettingsFormData {
     showSecurityScanBadges: settings.showSecurityScanBadges ?? true,
     updateCheckInterval: settings.updateCheckInterval || 60,
     autoCheckUpdates: settings.autoCheckUpdates !== false,
-    appUpdateChannel: settings.appUpdate?.channel ?? "beta",
+    appUpdateChannel: settings.appUpdate?.channel ?? "stable",
     logLevel:
       (settings.logLevel as "debug" | "info" | "warn" | "error") || "info",
     modIconCacheLimitMb: normalizeModIconCacheLimitMb(
@@ -432,7 +445,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     showSecurityScanBadges: true,
     updateCheckInterval: 60,
     autoCheckUpdates: true,
-    appUpdateChannel: "beta",
+    appUpdateChannel: "stable",
     logLevel: "info" as "debug" | "info" | "warn" | "error",
     modIconCacheLimitMb: 500,
     databaseBackupCount: 10,
@@ -440,6 +453,7 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
     showAdvancedGameTools: true,
   });
   const [error, setError] = useState<string | null>(null);
+  const [telemetryAvailable, setTelemetryAvailable] = useState<boolean | null>(null);
   const [showDirectoryPicker, setShowDirectoryPicker] = useState(false);
   const [directoryPath, setDirectoryPath] = useState("");
   const [directoryList, setDirectoryList] = useState<
@@ -470,6 +484,40 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const [openingThemesFolder, setOpeningThemesFolder] = useState(false);
   const [reloadingThemes, setReloadingThemes] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveRef = useRef<SettingsFormData | null>(null);
+  const persistedFormDataRef = useRef<SettingsFormData | null>(null);
+  const skipNextAutoSaveRef = useRef(false);
+  const formDataRef = useRef(formData);
+  const settingsRef = useRef(settings);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    formDataRef.current = formData;
+  }, [formData]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => () => {
+    isMountedRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!isOpen) return () => { disposed = true; };
+
+    void ApiService.getTelemetryCapability()
+      .then((capability) => {
+        if (!disposed) setTelemetryAvailable(capability.available);
+      })
+      .catch(() => {
+        // Settings should not expose actions the backend says it cannot serve.
+        if (!disposed) setTelemetryAvailable(false);
+      });
+    return () => { disposed = true; };
+  }, [isOpen]);
 
   const runCheckAllUpdates = async () => {
     try {
@@ -516,6 +564,23 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   useEffect(() => {
     if (settings) {
       const nextFormData = buildFormDataFromSettings(settings);
+      const currentFormData = formDataRef.current;
+      const previousPersisted = persistedFormDataRef.current;
+
+      // A settings-store refresh can arrive after the user has made a newer
+      // local edit. Never replace that draft with the older response.
+      if (
+        previousPersisted
+        && !areFormDataEqual(currentFormData, previousPersisted)
+        && !areFormDataEqual(currentFormData, nextFormData)
+      ) {
+        return;
+      }
+
+      persistedFormDataRef.current = nextFormData;
+      if (!areFormDataEqual(currentFormData, nextFormData)) {
+        skipNextAutoSaveRef.current = true;
+      }
       setFormData((current) =>
         areFormDataEqual(current, nextFormData) ? current : nextFormData,
       );
@@ -609,71 +674,104 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
       });
   }, [isOpen, settings?.platform]);
 
-  // Auto-save with debouncing
-  useEffect(() => {
-    if (!settings) return; // Don't save on initial load
-
-    const currentPersistedFormData = buildFormDataFromSettings(settings);
-    if (areFormDataEqual(formData, currentPersistedFormData)) {
+  const enqueueSettingsSave = useCallback((snapshot: SettingsFormData) => {
+    const persisted = persistedFormDataRef.current;
+    if (!settingsRef.current || (persisted && areFormDataEqual(snapshot, persisted))) {
       return;
     }
 
-    // Clear existing timeout
+    saveQueueRef.current = saveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const settingsSnapshot = settingsRef.current;
+        if (!settingsSnapshot) return;
+
+        try {
+          if (isMountedRef.current) setError(null);
+          // Platform and language are not user-configurable here, but they
+          // must preserve the backend defaults for the host OS.
+          await updateSettings({
+            defaultDownloadDir: snapshot.defaultDownloadDir,
+            maxConcurrentDownloads: snapshot.maxConcurrentDownloads,
+            theme: snapshot.theme,
+            melonLoaderVersion: snapshot.melonLoaderVersion,
+            autoInstallMelonLoader: snapshot.autoInstallMelonLoader,
+            enableSecurityScanner: snapshot.enableSecurityScanner,
+            autoInstallSecurityScanner: snapshot.autoInstallSecurityScanner,
+            blockCriticalScans: snapshot.blockCriticalScans,
+            promptOnHighScans: snapshot.promptOnHighScans,
+            showSecurityScanBadges: snapshot.showSecurityScanBadges,
+            updateCheckInterval: snapshot.updateCheckInterval,
+            autoCheckUpdates: snapshot.autoCheckUpdates,
+            appUpdate: {
+              ...(settingsSnapshot.appUpdate ?? {}),
+              channel: snapshot.appUpdateChannel,
+            },
+            logLevel: snapshot.logLevel,
+            modIconCacheLimitMb: normalizeModIconCacheLimitMb(snapshot.modIconCacheLimitMb),
+            databaseBackupCount: normalizeDatabaseBackupCount(snapshot.databaseBackupCount),
+            experienceMode: snapshot.experienceMode,
+            showAdvancedGameTools: snapshot.showAdvancedGameTools,
+            setupGuideCompleted: true,
+            platform: snapshot.platform,
+            language: "english",
+          });
+          persistedFormDataRef.current = snapshot;
+        } catch (err) {
+          if (isMountedRef.current) {
+            setError(err instanceof Error ? err.message : "Failed to save settings");
+          }
+        }
+      });
+  }, [updateSettings]);
+
+  const flushPendingSettingsSave = useCallback(() => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    const snapshot = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    if (snapshot) enqueueSettingsSave(snapshot);
+  }, [enqueueSettingsSave]);
+
+  // Auto-save with debouncing. Keep the pending snapshot in a ref so closing
+  // or unmounting Settings flushes it instead of silently dropping the edit.
+  useEffect(() => {
+    if (!settings || !isOpen) return;
+
+    if (skipNextAutoSaveRef.current) {
+      skipNextAutoSaveRef.current = false;
+      return;
     }
 
-    // Set new timeout to save after 500ms of no changes
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        setError(null);
-        // Platform and language are not user-configurable here, but they must
-        // preserve the backend defaults for the host OS.
-        const normalizedFormData = {
-          defaultDownloadDir: formData.defaultDownloadDir,
-          maxConcurrentDownloads: formData.maxConcurrentDownloads,
-          theme: formData.theme,
-          melonLoaderVersion: formData.melonLoaderVersion,
-          autoInstallMelonLoader: formData.autoInstallMelonLoader,
-          enableSecurityScanner: formData.enableSecurityScanner,
-          autoInstallSecurityScanner: formData.autoInstallSecurityScanner,
-          blockCriticalScans: formData.blockCriticalScans,
-          promptOnHighScans: formData.promptOnHighScans,
-          showSecurityScanBadges: formData.showSecurityScanBadges,
-          updateCheckInterval: formData.updateCheckInterval,
-          autoCheckUpdates: formData.autoCheckUpdates,
-          appUpdate: {
-            ...(settings?.appUpdate ?? {}),
-            channel: formData.appUpdateChannel,
-          },
-          logLevel: formData.logLevel,
-          modIconCacheLimitMb: normalizeModIconCacheLimitMb(
-            formData.modIconCacheLimitMb,
-          ),
-          databaseBackupCount: normalizeDatabaseBackupCount(
-            formData.databaseBackupCount,
-          ),
-          experienceMode: formData.experienceMode,
-          showAdvancedGameTools: formData.showAdvancedGameTools,
-          setupGuideCompleted: true,
-          platform: formData.platform,
-          language: "english",
-        };
-        await updateSettings(normalizedFormData);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to save settings",
-        );
-      }
+    const currentPersistedFormData = persistedFormDataRef.current ?? buildFormDataFromSettings(settings);
+    if (areFormDataEqual(formData, currentPersistedFormData)) return;
+
+    pendingSaveRef.current = formData;
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      const snapshot = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (snapshot) enqueueSettingsSave(snapshot);
     }, 500);
 
-    // Cleanup on unmount
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
       }
     };
-  }, [formData, settings, updateSettings]);
+  }, [enqueueSettingsSave, formData, isOpen, settings]);
+
+  useEffect(() => {
+    if (!isOpen) flushPendingSettingsSave();
+  }, [flushPendingSettingsSave, isOpen]);
+
+  useEffect(() => () => {
+    flushPendingSettingsSave();
+  }, [flushPendingSettingsSave]);
 
   const getParentPath = (currentPath: string): string | null => {
     if (!currentPath) return null;
@@ -820,9 +918,8 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
   const handleOpenBackupsFolder = async () => {
     try {
       setOpeningBackupsFolder(true);
-      const homeDirectory = await ApiService.getHomeDirectory();
-      const normalizedHome = homeDirectory.replace(/[\\/]+$/, "");
-      await ApiService.openPath(`${normalizedHome}\\backups`);
+      const backupsDirectory = await ApiService.getBackupsDirectory();
+      await ApiService.openPath(backupsDirectory);
     } catch (err) {
       setDatabaseBackupFeedback({
         tone: "error",
@@ -1230,13 +1327,11 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
 
                 <WindowBehaviorSettingsPanel />
 
-                {telemetryFeatureEnabled && (
-                  <>
-                    <hr className="settings-divider" />
+                {telemetryAvailable && <>
+                  <hr className="settings-divider" />
 
-                    <TelemetrySettingsPanel />
-                  </>
-                )}
+                  <TelemetrySettingsPanel />
+                </>}
 
                 <hr className="settings-divider" />
 
@@ -1528,6 +1623,20 @@ export function Settings({ isOpen, onClose, onRunSetupGuide }: SettingsProps) {
                       />
                       <small>
                         Stable uses production releases. Beta opts this app into prerelease updater manifests.
+                      </small>
+                    </div>
+
+                    <div className="settings-field settings-field--compact">
+                      <label>Manual app update check</label>
+                      <SimmButton
+                        type="button"
+                        onClick={() => window.dispatchEvent(new CustomEvent("simm:check-app-update"))}
+                        className="btn btn-secondary"
+                      >
+                        Check for App Updates
+                      </SimmButton>
+                      <small>
+                        Check the selected app update channel now, even when automatic checks are disabled.
                       </small>
                     </div>
 

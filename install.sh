@@ -1020,22 +1020,77 @@ detect_arch() {
 
 uninstall_appimage() {
   log "Removing user-local SIMM AppImage install."
+  remove_appimage_mime_defaults
   run rm -f "$BIN_LINK"
   run rm -f "$DESKTOP_FILE"
   run rm -f "$ICON_PATH"
   run rm -f "$LAUNCHER_PATH"
   run rm -f "$APPIMAGE_PATH"
 
-  if command -v xdg-mime >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
-    xdg-mime default "" x-scheme-handler/simm >/dev/null 2>&1 || true
-    xdg-mime default "" x-scheme-handler/nxm >/dev/null 2>&1 || true
-  fi
-
   if command -v update-desktop-database >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
     update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
   fi
 
   log "User-local AppImage files removed. Native package installs should be removed with your package manager."
+}
+
+remove_appimage_mime_defaults() {
+  # xdg-mime has no supported "clear default" operation: passing an empty
+  # desktop ID is rejected and leaves a deleted handler selected. Remove only
+  # our own desktop ID from user-scoped mimeapps files, preserving any other
+  # handlers and never touching system-wide associations.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] remove SIMM desktop MIME associations"
+    return
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    log "warning: python3 is unavailable; skipped cleanup of SIMM MIME defaults. Remove simm.desktop from your user mimeapps.list manually."
+    return
+  fi
+
+  python3 - "$(basename "$DESKTOP_FILE")" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+desktop_id = sys.argv[1]
+home = Path.home()
+config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+data_home = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
+candidates = [
+    config_home / "mimeapps.list",
+    config_home / "applications" / "mimeapps.list",
+    data_home / "applications" / "mimeapps.list",
+]
+
+for path in candidates:
+    if not path.is_file():
+        continue
+
+    original = path.read_text(encoding="utf-8")
+    section = ""
+    changed = False
+    output = []
+    for line in original.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+        if section in {"Default Applications", "Added Associations"} and "=" in line:
+            key, value = line.split("=", 1)
+            if key.strip() in {"x-scheme-handler/simm", "x-scheme-handler/nxm"}:
+                entries = [entry for entry in value.strip().split(";") if entry and entry != desktop_id]
+                replacement = f"{key}={';'.join(entries)};\n" if entries else ""
+                if replacement != line:
+                    changed = True
+                    line = replacement
+        output.append(line)
+
+    if changed:
+        temporary = path.with_name(f".{path.name}.simm-uninstall.tmp")
+        temporary.write_text("".join(output), encoding="utf-8")
+        os.replace(temporary, path)
+PY
 }
 
 if [ "$UNINSTALL" -eq 1 ]; then
@@ -1982,8 +2037,7 @@ repair_steam_deck_shortcut() {
 install_appimage() {
   log "Installing AppImage user-local package."
   run mkdir -p "$APPIMAGE_DIR" "$BIN_DIR"
-  run cp "$ASSET_PATH" "$APPIMAGE_PATH"
-  run chmod 0755 "$APPIMAGE_PATH"
+  install_appimage_atomically
   write_appimage_launcher
   run ln -sfn "$LAUNCHER_PATH" "$BIN_LINK"
   install_appimage_icon
@@ -1999,6 +2053,58 @@ install_appimage() {
   fi
 
   install_steam_deck_shortcut
+}
+
+install_appimage_atomically() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] stage ${ASSET_PATH} next to ${APPIMAGE_PATH}, fsync it, then atomically replace the installed AppImage"
+    return
+  fi
+
+  local staged_path
+  staged_path="$(mktemp "${APPIMAGE_DIR}/.SIMM.AppImage.XXXXXX")" || die "failed to allocate an AppImage staging file"
+
+  if ! cp "$ASSET_PATH" "$staged_path"; then
+    rm -f "$staged_path"
+    die "failed to stage the new AppImage; the existing installation was left unchanged"
+  fi
+  if ! chmod 0755 "$staged_path"; then
+    rm -f "$staged_path"
+    die "failed to set permissions on the staged AppImage; the existing installation was left unchanged"
+  fi
+  if ! python3 - "$staged_path" "$APPIMAGE_DIR" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "rb") as staged:
+    os.fsync(staged.fileno())
+directory_fd = os.open(sys.argv[2], os.O_RDONLY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  then
+    rm -f "$staged_path"
+    die "failed to flush the staged AppImage; the existing installation was left unchanged"
+  fi
+  if ! mv -f "$staged_path" "$APPIMAGE_PATH"; then
+    rm -f "$staged_path"
+    die "failed to atomically replace the AppImage; the existing installation was left unchanged"
+  fi
+  if ! python3 - "$APPIMAGE_DIR" <<'PY'
+import os
+import sys
+
+directory_fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  then
+    die "the AppImage was replaced but the directory metadata could not be flushed"
+  fi
 }
 
 if [ "$REPAIR_STEAM_SHORTCUT" -eq 1 ]; then
