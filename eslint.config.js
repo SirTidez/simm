@@ -14,6 +14,7 @@ export default defineConfig([
     '.serena',
     '.stitch',
     '.vscode',
+    '.worktrees',
     'dist',
     'output',
     'target',

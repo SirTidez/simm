@@ -218,33 +218,21 @@ async function loadEnvironmentLocalProbeSnapshot(
   const userLibs = new Map<string, number>();
   const melonLoader = new Map<string, MelonLoaderStatus>();
 
-  for (const environmentId of environmentIds) {
-    try {
-      const installedMods = await ApiService.getMods(environmentId, false);
+  // Bound concurrency while removing the previous 4 x N serial IPC chain.
+  const concurrency = 3;
+  for (let index = 0; index < environmentIds.length; index += concurrency) {
+    await Promise.all(environmentIds.slice(index, index + concurrency).map(async (environmentId) => {
+      const [installedMods, pluginsResult, userLibsResult, melonLoaderResult] = await Promise.all([
+        ApiService.getMods(environmentId, false).catch(() => null),
+        ApiService.getPluginsCount(environmentId).catch(() => ({ count: 0 })),
+        ApiService.getUserLibsCount(environmentId).catch(() => ({ count: 0 })),
+        ApiService.getMelonLoaderStatus(environmentId).catch(() => ({ installed: false })),
+      ]);
       unmanagedLocalMods.set(environmentId, countUnmanagedLocalMods(installedMods));
-    } catch {
-      unmanagedLocalMods.set(environmentId, 0);
-    }
-
-    try {
-      const result = await ApiService.getPluginsCount(environmentId);
-      plugins.set(environmentId, result.count);
-    } catch {
-      plugins.set(environmentId, 0);
-    }
-
-    try {
-      const result = await ApiService.getUserLibsCount(environmentId);
-      userLibs.set(environmentId, result.count);
-    } catch {
-      userLibs.set(environmentId, 0);
-    }
-
-    try {
-      melonLoader.set(environmentId, await ApiService.getMelonLoaderStatus(environmentId));
-    } catch {
-      melonLoader.set(environmentId, { installed: false });
-    }
+      plugins.set(environmentId, pluginsResult.count);
+      userLibs.set(environmentId, userLibsResult.count);
+      melonLoader.set(environmentId, melonLoaderResult);
+    }));
   }
 
   return { unmanagedLocalMods, plugins, userLibs, melonLoader };
@@ -1261,6 +1249,17 @@ export function EnvironmentList({
       return () => {
         disposed = true;
       };
+    }
+
+    const hasCompleteCachedSnapshot = completedEnvironmentIds.every((environmentId) =>
+      environmentCountCache.unmanagedLocalMods.has(environmentId)
+      && environmentCountCache.plugins.has(environmentId)
+      && environmentCountCache.userLibs.has(environmentId)
+      && environmentCountCache.melonLoader.has(environmentId));
+    if (hasCompleteCachedSnapshot) {
+      // Cached values already rendered synchronously; keep the freshness pass
+      // in the background instead of holding the pane-wide loading gate.
+      notifyInitialDetectionComplete();
     }
 
     let request = localProbeRequestRef.current;
@@ -2418,7 +2417,7 @@ export function EnvironmentList({
           }
         }}
         onAuthenticated={handleAuthenticated}
-        required={true}
+        required={false}
         waitingForAuth={authModal.waiting}
         authMessage={authModal.message}
       />

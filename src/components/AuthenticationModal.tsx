@@ -335,7 +335,7 @@ export function AuthenticationModal({
                     <pre className={qrOutputClassName} aria-live="polite" data-testid="steam-auth-qr-output">
                       {qrDisplayLines.length > 0
                         ? qrDisplayLines.join('\n')
-                        : 'QR code will appear here after the session starts.'}
+                        : 'Select “Start QR Login” below to generate a QR code.'}
                     </pre>
                   </div>
                 ) : (

@@ -89,20 +89,52 @@ pub async fn get_themes_directory(db: State<'_, Arc<SqlitePool>>) -> Result<Stri
 #[tauri::command]
 pub async fn save_credentials(
     db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
     username: String,
     password: String,
 ) -> Result<(), String> {
     let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
     service
-        .save_credentials(username, password)
+        .save_credentials(username.clone(), password)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    runtime_settings
+        .save_settings(
+            db.inner().as_ref(),
+            serde_json::json!({
+                "steamUsername": username,
+                "depotDownloaderRememberedSession": true
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn clear_credentials(db: State<'_, Arc<SqlitePool>>) -> Result<(), String> {
+pub async fn clear_credentials(
+    db: State<'_, Arc<SqlitePool>>,
+    runtime_settings: State<'_, RuntimeSettingsState>,
+) -> Result<(), String> {
     let service = SettingsService::new(db.inner().clone()).map_err(|e| e.to_string())?;
-    service.clear_credentials().await.map_err(|e| e.to_string())
+    runtime_settings
+        .save_settings(
+            db.inner().as_ref(),
+            serde_json::json!({
+                "steamUsername": null,
+                "depotDownloaderRememberedSession": false
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    // Disable session reuse durably before deleting the encrypted password.
+    // If secret deletion fails, the dormant secret remains inaccessible to
+    // automatic downloads instead of leaving a stale reuse marker enabled.
+    service
+        .clear_credentials()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

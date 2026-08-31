@@ -64,6 +64,10 @@ pub async fn authenticate(
 
                 let mut updates = serde_json::Map::new();
                 updates.insert("steamUsername".to_string(), serde_json::json!(username));
+                updates.insert(
+                    "depotDownloaderRememberedSession".to_string(),
+                    serde_json::json!(true),
+                );
                 runtime_settings
                     .save_settings(db.inner().as_ref(), serde_json::Value::Object(updates))
                     .await
@@ -121,6 +125,10 @@ pub async fn authenticate_qr(
             updates.insert(
                 "steamUsername".to_string(),
                 serde_json::json!(username.clone()),
+            );
+            updates.insert(
+                "depotDownloaderRememberedSession".to_string(),
+                serde_json::json!(true),
             );
             runtime_settings
                 .save_settings(db.inner().as_ref(), serde_json::Value::Object(updates))

@@ -293,6 +293,7 @@ export interface Settings {
   defaultDownloadDir: string;
   depotDownloaderPath?: string;
   steamUsername?: string;
+  depotDownloaderRememberedSession?: boolean;
   maxConcurrentDownloads: number;
   platform: 'windows' | 'macos' | 'linux';
   language: string;

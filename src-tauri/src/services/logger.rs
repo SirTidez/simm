@@ -5,9 +5,11 @@ use log::LevelFilter;
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::RwLock;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 static SESSION_LOG_FILENAME: Lazy<String> = Lazy::new(|| {
     let now = Local::now();
@@ -15,6 +17,11 @@ static SESSION_LOG_FILENAME: Lazy<String> = Lazy::new(|| {
 });
 static SHARED_LOG_LEVEL: Lazy<RwLock<LogLevel>> = Lazy::new(|| RwLock::new(LogLevel::Warn));
 static SHARED_RETENTION_DAYS: Lazy<RwLock<u32>> = Lazy::new(|| RwLock::new(7));
+static SHARED_LOG_FILE: Lazy<Mutex<Option<tokio::fs::File>>> = Lazy::new(|| Mutex::new(None));
+static PENDING_LOG_WRITES: AtomicUsize = AtomicUsize::new(0);
+static LAST_LOG_CLEANUP_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
+const LOG_FLUSH_INTERVAL: usize = 64;
+const LOG_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
 static WINDOWS_PATH_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b[a-z]:[\\/](?:[^\\/:*?"<>|\s]+[\\/])*[^\\/:*?"<>|\s]*"#)
         .expect("windows path regex")
@@ -87,7 +94,11 @@ impl LoggerService {
 
     pub fn level_filter(level: LogLevel) -> LevelFilter {
         match level {
-            LogLevel::Debug => LevelFilter::Trace,
+            // Debug is intentionally not Trace: dependency trace streams (for
+            // example Hyper's idle-pool maintenance) are extremely noisy and
+            // can dominate long-running sessions without helping app-level
+            // diagnosis.
+            LogLevel::Debug => LevelFilter::Debug,
             LogLevel::Info => LevelFilter::Info,
             LogLevel::Warn => LevelFilter::Warn,
             LogLevel::Error => LevelFilter::Error,
@@ -305,33 +316,65 @@ impl LoggerService {
         };
 
         // Use the session log file path stored at initialization
-        if let Err(e) = self.write_to_file(&self.session_log_file, &log_line).await {
+        if let Err(e) = self
+            .write_to_file(
+                &self.session_log_file,
+                &log_line,
+                matches!(level, LogLevel::Warn | LogLevel::Error),
+            )
+            .await
+        {
             eprintln!("Failed to write to app log file: {}", e);
         }
 
-        // Periodically cleanup old logs (do it async without blocking)
-        let logs_dir = self.logs_dir.clone();
-        let retention = Self::read_retention_days();
-        tokio::spawn(async move {
-            let _ = Self::cleanup_old_logs(&logs_dir, retention).await;
-        });
+        self.maybe_schedule_log_cleanup();
     }
 
-    async fn write_to_file(&self, file_path: &PathBuf, content: &str) -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(file_path)
-            .await
-            .context("Failed to open log file")?;
+    async fn write_to_file(&self, file_path: &PathBuf, content: &str, flush: bool) -> Result<()> {
+        let mut shared_file = SHARED_LOG_FILE.lock().await;
+        if shared_file.is_none() {
+            *shared_file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(file_path)
+                    .await
+                    .context("Failed to open log file")?,
+            );
+        }
+        let file = shared_file.as_mut().expect("shared log file initialized");
 
         file.write_all(content.as_bytes())
             .await
             .context("Failed to write to log file")?;
 
-        file.flush().await.context("Failed to flush log file")?;
+        let pending = PENDING_LOG_WRITES.fetch_add(1, Ordering::Relaxed) + 1;
+        if flush || pending >= LOG_FLUSH_INTERVAL {
+            file.flush().await.context("Failed to flush log file")?;
+            PENDING_LOG_WRITES.store(0, Ordering::Relaxed);
+        }
 
         Ok(())
+    }
+
+    fn maybe_schedule_log_cleanup(&self) {
+        let now = Utc::now().timestamp().max(0) as u64;
+        let last = LAST_LOG_CLEANUP_UNIX_SECS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < LOG_CLEANUP_INTERVAL_SECS
+            || LAST_LOG_CLEANUP_UNIX_SECS
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+
+        let logs_dir = self.logs_dir.clone();
+        let retention = Self::read_retention_days();
+        tokio::spawn(async move {
+            if let Err(error) = Self::cleanup_old_logs(&logs_dir, retention).await {
+                eprintln!("[Logger] Failed to clean up old logs: {}", error);
+            }
+        });
     }
 
     async fn cleanup_old_logs(logs_dir: &PathBuf, retention_days: u32) -> Result<()> {
@@ -429,16 +472,18 @@ impl LoggerService {
         };
 
         // Use the app log file path stored at initialization
-        if let Err(e) = self.write_to_file(&self.session_log_file, &log_line).await {
+        if let Err(e) = self
+            .write_to_file(
+                &self.session_log_file,
+                &log_line,
+                matches!(level, LogLevel::Warn | LogLevel::Error),
+            )
+            .await
+        {
             eprintln!("Failed to write to app log file: {}", e);
         }
 
-        // Periodically cleanup old logs (do it async without blocking)
-        let logs_dir = self.logs_dir.clone();
-        let retention = Self::read_retention_days();
-        tokio::spawn(async move {
-            let _ = Self::cleanup_old_logs(&logs_dir, retention).await;
-        });
+        self.maybe_schedule_log_cleanup();
     }
 
     #[allow(dead_code)]
@@ -655,7 +700,7 @@ mod tests {
         assert_eq!(LoggerService::current_log_level(), LogLevel::Debug);
         assert_eq!(
             LoggerService::level_filter(LoggerService::current_log_level()),
-            LevelFilter::Trace
+            LevelFilter::Debug
         );
         assert_eq!(logger_b.get_retention_days().await, 14);
 

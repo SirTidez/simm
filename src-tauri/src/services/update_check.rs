@@ -921,7 +921,10 @@ impl UpdateCheckService {
 
         // DepotDownloader's remembered sessions are cross-platform. If SIMM
         // sends a username without a password, it must opt into the saved token.
-        if credentials.is_some() || settings.steam_username.is_some() {
+        if settings
+            .depot_downloader_remembered_session
+            .unwrap_or(false)
+        {
             cmd.arg("-remember-password");
         }
 

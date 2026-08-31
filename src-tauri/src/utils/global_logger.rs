@@ -1,9 +1,12 @@
 use crate::types::LogLevel;
 use log::{Level, Metadata, Record};
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Mutex;
+
+const LOG_QUEUE_CAPACITY: usize = 4096;
+static DROPPED_LOG_MESSAGES: AtomicUsize = AtomicUsize::new(0);
 
 struct LogMessage {
     level: LogLevel,
@@ -11,7 +14,7 @@ struct LogMessage {
 }
 
 pub struct GlobalLogger {
-    sender: Mutex<Option<Sender<LogMessage>>>,
+    sender: Mutex<Option<SyncSender<LogMessage>>>,
 }
 
 impl GlobalLogger {
@@ -23,7 +26,7 @@ impl GlobalLogger {
 
     pub fn initialize_logger_service(&self) {
         // Create a channel for sending log messages
-        let (tx, rx) = mpsc::channel::<LogMessage>();
+        let (tx, rx) = mpsc::sync_channel::<LogMessage>(LOG_QUEUE_CAPACITY);
 
         // Store the sender
         if let Ok(mut sender) = self.sender.lock() {
@@ -82,7 +85,25 @@ impl GlobalLogger {
     fn send_to_file(&self, level: LogLevel, message: String) {
         if let Ok(sender) = self.sender.lock() {
             if let Some(tx) = sender.as_ref() {
-                let _ = tx.send(LogMessage { level, message });
+                match tx.try_send(LogMessage { level, message }) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(log_message)) => {
+                        if matches!(log_message.level, LogLevel::Warn | LogLevel::Error) {
+                            // Preserve actionable records even during a burst;
+                            // only low-priority traffic may be shed.
+                            let _ = tx.send(log_message);
+                            return;
+                        }
+                        let dropped = DROPPED_LOG_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
+                        if dropped == 1 || dropped % 1000 == 0 {
+                            eprintln!(
+                                "[GlobalLogger] Log queue saturated; dropped {} low-priority record(s)",
+                                dropped
+                            );
+                        }
+                    }
+                    Err(TrySendError::Disconnected(_)) => {}
+                }
             }
         }
     }

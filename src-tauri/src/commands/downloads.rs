@@ -29,10 +29,10 @@ fn non_empty_credential(value: Option<String>) -> Option<String> {
 }
 
 fn should_remember_credentials(
-    durable_credentials_exist: bool,
+    remembered_session_exists: bool,
     one_time_credentials: Option<&OneTimeDownloadCredentials>,
 ) -> bool {
-    durable_credentials_exist
+    remembered_session_exists
         && one_time_credentials
             .map(|credentials| credentials.save_credentials)
             .unwrap_or(true)
@@ -104,15 +104,19 @@ pub async fn start_download(
         .await
         .map_err(|e| e.to_string())?;
 
-    // A stored credential is an explicit, durable opt-in to let
-    // DepotDownloader reuse its own session. Do not infer that consent from a
-    // public username setting alone.
+    // The explicit remembered-session setting is the durable opt-in that lets
+    // DepotDownloader reuse its own credential store. Do not infer that
+    // consent from a public username or an encrypted password alone.
     // An explicit one-time handoff is non-persistent unless it also carries
-    // the save decision and the durable settings lookup confirms that save.
+    // the save decision and the durable session marker confirms that save.
     // A username, password, or caller-provided boolean alone never enables
     // DepotDownloader's own credential persistence.
-    let remember_credentials =
-        should_remember_credentials(credentials.is_some(), one_time_credentials.as_ref());
+    let remember_credentials = should_remember_credentials(
+        settings
+            .depot_downloader_remembered_session
+            .unwrap_or(false),
+        one_time_credentials.as_ref(),
+    );
     let saved_username = credentials.map(|(username, _)| username);
     let one_time_username = one_time_credentials
         .as_ref()

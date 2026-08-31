@@ -1234,6 +1234,7 @@ mod tests {
             default_download_dir: download_dir.to_string_lossy().to_string(),
             depot_downloader_path: Some("C:\\tools\\depotdownloader.exe".to_string()),
             steam_username: Some("tester".to_string()),
+            depot_downloader_remembered_session: Some(true),
             max_concurrent_downloads: 3,
             platform: Platform::Windows,
             language: "en".to_string(),

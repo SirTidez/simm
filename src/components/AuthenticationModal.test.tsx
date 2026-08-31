@@ -138,6 +138,19 @@ describe('AuthenticationModal', () => {
     });
   });
 
+  it('explains that QR generation waits for the user to start it', async () => {
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={() => {}}
+        onAuthenticated={() => {}}
+        required={false}
+      />
+    );
+
+    expect(await screen.findByText('Select “Start QR Login” below to generate a QR code.')).toBeInTheDocument();
+  });
+
   it('renders only QR rows from the DepotDownloader QR stream', async () => {
     let qrLineHandler: ((data: { line: string }) => void) | null = null;
     eventMocks.onSteamAuthQrLine.mockImplementation(async (handler) => {
@@ -228,6 +241,21 @@ describe('AuthenticationModal', () => {
     expect(screen.getByText('Waiting for Steam Approval')).toBeTruthy();
     expect(screen.getByText('Approve the Steam login')).toBeTruthy();
     expect(screen.getByText('Approve this login in Steam Guard')).toBeTruthy();
+  });
+
+  it('allows a download authentication prompt to be dismissed', async () => {
+    const onClose = vi.fn();
+    render(
+      <AuthenticationModal
+        isOpen={true}
+        onClose={onClose}
+        onAuthenticated={() => {}}
+        required={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Steam authentication dialog' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('shows backend auth errors from the command contract', async () => {

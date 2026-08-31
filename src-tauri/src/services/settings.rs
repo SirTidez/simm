@@ -168,6 +168,7 @@ impl SettingsService {
                 .unwrap_or_else(|| ".".to_string()),
             depot_downloader_path: None,
             steam_username: None,
+            depot_downloader_remembered_session: Some(false),
             max_concurrent_downloads: 2,
             platform,
             language: "english".to_string(),
@@ -846,6 +847,8 @@ impl SettingsService {
             if let Ok(mut settings) = serde_json::from_str::<Settings>(&data) {
                 settings.theme = Self::normalize_theme_selection(&settings.theme);
                 self.migrate_window_close_behavior(&mut settings).await?;
+                self.migrate_depot_downloader_remembered_session(&mut settings)
+                    .await?;
                 return Ok(settings);
             }
 
@@ -854,6 +857,8 @@ impl SettingsService {
                 if let Ok(mut settings) = serde_json::from_value::<Settings>(sanitized) {
                     settings.theme = Self::normalize_theme_selection(&settings.theme);
                     self.migrate_window_close_behavior(&mut settings).await?;
+                    self.migrate_depot_downloader_remembered_session(&mut settings)
+                        .await?;
                     log::warn!("Recovered persisted settings through legacy sanitization");
                     return Ok(settings);
                 }
@@ -889,6 +894,35 @@ impl SettingsService {
             .execute(&*self.pool)
             .await
             .context("Failed to migrate window close behavior into application settings")?;
+
+        Ok(())
+    }
+
+    async fn migrate_depot_downloader_remembered_session(
+        &self,
+        settings: &mut Settings,
+    ) -> Result<()> {
+        if settings.depot_downloader_remembered_session.is_some() {
+            return Ok(());
+        }
+
+        // Older SIMM versions only persisted steamUsername after the user
+        // selected the save-session option. Preserve those existing QR-login
+        // sessions while making future decisions use an explicit marker.
+        settings.depot_downloader_remembered_session = Some(
+            settings
+                .steam_username
+                .as_deref()
+                .is_some_and(|username| !username.trim().is_empty()),
+        );
+        let content = serde_json::to_string(settings)
+            .context("Failed to serialize migrated DepotDownloader session setting")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(content)
+            .bind(SETTINGS_ID)
+            .execute(&*self.pool)
+            .await
+            .context("Failed to migrate DepotDownloader remembered-session setting")?;
 
         Ok(())
     }
@@ -1338,6 +1372,43 @@ mod tests {
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn legacy_saved_steam_username_migrates_to_remembered_session_marker() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let mut legacy = serde_json::to_value(SettingsService::default_settings())?;
+        legacy["steamUsername"] = serde_json::json!("saved-user");
+        legacy
+            .as_object_mut()
+            .expect("settings serialize as an object")
+            .remove("depotDownloaderRememberedSession");
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(serde_json::to_string(&legacy)?)
+            .execute(&*pool)
+            .await?;
+
+        let mut service = SettingsService::new(pool.clone())?;
+        let loaded = service.load_settings().await?;
+        assert_eq!(loaded.depot_downloader_remembered_session, Some(true));
+
+        let persisted: String = sqlx::query_scalar("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&persisted)?
+                ["depotDownloaderRememberedSession"],
+            serde_json::json!(true)
+        );
         Ok(())
     }
 

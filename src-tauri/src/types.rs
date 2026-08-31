@@ -373,6 +373,10 @@ pub struct Settings {
     pub default_download_dir: String,
     pub depot_downloader_path: Option<String>,
     pub steam_username: Option<String>,
+    /// Whether DepotDownloader has a user-approved remembered login session.
+    /// Kept separate from the public username because a username alone is not
+    /// sufficient consent to reuse DepotDownloader's credential store.
+    pub depot_downloader_remembered_session: Option<bool>,
     pub max_concurrent_downloads: u32,
     pub platform: Platform,
     pub language: String,

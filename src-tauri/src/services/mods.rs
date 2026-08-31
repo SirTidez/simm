@@ -16138,6 +16138,7 @@ mod tests {
         let _home_guard =
             EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
+        set_test_download_dir(pool.clone(), temp.path()).await?;
         let service = ModsService::new(pool);
 
         let game_dir = temp.path().join("env-dll-plugin");

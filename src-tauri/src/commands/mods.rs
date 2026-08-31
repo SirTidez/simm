@@ -134,7 +134,10 @@ fn security_scan_test_report_for(file_path: &str) -> Option<SecurityScanReport> 
     Some(hook.report.clone())
 }
 
-const MOD_LIBRARY_CACHE_TTL: Duration = Duration::from_millis(750);
+// Mutation and watcher paths explicitly invalidate this cache. Keep a long
+// fallback TTL for external changes that bypass SIMM instead of rescanning the
+// entire library on every pane mount.
+const MOD_LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 struct ModLibraryCacheEntry {
     loaded_at: Instant,
@@ -147,7 +150,7 @@ struct ModLibraryCacheEntry {
 pub(crate) async fn invalidate_mod_library_cache(reason: &'static str) {
     let mut cache = MOD_LIBRARY_CACHE.lock().await;
     if cache.take().is_some() {
-        log::debug!("[ModLibrary] Invalidated short-lived cache ({})", reason);
+        log::debug!("[ModLibrary] Invalidated cached library ({})", reason);
     }
 }
 

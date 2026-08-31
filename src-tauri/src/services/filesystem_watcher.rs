@@ -241,11 +241,17 @@ impl FileSystemWatcherService {
         let environment_id_clone = environment_id.to_string();
         let watch_type_clone = watch_type.to_string();
         let refresh_debouncer = self.refresh_debouncer.clone();
+        let logical_directory = dir_path.clone();
 
         let mut watcher = notify::recommended_watcher(
             move |res: std::result::Result<notify::Event, notify::Error>| {
                 match res {
-                    Ok(_event) => {
+                    Ok(event) => {
+                        // A missing logical directory makes us watch a broader
+                        // ancestor. Ignore unrelated sibling activity there.
+                        if !event_targets_directory(&event, &logical_directory) {
+                            return;
+                        }
                         if let Some(app_arc) = app_handle_clone.as_ref() {
                             let app = app_arc.as_ref().clone();
                             let environment_id = environment_id_clone.clone();
@@ -315,6 +321,10 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn event_targets_directory(event: &notify::Event, directory: &Path) -> bool {
+    event.paths.iter().any(|path| path.starts_with(directory))
+}
+
 impl Default for FileSystemWatcherService {
     fn default() -> Self {
         Self::new()
@@ -362,6 +372,20 @@ mod tests {
             nearest_existing_ancestor(&nested),
             Some(temp.path().to_path_buf())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ancestor_watch_filters_unrelated_sibling_events() -> Result<()> {
+        let temp = tempdir()?;
+        let logical = temp.path().join("Mods");
+        let relevant =
+            notify::Event::new(notify::EventKind::Any).add_path(logical.join("Example.dll"));
+        let unrelated = notify::Event::new(notify::EventKind::Any)
+            .add_path(temp.path().join("Downloads").join("other.zip"));
+
+        assert!(event_targets_directory(&relevant, &logical));
+        assert!(!event_targets_directory(&unrelated, &logical));
         Ok(())
     }
 

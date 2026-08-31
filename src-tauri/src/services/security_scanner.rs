@@ -1793,6 +1793,7 @@ mod tests {
             default_download_dir: "C:/mods".to_string(),
             depot_downloader_path: None,
             steam_username: None,
+            depot_downloader_remembered_session: Some(false),
             max_concurrent_downloads: 1,
             platform: Platform::Windows,
             language: "en-US".to_string(),

@@ -541,8 +541,8 @@ describe('EnvironmentList', () => {
       expect(apiMocks.getPluginsCount).toHaveBeenCalledTimes(1);
       expect(eventMocks.onModsSnapshotUpdated).toHaveBeenCalledTimes(1);
     });
-    expect(apiMocks.getUserLibsCount).not.toHaveBeenCalled();
-    expect(apiMocks.getMelonLoaderStatus).not.toHaveBeenCalled();
+    expect(apiMocks.getUserLibsCount).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getMelonLoaderStatus).toHaveBeenCalledTimes(1);
 
     const snapshotHandler = eventMocks.onModsSnapshotUpdated.mock.calls[0]?.[0] as (
       data: {
