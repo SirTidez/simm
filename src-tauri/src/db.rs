@@ -2172,8 +2172,14 @@ mod tests {
         let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
         let pool = initialize_pool().await?;
 
+        #[cfg(windows)]
         let first_dir = "C:/Games/Schedule I";
+        #[cfg(windows)]
         let second_dir = "C:\\Games\\Schedule I\\";
+        #[cfg(not(windows))]
+        let first_dir = "/opt/simm/Schedule I";
+        #[cfg(not(windows))]
+        let second_dir = "/opt/simm/Schedule I/";
 
         sqlx::query(
             "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",

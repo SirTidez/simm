@@ -861,15 +861,22 @@ impl PluginsService {
 
     pub async fn delete_plugin(&self, game_dir: &str, plugin_file_name: &str) -> Result<()> {
         let plugin_file_name = Self::plugin_file_name(plugin_file_name)?;
+        let enabled_path = self.get_plugins_directory(game_dir).join(plugin_file_name);
+        let enabled_entry = fs::symlink_metadata(&enabled_path).await;
         let (plugins_directory, file_to_delete) = match self
             .existing_managed_plugin_path(game_dir, plugin_file_name, false)
             .await
         {
             Ok(paths) => paths,
-            Err(_) => {
+            Err(_)
+                if enabled_entry
+                    .as_ref()
+                    .is_err_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound) =>
+            {
                 self.existing_managed_plugin_path(game_dir, plugin_file_name, true)
                     .await?
             }
+            Err(error) => return Err(error),
         };
 
         fs::remove_file(&file_to_delete)

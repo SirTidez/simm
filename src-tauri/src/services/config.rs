@@ -963,7 +963,14 @@ impl ConfigService {
 
     async fn managed_config_file(game_dir: &str, file_path: &str) -> Result<PathBuf> {
         let game_root = Self::canonical_game_root(game_dir).await?;
-        let requested = Self::normalize_path(file_path)?;
+        let requested = PathBuf::from(file_path);
+        let requested = if requested.is_relative() {
+            std::env::current_dir()
+                .context("Failed to resolve current directory")?
+                .join(requested)
+        } else {
+            requested
+        };
         let metadata = fs::symlink_metadata(&requested)
             .await
             .context("Failed to inspect config file")?;
