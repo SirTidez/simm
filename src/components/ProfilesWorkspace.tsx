@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -198,7 +198,7 @@ export function ProfilesWorkspace({ preferredEnvironmentId }: ProfilesWorkspaceP
     setNotice(null);
   }, [selectedProfile, selectedRuntime]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     targetSelectionGenerationRef.current += 1;
   }, [selectedProfileId, targetEnvironmentId]);
 
