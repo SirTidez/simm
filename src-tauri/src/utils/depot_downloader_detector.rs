@@ -7,6 +7,34 @@ use std::process::Command;
 
 /// Detects if DepotDownloader is installed and returns its path
 pub async fn detect_depot_downloader() -> Result<DepotDownloaderInfo> {
+    detect_depot_downloader_with_override(None).await
+}
+
+/// Resolves a user-configured DepotDownloader executable before consulting
+/// PATH and the platform defaults. Invalid configured paths fail closed so a
+/// typo cannot silently launch a different installation than the one selected
+/// in Settings.
+pub async fn detect_depot_downloader_with_override(
+    configured_path: Option<&str>,
+) -> Result<DepotDownloaderInfo> {
+    if let Some(configured_path) = configured_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let path = Path::new(configured_path);
+        if !path.is_file() {
+            anyhow::bail!(
+                "Configured DepotDownloader executable does not exist or is not a file: {}",
+                path.display()
+            );
+        }
+        return Ok(depot_downloader_info(
+            true,
+            Some(path.to_string_lossy().into_owned()),
+            Some(DetectionMethod::Manual),
+        ));
+    }
+
     let executable_names = if cfg!(target_os = "windows") {
         vec!["DepotDownloader.exe"]
     } else {
@@ -270,6 +298,30 @@ mod tests {
         );
         assert!(matches!(result.method, Some(DetectionMethod::Manual)));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_executable_takes_precedence() -> Result<()> {
+        let temp = tempdir()?;
+        let executable = temp.path().join("custom-depot.exe");
+        fs::write(&executable, b"fixture").await?;
+
+        let result = detect_depot_downloader_with_override(executable.to_str()).await?;
+        assert!(result.installed);
+        assert_eq!(result.path.as_deref(), executable.to_str());
+        assert!(matches!(result.method, Some(DetectionMethod::Manual)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_configured_executable_fails_closed() -> Result<()> {
+        let temp = tempdir()?;
+        let missing = temp.path().join("missing-depot.exe");
+        let error = detect_depot_downloader_with_override(missing.to_str())
+            .await
+            .expect_err("invalid explicit path must not fall back to another executable");
+        assert!(error.to_string().contains("does not exist"));
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
 import { EnvironmentStoreProvider, useEnvironmentStore } from './environmentStore';
 import type { Environment, DownloadProgress } from '../types';
 
@@ -73,6 +73,8 @@ function Consumer() {
       <div data-testid="env-runtime">{environments[0]?.runtime ?? 'none'}</div>
       <div data-testid="update-available">{String(environments[0]?.updateAvailable ?? false)}</div>
       <div data-testid="progress-count">{progress.size}</div>
+      <div data-testid="progress-operation">{progress.get('env-1')?.operationId ?? 'none'}</div>
+      <div data-testid="progress-status">{progress.get('env-1')?.status ?? 'none'}</div>
       <div data-testid="cached-runtime">{cachedRuntime}</div>
       <button
         data-testid="start-download"
@@ -126,7 +128,8 @@ function Consumer() {
 
 describe('EnvironmentStore', () => {
   let progressHandler: ((data: DownloadProgress) => void) | null = null;
-  let completeHandler: ((data: { downloadId: string; manifestId?: string }) => void) | null = null;
+  let completeHandler: ((data: { downloadId: string; operationId: string; manifestId?: string }) => Promise<void> | void) | null = null;
+  let errorHandler: ((data: { downloadId: string; operationId: string; error: string }) => Promise<void> | void) | null = null;
   let runtimeSwitchHandler: ((data: import('../types').RuntimeSwitchResult) => void) | null = null;
 
   beforeEach(() => {
@@ -150,17 +153,21 @@ describe('EnvironmentStore', () => {
 
     progressHandler = null;
     completeHandler = null;
+    errorHandler = null;
     runtimeSwitchHandler = null;
 
     eventMocks.onProgress.mockImplementation(async (handler: (data: DownloadProgress) => void) => {
       progressHandler = handler;
       return () => {};
     });
-    eventMocks.onComplete.mockImplementation(async (handler: (data: { downloadId: string; manifestId?: string }) => void) => {
+    eventMocks.onComplete.mockImplementation(async (handler: (data: { downloadId: string; operationId: string; manifestId?: string }) => Promise<void> | void) => {
       completeHandler = handler;
       return () => {};
     });
-    eventMocks.onError.mockResolvedValue(() => {});
+    eventMocks.onError.mockImplementation(async (handler: (data: { downloadId: string; operationId: string; error: string }) => Promise<void> | void) => {
+      errorHandler = handler;
+      return () => {};
+    });
     eventMocks.onUpdateAvailable.mockResolvedValue(() => {});
     eventMocks.onUpdateCheckComplete.mockResolvedValue(() => {});
     eventMocks.onRuntimeSwitch.mockImplementation(async (handler: (data: import('../types').RuntimeSwitchResult) => void) => {
@@ -259,7 +266,7 @@ describe('EnvironmentStore', () => {
     fireEvent.click(screen.getByTestId('start-download'));
     await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1'));
 
-    void completeHandler?.({ downloadId: 'env-1' });
+    void completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1' });
     await waitFor(() => expect(screen.getByTestId('env-status').textContent).toBe('completed'));
 
     resolveStart?.();
@@ -284,7 +291,7 @@ describe('EnvironmentStore', () => {
     );
 
     await waitFor(() => expect(screen.getByTestId('loading').textContent).toBe('false'));
-    progressHandler?.({ downloadId: 'env-1', status: 'downloading', progress: 95 });
+    progressHandler?.({ downloadId: 'env-1', operationId: 'operation-1', status: 'downloading', progress: 95 });
     await waitFor(() => expect(screen.getByTestId('progress-count').textContent).toBe('1'));
 
     fireEvent.click(screen.getByTestId('cancel-download'));
@@ -346,6 +353,7 @@ describe('EnvironmentStore', () => {
 
     progressHandler?.({
       downloadId: 'env-1',
+      operationId: 'operation-1',
       status: 'completed',
       progress: 100,
     });
@@ -382,11 +390,12 @@ describe('EnvironmentStore', () => {
 
     progressHandler?.({
       downloadId: 'env-1',
+      operationId: 'operation-1',
       status: 'downloading',
       progress: 10,
     });
 
-    completeHandler?.({ downloadId: 'env-1', manifestId: '123' });
+    completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1', manifestId: '123' });
 
     await waitFor(() => {
       expect(screen.getByTestId('progress-count').textContent).toBe('0');
@@ -398,6 +407,110 @@ describe('EnvironmentStore', () => {
       'env-1',
       expect.objectContaining({ status: 'completed' }),
     );
+  });
+
+  it('ignores a delayed completion from the operation replaced by an immediate retry', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([{ ...baseEnv, currentGameVersion: '1.0.0' }]);
+    apiMocks.startDownload.mockResolvedValue(undefined);
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+    await waitFor(() => expect(completeHandler).not.toBeNull());
+
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-1', status: 'completed', progress: 100,
+    }));
+    fireEvent.click(screen.getByTestId('start-download'));
+    await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1'));
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-2', status: 'downloading', progress: 5,
+    }));
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-1', status: 'error', progress: 100,
+      error: 'Delayed progress from prior operation',
+    }));
+
+    await act(async () => {
+      await completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1' });
+    });
+
+    expect(screen.getByTestId('progress-operation').textContent).toBe('operation-2');
+    expect(screen.getByTestId('progress-status').textContent).toBe('downloading');
+    expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
+    expect(apiMocks.extractGameVersion).not.toHaveBeenCalled();
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalled();
+  });
+
+  it('ignores a delayed error from the operation replaced by an immediate retry', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([{ ...baseEnv, currentGameVersion: '1.0.0' }]);
+    apiMocks.startDownload.mockResolvedValue(undefined);
+    apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
+      ...baseEnv, id, currentGameVersion: '1.0.0', ...updates,
+    }));
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+    await waitFor(() => expect(errorHandler).not.toBeNull());
+
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-1', status: 'error', progress: 40,
+      error: 'First attempt failed',
+    }));
+    await waitFor(() => expect(apiMocks.updateEnvironment).toHaveBeenCalledTimes(1));
+    apiMocks.updateEnvironment.mockClear();
+    fireEvent.click(screen.getByTestId('start-download'));
+    await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1'));
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-2', status: 'downloading', progress: 5,
+    }));
+
+    await act(async () => {
+      await errorHandler?.({
+        downloadId: 'env-1', operationId: 'operation-1', error: 'Delayed first-attempt error',
+      });
+    });
+
+    expect(screen.getByTestId('progress-operation').textContent).toBe('operation-2');
+    expect(screen.getByTestId('progress-status').textContent).toBe('downloading');
+    expect(apiMocks.updateEnvironment).not.toHaveBeenCalled();
+  });
+
+  it('accepts completion from the current immediate-retry operation', async () => {
+    apiMocks.getEnvironments.mockResolvedValue([{ ...baseEnv, currentGameVersion: '1.0.0' }]);
+    apiMocks.startDownload.mockResolvedValue(undefined);
+    apiMocks.extractGameVersion.mockResolvedValue({ version: '2.0.0' });
+    apiMocks.updateEnvironment.mockImplementation(async (id: string, updates: Partial<Environment>) => ({
+      ...baseEnv, id, currentGameVersion: '1.0.0', ...updates,
+    }));
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+    await waitFor(() => expect(completeHandler).not.toBeNull());
+
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-1', status: 'completed', progress: 100,
+    }));
+    fireEvent.click(screen.getByTestId('start-download'));
+    await waitFor(() => expect(apiMocks.startDownload).toHaveBeenCalledWith('env-1'));
+    act(() => progressHandler?.({
+      downloadId: 'env-1', operationId: 'operation-2', status: 'downloading', progress: 5,
+    }));
+
+    await act(async () => {
+      await completeHandler?.({ downloadId: 'env-1', operationId: 'operation-2' });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('progress-count').textContent).toBe('0');
+      expect(apiMocks.extractGameVersion).toHaveBeenCalledWith('env-1');
+      expect(apiMocks.updateEnvironment).toHaveBeenCalledWith('env-1', { currentGameVersion: '2.0.0' });
+    });
   });
 
   it('keeps the existing environment list visible during a completion refresh', async () => {
@@ -419,7 +532,7 @@ describe('EnvironmentStore', () => {
       expect(completeHandler).not.toBeNull();
     });
 
-    void completeHandler?.({ downloadId: 'env-1' });
+    void completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1' });
 
     await waitFor(() => {
       expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(2);
@@ -455,7 +568,7 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('loading').textContent).toBe('false');
     });
 
-    completeHandler?.({ downloadId: 'env-1' });
+    completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1' });
 
     await waitFor(() => {
       expect(screen.getByTestId('progress-count').textContent).toBe('0');
@@ -533,6 +646,45 @@ describe('EnvironmentStore', () => {
       expect(screen.getByTestId('cached-runtime').textContent).toBe('Mono');
     });
     expect(apiMocks.getEnvironments).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a stale version extraction overwrite a newer runtime switch', async () => {
+    apiMocks.getEnvironments.mockResolvedValueOnce([{
+      ...baseEnv,
+      currentGameVersion: '1.0.0',
+      environmentType: 'Steam',
+    }]);
+    let resolveExtraction: (result: {
+      version: string | null;
+      branch?: string;
+      runtime?: Environment['runtime'];
+    }) => void = () => {};
+    apiMocks.extractGameVersion.mockReturnValueOnce(new Promise((resolve) => {
+      resolveExtraction = resolve;
+    }));
+
+    render(
+      <EnvironmentStoreProvider>
+        <Consumer />
+      </EnvironmentStoreProvider>
+    );
+    await waitFor(() => {
+      expect(runtimeSwitchHandler).not.toBeNull();
+      expect(apiMocks.extractGameVersion).toHaveBeenCalledWith('env-1');
+    });
+
+    const emitRuntimeSwitch = runtimeSwitchHandler as unknown as (data: import('../types').RuntimeSwitchResult) => void;
+    act(() => emitRuntimeSwitch({
+      environmentId: 'env-1', environmentName: 'Env', previousBranch: 'closed-beta', branch: 'main',
+      previousRuntime: 'IL2CPP', runtime: 'MONO', disabledItems: 0, installedItems: 0,
+      missingItems: [], errors: [],
+    }));
+    resolveExtraction({ version: '0.9.0', branch: 'closed-beta', runtime: 'IL2CPP' });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('env-branch').textContent).toBe('main');
+      expect(screen.getByTestId('env-runtime').textContent).toBe('Mono');
+    });
   });
 
   it('applies a launch-time Steam runtime switch event immediately', async () => {
@@ -638,7 +790,7 @@ describe('EnvironmentStore', () => {
       expect(completeHandler).not.toBeNull();
     });
 
-    void completeHandler?.({ downloadId: 'env-1' });
+    void completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1' });
     resolveInitialFetch([{ ...baseEnv, status: 'downloading', currentGameVersion: '1.0.0' }]);
 
     await waitFor(() => {

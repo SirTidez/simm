@@ -1,6 +1,6 @@
 use crate::services::environment::EnvironmentService;
 use crate::services::filesystem_watcher::FileSystemWatcherService;
-use crate::types::{schedule_i_config, AppConfig, Environment, EnvironmentStatus};
+use crate::types::{schedule_i_config, AppConfig, Environment};
 use crate::utils::validation::{
     validate_app_id, validate_branch_name, validate_directory_path, validate_environment_name,
 };
@@ -19,48 +19,6 @@ fn normalize_path(path: &str) -> String {
     {
         trimmed.to_string()
     }
-}
-
-fn environment_status_rank(status: &EnvironmentStatus) -> u8 {
-    match status {
-        EnvironmentStatus::Completed => 4,
-        EnvironmentStatus::Downloading => 3,
-        EnvironmentStatus::NotDownloaded => 2,
-        EnvironmentStatus::Unavailable => 1,
-        EnvironmentStatus::Error => 0,
-    }
-}
-
-fn should_replace_existing_for_path(existing: &Environment, candidate: &Environment) -> bool {
-    let existing_is_steam = existing.environment_type == Some(crate::types::EnvironmentType::Steam)
-        || existing.id.starts_with("steam-");
-    let candidate_is_steam = candidate.environment_type
-        == Some(crate::types::EnvironmentType::Steam)
-        || candidate.id.starts_with("steam-");
-
-    if candidate_is_steam != existing_is_steam {
-        return candidate_is_steam;
-    }
-
-    let existing_rank = environment_status_rank(&existing.status);
-    let candidate_rank = environment_status_rank(&candidate.status);
-    if candidate_rank != existing_rank {
-        return candidate_rank > existing_rank;
-    }
-
-    let existing_updated = existing
-        .last_updated
-        .map(|dt| dt.timestamp())
-        .unwrap_or_default();
-    let candidate_updated = candidate
-        .last_updated
-        .map(|dt| dt.timestamp())
-        .unwrap_or_default();
-    if candidate_updated != existing_updated {
-        return candidate_updated > existing_updated;
-    }
-
-    candidate.id < existing.id
 }
 
 fn parse_updates_object(
@@ -166,40 +124,6 @@ pub async fn get_environments(
         .await
         .ok()
         .and_then(|installations| installations.into_iter().next());
-
-    // De-duplicate any environments that point to the same install path before
-    // attempting status reconciliation/upserts to avoid unique-path write conflicts.
-    let mut keeper_by_path: std::collections::HashMap<String, Environment> =
-        std::collections::HashMap::new();
-    let mut duplicate_ids_to_remove: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-
-    for env in &envs {
-        let key = normalize_path(&env.output_dir);
-        if let Some(existing) = keeper_by_path.get(&key).cloned() {
-            if should_replace_existing_for_path(&existing, env) {
-                duplicate_ids_to_remove.insert(existing.id.clone());
-                duplicate_ids_to_remove.remove(&env.id);
-                keeper_by_path.insert(key, env.clone());
-            } else {
-                duplicate_ids_to_remove.insert(env.id.clone());
-            }
-        } else {
-            keeper_by_path.insert(key, env.clone());
-        }
-    }
-
-    if !duplicate_ids_to_remove.is_empty() {
-        for duplicate_id in &duplicate_ids_to_remove {
-            // App initialization may have armed this raw row before this
-            // reconciliation pass.  Remove the watcher before its DB record
-            // and snapshot cache disappear.
-            let watcher_guard = watcher.lock().await;
-            let _ = watcher_guard.stop_watching_environment(duplicate_id).await;
-            let _ = service.hard_delete_environment_record(duplicate_id).await;
-        }
-        envs.retain(|env| !duplicate_ids_to_remove.contains(&env.id));
-    }
 
     for env in envs.iter_mut() {
         let is_steam = env.environment_type == Some(crate::types::EnvironmentType::Steam)

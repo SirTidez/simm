@@ -1,6 +1,14 @@
 # SIMM Bug Fix Implementation Log
 
-Status: ACTIVE
+Status: COMPLETE — original remediation and 2026-09-03 Windows release-readiness follow-up
+
+Current follow-up worktree: `E:\CLionProjects\simmrust\.worktrees\windows-release-readiness-20260903`
+
+Current follow-up branch: `fix/windows-release-readiness`
+
+Current follow-up baseline: `8bbfea823210fcb308cba45cae92e6f83e7cdf07`
+
+Historical remediation record:
 
 Implementation worktree: `E:\CLionProjects\simmrust\.worktrees\bug-remediation-20260820`
 
@@ -13,6 +21,18 @@ Authoritative evidence:
 - `E:\CLionProjects\simmrust\.worktrees\bug-discovery-swarm-20260820\BUG_DISCOVERY_REPORT.md`
 - `E:\CLionProjects\simmrust\.worktrees\bug-discovery-swarm-20260820\BUG_REMEDIATION_PLAN.md`
 - `E:\CLionProjects\simmrust\.worktrees\bug-discovery-swarm-20260820\_audit-poc\terra-proofs\PROOF_RESULTS.md`
+
+## 2026-09-03 — Windows release-readiness follow-up
+
+- Preserved the accepted release-branch merge behavior and Windows/Linux GitHub publication coupling; Linux Nexus publication remains outside this release scope.
+- Kept telemetry unavailable unless `SIMM_ENABLE_TELEMETRY` is trimmed `1` or case-insensitive `true`, and added consent revalidation plus Windows rooted/UNC path filtering at the upload boundary.
+- Closed DepotDownloader account-state, working-directory, custom-path, process-lifecycle, batch-timeout, and same-environment retry races.
+- Added final path containment for mod mutations, fail-closed Nexus runtime selection, canonical provider filenames, safe storage cleanup, and actual expanded-byte budgets for install/scanner/FOMOD archive paths.
+- Added serialized and recoverable save/Steam configuration writes, non-destructive environment/database/settings repair, and nonblocking high-severity log fallback.
+- Hardened Windows installer/release delivery with prerequisite signer verification, required Authenticode secrets, signature checks, draft-first publication, same-tag serialization, final asset/signature verification, release-contract tests, and Windows-native Rust CI.
+- An independent read-only bypass review found four integration gaps; all four were corrected and covered by malicious and legitimate controls before final validation.
+- Final local validation: TypeScript passed; lint passed with 0 errors and 21 advisory warnings; 35 Vitest files / 381 tests passed; production build passed; release-contract tests passed; Cargo check passed without warnings; Cargo tests passed 549 with 6 intentionally ignored live tests; Rust formatting, diff checks, and IPC registration checks passed.
+- Remaining external gates: a production certificate-backed Windows build/install must prove the app, installer, and embedded uninstaller signatures; packaged enabled/disabled telemetry launches and live DepotDownloader/Steam/provider/game behavior still require attended validation. Linux public Nexus posting remains intentionally deferred.
 
 ## Model and concurrency policy
 

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -24,6 +25,8 @@ const SAVE_SLOT_COUNT: u8 = 5;
 const STEAM_PROFILE_TIMEOUT_SECONDS: u64 = 2;
 
 static STEAM_DISPLAY_NAME_CACHE: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static SAVE_SLOT_OPERATION_LOCKS: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Default)]
@@ -98,6 +101,8 @@ impl SaveBackupsService {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
         validate_retention_limit(retention_limit)?;
+        let _operation_guard = lock_save_slot(steam_id, slot_number).await;
+        ensure_schedule_i_not_running("create a save backup").await?;
 
         let account_path = schedule_i_saves_dir()?.join(steam_id);
         let source = slot_path(&account_path, slot_number);
@@ -138,6 +143,8 @@ impl SaveBackupsService {
     ) -> Result<GameSaveBackupExportResult> {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
+        let _operation_guard = lock_save_slot(steam_id, slot_number).await;
+        ensure_schedule_i_not_running("export a save backup").await?;
 
         let source = slot_path(&schedule_i_saves_dir()?.join(steam_id), slot_number);
         if !source.is_dir() {
@@ -169,12 +176,12 @@ impl SaveBackupsService {
             .file_name()
             .and_then(|value| value.to_str())
             .context("Choose a file name for the ZIP export")?;
-        let staging = destination_parent.join(format!(".{file_name}.simm-partial"));
-        if staging.exists() {
-            std::fs::remove_file(&staging)
-                .context("Failed to clear an incomplete save ZIP export")?;
-        }
+        let staging = destination_parent.join(format!(
+            ".{file_name}.simm-{}.partial",
+            uuid::Uuid::new_v4()
+        ));
 
+        let source_fingerprint_before = backup_content_fingerprint(&source).await?;
         let source_for_export = source.clone();
         let staging_for_export = staging.clone();
         let export_result = tokio::task::spawn_blocking(move || {
@@ -185,6 +192,19 @@ impl SaveBackupsService {
         if let Err(error) = export_result {
             let _ = fs::remove_file(&staging).await;
             return Err(error);
+        }
+        let source_fingerprint_after = match backup_content_fingerprint(&source).await {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let _ = fs::remove_file(&staging).await;
+                return Err(error);
+            }
+        };
+        if source_fingerprint_after != source_fingerprint_before {
+            let _ = fs::remove_file(&staging).await;
+            anyhow::bail!(
+                "The save changed while SIMM was exporting it; close Schedule I and try again"
+            )
         }
 
         fs::rename(&staging, &destination)
@@ -210,6 +230,8 @@ impl SaveBackupsService {
     ) -> Result<GameSaveRestoreResult> {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
+        let _operation_guard = lock_save_slot(steam_id, slot_number).await;
+        ensure_schedule_i_not_running("restore a save backup").await?;
 
         let account_path = schedule_i_saves_dir()?.join(steam_id);
         let backup_slot_root = slot_path(&account_path.join("backups"), slot_number);
@@ -236,6 +258,7 @@ impl SaveBackupsService {
     ) -> Result<GameSaveRestorePreview> {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
+        let _operation_guard = lock_save_slot(steam_id, slot_number).await;
 
         let account_path = schedule_i_saves_dir()?.join(steam_id);
         let backup_slot_root = slot_path(&account_path.join("backups"), slot_number);
@@ -265,6 +288,8 @@ impl SaveBackupsService {
     ) -> Result<GameSaveRestoreResult> {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
+        let _operation_guard = lock_save_slot(steam_id, slot_number).await;
+        ensure_schedule_i_not_running("restore a save backup").await?;
         let zip_path = restore_zip_path(zip_path)?;
         if !zip_path.is_file() {
             anyhow::bail!("The selected ZIP file was not found")
@@ -273,7 +298,6 @@ impl SaveBackupsService {
         let account_path = schedule_i_saves_dir()?.join(steam_id);
         let destination = slot_path(&account_path, slot_number);
         let staging = restore_staging_path(&destination, slot_number);
-        remove_directory_if_exists(&staging).await?;
         let zip_for_restore = zip_path.clone();
         let staging_for_restore = staging.clone();
         let extraction = tokio::task::spawn_blocking(move || {
@@ -286,7 +310,14 @@ impl SaveBackupsService {
             return Err(error);
         }
 
-        validate_save_directory(&staging, "The staged ZIP restore").await?;
+        if let Err(error) = validate_save_directory(&staging, "The staged ZIP restore").await {
+            let _ = remove_directory_if_exists(&staging).await;
+            return Err(error);
+        }
+        if let Err(error) = ensure_schedule_i_not_running("restore a save backup").await {
+            let _ = remove_directory_if_exists(&staging).await;
+            return Err(error);
+        }
         create_rollback_backup_if_present(
             &destination,
             &slot_path(&account_path.join("backups"), slot_number),
@@ -304,6 +335,7 @@ impl SaveBackupsService {
     ) -> Result<GameSaveRestorePreview> {
         validate_steam_id(steam_id)?;
         validate_slot_number(slot_number)?;
+        let _operation_guard = lock_save_slot(steam_id, slot_number).await;
         let zip_path = restore_zip_path(zip_path)?;
         if !zip_path.is_file() {
             anyhow::bail!("The selected ZIP file was not found")
@@ -442,7 +474,48 @@ fn restore_zip_path(zip_path: &str) -> Result<PathBuf> {
 }
 
 fn restore_staging_path(destination: &Path, slot_number: u8) -> PathBuf {
-    destination.with_file_name(format!("SaveGame_{slot_number}.simm-restore"))
+    destination.with_file_name(format!(
+        "SaveGame_{slot_number}.simm-restore-{}",
+        uuid::Uuid::new_v4()
+    ))
+}
+
+async fn lock_save_slot(steam_id: &str, slot_number: u8) -> tokio::sync::OwnedMutexGuard<()> {
+    let key = format!("{steam_id}:{slot_number}");
+    let slot_lock = {
+        let mut locks = SAVE_SLOT_OPERATION_LOCKS.lock().await;
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    slot_lock.lock_owned().await
+}
+
+async fn ensure_schedule_i_not_running(action: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let running = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "if (Get-Process -Name 'Schedule I' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
+                ])
+                .status()
+        })
+        .await
+        .context("Schedule I process check stopped unexpectedly")?
+        .context("Could not check whether Schedule I is running")?
+        .success();
+        if running {
+            anyhow::bail!(
+                "Close Schedule I before asking SIMM to {action}; changing live save files could create an inconsistent or lost save"
+            )
+        }
+    }
+    Ok(())
 }
 
 fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
@@ -530,25 +603,15 @@ async fn create_backup_snapshot(
     kind: &str,
 ) -> Result<PathBuf> {
     validate_save_directory(source, "The source save").await?;
+    let source_fingerprint_before = backup_content_fingerprint(source).await?;
     fs::create_dir_all(backup_slot_root)
         .await
         .context("Failed to create the game's save backup directory")?;
 
     let base_name = snapshot_name();
-    let snapshot_name = if kind == "manual" {
-        base_name
-    } else {
-        format!("{base_name}-{kind}-{}", uuid::Uuid::new_v4())
-    };
+    let snapshot_name = format!("{base_name}-{kind}-{}", uuid::Uuid::new_v4());
     let destination = backup_slot_root.join(&snapshot_name);
     let staging = backup_slot_root.join(format!(".{snapshot_name}.simm-partial"));
-    remove_directory_if_exists(&staging)
-        .await
-        .context("Failed to clear an incomplete game save backup")?;
-    if destination.exists() {
-        anyhow::bail!("A game backup already exists for this save slot at this timestamp")
-    }
-
     if let Err(error) = copy_directory_recursive(source, &staging).await {
         let _ = remove_directory_if_exists(&staging).await;
         return Err(error).context("Failed to stage the game save backup");
@@ -556,6 +619,26 @@ async fn create_backup_snapshot(
     if let Err(error) = validate_save_directory(&staging, "The staged game backup").await {
         let _ = remove_directory_if_exists(&staging).await;
         return Err(error);
+    }
+    let source_fingerprint_after = match backup_content_fingerprint(source).await {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let _ = remove_directory_if_exists(&staging).await;
+            return Err(error);
+        }
+    };
+    let staged_fingerprint = match backup_content_fingerprint(&staging).await {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let _ = remove_directory_if_exists(&staging).await;
+            return Err(error);
+        }
+    };
+    if source_fingerprint_after != source_fingerprint_before
+        || staged_fingerprint != source_fingerprint_before
+    {
+        let _ = remove_directory_if_exists(&staging).await;
+        anyhow::bail!("The save changed while SIMM was copying it; close Schedule I and try again")
     }
     fs::rename(&staging, &destination)
         .await
@@ -612,7 +695,6 @@ async fn restore_directory_to_slot(
 ) -> Result<()> {
     let slot_number = slot_number_from_path(destination)?;
     let staging = restore_staging_path(destination, slot_number);
-    remove_directory_if_exists(&staging).await?;
     let stage_result = if legacy_root {
         copy_legacy_backup_payload(source, &staging).await
     } else {
@@ -626,6 +708,10 @@ async fn restore_directory_to_slot(
         let _ = remove_directory_if_exists(&staging).await;
         return Err(error);
     }
+    if let Err(error) = ensure_schedule_i_not_running("restore a save backup").await {
+        let _ = remove_directory_if_exists(&staging).await;
+        return Err(error);
+    }
     create_rollback_backup_if_present(destination, backup_slot_root).await?;
     replace_slot_with_staging(destination, &staging, slot_number).await
 }
@@ -635,8 +721,10 @@ async fn replace_slot_with_staging(
     staging: &Path,
     slot_number: u8,
 ) -> Result<()> {
-    let previous = destination.with_file_name(format!("SaveGame_{slot_number}.simm-previous"));
-    remove_directory_if_exists(&previous).await?;
+    let previous = destination.with_file_name(format!(
+        "SaveGame_{slot_number}.simm-previous-{}",
+        uuid::Uuid::new_v4()
+    ));
 
     if destination.exists() {
         fs::rename(destination, &previous)
@@ -976,6 +1064,7 @@ fn extract_steam_display_name(profile_xml: &str) -> Option<String> {
     )
 }
 
+#[cfg(test)]
 async fn read_backup(path: &Path) -> Result<Option<GameSaveBackup>> {
     Ok(read_valid_game_backups(path).await?.into_iter().next())
 }
@@ -1408,13 +1497,15 @@ mod tests {
     use super::{
         backup_content_fingerprint, cash_balance_from_inventory, create_backup_snapshot,
         extract_save_zip, extract_steam_display_name, game_backup_from_path, game_date_from_json,
-        issue_backup_restore_token, json_number, json_unsigned, organization_name_from_json,
-        prune_game_backups, read_backup, read_valid_game_backups, resolve_backup_restore_token,
-        restore_directory_to_slot, restore_preview, safe_zip_output_path, select_game_backup,
-        slot_path, validate_slot_number, validate_steam_id, write_save_slot_zip,
+        issue_backup_restore_token, json_number, json_unsigned, lock_save_slot,
+        organization_name_from_json, prune_game_backups, read_backup, read_valid_game_backups,
+        resolve_backup_restore_token, restore_directory_to_slot, restore_preview,
+        restore_staging_path, safe_zip_output_path, select_game_backup, slot_path,
+        validate_slot_number, validate_steam_id, write_save_slot_zip,
     };
     use std::io::Read;
     use std::path::Path;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn write_game_json(path: &Path, organization_name: &str) {
@@ -1443,6 +1534,43 @@ mod tests {
         assert_eq!(
             slot_path(Path::new("C:/Saves"), 2),
             Path::new("C:/Saves/SaveGame_2")
+        );
+    }
+
+    #[test]
+    fn restore_staging_paths_are_unique_per_operation() {
+        let destination = Path::new("C:/saves/SaveGame_3");
+        let first = restore_staging_path(destination, 3);
+        let second = restore_staging_path(destination, 3);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), destination.parent());
+        assert!(first.file_name().is_some_and(|name| name
+            .to_string_lossy()
+            .starts_with("SaveGame_3.simm-restore-")));
+    }
+
+    #[tokio::test]
+    async fn save_slot_operations_serialize_only_the_same_account_slot() {
+        let steam_id = format!("test-{}", uuid::Uuid::new_v4());
+        let first = lock_save_slot(&steam_id, 1).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lock_save_slot(&steam_id, 1))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lock_save_slot(&steam_id, 2))
+                .await
+                .is_ok()
+        );
+
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lock_save_slot(&steam_id, 1))
+                .await
+                .is_ok()
         );
     }
 

@@ -332,6 +332,19 @@ describe('EnvironmentList', () => {
     });
   });
 
+  it('gives the keyboard-focusable environment card an accessible action-menu identity', async () => {
+    render(<EnvironmentList />);
+
+    const card = await screen.findByRole('button', { name: `Open actions for ${completedEnv.name}` });
+    expect(card).toHaveAttribute('aria-haspopup', 'menu');
+    expect(card).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.keyDown(card, { key: 'ContextMenu' });
+    await waitFor(() => expect(card).toHaveAttribute('aria-expanded', 'true'));
+    expect(card).toHaveAttribute('aria-controls', `environment-actions-${completedEnv.id}`);
+    expect(document.getElementById(`environment-actions-${completedEnv.id}`)).not.toBeNull();
+  });
+
   afterEach(() => {
     cleanup();
   });

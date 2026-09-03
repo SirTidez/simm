@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ApiService } from '../services/api';
-import { onLiveTelemetryEvent, onLiveTelemetryStatus } from '../services/events';
+import { createAsyncListenerScope, onLiveTelemetryEvent, onLiveTelemetryStatus } from '../services/events';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import type { LiveTelemetryEvent, LiveTelemetryExport, LiveTelemetryStatus, TelemetryCapability, TelemetryModCaptureMode, TelemetryModPolicyItem, TelemetryPreferences, TelemetryUploadPreview, TelemetryUploadReceipt } from '../types';
 import { ConfirmOverlay } from './ConfirmOverlay';
@@ -27,10 +27,18 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
   const [modPolicyOpen, setModPolicyOpen] = useState(false);
   const [modPolicies, setModPolicies] = useState<TelemetryModPolicyItem[]>([]);
   const [modRuleScopes, setModRuleScopes] = useState<Record<string, 'environment' | 'global'>>({});
+  const refreshGenerationRef = useRef(0);
+
+  const reportActionError = useCallback((error: unknown, fallback: string) => {
+    setFeedback(error instanceof Error ? error.message : fallback);
+    setFeedbackTone('error');
+  }, []);
 
   const refresh = useCallback(async () => {
+    const refreshGeneration = ++refreshGenerationRef.current;
     try {
       const nextCapability = await ApiService.getTelemetryCapability();
+      if (refreshGeneration !== refreshGenerationRef.current) return;
       setCapability(nextCapability);
       if (!nextCapability.available) {
         setFeedback('Telemetry is not available in this SIMM package.');
@@ -44,12 +52,14 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
         ApiService.listTelemetryUploads(),
         ApiService.exportLiveTelemetryHistory(environmentId || null),
       ]);
+      if (refreshGeneration !== refreshGenerationRef.current) return;
       setPreferences(nextPreferences);
       setStatuses(nextStatuses);
       setEvents(nextEvents);
       setUploads(nextUploads);
       setCaptureHistory(nextCaptureHistory);
     } catch (error) {
+      if (refreshGeneration !== refreshGenerationRef.current) return;
       setFeedback(error instanceof Error ? error.message : 'Failed to refresh local telemetry. Retry when SIMM is ready.');
       setFeedbackTone('error');
     }
@@ -57,17 +67,20 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
-    let disposed = false;
-    let unlistenEvent: (() => void) | undefined;
-    let unlistenStatus: (() => void) | undefined;
-    void onLiveTelemetryEvent(() => void refresh()).then((unlisten) => {
-      if (disposed) unlisten(); else unlistenEvent = unlisten;
-    }).catch((error) => reportActionError(error, 'Failed to listen for telemetry events.'));
-    void onLiveTelemetryStatus(() => void refresh()).then((unlisten) => {
-      if (disposed) unlisten(); else unlistenStatus = unlisten;
-    }).catch((error) => reportActionError(error, 'Failed to listen for telemetry status updates.'));
-    return () => { disposed = true; unlistenEvent?.(); unlistenStatus?.(); };
-  }, [refresh]);
+    const listeners = createAsyncListenerScope((error) => {
+      reportActionError(error, 'Failed to listen for telemetry updates.');
+    });
+    listeners.register(() => onLiveTelemetryEvent(() => {
+      if (listeners.isActive()) void refresh();
+    }));
+    listeners.register(() => onLiveTelemetryStatus(() => {
+      if (listeners.isActive()) void refresh();
+    }));
+    return () => {
+      refreshGenerationRef.current += 1;
+      listeners.dispose();
+    };
+  }, [refresh, reportActionError]);
 
   const filteredEvents = useMemo(
     () => events.filter((event) => severity === 'all' || event.severity === severity),
@@ -93,11 +106,6 @@ export function TelemetryWorkspace({ onClose }: { onClose: () => void }) {
         : latestUpload?.state === 'accepted'
           ? 'Last update-check sync accepted'
           : 'Queued for update check';
-
-  const reportActionError = (error: unknown, fallback: string) => {
-    setFeedback(error instanceof Error ? error.message : fallback);
-    setFeedbackTone('error');
-  };
 
   const updatePreferences = async (updates: Partial<TelemetryPreferences>) => {
     setBusy(true);

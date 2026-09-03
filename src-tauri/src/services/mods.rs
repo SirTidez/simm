@@ -1,4 +1,4 @@
-use crate::services::fomod::{FomodInstallEntry, FomodService};
+use crate::services::fomod::{ArchiveBudget, FomodInstallEntry, FomodService};
 use crate::services::nexus_mods::NexusModsService;
 use crate::services::settings::SettingsService;
 use crate::services::thunderstore::shared_thunderstore_service;
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{copy, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,6 +186,36 @@ fn safe_archive_relative_path(entry_name: &str) -> std::result::Result<PathBuf, 
         ))
     } else {
         Ok(relative)
+    }
+}
+
+fn safe_mod_relative_dll_path(file_name: &str) -> Result<PathBuf> {
+    let relative =
+        safe_archive_relative_path(file_name).map_err(|_| anyhow::anyhow!("Invalid mod file"))?;
+    let is_dll = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.to_ascii_lowercase().ends_with(".dll"));
+    if !is_dll {
+        anyhow::bail!("Invalid mod file");
+    }
+    Ok(relative)
+}
+
+fn safe_direct_file_name(file_name: &str) -> Result<&str> {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains(':')
+        || trimmed.chars().any(char::is_control)
+    {
+        anyhow::bail!("Invalid original file name");
+    }
+    let mut components = Path::new(trimmed).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(trimmed),
+        _ => anyhow::bail!("Invalid original file name"),
     }
 }
 
@@ -1812,6 +1842,36 @@ impl ModsService {
         let env_root = match fs::canonicalize(env_root).await {
             Ok(path) => path,
             Err(_) => env_root.to_path_buf(),
+        };
+        candidate.starts_with(env_root)
+    }
+
+    async fn managed_mutation_path_is_inside_environment(
+        &self,
+        path: &Path,
+        output_dir: &str,
+    ) -> bool {
+        let env_root = match fs::canonicalize(output_dir).await {
+            Ok(path) => path,
+            Err(_) => PathBuf::from(output_dir),
+        };
+        let candidate = if self.path_exists_or_symlink(path).await {
+            match fs::canonicalize(path).await {
+                Ok(path) => path,
+                Err(_) => return false,
+            }
+        } else {
+            let Some(parent) = path.parent() else {
+                return false;
+            };
+            let parent = match fs::canonicalize(parent).await {
+                Ok(path) => path,
+                Err(_) => return false,
+            };
+            let Some(file_name) = path.file_name() else {
+                return false;
+            };
+            parent.join(file_name)
         };
         candidate.starts_with(env_root)
     }
@@ -4199,6 +4259,16 @@ impl ModsService {
                 continue;
             }
 
+            if !self
+                .managed_mutation_path_is_inside_environment(from_path, output_dir)
+                .await
+                || !self
+                    .managed_mutation_path_is_inside_environment(to_path, output_dir)
+                    .await
+            {
+                anyhow::bail!("Refusing to modify a managed path outside the environment");
+            }
+
             fs::rename(from_path, to_path).await.with_context(|| {
                 format!(
                     "Failed to {} managed path {}",
@@ -5787,8 +5857,8 @@ impl ModsService {
         if file_ext == "dll" {
             let bucket_target =
                 Self::resolve_direct_file_bucket_target(target.as_deref(), archive_path);
-            let file_name = if !original_file_name.is_empty() {
-                original_file_name.to_string()
+            let file_name = if !original_file_name.trim().is_empty() {
+                safe_direct_file_name(original_file_name)?.to_string()
             } else {
                 archive_path
                     .file_name()
@@ -6942,13 +7012,9 @@ exit 1
 
     pub async fn delete_mod(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
         let mods_directory = self.get_mods_directory(game_dir);
-        let mod_path = mods_directory.join(mod_file_name);
-        let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
-
-        // Security: Ensure the file is within the mods directory and ends with .dll
-        if !mod_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid mod file"));
-        }
+        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
+        let mod_path = mods_directory.join(&relative_mod_path);
+        let disabled_path = PathBuf::from(format!("{}.disabled", mod_path.to_string_lossy()));
 
         let managed_meta = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
@@ -6989,6 +7055,15 @@ exit 1
             candidate_paths.insert(disabled_path.clone());
 
             for path in candidate_paths {
+                if !self.path_exists_or_symlink(&path).await {
+                    continue;
+                }
+                if !self
+                    .managed_mutation_path_is_inside_environment(&path, game_dir)
+                    .await
+                {
+                    anyhow::bail!("Refusing to remove a mod path outside the environment");
+                }
                 removed_any |= self.remove_path_if_exists(&path).await?;
             }
 
@@ -7011,6 +7086,13 @@ exit 1
         } else {
             return Err(anyhow::anyhow!("Mod file not found"));
         };
+
+        if !self
+            .managed_mutation_path_is_inside_environment(&file_to_delete, game_dir)
+            .await
+        {
+            anyhow::bail!("Refusing to remove a mod path outside the environment");
+        }
 
         // Verify it's actually a file
         let metadata = fs::metadata(&file_to_delete).await?;
@@ -7036,13 +7118,9 @@ exit 1
 
     pub async fn disable_mod(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
         let mods_directory = self.get_mods_directory(game_dir);
-        let mod_path = mods_directory.join(mod_file_name);
-        let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
-
-        // Security: Ensure the file is within the mods directory and ends with .dll
-        if !mod_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid mod file"));
-        }
+        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
+        let mod_path = mods_directory.join(&relative_mod_path);
+        let disabled_path = PathBuf::from(format!("{}.disabled", mod_path.to_string_lossy()));
 
         if let Some(storage_id) = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
@@ -7065,6 +7143,16 @@ exit 1
             return Err(anyhow::anyhow!("Mod is already disabled"));
         }
 
+        if !self
+            .managed_mutation_path_is_inside_environment(&mod_path, game_dir)
+            .await
+            || !self
+                .managed_mutation_path_is_inside_environment(&disabled_path, game_dir)
+                .await
+        {
+            anyhow::bail!("Refusing to modify a mod path outside the environment");
+        }
+
         // Verify it's actually a file
         let metadata = fs::metadata(&mod_path).await?;
         if !metadata.is_file() {
@@ -7081,13 +7169,9 @@ exit 1
 
     pub async fn enable_mod(&self, game_dir: &str, mod_file_name: &str) -> Result<()> {
         let mods_directory = self.get_mods_directory(game_dir);
-        let disabled_path = mods_directory.join(format!("{}.disabled", mod_file_name));
-        let mod_path = mods_directory.join(mod_file_name);
-
-        // Security: Ensure the file is within the mods directory and ends with .dll
-        if !mod_file_name.to_lowercase().ends_with(".dll") {
-            return Err(anyhow::anyhow!("Invalid mod file"));
-        }
+        let relative_mod_path = safe_mod_relative_dll_path(mod_file_name)?;
+        let mod_path = mods_directory.join(&relative_mod_path);
+        let disabled_path = PathBuf::from(format!("{}.disabled", mod_path.to_string_lossy()));
 
         if let Some(storage_id) = self
             .try_load_raw_mod_metadata_entry(game_dir, mod_file_name)
@@ -7108,6 +7192,16 @@ exit 1
 
         if mod_path.exists() {
             return Err(anyhow::anyhow!("Mod file already exists (not disabled)"));
+        }
+
+        if !self
+            .managed_mutation_path_is_inside_environment(&disabled_path, game_dir)
+            .await
+            || !self
+                .managed_mutation_path_is_inside_environment(&mod_path, game_dir)
+                .await
+        {
+            anyhow::bail!("Refusing to modify a mod path outside the environment");
         }
 
         // Verify it's actually a file
@@ -7894,6 +7988,7 @@ exit 1
         let file = File::open(zip_path).context("Failed to open zip file")?;
 
         let mut archive = ZipArchive::new(file).context("Failed to read zip archive")?;
+        let mut budget = ArchiveBudget::default();
 
         // Extract directly to disk so large archives are not buffered in memory.
         for i in 0..archive.len() {
@@ -7902,6 +7997,9 @@ exit 1
                 .context("Failed to read file from archive")?;
 
             let file_name = file.name().to_string();
+            budget
+                .account(&file_name, file.size())
+                .context("Zip archive exceeds extraction limits")?;
             let relative_path = safe_archive_relative_path(&file_name)
                 .map_err(anyhow::Error::msg)
                 .context("Unsafe path in zip archive")?;
@@ -7915,9 +8013,9 @@ exit 1
                     std::fs::create_dir_all(p)
                         .context("Failed to create archive parent directory")?;
                 }
-                let mut outfile =
-                    File::create(&outpath).context("Failed to create extracted archive file")?;
-                copy(&mut file, &mut outfile).context("Failed to extract archive file")?;
+                budget
+                    .copy_entry_to_path(&file_name, &mut file, &outpath)
+                    .context("Failed to extract archive file")?;
             }
         }
 
@@ -8133,11 +8231,15 @@ exit 1
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("Invalid temp directory path"))?;
 
+            let mut budget = ArchiveBudget::default();
             // Process all entries in the archive synchronously
             while let Some(header) = archive.read_header().context("Failed to read RAR header")? {
                 let entry = header.entry();
                 let is_dir = entry.is_directory();
                 validate_rar_entry_path(&entry.filename)?;
+                budget
+                    .account(&entry.filename.to_string_lossy(), entry.unpacked_size)
+                    .context("RAR archive exceeds extraction limits")?;
 
                 if is_dir {
                     archive = header.skip().context("Failed to skip directory entry")?;
@@ -8343,6 +8445,7 @@ exit 1
         let archive_path = archive_path.to_path_buf();
         let extract_dir = temp_dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
+            let mut budget = ArchiveBudget::default();
             sevenz_rust::decompress_file_with_extract_fn(
                 &archive_path,
                 &extract_dir,
@@ -8350,6 +8453,9 @@ exit 1
                     if entry.name().is_empty() && entry.is_directory() {
                         return Ok(true);
                     }
+                    budget
+                        .account(entry.name(), entry.size())
+                        .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
                     let relative_path = safe_archive_relative_path(entry.name())
                         .map_err(sevenz_rust::Error::other)?;
                     let output_path = extract_dir.join(relative_path);
@@ -8360,9 +8466,9 @@ exit 1
                         if let Some(parent) = output_path.parent() {
                             std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
                         }
-                        let mut output =
-                            File::create(&output_path).map_err(sevenz_rust::Error::io)?;
-                        std::io::copy(reader, &mut output).map_err(sevenz_rust::Error::io)?;
+                        budget
+                            .copy_entry_to_path(entry.name(), reader, &output_path)
+                            .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
                     }
 
                     Ok(true)
@@ -8560,11 +8666,19 @@ exit 1
             let file = File::open(&archive_path).context("Failed to open tar.gz archive")?;
             let decoder = GzDecoder::new(file);
             let mut archive = tar::Archive::new(decoder);
+            let mut budget = ArchiveBudget::default();
 
             for entry in archive.entries().context("Failed to read tar.gz archive")? {
                 let mut entry = entry.context("Failed to read tar.gz entry")?;
                 let entry_path = entry.path().context("Failed to read tar.gz entry path")?;
                 let entry_name = entry_path.to_string_lossy().replace('\\', "/");
+                let expanded_size = entry
+                    .header()
+                    .size()
+                    .context("Failed to read tar.gz entry size")?;
+                budget
+                    .account(&entry_name, expanded_size)
+                    .context("tar.gz archive exceeds extraction limits")?;
                 let relative_path = safe_archive_relative_path(&entry_name)
                     .map_err(|error| anyhow::anyhow!(error))?;
                 let output_path = extract_dir.join(relative_path);
@@ -8580,9 +8694,11 @@ exit 1
                             format!("Failed to create directory {}", parent.display())
                         })?;
                     }
-                    entry.unpack(&output_path).with_context(|| {
-                        format!("Failed to extract tar.gz file {}", output_path.display())
-                    })?;
+                    budget
+                        .copy_entry_to_path(&entry_name, &mut entry, &output_path)
+                        .with_context(|| {
+                            format!("Failed to extract tar.gz file {}", output_path.display())
+                        })?;
                 }
             }
 
@@ -9638,11 +9754,13 @@ exit 1
         }))
     }
 
-    /// Clean up duplicate/unused mod storage directories
-    /// Removes directories that aren't referenced by any environment's metadata
+    /// Clean up abandoned internal staging directories.
+    ///
+    /// Normal storage directories are library entries even when no environment currently
+    /// references them, so an "unused" reference count is not proof that they are safe to
+    /// delete. Only SIMM-owned staging directories old enough that no install can still be
+    /// publishing them are eligible here.
     pub async fn cleanup_duplicate_mod_storage(&self) -> Result<serde_json::Value> {
-        use crate::services::environment::EnvironmentService;
-
         let mod_storage_dir = self.get_mods_storage_dir().await?;
 
         if !mod_storage_dir.exists() {
@@ -9653,39 +9771,8 @@ exit 1
             }));
         }
 
-        // Get all environments
-        let env_service = EnvironmentService::new(self.pool.clone())
-            .context("Failed to create environment service")?;
-        let environments = env_service
-            .get_environments()
-            .await
-            .context("Failed to get environments")?;
-
-        // Collect all mod_storage_id values that are actually in use
-        let mut used_storage_ids = std::collections::HashSet::new();
-
-        for env in &environments {
-            if env.output_dir.is_empty() {
-                continue;
-            }
-
-            let mods_directory = self.get_mods_directory(&env.output_dir);
-            if !mods_directory.exists() {
-                continue;
-            }
-
-            // Load metadata for this environment
-            if let Ok(metadata) = self.load_mod_metadata(&mods_directory).await {
-                for (_file_name, mod_meta) in metadata.iter() {
-                    if let Some(storage_id) = &mod_meta.mod_storage_id {
-                        used_storage_ids.insert(storage_id.clone());
-                    }
-                }
-            }
-        }
-
-        // List all directories in mod storage
         let mut removed_count = 0;
+        let mut preserved_library_entries = 0;
         let mut errors = Vec::new();
 
         let mut entries = fs::read_dir(&mod_storage_dir)
@@ -9694,12 +9781,17 @@ exit 1
 
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
-            let metadata = fs::metadata(&entry_path).await?;
+            let metadata = fs::symlink_metadata(&entry_path).await?;
 
-            if metadata.is_dir() {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
                 if let Some(dir_name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                    // Check if this directory is referenced in any metadata
-                    if !used_storage_ids.contains(dir_name) {
+                    let stale_staging = dir_name.starts_with(".staging-")
+                        && metadata
+                            .modified()
+                            .ok()
+                            .and_then(|modified| modified.elapsed().ok())
+                            .is_some_and(|age| age >= Duration::from_secs(24 * 60 * 60));
+                    if stale_staging {
                         match fs::remove_dir_all(&entry_path).await {
                             Ok(_) => {
                                 removed_count += 1;
@@ -9710,6 +9802,8 @@ exit 1
                                 errors.push(error_msg);
                             }
                         }
+                    } else if !dir_name.starts_with(".staging-") {
+                        preserved_library_entries += 1;
                     }
                 }
             }
@@ -9718,6 +9812,7 @@ exit 1
         let result = serde_json::json!({
             "success": errors.is_empty(),
             "removed": removed_count,
+            "preservedLibraryEntries": preserved_library_entries,
             "errors": errors
         });
 
@@ -9983,6 +10078,47 @@ mod tests {
                 "defaultDownloadDir": download_dir.to_string_lossy().to_string()
             }))
             .await
+    }
+
+    #[test]
+    fn mod_mutation_paths_reject_traversal_but_allow_nested_relative_dlls() {
+        assert!(safe_mod_relative_dll_path("Runtime/Example.dll").is_ok());
+        assert!(safe_mod_relative_dll_path("../outside.dll").is_err());
+        assert!(safe_mod_relative_dll_path("Runtime/../../outside.dll").is_err());
+        assert!(safe_mod_relative_dll_path("C:\\outside.dll").is_err());
+        assert!(safe_mod_relative_dll_path("Runtime/readme.txt").is_err());
+    }
+
+    #[test]
+    fn direct_provider_file_names_must_be_single_safe_leaf_names() -> Result<()> {
+        assert_eq!(safe_direct_file_name("Example.dll")?, "Example.dll");
+        assert!(safe_direct_file_name("../Example.dll").is_err());
+        assert!(safe_direct_file_name("nested/Example.dll").is_err());
+        assert!(safe_direct_file_name("nested\\Example.dll").is_err());
+        assert!(safe_direct_file_name("C:Example.dll").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn duplicate_cleanup_preserves_uninstalled_library_entries() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+        let pool = initialize_pool().await?;
+        let service = ModsService::new(pool.clone());
+        let download_dir = temp.path().join("downloads");
+        set_test_download_dir(pool, &download_dir).await?;
+        let library_entry = download_dir.join("Mods").join("kept-uninstalled-mod");
+        fs::create_dir_all(library_entry.join("Mods")).await?;
+        fs::write(library_entry.join("Mods").join("Example.dll"), b"library").await?;
+
+        let result = service.cleanup_duplicate_mod_storage().await?;
+
+        assert!(library_entry.exists());
+        assert_eq!(result["removed"], serde_json::json!(0));
+        assert_eq!(result["preservedLibraryEntries"], serde_json::json!(1));
+        Ok(())
     }
 
     #[test]
@@ -11904,6 +12040,43 @@ mod tests {
         assert!(result.is_err());
         assert!(!temp.path().join("escape.txt").exists());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_and_install_zip_rejects_excessive_path_depth() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let zip_path = temp.path().join("deep.zip");
+        let deep_name = (0..=crate::services::fomod::MAX_ARCHIVE_PATH_DEPTH)
+            .map(|index| format!("level-{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        write_zip_fixture(&zip_path, &[(deep_name.as_str(), b"payload")])?;
+
+        let extract_dir = temp.path().join("extract");
+        let mods_dir = temp.path().join("Mods");
+        let plugins_dir = temp.path().join("Plugins");
+        let userlibs_dir = temp.path().join("UserLibs");
+        let userdata_dir = temp.path().join("UserData");
+        fs::create_dir_all(&extract_dir).await?;
+
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+        let error = service
+            .extract_and_install_zip(
+                &zip_path,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                &extract_dir,
+                None,
+                None,
+            )
+            .await
+            .expect_err("deep archive entry must fail closed");
+
+        assert!(error.to_string().contains("extraction limits"));
+        assert!(!extract_dir.join(&deep_name).exists());
         Ok(())
     }
 
@@ -14405,6 +14578,54 @@ mod tests {
             .expect_err("expected invalid mod file error");
         assert!(err.to_string().contains("Invalid mod file"));
 
+        for operation in ["delete", "disable", "enable"] {
+            let error = match operation {
+                "delete" => {
+                    service
+                        .delete_mod(temp.path().to_string_lossy().as_ref(), "../outside.dll")
+                        .await
+                }
+                "disable" => {
+                    service
+                        .disable_mod(temp.path().to_string_lossy().as_ref(), "../outside.dll")
+                        .await
+                }
+                _ => {
+                    service
+                        .enable_mod(temp.path().to_string_lossy().as_ref(), "../outside.dll")
+                        .await
+                }
+            }
+            .expect_err("path traversal must be rejected");
+            assert!(error.to_string().contains("Invalid mod file"));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disable_and_enable_mod_preserve_safe_nested_relative_paths() -> Result<()> {
+        let temp = tempdir()?;
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+        let nested = temp.path().join("Mods").join("Runtime");
+        fs::create_dir_all(&nested).await?;
+        fs::write(nested.join("Example.dll"), b"nested").await?;
+
+        service
+            .disable_mod(
+                temp.path().to_string_lossy().as_ref(),
+                "Runtime/Example.dll",
+            )
+            .await?;
+        assert!(nested.join("Example.dll.disabled").exists());
+
+        service
+            .enable_mod(
+                temp.path().to_string_lossy().as_ref(),
+                "Runtime/Example.dll",
+            )
+            .await?;
+        assert!(nested.join("Example.dll").exists());
         Ok(())
     }
 

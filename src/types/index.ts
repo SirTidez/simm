@@ -15,6 +15,8 @@ export interface DepotDownloaderInfo {
 
 export interface DownloadProgress {
   downloadId: string;
+  /** Unique backend operation generation; changes when the same environment is retried. */
+  operationId: string;
   status: 'queued' | 'downloading' | 'validating' | 'completed' | 'error' | 'cancelled';
   progress: number;
   downloadedFiles?: number;
@@ -55,6 +57,8 @@ export interface TrackedDownload {
   error?: string;
   startedAt: number;
   finishedAt?: number | null;
+  /** Present for game downloads so late events from an older run can be ignored. */
+  operationId?: string;
 }
 
 /** Result of `extract_game_version` (Steam entries include reconciled branch/runtime). */

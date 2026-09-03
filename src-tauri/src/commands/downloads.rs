@@ -133,6 +133,7 @@ pub async fn start_download(
 
     let depot_platform =
         DepotDownloaderService::resolve_depot_platform(&env.app_id, settings.platform.clone());
+    let configured_depot_downloader = settings.depot_downloader_path.clone();
 
     let options = DepotDownloadOptions {
         app_id: env.app_id,
@@ -160,7 +161,12 @@ pub async fn start_download(
         .map_err(|e| e.to_string())?;
 
     if let Err(error) = download_service
-        .start_download(environment_id.clone(), options, app)
+        .start_download_with_executable(
+            environment_id.clone(),
+            options,
+            app,
+            configured_depot_downloader.as_deref(),
+        )
         .await
     {
         if let Err(rollback_error) = env_service

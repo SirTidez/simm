@@ -33,6 +33,23 @@ impl ModUpdateService {
         Self
     }
 
+    fn validated_provider_file_name(value: &str) -> Result<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty()
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || trimmed.contains(':')
+            || trimmed.chars().any(char::is_control)
+        {
+            anyhow::bail!("Provider returned an invalid file name");
+        }
+        let mut components = Path::new(trimmed).components();
+        match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(_)), None) => Ok(trimmed.to_string()),
+            _ => anyhow::bail!("Provider returned an invalid file name"),
+        }
+    }
+
     fn cached_update_check_result(
         file_name: &str,
         metadata: &crate::types::ModMetadata,
@@ -549,12 +566,6 @@ impl ModUpdateService {
                                     .or_else(|| file.get("mod_version"))
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
-                            })
-                            .or_else(|| {
-                                mod_info
-                                    .get("version")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
                             });
 
                         if let Some(latest_version) = latest_version {
@@ -601,6 +612,7 @@ impl ModUpdateService {
                             }))
                         } else {
                             metadata.update_available = Some(false);
+                            metadata.remote_version = None;
                             None
                         }
                     } else {
@@ -1322,11 +1334,26 @@ impl ModUpdateService {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_lowercase();
+        let tokens: HashSet<&str> = file_name
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect();
+        let has_il2cpp_signal =
+            tokens.contains("il2cpp") || tokens.contains("main") || tokens.contains("beta");
+        let has_mono_signal = tokens.contains("mono") || tokens.contains("alternate");
+
+        // A target alias is not sufficient when the same provider filename also names the
+        // opposite runtime. Mixed-family filenames are ambiguous and must be chosen manually.
+        if has_il2cpp_signal == has_mono_signal {
+            return false;
+        }
 
         if runtime_lower == "il2cpp" {
-            file_name.contains("il2cpp") || file_name.contains("main") || file_name.contains("beta")
+            has_il2cpp_signal
+        } else if runtime_lower == "mono" {
+            has_mono_signal
         } else {
-            file_name.contains("mono") || file_name.contains("alternate")
+            false
         }
     }
 
@@ -1341,13 +1368,7 @@ impl ModUpdateService {
             .cloned()
             .collect();
 
-        let pool: Vec<Value> = if compatible.is_empty() {
-            files.to_vec()
-        } else {
-            compatible
-        };
-
-        pool.into_iter().max_by(|left, right| {
+        compatible.into_iter().max_by(|left, right| {
             let left_version = Self::file_version_string(left);
             let right_version = Self::file_version_string(right);
             match Self::compare_versions(&left_version, &right_version) {
@@ -1710,7 +1731,12 @@ impl ModUpdateService {
                     runtime_label,
                     metadata.source_version.as_deref(),
                 )
-                .ok_or_else(|| anyhow::anyhow!("No Nexus file available for update"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No Nexus update file explicitly matches the {} runtime; automatic update was refused",
+                        runtime_label
+                    )
+                })?;
 
                 let file_id = target_file
                     .get("file_id")
@@ -1742,15 +1768,17 @@ impl ModUpdateService {
                         "recoveryUrl": "accounts"
                     }));
                 };
-                let original_file_name = target_file
-                    .get("file_name")
-                    .or_else(|| target_file.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("nexus-update.zip");
+                let original_file_name = Self::validated_provider_file_name(
+                    target_file
+                        .get("file_name")
+                        .or_else(|| target_file.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("nexus-update.zip"),
+                )?;
                 let tracked_download = crate::services::tracked_downloads::start_file_download(
                     crate::services::tracked_downloads::new_download_id("mod-update-nexus"),
                     crate::types::TrackedDownloadKind::Mod,
-                    original_file_name.to_string(),
+                    original_file_name.clone(),
                     format!("Update -> {}", env.name),
                     Some("Downloading update".to_string()),
                 );
@@ -1791,12 +1819,15 @@ impl ModUpdateService {
                         return Err(anyhow::anyhow!(message));
                     }
                 };
-                let extension = Path::new(original_file_name)
+                let extension = Path::new(&original_file_name)
                     .extension()
                     .and_then(|v| v.to_str())
                     .unwrap_or("zip");
-                let temp_path =
-                    std::env::temp_dir().join(format!("{}.{}", temp_file_name, extension));
+                let temp_dir = std::env::temp_dir().join(&temp_file_name);
+                tokio::fs::create_dir_all(&temp_dir)
+                    .await
+                    .context("Failed to create Nexus update staging directory")?;
+                let temp_path = temp_dir.join(&original_file_name);
                 tokio::fs::write(&temp_path, bytes).await.map_err(|error| {
                     let message = format!("Failed to write Nexus update file: {}", error);
                     let _ = crate::services::tracked_downloads::emit(
@@ -1853,7 +1884,7 @@ impl ModUpdateService {
                                 .install_zip_mod(
                                     &env.output_dir,
                                     &temp_path_string,
-                                    original_file_name,
+                                    &original_file_name,
                                     runtime_label,
                                     &env.branch,
                                     metadata,
@@ -2454,6 +2485,104 @@ mod tests {
         .expect("selected nexus file");
 
         assert_eq!(selected.get("file_id").and_then(|v| v.as_u64()), Some(11));
+    }
+
+    #[test]
+    fn select_best_nexus_file_for_update_refuses_unknown_or_opposite_runtime_files() {
+        let ambiguous = vec![serde_json::json!({
+            "file_id": 20,
+            "file_name": "Example.zip",
+            "version": "2.0.0",
+            "is_primary": true
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &ambiguous,
+            "IL2CPP",
+            Some("1.0.0")
+        )
+        .is_none());
+
+        let mono_only = vec![serde_json::json!({
+            "file_id": 21,
+            "file_name": "Example Mono.zip",
+            "version": "2.0.0",
+            "is_primary": true
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &mono_only,
+            "IL2CPP",
+            Some("1.0.0")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn nexus_runtime_aliases_cannot_override_opposite_runtime_tokens() {
+        let mono_with_il2cpp_alias = vec![serde_json::json!({
+            "file_id": 30,
+            "file_name": "Example Mono beta.zip",
+            "version": "2.0.0"
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &mono_with_il2cpp_alias,
+            "IL2CPP",
+            Some("1.0.0")
+        )
+        .is_none());
+
+        let il2cpp_with_mono_alias = vec![serde_json::json!({
+            "file_id": 31,
+            "file_name": "Example IL2CPP alternate.zip",
+            "version": "2.0.0"
+        })];
+        assert!(ModUpdateService::select_best_nexus_file_for_update(
+            &il2cpp_with_mono_alias,
+            "Mono",
+            Some("1.0.0")
+        )
+        .is_none());
+
+        let legitimate_il2cpp = vec![serde_json::json!({
+            "file_id": 32,
+            "file_name": "Example beta.zip",
+            "version": "2.0.0"
+        })];
+        assert_eq!(
+            ModUpdateService::select_best_nexus_file_for_update(
+                &legitimate_il2cpp,
+                "IL2CPP",
+                Some("1.0.0")
+            )
+            .and_then(|file| file.get("file_id").and_then(Value::as_u64)),
+            Some(32)
+        );
+
+        let legitimate_mono = vec![serde_json::json!({
+            "file_id": 33,
+            "file_name": "Example alternate.zip",
+            "version": "2.0.0"
+        })];
+        assert_eq!(
+            ModUpdateService::select_best_nexus_file_for_update(
+                &legitimate_mono,
+                "Mono",
+                Some("1.0.0")
+            )
+            .and_then(|file| file.get("file_id").and_then(Value::as_u64)),
+            Some(33)
+        );
+    }
+
+    #[test]
+    fn provider_update_file_name_is_kept_canonical_and_rejects_paths() -> Result<()> {
+        assert_eq!(
+            ModUpdateService::validated_provider_file_name("Example.dll")?,
+            "Example.dll"
+        );
+        assert!(ModUpdateService::validated_provider_file_name("../Example.dll").is_err());
+        assert!(ModUpdateService::validated_provider_file_name("nested/Example.dll").is_err());
+        assert!(ModUpdateService::validated_provider_file_name("nested\\Example.dll").is_err());
+        Ok(())
     }
 
     #[test]

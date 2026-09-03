@@ -111,6 +111,17 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
         ("windows-x86_64", "validates the Windows updater platform"),
         ("linux-x86_64", "validates the Linux updater platform"),
         ("SHA256SUMS", "builds or validates release checksums"),
+        ("prepare-windows-signing.ps1", "configures fail-closed Windows Authenticode signing"),
+        ("verify-windows-signatures.ps1", "verifies Windows release signatures"),
+        ("--draft", "creates the GitHub release as a draft"),
+        ("--draft=false", "publishes the GitHub release only after validation"),
+        ("concurrency:", "serializes publication for a channel and tag"),
+        ("cancel-in-progress: false", "waits for an active publication instead of interrupting it"),
+        ("gh release download", "re-downloads the final draft assets before publication"),
+        ("Get-FileHash", "hash-checks final draft assets against the build outputs"),
+        ("Compare-Object", "rejects missing or unexpected final draft assets"),
+        (".signature -cne $windowsSignature", "matches the Windows manifest signature to the build output"),
+        (".signature -cne $linuxSignature", "matches the Linux manifest signature to the build output"),
     ]
     for needle, description in required:
         if needle not in text:
@@ -122,11 +133,53 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
             ("-Channel Beta", "generates an explicitly Beta manifest"),
             ("-MinimumVersion", "compares Beta precedence with the current Stable feed"),
             ('"tag=v${version}"', "uses the full prerelease SemVer as the release tag"),
+            (
+                "group: publish-beta-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}",
+                "serializes Beta publication for the resolved release tag",
+            ),
         ]:
             if needle not in text:
                 issues.append(f"{workflow} does not show that it {description}.")
-    if workflow.name == "publish-release.yml" and "-Channel Stable" not in text:
-        issues.append(f"{workflow} does not generate an explicitly Stable manifest.")
+    if workflow.name == "publish-release.yml":
+        if "-Channel Stable" not in text:
+            issues.append(f"{workflow} does not generate an explicitly Stable manifest.")
+        if (
+            "group: publish-stable-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}"
+            not in text
+        ):
+            issues.append(
+                f"{workflow} does not serialize Stable publication for the resolved release tag."
+            )
+    draft_index = text.find("Create or update draft")
+    manifest_index = text.find("Generate stable updater manifest")
+    if workflow.name == "publish-beta-release.yml":
+        manifest_index = text.find("Generate beta updater manifest")
+    commit_index = text.find("Commit stable updater manifest")
+    remote_verify_index = text.find("Verify committed stable updater feed")
+    final_verify_index = text.find("Verify final stable draft assets and publish")
+    if workflow.name == "publish-beta-release.yml":
+        commit_index = text.find("Commit beta updater manifest")
+        remote_verify_index = text.find("Verify committed beta updater feed")
+        final_verify_index = text.find("Verify final beta draft assets and publish")
+    publish_index = text.find("gh release edit", final_verify_index)
+    if min(
+        draft_index,
+        manifest_index,
+        commit_index,
+        remote_verify_index,
+        final_verify_index,
+        publish_index,
+    ) < 0 or not (
+        draft_index
+        < manifest_index
+        < commit_index
+        < remote_verify_index
+        < final_verify_index
+        < publish_index
+    ):
+        issues.append(
+            f"{workflow} does not keep the release draft until its updater manifest and final release assets are validated."
+        )
     return issues
 
 

@@ -14,6 +14,10 @@ function partialEnvFromExtractGameVersion(res: ExtractGameVersionResult): Partia
   }
   return out;
 }
+
+function isTerminalDownloadStatus(status: DownloadProgress['status']) {
+  return status === 'completed' || status === 'error' || status === 'cancelled';
+}
 import { ApiService } from '../services/api';
 import { createAsyncListenerScope, onProgress, onComplete, onError, onUpdateAvailable, onUpdateCheckComplete, onRuntimeSwitch } from '../services/events';
 
@@ -66,6 +70,11 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const [progress, setProgress] = useState<Map<string, DownloadProgress>>(new Map());
   const refreshEnvironmentsInFlightRef = useRef<Promise<void> | null>(null);
   const startingGameDownloadRef = useRef<string | null>(null);
+  const downloadOperationsRef = useRef<Map<string, {
+    operationId: string;
+    state: 'active' | 'terminal';
+  }>>(new Map());
+  const pendingOperationReplacementRef = useRef<Set<string>>(new Set());
   const environmentsRef = useRef<Environment[]>([]);
   const snapshotGenerationRef = useRef(0);
   const commitEnvironmentSnapshot = useCallback((updater: (current: Environment[]) => Environment[]) => {
@@ -77,6 +86,76 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
   const invalidateEnvironmentSnapshot = useCallback(() => {
     snapshotGenerationRef.current += 1;
   }, []);
+  const acceptProgressOperation = useCallback((data: DownloadProgress) => {
+    const nextState = isTerminalDownloadStatus(data.status) ? 'terminal' : 'active';
+    const current = downloadOperationsRef.current.get(data.downloadId);
+    if (!current) {
+      downloadOperationsRef.current.set(data.downloadId, {
+        operationId: data.operationId,
+        state: nextState,
+      });
+      pendingOperationReplacementRef.current.delete(data.downloadId);
+      return true;
+    }
+
+    if (
+      pendingOperationReplacementRef.current.has(data.downloadId)
+      && current.operationId === data.operationId
+    ) {
+      return false;
+    }
+
+    if (current.operationId === data.operationId) {
+      // Active output from a completed operation is necessarily delayed.
+      if (current.state === 'terminal' && nextState === 'active') {
+        return false;
+      }
+      current.state = nextState;
+      return true;
+    }
+
+    const explicitReplacement = pendingOperationReplacementRef.current.has(data.downloadId);
+    if (!explicitReplacement && !(current.state === 'terminal' && nextState === 'active')) {
+      return false;
+    }
+
+    downloadOperationsRef.current.set(data.downloadId, {
+      operationId: data.operationId,
+      state: nextState,
+    });
+    pendingOperationReplacementRef.current.delete(data.downloadId);
+    // Any environment snapshot already being fetched belongs to the previous
+    // operation and must not land after this retry begins.
+    invalidateEnvironmentSnapshot();
+    return true;
+  }, [invalidateEnvironmentSnapshot]);
+  const acceptTerminalOperation = useCallback((downloadId: string, operationId: string) => {
+    const current = downloadOperationsRef.current.get(downloadId);
+    if (!current) {
+      downloadOperationsRef.current.set(downloadId, { operationId, state: 'terminal' });
+      pendingOperationReplacementRef.current.delete(downloadId);
+      return true;
+    }
+    if (
+      pendingOperationReplacementRef.current.has(downloadId)
+      && current.operationId === operationId
+    ) {
+      return false;
+    }
+    if (current.operationId === operationId) {
+      current.state = 'terminal';
+      return true;
+    }
+    if (!pendingOperationReplacementRef.current.has(downloadId)) {
+      return false;
+    }
+    downloadOperationsRef.current.set(downloadId, { operationId, state: 'terminal' });
+    pendingOperationReplacementRef.current.delete(downloadId);
+    return true;
+  }, []);
+  const operationIsCurrent = useCallback((downloadId: string, operationId: string) => (
+    downloadOperationsRef.current.get(downloadId)?.operationId === operationId
+  ), []);
 
   const activeGameDownloadId = useMemo(() => {
     const activeProgress = Array.from(progress.values()).find(
@@ -121,6 +200,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       );
 
       if (envsNeedingVersion.length > 0) {
+        const extractionGeneration = snapshotGenerationRef.current;
         const detectedPatches = await Promise.all(
           envsNeedingVersion.map(async (env) => {
             try {
@@ -141,7 +221,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
             .map(entry => [entry.id, entry.patch])
         );
 
-        if (patchMap.size > 0) {
+        if (patchMap.size > 0 && snapshotGenerationRef.current === extractionGeneration) {
           commitEnvironmentSnapshot(current => current.map(env => {
             const patch = patchMap.get(env.id);
             return patch ? { ...env, ...patch } : env;
@@ -202,6 +282,8 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
       // follow-up pass when that older request finishes.
       invalidateEnvironmentSnapshot();
       await ApiService.deleteEnvironment(id, deleteFiles);
+      downloadOperationsRef.current.delete(id);
+      pendingOperationReplacementRef.current.delete(id);
       commitEnvironmentSnapshot(current => current.filter(env => env.id !== id));
       await refreshEnvironments();
       setProgress(prev => {
@@ -224,6 +306,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     }
 
     startingGameDownloadRef.current = environmentId;
+    pendingOperationReplacementRef.current.add(environmentId);
     try {
       if (oneTimeCredentials) {
         await ApiService.startDownload(environmentId, oneTimeCredentials);
@@ -231,6 +314,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
         await ApiService.startDownload(environmentId);
       }
     } catch (err) {
+      pendingOperationReplacementRef.current.delete(environmentId);
       throw err;
     } finally {
       if (startingGameDownloadRef.current === environmentId) {
@@ -333,6 +417,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
     listeners.register(() => onProgress((data: DownloadProgress) => {
           if (!listeners.isActive()) return;
+          if (!acceptProgressOperation(data)) return;
           setProgress(prev => {
             const next = new Map(prev);
             next.set(data.downloadId, data);
@@ -346,14 +431,16 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
           }
         }));
 
-    listeners.register(() => onComplete(async ({ downloadId }: { downloadId: string; manifestId?: string }) => {
+    listeners.register(() => onComplete(async ({ downloadId, operationId }: { downloadId: string; operationId: string; manifestId?: string }) => {
           if (!listeners.isActive()) return;
+          if (!acceptTerminalOperation(downloadId, operationId)) return;
           // DepotDownloader persists completion before emitting this event. Refresh
           // that backend-owned state instead of independently writing manifests here.
           // A response already in flight predates the completion, so discard it
           // and let its completion schedule one fresh snapshot.
           invalidateEnvironmentSnapshot();
           await refreshEnvironments();
+          if (!listeners.isActive() || !operationIsCurrent(downloadId, operationId)) return;
           setProgress(prev => {
             const next = new Map(prev);
             next.delete(downloadId);
@@ -362,9 +449,20 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
           // Automatically extract game version when download completes
           try {
+            const extractionGeneration = snapshotGenerationRef.current;
             const extracted = await ApiService.extractGameVersion(downloadId);
-            const patch = partialEnvFromExtractGameVersion(extracted);
-            if (Object.keys(patch).length > 0) {
+            // The completion refresh immediately above already reconciled the
+            // backend-owned branch/runtime. Persist only the detected version
+            // here so this follow-up cannot write an older runtime selection
+            // back through update_environment.
+            const patch: Partial<Environment> = extracted.version
+              ? { currentGameVersion: extracted.version }
+              : {};
+            if (
+              Object.keys(patch).length > 0
+              && operationIsCurrent(downloadId, operationId)
+              && snapshotGenerationRef.current === extractionGeneration
+            ) {
               await updateEnvironment(downloadId, patch);
             }
           } catch (err) {
@@ -374,8 +472,9 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
 
         }));
 
-    listeners.register(() => onError(async ({ downloadId }: { downloadId: string }) => {
+    listeners.register(() => onError(async ({ downloadId, operationId }: { downloadId: string; operationId: string }) => {
           if (!listeners.isActive()) return;
+          if (!acceptTerminalOperation(downloadId, operationId)) return;
           try {
             await updateEnvironment(downloadId, { status: 'error' });
           } catch (err) {
@@ -413,7 +512,7 @@ export function EnvironmentStoreProvider({ children }: { children: React.ReactNo
     return () => {
       listeners.dispose();
     };
-  }, [updateEnvironment, applyUpdateResultLocally, commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
+  }, [acceptProgressOperation, acceptTerminalOperation, operationIsCurrent, updateEnvironment, applyUpdateResultLocally, commitEnvironmentSnapshot, invalidateEnvironmentSnapshot, refreshEnvironments]);
 
   return (
     <EnvironmentStoreContext.Provider

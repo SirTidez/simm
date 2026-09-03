@@ -2,6 +2,7 @@ use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +12,7 @@ use std::time::{Duration, SystemTime};
 const STEAM_SHORTCUT_TAG: &str = "SIMM";
 static ACTIVE_DIRECT_LAUNCHES: Lazy<Mutex<HashMap<PathBuf, u64>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static STEAM_SHORTCUT_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static NEXT_DIRECT_LAUNCH_TOKEN: AtomicU64 = AtomicU64::new(1);
 const STEAM_SHORTCUT_MANAGED_KEYS: &[&str] = &[
     "appid",
@@ -695,16 +697,25 @@ impl FileSystemService {
         &self,
         shortcut: &SteamShortcut,
     ) -> Result<(PathBuf, SteamShortcutStatus)> {
+        let _write_guard = STEAM_SHORTCUT_WRITE_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Steam shortcut update lock is unavailable"))?;
         let shortcuts_file = Self::steam_shortcuts_file_path()?;
         if let Some(parent) = shortcuts_file.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
 
-        let mut root = if shortcuts_file.exists() {
-            let data = std::fs::read(&shortcuts_file)
-                .with_context(|| format!("Failed to read {}", shortcuts_file.display()))?;
-            parse_binary_vdf(&data)
+        let original = if shortcuts_file.exists() {
+            Some(
+                std::fs::read(&shortcuts_file)
+                    .with_context(|| format!("Failed to read {}", shortcuts_file.display()))?,
+            )
+        } else {
+            None
+        };
+        let mut root = if let Some(data) = original.as_deref() {
+            parse_binary_vdf(data)
                 .with_context(|| format!("Failed to parse {}", shortcuts_file.display()))?
         } else {
             vec![("shortcuts".to_string(), BinaryVdfValue::Object(Vec::new()))]
@@ -714,11 +725,116 @@ impl FileSystemService {
         let status = upsert_shortcut_entry(shortcuts, shortcut);
         if status != SteamShortcutStatus::Unchanged {
             let bytes = write_binary_vdf(&root);
-            std::fs::write(&shortcuts_file, bytes)
-                .with_context(|| format!("Failed to write {}", shortcuts_file.display()))?;
+            Self::write_steam_shortcuts_atomically(&shortcuts_file, original.as_deref(), &bytes)?;
         }
 
         Ok((shortcuts_file, status))
+    }
+
+    fn write_steam_shortcuts_atomically(
+        target: &Path,
+        original: Option<&[u8]>,
+        content: &[u8],
+    ) -> Result<()> {
+        parse_binary_vdf(content).context("Generated Steam shortcuts are invalid")?;
+        let parent = target
+            .parent()
+            .context("Steam shortcuts file has no parent directory")?;
+        let name = target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("Steam shortcuts file has no valid name")?;
+        let staged = parent.join(format!(".{name}.simm-{}.tmp", uuid::Uuid::new_v4()));
+        Self::write_synced_new_file(&staged, content)?;
+        let staged_validation =
+            std::fs::read(&staged).context("Failed to re-read staged shortcuts")?;
+        parse_binary_vdf(&staged_validation).context("Staged Steam shortcuts are invalid")?;
+
+        let current = match std::fs::read(target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                let _ = std::fs::remove_file(&staged);
+                return Err(error).context("Failed to re-check Steam shortcuts before replacement");
+            }
+        };
+        if current.as_deref() != original {
+            let _ = std::fs::remove_file(&staged);
+            anyhow::bail!("Steam shortcuts changed while SIMM was preparing the update; try again")
+        }
+
+        if let Some(original) = original {
+            let backup = parent.join(format!("{name}.simm-backup"));
+            let backup_staged =
+                parent.join(format!(".{name}.simm-backup-{}.tmp", uuid::Uuid::new_v4()));
+            Self::write_synced_new_file(&backup_staged, original)?;
+            Self::replace_file_atomically(&backup_staged, &backup)
+                .context("Failed to preserve the previous Steam shortcuts")?;
+        }
+
+        if let Err(error) = Self::replace_file_atomically(&staged, target) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error).context("Failed to install updated Steam shortcuts");
+        }
+        let installed =
+            std::fs::read(target).context("Failed to verify updated Steam shortcuts")?;
+        if installed != content {
+            anyhow::bail!("Steam shortcuts changed immediately after SIMM updated them")
+        }
+        parse_binary_vdf(&installed).context("Updated Steam shortcuts failed validation")?;
+        Ok(())
+    }
+
+    fn write_synced_new_file(path: &Path, content: &[u8]) -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("Failed to create staged file {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("Failed to write staged file {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("Failed to flush staged file {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to persist staged file {}", path.display()))
+    }
+
+    fn replace_file_atomically(replacement: &Path, target: &Path) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use winapi::um::winbase::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+            let replacement_wide = replacement
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let target_wide = target
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let replaced = unsafe {
+                MoveFileExW(
+                    replacement_wide.as_ptr(),
+                    target_wide.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if replaced == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("Failed to atomically replace Steam configuration");
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::fs::rename(replacement, target)
+                .context("Failed to atomically replace Steam configuration")
+        }
     }
 
     fn steam_shortcuts_file_path() -> Result<PathBuf> {
@@ -1983,6 +2099,41 @@ mod tests {
         let bytes = write_binary_vdf(&root);
         let parsed = parse_binary_vdf(&bytes).expect("parse generated vdf");
         assert_eq!(parsed, root);
+    }
+
+    #[test]
+    fn steam_shortcuts_atomic_write_preserves_a_valid_backup() {
+        let temp = tempdir().expect("temp dir");
+        let target = temp.path().join("shortcuts.vdf");
+        let original = vec![("shortcuts".to_string(), BinaryVdfValue::Object(Vec::new()))];
+        let updated = vec![(
+            "shortcuts".to_string(),
+            BinaryVdfValue::Object(vec![("0".to_string(), BinaryVdfValue::Object(Vec::new()))]),
+        )];
+        let original_bytes = write_binary_vdf(&original);
+        let updated_bytes = write_binary_vdf(&updated);
+        std::fs::write(&target, &original_bytes).expect("seed shortcuts");
+
+        FileSystemService::write_steam_shortcuts_atomically(
+            &target,
+            Some(&original_bytes),
+            &updated_bytes,
+        )
+        .expect("atomic shortcuts update");
+
+        assert_eq!(
+            parse_binary_vdf(&std::fs::read(&target).expect("updated shortcuts"))
+                .expect("parse updated shortcuts"),
+            updated
+        );
+        assert_eq!(
+            parse_binary_vdf(
+                &std::fs::read(temp.path().join("shortcuts.vdf.simm-backup"))
+                    .expect("shortcuts backup")
+            )
+            .expect("parse shortcuts backup"),
+            original
+        );
     }
 
     #[test]

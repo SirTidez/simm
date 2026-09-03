@@ -1,6 +1,7 @@
 use crate::types::{DepotDownloadOptions, DownloadProgress, DownloadStatus};
-use crate::utils::depot_downloader_detector::detect_depot_downloader;
+use crate::utils::depot_downloader_detector::detect_depot_downloader_with_override;
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use regex::Regex;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
@@ -8,14 +9,14 @@ use std::collections::{HashMap, HashSet};
 #[allow(unused_imports)] // Required for CommandExt trait methods
 use std::os::windows::process::CommandExt;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tokio::task::JoinHandle;
 
 macro_rules! eprintln {
@@ -44,6 +45,8 @@ struct ActiveDownload {
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     output_dir: String,
+    operation_id: String,
+    _process_permit: Option<OwnedMutexGuard<()>>,
 }
 
 impl ActiveDownload {
@@ -106,6 +109,8 @@ impl ActiveDownload {
             stdout_task: None,
             stderr_task: None,
             output_dir: String::new(),
+            operation_id: unique_login_id(),
+            _process_permit: None,
         }
     }
 }
@@ -120,6 +125,67 @@ pub struct DepotShutdownReport {
 // stalled child cannot keep the global download gate forever.
 const DEPOT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
 pub const DEPOT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+static DEPOT_PROCESS_GATE: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
+static DEPOT_LOGIN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) async fn acquire_process_permit() -> OwnedMutexGuard<()> {
+    DEPOT_PROCESS_GATE.clone().lock_owned().await
+}
+
+/// Owns a newly spawned child until it has been published in active_downloads.
+/// If start_download is cancelled at one of the intervening async lock points,
+/// cleanup keeps the global process permit until the child has been killed and
+/// reaped.
+struct PendingDepotChild {
+    child: Option<Child>,
+    process_permit: Option<OwnedMutexGuard<()>>,
+}
+
+impl PendingDepotChild {
+    fn new(child: Child, process_permit: OwnedMutexGuard<()>) -> Self {
+        Self {
+            child: Some(child),
+            process_permit: Some(process_permit),
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("pending child remains owned")
+    }
+
+    fn into_parts(mut self) -> (Child, OwnedMutexGuard<()>) {
+        (
+            self.child.take().expect("pending child remains owned"),
+            self.process_permit
+                .take()
+                .expect("pending process permit remains owned"),
+        )
+    }
+}
+
+impl Drop for PendingDepotChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let process_permit = self.process_permit.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = child.kill().await;
+                drop(process_permit);
+            });
+        } else {
+            let _ = child.start_kill();
+            drop(process_permit);
+        }
+    }
+}
+
+pub(crate) fn unique_login_id() -> String {
+    let sequence = DEPOT_LOGIN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    (sequence % u64::from(u32::MAX)).max(1).to_string()
+}
 
 fn ensure_no_active_game_download(
     active_download_id: Option<&str>,
@@ -181,6 +247,9 @@ impl DepotDownloaderService {
             args.push("-username".to_string());
             args.push(username.clone());
         }
+
+        args.push("-loginid".to_string());
+        args.push(unique_login_id());
 
         if options.remember_credentials {
             args.push("-remember-password".to_string());
@@ -495,6 +564,7 @@ impl DepotDownloaderService {
                 .cloned()
                 .unwrap_or_else(|| DownloadProgress {
                     download_id: download_id.to_string(),
+                    operation_id: unique_login_id(),
                     status: DownloadStatus::Downloading,
                     progress: 0.0,
                     downloaded_files: None,
@@ -770,11 +840,23 @@ impl DepotDownloaderService {
         None
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn start_download<R: Runtime>(
         &self,
         download_id: String,
         options: DepotDownloadOptions,
         app: AppHandle<R>,
+    ) -> Result<()> {
+        self.start_download_with_executable(download_id, options, app, None)
+            .await
+    }
+
+    pub async fn start_download_with_executable<R: Runtime>(
+        &self,
+        download_id: String,
+        options: DepotDownloadOptions,
+        app: AppHandle<R>,
+        configured_executable: Option<&str>,
     ) -> Result<()> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(anyhow::anyhow!(
@@ -783,7 +865,7 @@ impl DepotDownloaderService {
         }
 
         // Detect DepotDownloader
-        let detector_info = detect_depot_downloader().await?;
+        let detector_info = detect_depot_downloader_with_override(configured_executable).await?;
         if !detector_info.installed || detector_info.path.is_none() {
             return Err(anyhow::anyhow!(
                 "DepotDownloader is not installed. Please install it first."
@@ -800,6 +882,8 @@ impl DepotDownloaderService {
         // Get depots directory from SIMM folder
         let depots_dir = crate::utils::directory_init::get_depots_dir()
             .context("Failed to get depots directory")?;
+
+        let process_permit = acquire_process_permit().await;
 
         // DepotDownloader maintains shared on-disk state, so only one game
         // install or update process may run at a time. Keep the check and
@@ -819,7 +903,7 @@ impl DepotDownloaderService {
 
         // Spawn process with working directory set to depots folder.
         #[cfg(target_os = "windows")]
-        let mut child = Command::new(&executable_path)
+        let child = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
@@ -830,7 +914,7 @@ impl DepotDownloaderService {
             .context("Failed to spawn DepotDownloader process")?;
 
         #[cfg(not(target_os = "windows"))]
-        let mut child = Command::new(&executable_path)
+        let child = Command::new(&executable_path)
             .args(&args)
             .current_dir(&depots_dir) // Set working directory to SIMM/depots
             .stdin(Stdio::piped())
@@ -839,8 +923,9 @@ impl DepotDownloaderService {
             .spawn()
             .context("Failed to spawn DepotDownloader process")?;
 
+        let mut pending_child = PendingDepotChild::new(child, process_permit);
         let credential_input = if let Some(payload) = Self::credential_stdin_payload(&options) {
-            Some((child.stdin.take(), payload))
+            Some((pending_child.child_mut().stdin.take(), payload))
         } else {
             None
         };
@@ -853,6 +938,8 @@ impl DepotDownloaderService {
             self.credential_handoffs.write().await.remove(&download_id);
         }
 
+        let operation_id = unique_login_id();
+
         // The process is now reserved by the global gate. Only publish the
         // active progress entry after it has spawned successfully.
         {
@@ -861,6 +948,7 @@ impl DepotDownloaderService {
                 download_id.clone(),
                 DownloadProgress {
                     download_id: download_id.clone(),
+                    operation_id: operation_id.clone(),
                     status: DownloadStatus::Downloading,
                     progress: 0.0,
                     downloaded_files: None,
@@ -876,11 +964,12 @@ impl DepotDownloaderService {
 
         let _app_clone = app.clone();
         let _download_id_clone = download_id.clone();
+        let operation_id_complete = operation_id.clone();
         let service_clone = Arc::new(self.clone());
 
         // Handle stdout
         let mut stdout_task = None;
-        if let Some(stdout) = child.stdout.take() {
+        if let Some(stdout) = pending_child.child_mut().stdout.take() {
             let app_stdout = app.clone();
             let download_id_stdout = download_id.clone();
             let service_stdout = service_clone.clone();
@@ -902,7 +991,7 @@ impl DepotDownloaderService {
 
         // Handle stderr
         let mut stderr_task = None;
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = pending_child.child_mut().stderr.take() {
             let app_stderr = app.clone();
             let download_id_stderr = download_id.clone();
             let service_stderr = service_clone.clone();
@@ -922,6 +1011,8 @@ impl DepotDownloaderService {
             }));
         }
 
+        let (child, process_permit) = pending_child.into_parts();
+
         // Store child process
         active_downloads.insert(
             download_id.clone(),
@@ -930,6 +1021,8 @@ impl DepotDownloaderService {
                 stdout_task,
                 stderr_task,
                 output_dir: output_dir.clone(),
+                operation_id,
+                _process_permit: Some(process_permit),
             },
         );
         drop(active_downloads);
@@ -981,6 +1074,12 @@ impl DepotDownloaderService {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 let mut map = service_complete.active_downloads.write().await;
+                if map
+                    .get(&download_id_complete)
+                    .is_some_and(|download| download.operation_id != operation_id_complete)
+                {
+                    break;
+                }
                 if started_at.elapsed() >= DEPOT_DOWNLOAD_TIMEOUT {
                     if let Some(mut download) = map.remove(&download_id_complete) {
                         drop(map);
@@ -1011,6 +1110,7 @@ impl DepotDownloaderService {
                         let _ = crate::events::emit_error(
                             &app_complete,
                             download_id_complete.clone(),
+                            operation_id_complete.clone(),
                             "DepotDownloader timed out before completion".to_string(),
                         );
                         break;
@@ -1087,6 +1187,7 @@ impl DepotDownloaderService {
                                 let _ = crate::events::emit_complete(
                                     &app_complete,
                                     download_id_complete.clone(),
+                                    operation_id_complete.clone(),
                                     manifest_id,
                                 );
                             } else {
@@ -1107,6 +1208,7 @@ impl DepotDownloaderService {
                                 let _ = crate::events::emit_error(
                                     &app_complete,
                                     download_id_complete.clone(),
+                                    operation_id_complete.clone(),
                                     format!("DepotDownloader exited with code {:?}", status.code()),
                                 );
                             }
@@ -1143,6 +1245,7 @@ impl DepotDownloaderService {
                             let _ = crate::events::emit_error(
                                 &app_complete,
                                 download_id_complete.clone(),
+                                operation_id_complete.clone(),
                                 format!("Error checking process status: {}", e),
                             );
                             break;
@@ -1250,7 +1353,12 @@ impl DepotDownloaderService {
                         drop(progress_map);
                         let _ = crate::events::emit_progress(app, progress);
                     }
-                    let _ = crate::events::emit_complete(app, download_id, manifest_id);
+                    let _ = crate::events::emit_complete(
+                        app,
+                        download_id,
+                        download.operation_id.clone(),
+                        manifest_id,
+                    );
                     continue;
                 }
             }
@@ -1266,6 +1374,7 @@ impl DepotDownloaderService {
                         .entry(download_id.clone())
                         .or_insert_with(|| DownloadProgress {
                             download_id: download_id.clone(),
+                            operation_id: download.operation_id.clone(),
                             status: DownloadStatus::Error,
                             progress: 0.0,
                             downloaded_files: None,
@@ -1283,7 +1392,12 @@ impl DepotDownloaderService {
                 drop(progress_map);
                 let _ = crate::events::emit_progress(app, progress);
             }
-            let _ = crate::events::emit_error(app, download_id.clone(), interruption_message);
+            let _ = crate::events::emit_error(
+                app,
+                download_id.clone(),
+                download.operation_id.clone(),
+                interruption_message,
+            );
 
             // Request termination before database I/O so the external process
             // begins stopping immediately even if persistence is slow.
@@ -1443,6 +1557,7 @@ mod tests {
             download_id.to_string(),
             DownloadProgress {
                 download_id: download_id.to_string(),
+                operation_id: unique_login_id(),
                 status: DownloadStatus::Downloading,
                 progress: 0.0,
                 downloaded_files: None,
@@ -1474,6 +1589,8 @@ mod tests {
                 stdout_task: Some(reader_task),
                 stderr_task: None,
                 output_dir: String::new(),
+                operation_id: unique_login_id(),
+                _process_permit: None,
             },
         );
 
@@ -1581,6 +1698,7 @@ mod tests {
             environment.id.clone(),
             DownloadProgress {
                 download_id: environment.id.clone(),
+                operation_id: unique_login_id(),
                 status: DownloadStatus::Downloading,
                 progress: 25.0,
                 downloaded_files: None,
@@ -1599,6 +1717,8 @@ mod tests {
                 stdout_task: Some(stdout_task),
                 stderr_task: None,
                 output_dir: environment.output_dir.clone(),
+                operation_id: unique_login_id(),
+                _process_permit: None,
             },
         );
 
@@ -1757,6 +1877,50 @@ mod tests {
 
         assert!(args.contains(&"-remember-password".to_string()));
         assert!(!args.contains(&"code".to_string()));
+        let login_id = args
+            .windows(2)
+            .find(|window| window[0] == "-loginid")
+            .map(|window| window[1].as_str())
+            .expect("download args should include -loginid");
+        assert!(login_id.parse::<u32>().is_ok());
+    }
+
+    #[tokio::test]
+    async fn process_gate_serializes_depot_children() {
+        let first = acquire_process_permit().await;
+        let blocked = tokio::spawn(acquire_process_permit());
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!blocked.is_finished());
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), blocked)
+            .await
+            .expect("second process acquires permit after first exits")
+            .expect("permit task joins");
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn cancelled_start_reaps_pending_child_before_releasing_process_gate() -> Result<()> {
+        let permit = acquire_process_permit().await;
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd")
+            .args(["/D", "/Q", "/C", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()?;
+        #[cfg(not(target_os = "windows"))]
+        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn()?;
+
+        let pending = PendingDepotChild::new(child, permit);
+        drop(pending);
+        let replacement = tokio::time::timeout(Duration::from_secs(2), acquire_process_permit())
+            .await
+            .expect("pending child cleanup should release the permit after reap");
+        drop(replacement);
+        Ok(())
+    }
+
+    #[test]
+    fn operation_identifiers_are_unique_for_immediate_retries() {
+        assert_ne!(unique_login_id(), unique_login_id());
     }
 
     #[test]
@@ -2204,6 +2368,7 @@ mod tests {
             "download-cancelled".to_string(),
             DownloadProgress {
                 download_id: "download-cancelled".to_string(),
+                operation_id: unique_login_id(),
                 status: DownloadStatus::Cancelled,
                 progress: 12.0,
                 downloaded_files: Some(1),

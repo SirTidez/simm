@@ -63,6 +63,9 @@ jobs:
       - name: Build frontend
         run: bun run build
 
+      - name: Run release contract tests
+        run: bun run test:release
+
       - name: Install Linux system dependencies (Tauri)
         run: |
           sudo apt-get update
@@ -108,6 +111,18 @@ jobs:
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+
+      - name: Configure Windows Authenticode signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          .\scripts\prepare-windows-signing.ps1 `
+            -ConfigPath 'src-tauri/tauri.conf.json' `
+            -CertificateBase64 $env:WINDOWS_CERTIFICATE `
+            -CertificatePassword $env:WINDOWS_CERTIFICATE_PASSWORD `
+            -CertificatePath (Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx')
 
       - name: Resolve app version and beta tag
         id: version
@@ -170,6 +185,10 @@ jobs:
           Copy-Item -LiteralPath $setupSource.FullName -Destination $setupTarget -Force
           Copy-Item -LiteralPath $signaturePath -Destination $signatureTarget -Force
 
+          .\scripts\verify-windows-signatures.ps1 `
+            -Path @('target/release/simmrust.exe', $setupTarget) `
+            -ExpectedThumbprint $env:SIMM_WINDOWS_SIGNING_THUMBPRINT
+
       - name: Upload Windows release assets
         uses: actions/upload-artifact@v4
         with:
@@ -177,6 +196,21 @@ jobs:
           path: artifacts/windows/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove Windows signing material
+        if: always()
+        shell: pwsh
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'simm-windows-signing.pfx'
+          if (Test-Path -LiteralPath $certificatePath) {
+            Remove-Item -LiteralPath $certificatePath -Force
+          }
+          if ($env:SIMM_WINDOWS_SIGNING_THUMBPRINT) {
+            $storePath = "Cert:\CurrentUser\My\$env:SIMM_WINDOWS_SIGNING_THUMBPRINT"
+            if (Test-Path -LiteralPath $storePath) {
+              Remove-Item -LiteralPath $storePath -Force
+            }
+          }
 
   build-linux:
     needs: validate
@@ -313,6 +347,9 @@ jobs:
     needs:
       - build-windows
       - build-linux
+    concurrency:
+      group: publish-beta-${{ github.repository }}-${{ needs.build-windows.outputs.tag }}
+      cancel-in-progress: false
 
     steps:
       - uses: actions/checkout@v4
@@ -341,7 +378,7 @@ jobs:
             throw 'Beta release artifact validation failed.'
           }
 
-      - name: Publish beta GitHub release
+      - name: Create or update draft beta GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -352,11 +389,15 @@ jobs:
             throw 'No release assets were downloaded.'
           }
 
-          gh release view $tag *> $null
+          $existing = gh release view $tag --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
+            $releaseState = $existing | ConvertFrom-Json
+            if (-not $releaseState.isDraft) {
+              throw "Release '$tag' is already public. Refusing to replace assets before updater validation."
+            }
             gh release upload $tag @assetPaths --clobber
           } else {
-            gh release create $tag @assetPaths --title $tag --generate-notes --prerelease --target $env:GITHUB_SHA
+            gh release create $tag @assetPaths --title $tag --generate-notes --draft --prerelease --target $env:GITHUB_SHA
           }
 
       - name: Generate beta updater manifest
@@ -367,7 +408,7 @@ jobs:
           $version = '${{ needs.build-windows.outputs.version }}'
           $tag = '${{ needs.build-windows.outputs.tag }}'
           $release = gh release view $tag --json body,publishedAt | ConvertFrom-Json
-          $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { '' }
+          $publishedAtIso = if ($release.publishedAt) { ([DateTimeOffset]$release.publishedAt).ToUniversalTime().ToString('o') } else { [DateTimeOffset]::UtcNow.ToString('o') }
           $stableManifestPath = 'updater/stable/latest.json'
           if (-not (Test-Path -LiteralPath $stableManifestPath -PathType Leaf)) {
             throw 'Beta manifest generation requires updater/stable/latest.json.'
@@ -453,3 +494,79 @@ jobs:
           git fetch origin $branch
           git rebase "origin/$branch"
           git push origin HEAD:$branch
+
+      - name: Verify committed beta updater feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $branch = '${{ github.event.repository.default_branch }}'
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $encoded = gh api "repos/$env:GITHUB_REPOSITORY/contents/updater/beta/latest-beta.json?ref=$branch" --jq .content
+          if ($LASTEXITCODE -ne 0 -or -not $encoded) {
+            throw 'The committed Beta updater feed is not readable from the default branch.'
+          }
+          $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($encoded -replace '\s', '')))
+          $manifest = $json | ConvertFrom-Json
+          if ($manifest.version -cne $version -or -not $manifest.platforms.'windows-x86_64' -or -not $manifest.platforms.'linux-x86_64') {
+            throw "The default-branch Beta updater feed is stale or incomplete for '$version'."
+          }
+
+      - name: Verify final beta draft assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = '${{ needs.build-windows.outputs.tag }}'
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $verificationRoot = Join-Path $env:RUNNER_TEMP 'simm-beta-release-verification'
+          if (Test-Path -LiteralPath $verificationRoot) {
+            Remove-Item -LiteralPath $verificationRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $verificationRoot | Out-Null
+
+          $release = gh release view $tag --json isDraft | ConvertFrom-Json
+          if (-not $release.isDraft) {
+            throw "Release '$tag' became public before final asset verification."
+          }
+          gh release download $tag --dir $verificationRoot --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download draft release assets for '$tag'."
+          }
+
+          $expectedPaths = @(
+            @(Get-ChildItem -Path 'artifacts' -File | ForEach-Object { $_.FullName })
+            (Resolve-Path 'updater/beta/latest-beta.json').Path
+          )
+          $expectedNames = @($expectedPaths | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+          $actualNames = @(Get-ChildItem -Path $verificationRoot -File | ForEach-Object { $_.Name } | Sort-Object)
+          if (Compare-Object -ReferenceObject $expectedNames -DifferenceObject $actualNames) {
+            throw "Draft release '$tag' contains missing or unexpected assets."
+          }
+          foreach ($expectedPath in $expectedPaths) {
+            $assetName = [IO.Path]::GetFileName($expectedPath)
+            $downloadedPath = Join-Path $verificationRoot $assetName
+            $expectedHash = (Get-FileHash -LiteralPath $expectedPath -Algorithm SHA256).Hash
+            $actualHash = (Get-FileHash -LiteralPath $downloadedPath -Algorithm SHA256).Hash
+            if ($actualHash -cne $expectedHash) {
+              throw "Draft release asset '$assetName' no longer matches the validated build artifact."
+            }
+          }
+
+          $manifest = Get-Content 'updater/beta/latest-beta.json' -Raw | ConvertFrom-Json
+          $windowsName = "SIMM_${version}_Setup.exe"
+          $linuxName = "SIMM_${version}_x86_64.AppImage"
+          $windowsSignature = (Get-Content "artifacts/$windowsName.sig" -Raw).Trim()
+          $linuxSignature = (Get-Content "artifacts/$linuxName.sig" -Raw).Trim()
+          if (-not $manifest.platforms.'windows-x86_64'.url.EndsWith("/$windowsName") -or $manifest.platforms.'windows-x86_64'.signature -cne $windowsSignature) {
+            throw 'Beta Windows updater manifest entry does not match the final signed draft assets.'
+          }
+          if (-not $manifest.platforms.'linux-x86_64'.url.EndsWith("/$linuxName") -or $manifest.platforms.'linux-x86_64'.signature -cne $linuxSignature) {
+            throw 'Beta Linux updater manifest entry does not match the final signed draft assets.'
+          }
+
+          $release = gh release view $tag --json isDraft | ConvertFrom-Json
+          if (-not $release.isDraft) {
+            throw "Release '$tag' became public before the updater manifest was committed."
+          }
+          gh release edit $tag --draft=false --prerelease

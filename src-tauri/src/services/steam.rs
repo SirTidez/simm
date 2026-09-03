@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tokio::fs;
+
+static STEAM_LOCAL_CONFIG_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 /// Steam detection and management service
 #[derive(Clone)]
@@ -212,11 +217,22 @@ impl SteamService {
     }
 
     pub fn ensure_schedule_i_launch_options(&self) -> Result<SteamLaunchOptionsStatus> {
+        let _write_guard = STEAM_LOCAL_CONFIG_WRITE_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Steam launch-options update lock is unavailable"))?;
         let config_path = Self::steam_local_config_path()?;
-        let mut entries = if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("Failed to read {}", config_path.display()))?;
-            parse_text_vdf(&content)
+        let original = if config_path.exists() {
+            Some(
+                std::fs::read(&config_path)
+                    .with_context(|| format!("Failed to read {}", config_path.display()))?,
+            )
+        } else {
+            None
+        };
+        let mut entries = if let Some(content) = original.as_deref() {
+            let content = std::str::from_utf8(content)
+                .with_context(|| format!("{} is not valid UTF-8", config_path.display()))?;
+            parse_text_vdf(content)
                 .with_context(|| format!("Failed to parse {}", config_path.display()))?
         } else {
             Vec::new()
@@ -254,10 +270,123 @@ impl SteamService {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
-        std::fs::write(&config_path, write_text_vdf(&entries))
-            .with_context(|| format!("Failed to write {}", config_path.display()))?;
+        Self::write_local_config_atomically(
+            &config_path,
+            original.as_deref(),
+            write_text_vdf(&entries).as_bytes(),
+        )?;
 
         self.get_schedule_i_launch_options_status()
+    }
+
+    fn write_local_config_atomically(
+        target: &Path,
+        original: Option<&[u8]>,
+        content: &[u8],
+    ) -> Result<()> {
+        let rendered = std::str::from_utf8(content).context("Generated Steam config is invalid")?;
+        parse_text_vdf(rendered).context("Generated Steam config is invalid")?;
+        let parent = target
+            .parent()
+            .context("Steam local config has no parent directory")?;
+        let name = target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("Steam local config has no valid name")?;
+        let staged = parent.join(format!(".{name}.simm-{}.tmp", uuid::Uuid::new_v4()));
+        Self::write_synced_new_file(&staged, content)?;
+        let staged_contents = std::fs::read_to_string(&staged)
+            .context("Failed to re-read staged Steam local config")?;
+        parse_text_vdf(&staged_contents).context("Staged Steam local config is invalid")?;
+
+        let current = match std::fs::read(target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                let _ = std::fs::remove_file(&staged);
+                return Err(error)
+                    .context("Failed to re-check Steam local config before replacement");
+            }
+        };
+        if current.as_deref() != original {
+            let _ = std::fs::remove_file(&staged);
+            anyhow::bail!(
+                "Steam local config changed while SIMM was preparing the update; try again"
+            )
+        }
+
+        if let Some(original) = original {
+            let backup = parent.join(format!("{name}.simm-backup"));
+            let backup_staged =
+                parent.join(format!(".{name}.simm-backup-{}.tmp", uuid::Uuid::new_v4()));
+            Self::write_synced_new_file(&backup_staged, original)?;
+            Self::replace_file_atomically(&backup_staged, &backup)
+                .context("Failed to preserve the previous Steam local config")?;
+        }
+
+        if let Err(error) = Self::replace_file_atomically(&staged, target) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error).context("Failed to install updated Steam local config");
+        }
+        let installed = std::fs::read_to_string(target)
+            .context("Failed to verify updated Steam local config")?;
+        if installed.as_bytes() != content {
+            anyhow::bail!("Steam local config changed immediately after SIMM updated it")
+        }
+        parse_text_vdf(&installed).context("Updated Steam local config failed validation")?;
+        Ok(())
+    }
+
+    fn write_synced_new_file(path: &Path, content: &[u8]) -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("Failed to create staged file {}", path.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("Failed to write staged file {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("Failed to flush staged file {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to persist staged file {}", path.display()))
+    }
+
+    fn replace_file_atomically(replacement: &Path, target: &Path) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use winapi::um::winbase::{
+                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            };
+            let replacement_wide = replacement
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let target_wide = target
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let replaced = unsafe {
+                MoveFileExW(
+                    replacement_wide.as_ptr(),
+                    target_wide.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if replaced == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("Failed to atomically replace Steam configuration");
+            }
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::fs::rename(replacement, target)
+                .context("Failed to atomically replace Steam configuration")
+        }
     }
 
     /// Find Steam installation directory
@@ -1159,6 +1288,7 @@ mod tests {
             }
         }
     }
+
 }
 "#;
 
@@ -1209,6 +1339,26 @@ mod tests {
             ),
             Some("WINEDLLOVERRIDES=\"version=n,b\" %command%")
         );
+    }
+
+    #[test]
+    fn local_config_atomic_write_preserves_a_valid_backup() {
+        let temp = TempDir::new().expect("temp dir");
+        let target = temp.path().join("localconfig.vdf");
+        let original = b"\"Root\" { \"Value\" \"before\" }\n";
+        let updated = b"\"Root\" { \"Value\" \"after\" }\n";
+        std::fs::write(&target, original).expect("seed local config");
+
+        SteamService::write_local_config_atomically(&target, Some(original), updated)
+            .expect("atomic local config update");
+
+        let installed = std::fs::read_to_string(&target).expect("updated local config");
+        parse_text_vdf(&installed).expect("parse updated local config");
+        assert!(installed.contains("after"));
+        let backup = std::fs::read_to_string(temp.path().join("localconfig.vdf.simm-backup"))
+            .expect("local config backup");
+        parse_text_vdf(&backup).expect("parse local config backup");
+        assert!(backup.contains("before"));
     }
 
     #[test]

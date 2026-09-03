@@ -17,13 +17,14 @@ export interface AnchoredContextMenuItem {
 }
 
 interface Props {
+  id?: string;
   x: number;
   y: number;
   items: AnchoredContextMenuItem[];
   onClose: () => void;
 }
 
-export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
+export function AnchoredContextMenu({ id, x, y, items, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const anchor = useMemo(
     () => ({
@@ -66,6 +67,7 @@ export function AnchoredContextMenu({ x, y, items, onClose }: Props) {
       }}
     >
       <ContextMenuContent
+        id={id}
         anchor={anchor}
         align="start"
         collisionAvoidance={{ side: 'shift', align: 'shift', fallbackAxisSide: 'end' }}

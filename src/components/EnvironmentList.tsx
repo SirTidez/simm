@@ -2057,6 +2057,11 @@ export function EnvironmentList({
           }
         }}
         className={`environment-card environment-card--workspace${focusedEnvironmentId === env.id ? ' environment-card--focused' : ''}`}
+        role="button"
+        aria-label={`Open actions for ${env.name}`}
+        aria-haspopup="menu"
+        aria-controls={environmentMenu?.envId === env.id ? `environment-actions-${env.id}` : undefined}
+        aria-expanded={environmentMenu?.envId === env.id}
         tabIndex={0}
         onKeyDown={(event) => {
           if (event.key !== 'ContextMenu' && event.key !== 'Enter' && event.key !== ' ') {
@@ -2737,6 +2742,7 @@ export function EnvironmentList({
 
         return (
           <AnchoredContextMenu
+            id={`environment-actions-${env.id}`}
             x={environmentMenu.x}
             y={environmentMenu.y}
             items={items}

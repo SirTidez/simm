@@ -1,13 +1,16 @@
-use crate::utils::depot_downloader_detector::detect_depot_downloader;
+use crate::services::depot_downloader::{acquire_process_permit, unique_login_id};
+use crate::utils::depot_downloader_detector::detect_depot_downloader_with_override;
 use crate::utils::logging::{error_with_location, warn_with_location};
 use anyhow::{Context, Result};
 use regex::Regex;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tauri::{AppHandle, Runtime};
+use tempfile::{tempdir_in, TempDir};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
 const PASSWORD_AUTH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -92,13 +95,20 @@ impl AuthService {
     }
 
     fn login_id() -> String {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| {
-                let bounded = (duration.as_millis() % u128::from(u32::MAX)) as u32;
-                bounded.max(1).to_string()
-            })
-            .unwrap_or_else(|_| "1".to_string())
+        unique_login_id()
+    }
+
+    fn auth_working_directory(
+        depots_dir: &Path,
+        remember_credentials: bool,
+    ) -> Result<(PathBuf, Option<TempDir>)> {
+        if remember_credentials {
+            return Ok((depots_dir.to_path_buf(), None));
+        }
+
+        let temporary = tempdir_in(depots_dir)
+            .context("Failed to create isolated one-time authentication directory")?;
+        Ok((temporary.path().to_path_buf(), Some(temporary)))
     }
 
     fn build_auth_args(
@@ -361,9 +371,17 @@ impl AuthService {
         mut child: Child,
         stdin_lines: Vec<String>,
         deadline: Duration,
+        ephemeral_auth_dir: Option<TempDir>,
+        process_permit: Option<OwnedMutexGuard<()>>,
     ) -> Result<AuthProcessOutput> {
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
+            // Keep one-time credential storage alive until cancellation has
+            // killed and reaped the child. Dropping it earlier can leave
+            // account.config behind on Windows while the process still has a
+            // handle open.
+            let _ephemeral_auth_dir = ephemeral_auth_dir;
+            let _process_permit = process_permit;
             let stdout_task = child
                 .stdout
                 .take()
@@ -416,9 +434,13 @@ impl AuthService {
         app: AppHandle<R>,
         mut child: Child,
         deadline: Duration,
+        ephemeral_auth_dir: Option<TempDir>,
+        process_permit: Option<OwnedMutexGuard<()>>,
     ) -> Result<AuthProcessOutput> {
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
+            let _ephemeral_auth_dir = ephemeral_auth_dir;
+            let _process_permit = process_permit;
             let stdout_task = child.stdout.take().map(|stdout| {
                 let app = app.clone();
                 tokio::spawn(Self::pump_qr_output(app, stdout))
@@ -456,7 +478,25 @@ impl AuthService {
         steam_guard: Option<String>,
         remember_credentials: bool,
     ) -> Result<AuthResult> {
-        let detector_info = detect_depot_downloader().await?;
+        self.authenticate_with_executable(
+            username,
+            password,
+            steam_guard,
+            remember_credentials,
+            None,
+        )
+        .await
+    }
+
+    pub async fn authenticate_with_executable(
+        &self,
+        username: String,
+        password: Option<String>,
+        steam_guard: Option<String>,
+        remember_credentials: bool,
+        configured_executable: Option<&str>,
+    ) -> Result<AuthResult> {
+        let detector_info = detect_depot_downloader_with_override(configured_executable).await?;
         if !detector_info.installed || detector_info.path.is_none() {
             warn_with_location("Steam auth rejected because DepotDownloader is not installed");
             return Ok(Self::failure(
@@ -483,6 +523,9 @@ impl AuthService {
                 ));
                 error
             })?;
+        let (working_dir, ephemeral_auth_dir) =
+            Self::auth_working_directory(&depots_dir, remember_credentials)?;
+        let process_permit = acquire_process_permit().await;
 
         #[cfg(target_os = "windows")]
         let child = ({
@@ -490,7 +533,7 @@ impl AuthService {
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
                 .args(&args)
-                .current_dir(&depots_dir) // Set working directory to SIMM/depots
+                .current_dir(&working_dir)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -510,7 +553,7 @@ impl AuthService {
         #[cfg(not(target_os = "windows"))]
         let child = Command::new(&executable_path)
             .args(&args)
-            .current_dir(&depots_dir) // Set working directory to SIMM/depots
+            .current_dir(&working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -529,12 +572,18 @@ impl AuthService {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        let output = Self::run_password_process(child, stdin_lines, PASSWORD_AUTH_TIMEOUT)
-            .await
-            .map_err(|error| {
-                error_with_location(format!("Steam auth process management failed: {}", error));
-                error
-            })?;
+        let output = Self::run_password_process(
+            child,
+            stdin_lines,
+            PASSWORD_AUTH_TIMEOUT,
+            ephemeral_auth_dir,
+            Some(process_permit),
+        )
+        .await
+        .map_err(|error| {
+            error_with_location(format!("Steam auth process management failed: {}", error));
+            error
+        })?;
         let all_output = output.stdout + &output.stderr;
         let sanitized_output =
             crate::services::logger::LoggerService::sanitize_log_text(&all_output);
@@ -585,12 +634,13 @@ impl AuthService {
         }
     }
 
-    pub async fn authenticate_qr<R: Runtime>(
+    pub async fn authenticate_qr_with_executable<R: Runtime>(
         &self,
         app: AppHandle<R>,
         remember_credentials: bool,
+        configured_executable: Option<&str>,
     ) -> Result<AuthResult> {
-        let detector_info = detect_depot_downloader().await?;
+        let detector_info = detect_depot_downloader_with_override(configured_executable).await?;
         if !detector_info.installed || detector_info.path.is_none() {
             warn_with_location("Steam QR auth rejected because DepotDownloader is not installed");
             return Ok(Self::failure(
@@ -611,6 +661,13 @@ impl AuthService {
                 ));
                 error
             })?;
+        // DepotDownloader writes QR refresh tokens even without
+        // -remember-password. Run one-time QR auth in an isolated directory
+        // whose contents are removed when this call completes.
+        let (working_dir, ephemeral_auth_dir) =
+            Self::auth_working_directory(&depots_dir, remember_credentials)
+                .context("Failed to prepare QR authentication storage")?;
+        let process_permit = acquire_process_permit().await;
 
         #[cfg(target_os = "windows")]
         let child = ({
@@ -618,7 +675,7 @@ impl AuthService {
             use std::os::windows::process::CommandExt;
             Command::new(&executable_path)
                 .args(&args)
-                .current_dir(&depots_dir)
+                .current_dir(&working_dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true)
@@ -637,7 +694,7 @@ impl AuthService {
         #[cfg(not(target_os = "windows"))]
         let child = Command::new(&executable_path)
             .args(&args)
-            .current_dir(&depots_dir)
+            .current_dir(&working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -651,15 +708,21 @@ impl AuthService {
                 error
             })?;
 
-        let output = Self::run_qr_process(app, child, QR_AUTH_TIMEOUT)
-            .await
-            .map_err(|error| {
-                error_with_location(format!(
-                    "Steam QR auth process management failed: {}",
-                    error
-                ));
+        let output = Self::run_qr_process(
+            app,
+            child,
+            QR_AUTH_TIMEOUT,
+            ephemeral_auth_dir,
+            Some(process_permit),
+        )
+        .await
+        .map_err(|error| {
+            error_with_location(format!(
+                "Steam QR auth process management failed: {}",
                 error
-            })?;
+            ));
+            error
+        })?;
         let all_output = output.stdout + &output.stderr;
         let lower_output = all_output.to_lowercase();
 
@@ -730,7 +793,6 @@ mod tests {
     use serial_test::serial;
     use std::io::Write;
     use tauri::test::mock_app;
-    #[cfg(target_os = "windows")]
     use tempfile::tempdir;
 
     #[cfg(target_os = "windows")]
@@ -827,6 +889,8 @@ mod tests {
             child,
             vec!["fixture-password-not-an-argument".to_string()],
             Duration::from_millis(750),
+            None,
+            None,
         )
         .await?;
 
@@ -845,7 +909,9 @@ mod tests {
         let handle = app.handle().clone();
         let started = tokio::time::Instant::now();
 
-        let output = AuthService::run_qr_process(handle, child, Duration::from_millis(750)).await?;
+        let output =
+            AuthService::run_qr_process(handle, child, Duration::from_millis(750), None, None)
+                .await?;
 
         assert_eq!(output.completion, AuthProcessCompletion::TimedOut);
         assert!(!output.status.success());
@@ -930,6 +996,27 @@ mod tests {
     fn qr_auth_args_honor_one_time_credentials_setting() {
         let args = AuthService::build_qr_auth_args(false);
         assert!(!args.iter().any(|arg| arg == "-remember-password"));
+    }
+
+    #[test]
+    fn one_time_auth_storage_is_isolated_and_removed() -> Result<()> {
+        let depots = tempdir()?;
+        let (working_dir, temporary) = AuthService::auth_working_directory(depots.path(), false)?;
+        assert_ne!(working_dir, depots.path());
+        assert!(working_dir.starts_with(depots.path()));
+        std::fs::write(working_dir.join("account.config"), b"fixture-token")?;
+        drop(temporary);
+        assert!(!working_dir.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn remembered_auth_uses_shared_depots_storage() -> Result<()> {
+        let depots = tempdir()?;
+        let (working_dir, temporary) = AuthService::auth_working_directory(depots.path(), true)?;
+        assert_eq!(working_dir, depots.path());
+        assert!(temporary.is_none());
+        Ok(())
     }
 
     #[test]

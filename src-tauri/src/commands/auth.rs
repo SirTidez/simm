@@ -29,12 +29,14 @@ pub async fn authenticate(
 ) -> Result<serde_json::Value, String> {
     let auth_service = get_auth_service().await?;
     let save_credentials = save_credentials.unwrap_or(false);
+    let configured_depot_downloader = runtime_settings.snapshot().await.depot_downloader_path;
     let result = auth_service
-        .authenticate(
+        .authenticate_with_executable(
             username.clone(),
             password.clone(),
             steam_guard,
             save_credentials,
+            configured_depot_downloader.as_deref(),
         )
         .await
         .map_err(|e| {
@@ -107,8 +109,13 @@ pub async fn authenticate_qr(
 ) -> Result<serde_json::Value, String> {
     let auth_service = get_auth_service().await?;
     let save_credentials = save_credentials.unwrap_or(false);
+    let configured_depot_downloader = runtime_settings.snapshot().await.depot_downloader_path;
     let result = auth_service
-        .authenticate_qr(app, save_credentials)
+        .authenticate_qr_with_executable(
+            app,
+            save_credentials,
+            configured_depot_downloader.as_deref(),
+        )
         .await
         .map_err(|e| {
             error_with_location(format!("Steam QR auth command failed: {}", e));

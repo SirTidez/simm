@@ -48,6 +48,7 @@ describe('events', () => {
         downloadId: 'download-1',
         progress: {
           downloadId: 'download-1',
+          operationId: 'operation-1',
           status: 'downloading',
           progress: 50,
         },
@@ -56,6 +57,7 @@ describe('events', () => {
 
     expect(handler).toHaveBeenCalledWith({
       downloadId: 'download-1',
+      operationId: 'operation-1',
       status: 'downloading',
       progress: 50,
     });
@@ -91,8 +93,8 @@ describe('events', () => {
   });
 
   it.each([
-    ['onComplete', onComplete, 'download_complete', { downloadId: 'd-1' }],
-    ['onError', onError, 'download_error', { downloadId: 'd-1', error: 'boom' }],
+    ['onComplete', onComplete, 'download_complete', { downloadId: 'd-1', operationId: 'op-1' }],
+    ['onError', onError, 'download_error', { downloadId: 'd-1', operationId: 'op-1', error: 'boom' }],
     ['onAuthWaiting', onAuthWaiting, 'auth_waiting', { downloadId: 'd-1', message: 'wait' }],
     ['onAuthSuccess', onAuthSuccess, 'auth_success', { downloadId: 'd-1' }],
     ['onAuthError', onAuthError, 'auth_error', { downloadId: 'd-1', error: 'bad' }],

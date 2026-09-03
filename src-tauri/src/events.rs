@@ -17,12 +17,14 @@ pub fn emit_progress<R: Runtime>(
 pub fn emit_complete<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    operation_id: String,
     manifest_id: Option<String>,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "download_complete",
         serde_json::json!({
             "downloadId": download_id,
+            "operationId": operation_id,
             "manifestId": manifest_id
         }),
     )
@@ -31,11 +33,12 @@ pub fn emit_complete<R: Runtime>(
 pub fn emit_error<R: Runtime>(
     app: &AppHandle<R>,
     download_id: String,
+    operation_id: String,
     error: String,
 ) -> Result<(), tauri::Error> {
     app.emit(
         "download_error",
-        serde_json::json!({ "downloadId": download_id, "error": error }),
+        serde_json::json!({ "downloadId": download_id, "operationId": operation_id, "error": error }),
     )
 }
 

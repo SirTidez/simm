@@ -42,7 +42,10 @@ pub async fn save_telemetry_preferences(
     if updates.field_count() != 1 {
         return Err("Update exactly one telemetry preference at a time".to_string());
     }
-    let policy_changed = updates.protect_local_mods.is_some();
+    // A queued preview is a snapshot of the privacy policy the user reviewed.
+    // Revoking readable excerpts must invalidate that snapshot before the new
+    // preference is exposed to background upload flushes.
+    let policy_changed = invalidates_queued_uploads(&updates);
     let preferences = TelemetryService::new(db.inner().clone())
         .save_preferences(updates)
         .await
@@ -63,6 +66,10 @@ pub async fn save_telemetry_preferences(
     }
 
     Ok(preferences)
+}
+
+fn invalidates_queued_uploads(updates: &TelemetryPreferencesUpdate) -> bool {
+    updates.protect_local_mods.is_some() || updates.error_excerpts_enabled == Some(false)
 }
 
 #[tauri::command]
@@ -205,5 +212,23 @@ mod tests {
 
         let _enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
         assert!(get_telemetry_capability().available);
+    }
+
+    #[test]
+    fn revoking_readable_excerpts_invalidates_queued_previews() {
+        assert!(invalidates_queued_uploads(&TelemetryPreferencesUpdate {
+            collection_enabled: None,
+            upload_enabled: None,
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            protect_local_mods: None,
+        }));
+        assert!(!invalidates_queued_uploads(&TelemetryPreferencesUpdate {
+            collection_enabled: None,
+            upload_enabled: None,
+            error_excerpts_enabled: Some(true),
+            retention_days: None,
+            protect_local_mods: None,
+        }));
     }
 }

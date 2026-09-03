@@ -77,6 +77,7 @@ impl RuntimeSettingsState {
         updates: serde_json::Value,
     ) -> Result<Settings> {
         let _save_guard = self.save_lock.lock().await;
+        SettingsService::ensure_persisted_settings_are_writable(pool).await?;
         let current = self.snapshot().await;
         let current_json = serde_json::to_value(&current)?;
         let merged = SettingsService::sanitize_legacy_settings_value(SettingsService::merge_json(
@@ -208,6 +209,71 @@ impl SettingsService {
             window_close_behavior: Some(WindowCloseBehavior::Ask),
             setup_guide_completed: Some(false),
         }
+    }
+
+    fn decode_persisted_settings(data: &str) -> Option<Settings> {
+        if let Ok(settings) = serde_json::from_str::<Settings>(data) {
+            return Some(settings);
+        }
+
+        let raw_value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+        serde_json::from_value::<Settings>(Self::sanitize_legacy_settings_value(raw_value)).ok()
+    }
+
+    async fn ensure_persisted_settings_are_writable(pool: &SqlitePool) -> Result<()> {
+        let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to validate persisted settings before saving")?;
+
+        if stored
+            .as_deref()
+            .is_some_and(|data| Self::decode_persisted_settings(data).is_none())
+        {
+            anyhow::bail!(
+                "Stored settings are corrupt. Run Database Repair to preserve the damaged row and restore safe defaults before saving settings."
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn repair_corrupt_settings(pool: &SqlitePool) -> Result<bool> {
+        let stored = sqlx::query_scalar::<_, String>("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to inspect settings during database repair")?;
+        let Some(data) = stored else {
+            return Ok(false);
+        };
+        if Self::decode_persisted_settings(&data).is_some() {
+            return Ok(false);
+        }
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("Failed to begin corrupt settings repair")?;
+        sqlx::query("INSERT INTO settings_quarantine (settings_id, data, reason) VALUES (?, ?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(&data)
+            .bind("settings JSON failed schema validation")
+            .execute(&mut *transaction)
+            .await
+            .context("Failed to quarantine corrupt settings")?;
+        sqlx::query("UPDATE settings SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&Self::default_settings())?)
+            .bind(SETTINGS_ID)
+            .execute(&mut *transaction)
+            .await
+            .context("Failed to restore default settings during repair")?;
+        transaction
+            .commit()
+            .await
+            .context("Failed to commit corrupt settings repair")?;
+        log::warn!("Quarantined corrupt persisted settings and restored safe defaults");
+        Ok(true)
     }
 
     fn key_from_material(key_str: &str) -> Key<Aes256Gcm> {
@@ -844,27 +910,16 @@ impl SettingsService {
             .context("Failed to load settings")?;
 
         if let Some(data) = stored {
-            if let Ok(mut settings) = serde_json::from_str::<Settings>(&data) {
+            if let Some(mut settings) = Self::decode_persisted_settings(&data) {
                 settings.theme = Self::normalize_theme_selection(&settings.theme);
                 self.migrate_window_close_behavior(&mut settings).await?;
                 self.migrate_depot_downloader_remembered_session(&mut settings)
                     .await?;
                 return Ok(settings);
             }
-
-            if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&data) {
-                let sanitized = Self::sanitize_legacy_settings_value(raw_value);
-                if let Ok(mut settings) = serde_json::from_value::<Settings>(sanitized) {
-                    settings.theme = Self::normalize_theme_selection(&settings.theme);
-                    self.migrate_window_close_behavior(&mut settings).await?;
-                    self.migrate_depot_downloader_remembered_session(&mut settings)
-                        .await?;
-                    log::warn!("Recovered persisted settings through legacy sanitization");
-                    return Ok(settings);
-                }
-            }
-
-            log::warn!("Stored settings could not be parsed; falling back to defaults");
+            anyhow::bail!(
+                "Stored settings are corrupt and were left untouched. Run Database Repair to quarantine the damaged row and restore safe defaults."
+            );
         }
 
         Ok(Self::default_settings())
@@ -1371,6 +1426,52 @@ mod tests {
         assert_eq!(loaded.database_backup_count, Some(12));
         assert_eq!(loaded.log_retention_days, Some(10));
         assert_eq!(loaded.auto_check_updates, Some(false));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn corrupt_settings_require_explicit_repair_and_are_quarantined() -> Result<()> {
+        let temp = tempdir()?;
+        let data_dir = temp.path().join("simmrust");
+        let _data_guard =
+            EnvVarGuard::set("SIMMRUST_DATA_DIR", data_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        let corrupt = r#"{"theme":"dark","maxConcurrentDownloads":"not-a-number"}"#;
+        sqlx::query("INSERT INTO settings (id, data) VALUES (?, ?)")
+            .bind(SETTINGS_ID)
+            .bind(corrupt)
+            .execute(&*pool)
+            .await?;
+
+        let mut service = SettingsService::new(pool.clone())?;
+        let load_error = service.load_settings().await.unwrap_err().to_string();
+        assert!(load_error.contains("left untouched"));
+
+        let runtime = RuntimeSettingsState::new(SettingsService::default_settings());
+        let save_error = runtime
+            .save_settings(&pool, serde_json::json!({"theme": "light"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(save_error.contains("Run Database Repair"));
+        let unchanged: String = sqlx::query_scalar("SELECT data FROM settings WHERE id = ?")
+            .bind(SETTINGS_ID)
+            .fetch_one(&*pool)
+            .await?;
+        assert_eq!(unchanged, corrupt);
+
+        crate::db::repair_database(&pool).await?;
+        let quarantined: String = sqlx::query_scalar(
+            "SELECT data FROM settings_quarantine WHERE settings_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(SETTINGS_ID)
+        .fetch_one(&*pool)
+        .await?;
+        assert_eq!(quarantined, corrupt);
+        assert_eq!(service.load_settings().await?.theme, "modern-blue");
 
         Ok(())
     }

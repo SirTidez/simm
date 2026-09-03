@@ -34,6 +34,10 @@ pub enum Platform {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadProgress {
     pub download_id: String,
+    /// Unique to one attempt, even when an environment reuses download_id.
+    /// Frontends use this to distinguish an immediate retry from a duplicate
+    /// event emitted by the preceding attempt.
+    pub operation_id: String,
     pub status: DownloadStatus,
     pub progress: f64, // 0-100
     pub downloaded_files: Option<u64>,

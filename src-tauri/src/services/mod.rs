@@ -24,7 +24,6 @@ pub mod runtime_update_scheduler;
 pub mod save_backups;
 pub mod security_scanner;
 pub mod settings;
-pub mod simm_package;
 pub mod steam;
 pub mod telemetry;
 pub mod telemetry_upload;

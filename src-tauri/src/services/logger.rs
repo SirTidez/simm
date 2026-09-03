@@ -26,6 +26,12 @@ static WINDOWS_PATH_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)\b[a-z]:[\\/](?:[^\\/:*?"<>|\s]+[\\/])*[^\\/:*?"<>|\s]*"#)
         .expect("windows path regex")
 });
+static WINDOWS_ROOTED_PATH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(^|[\s=\(\[\{\"'])((?:\\\\[^\\/:*?\"<>|\s]+[\\/][^\s\"'<>|]*|\\[^\\/:*?\"<>|\s]+(?:\\[^\\/:*?\"<>|\s]+)*))"#,
+    )
+    .expect("rooted windows path regex")
+});
 static FILE_URI_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)\bfile://[^\s"'<>|\r\n]+"#).expect("file URI regex"));
 static UNIX_PATH_RE: Lazy<Regex> = Lazy::new(|| {
@@ -137,6 +143,21 @@ impl LoggerService {
         sanitized = FILE_URI_RE
             .replace_all(&sanitized, |caps: &Captures| {
                 Self::summarize_path(caps.get(0).map(|m| m.as_str()).unwrap_or_default())
+            })
+            .to_string();
+        sanitized = WINDOWS_ROOTED_PATH_RE
+            .replace_all(&sanitized, |caps: &Captures| {
+                format!(
+                    "{}{}",
+                    caps.get(1)
+                        .map(|capture| capture.as_str())
+                        .unwrap_or_default(),
+                    Self::summarize_path(
+                        caps.get(2)
+                            .map(|capture| capture.as_str())
+                            .unwrap_or_default()
+                    )
+                )
             })
             .to_string();
         sanitized = WINDOWS_PATH_RE
@@ -625,6 +646,25 @@ mod tests {
         assert!(!sanitized.contains("Alice"));
         assert!(!sanitized.contains("/home/alice"));
         assert!(!sanitized.contains("file:///"));
+    }
+
+    #[test]
+    fn sanitize_log_text_redacts_unc_and_root_relative_windows_paths() {
+        let sanitized = LoggerService::sanitize_log_text(
+            r"share=\\server\private\Latest.log root=\Users\Alice\AppData\Local\SIMM\app.log system=\Windows",
+        );
+
+        assert!(!sanitized.contains("server"));
+        assert!(!sanitized.contains("Alice"));
+        assert!(sanitized.contains("share=<path:Latest.log>"));
+        assert!(sanitized.contains("root=<path:app.log>"));
+        assert!(sanitized.contains("system=<path:Windows>"));
+    }
+
+    #[test]
+    fn sanitize_log_text_preserves_non_path_slash_text() {
+        let input = "processed 1/2 files in mod/category label";
+        assert_eq!(LoggerService::sanitize_log_text(input), input);
     }
 
     #[test]

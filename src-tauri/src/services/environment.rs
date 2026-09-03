@@ -588,33 +588,6 @@ impl EnvironmentService {
         }
     }
 
-    pub async fn hard_delete_environment_record(&self, id: &str) -> Result<()> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .context("Failed to begin hard environment delete")?;
-        Self::clear_environment_metadata_in_transaction(&mut transaction, id).await?;
-        sqlx::query("DELETE FROM environment_profiles WHERE environment_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await
-            .context("Failed to clear active environment profile mapping")?;
-        sqlx::query("DELETE FROM environments WHERE id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await
-            .context("Failed to hard delete environment")?;
-        transaction
-            .commit()
-            .await
-            .context("Failed to commit hard environment delete")?;
-        crate::services::mods_snapshot_cache::remove(id).await;
-
-        notify_scheduler_of_environment_change();
-        Ok(())
-    }
-
     fn normalize_path(path: &str) -> String {
         let trimmed = path.trim_end_matches(['\\', '/']);
         #[cfg(windows)]

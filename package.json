@@ -39,7 +39,8 @@
     "test:e2e": "playwright test",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:rust:live": "cargo test --manifest-path src-tauri/Cargo.toml -- --ignored",
-    "test:linux-parity": "bash scripts/validate-linux-parity-smoke.sh"
+    "test:linux-parity": "bash scripts/validate-linux-parity-smoke.sh",
+    "test:release": "python .codex/skills/simmrust-release-updater/scripts/test_check_release_artifacts.py && pwsh -NoProfile -File .codex/skills/simmrust-release-updater/scripts/test_generate_updater_manifest.ps1 && pwsh -NoProfile -File scripts/test-windows-release-contract.ps1"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",

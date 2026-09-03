@@ -65,9 +65,9 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
     if let Err(err) = migrator.run(&pool).await {
         match err {
             MigrateError::VersionMismatch(version) => {
-                if has_expected_schema(&pool).await? {
+                if migration_schema_invariant(&pool, version).await? {
                     log::warn!(
-                        "Database migration version mismatch detected for version {}; proceeding with existing schema",
+                        "Database migration version mismatch detected for version {}; proceeding because that migration's schema invariant is satisfied",
                         version
                     );
                 } else {
@@ -451,7 +451,7 @@ async fn reconcile_historical_migration_checksums(
     pool: &SqlitePool,
     migrator: &sqlx::migrate::Migrator,
 ) -> Result<()> {
-    if !has_expected_schema(pool).await? || !table_exists(pool, "_sqlx_migrations").await? {
+    if !table_exists(pool, "_sqlx_migrations").await? {
         return Ok(());
     }
 
@@ -472,6 +472,14 @@ async fn reconcile_historical_migration_checksums(
             continue;
         }
 
+        if !migration_schema_invariant(pool, version).await? {
+            log::warn!(
+                "Refusing to rewrite checksum for migration {} because its schema invariant is not satisfied",
+                version
+            );
+            continue;
+        }
+
         sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
             .bind(expected.checksum.as_ref())
             .bind(version)
@@ -485,6 +493,61 @@ async fn reconcile_historical_migration_checksums(
     }
 
     Ok(())
+}
+
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1")
+            .bind(table)
+            .bind(column)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("Failed to inspect columns for table {table}"))?;
+    Ok(exists.is_some())
+}
+
+async fn index_exists(pool: &SqlitePool, index: &str) -> Result<bool> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1")
+            .bind(index)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("Failed to inspect database index {index}"))?;
+    Ok(exists.is_some())
+}
+
+/// A checksum is reconciled only when the concrete objects introduced by that
+/// exact historical migration are present. Merely having the foundational
+/// table names is not sufficient evidence that an altered migration ran.
+async fn migration_schema_invariant(pool: &SqlitePool, version: i64) -> Result<bool> {
+    match version {
+        1 => Ok(table_exists(pool, "app_meta").await?
+            && column_exists(pool, "app_meta", "value").await?
+            && table_exists(pool, "settings").await?
+            && column_exists(pool, "settings", "data").await?
+            && table_exists(pool, "environments").await?
+            && column_exists(pool, "environments", "output_dir").await?
+            && column_exists(pool, "environments", "data").await?
+            && table_exists(pool, "secrets").await?
+            && table_exists(pool, "mod_metadata").await?),
+        2 => Ok(
+            column_exists(pool, "environments", "normalized_output_dir").await?
+                && index_exists(pool, "idx_environments_normalized_output_dir_unique").await?,
+        ),
+        3 => Ok(table_exists(pool, "profiles").await?
+            && table_exists(pool, "environment_profiles").await?
+            && index_exists(pool, "idx_profiles_default_runtime").await?),
+        4 => Ok(table_exists(pool, "telemetry_preferences").await?
+            && table_exists(pool, "telemetry_snapshots").await?),
+        5 => Ok(table_exists(pool, "telemetry_sessions").await?
+            && table_exists(pool, "telemetry_events").await?),
+        6 => Ok(table_exists(pool, "telemetry_upload_queue").await?
+            && index_exists(pool, "idx_telemetry_upload_queue_state_created").await?),
+        7 => Ok(table_exists(pool, "telemetry_mod_rules").await?),
+        8 => Ok(table_exists(pool, "environment_deletion_journal").await?
+            && index_exists(pool, "idx_environment_deletion_journal_state").await?),
+        _ => Ok(false),
+    }
 }
 
 async fn maybe_create_startup_backup(
@@ -571,6 +634,7 @@ pub async fn repair_database(pool: &SqlitePool) -> Result<PathBuf> {
 
     let backup_path = create_database_backup(pool, "pre-repair").await?;
     ensure_additive_schema(pool).await?;
+    crate::services::settings::SettingsService::repair_corrupt_settings(pool).await?;
     let migrator = sqlx::migrate!();
     reconcile_historical_migration_checksums(pool, &migrator).await?;
     migrator
@@ -970,6 +1034,31 @@ async fn has_expected_schema(pool: &SqlitePool) -> Result<bool> {
 /// runner, so later profiles and telemetry migrations would otherwise never be applied.
 async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
     const ADDITIVE_SCHEMA_STATEMENTS: &[&str] = &[
+        "CREATE TABLE IF NOT EXISTS environment_duplicate_quarantine (\
+            id TEXT PRIMARY KEY, \
+            keeper_environment_id TEXT NOT NULL, \
+            output_dir TEXT NOT NULL, \
+            normalized_output_dir TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            reason TEXT NOT NULL, \
+            quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\
+        )",
+        "CREATE TABLE IF NOT EXISTS environment_duplicate_mod_metadata_quarantine (\
+            environment_id TEXT NOT NULL, \
+            keeper_environment_id TEXT NOT NULL, \
+            kind TEXT NOT NULL, \
+            file_name TEXT NOT NULL, \
+            data TEXT NOT NULL, \
+            quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+            PRIMARY KEY (environment_id, kind, file_name)\
+        )",
+        "CREATE TABLE IF NOT EXISTS settings_quarantine (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            settings_id INTEGER NOT NULL, \
+            data TEXT NOT NULL, \
+            reason TEXT NOT NULL, \
+            quarantined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\
+        )",
         "CREATE TABLE IF NOT EXISTS profiles (\
             id TEXT PRIMARY KEY, \
             name TEXT NOT NULL, \
@@ -1084,6 +1173,9 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
     .context("Failed to remove orphan environment profile mappings")?;
 
     for table in [
+        "environment_duplicate_quarantine",
+        "environment_duplicate_mod_metadata_quarantine",
+        "settings_quarantine",
         "profiles",
         "environment_deletion_journal",
         "environment_profiles",
@@ -1097,6 +1189,18 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
         if !table_exists(pool, table).await? {
             anyhow::bail!("Database repair did not restore required table {table}");
         }
+    }
+
+    let quarantined_duplicates: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environment_duplicate_quarantine")
+            .fetch_one(pool)
+            .await
+            .context("Failed to inspect quarantined duplicate environments")?;
+    if quarantined_duplicates > 0 {
+        log::warn!(
+            "{} duplicate environment record(s) are preserved in the database quarantine after install-path normalization",
+            quarantined_duplicates
+        );
     }
 
     Ok(())
@@ -1824,6 +1928,95 @@ mod tests {
 
         let migrator = sqlx::migrate!();
         assert!(database_requires_migration_backup(&pool, &migrator).await?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn checksum_reconciliation_requires_the_specific_migration_schema() -> Result<()> {
+        let temp = tempdir()?;
+        let override_dir = temp.path().join("simmrust");
+        let _guard = EnvVarGuard::set("SIMMRUST_DATA_DIR", override_dir.to_string_lossy().as_ref());
+
+        let pool = initialize_pool().await?;
+        sqlx::query("DROP TABLE environment_profiles")
+            .execute(&*pool)
+            .await?;
+        let mismatched = vec![0_u8; 48];
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(&mismatched)
+            .bind(3_i64)
+            .execute(&*pool)
+            .await?;
+
+        let migrator = sqlx::migrate!();
+        reconcile_historical_migration_checksums(&pool, &migrator).await?;
+        let retained: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(3_i64)
+                .fetch_one(&*pool)
+                .await?;
+        assert_eq!(retained, mismatched);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn normalized_path_migration_quarantines_duplicates_and_merges_metadata() -> Result<()> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind("a-keeper")
+            .bind(r"C:\Games\Schedule I")
+            .bind(r#"{"id":"a-keeper"}"#)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
+            .bind("b-duplicate")
+            .bind("c:/games/schedule i/")
+            .bind(r#"{"id":"b-duplicate"}"#)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO mod_metadata (environment_id, kind, file_name, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind("b-duplicate")
+        .bind("mods")
+        .bind("OnlyOnDuplicate.dll")
+        .bind(r#"{"enabled":true}"#)
+        .execute(&pool)
+        .await?;
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_environments_normalized_output_dir.sql"
+        ))
+        .execute(&pool)
+        .await?;
+
+        let active_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM environments ORDER BY id")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(active_ids, vec!["a-keeper"]);
+        let quarantined_data: String =
+            sqlx::query_scalar("SELECT data FROM environment_duplicate_quarantine WHERE id = ?")
+                .bind("b-duplicate")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(quarantined_data, r#"{"id":"b-duplicate"}"#);
+        let merged_metadata: String = sqlx::query_scalar(
+            "SELECT data FROM mod_metadata WHERE environment_id = ? AND file_name = ?",
+        )
+        .bind("a-keeper")
+        .bind("OnlyOnDuplicate.dll")
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(merged_metadata, r#"{"enabled":true}"#);
 
         Ok(())
     }

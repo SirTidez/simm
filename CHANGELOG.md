@@ -2,6 +2,12 @@
 
 ## [0.8.6]
 
+- Hardened Windows release delivery with required Authenticode signing and signer verification, Microsoft signature validation before running the downloaded VC++ redistributable, removal of the obsolete .NET 6 installer prerequisite now that DepotDownloader ships a self-contained Windows executable, draft-first GitHub publication, committed updater-feed freshness checks, release-contract regression tests, and Windows-native Rust CI coverage.
+- Hardened DepotDownloader authentication and update checks with one-time credential isolation, serialized child-process ownership, configured executable support, remembered-session-safe manifest probes, bounded batch checks, and generation-safe retry events.
+- Contained mod mutations and provider updates to validated paths and runtime-compatible files, preserved uninstalled library entries, retained canonical Nexus filenames, and added expanded-size budgets across installation, scanning, and FOMOD processing.
+- Made save backups and Steam configuration updates serialized and recoverable with change detection, unique staging, validation, backups, and atomic replacement; save operations now refuse to run while Schedule I is active.
+- Preserved uncertain persistence data by quarantining duplicate environments and corrupt settings, tightened migration-checksum repair, removed deletion from environment reads, and made saturated high-severity logging nonblocking.
+- Rechecked telemetry consent at the final upload boundary, blocked Windows rooted/UNC path leakage, retained the `SIMM_ENABLE_TELEMETRY` runtime gate, and closed stale listener, refresh, runtime-extraction, and download-retry races in the desktop UI.
 - Preserved distinct Nexus mod files and included file IDs in install dedupe so multi-file mod variants stay selectable and install the intended package instead of collapsing together.
 - Improved responsive layout and text wrapping across wizard and setup UI surfaces so long labels, paths, and card content no longer clip or overflow awkwardly.
 - Updated wizard selection grids and related cards to size more flexibly across desktop viewports, keeping installation/setup flows readable in denser or narrower layouts.

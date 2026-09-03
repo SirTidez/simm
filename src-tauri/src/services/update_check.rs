@@ -1,8 +1,10 @@
-use crate::services::depot_downloader::DepotDownloaderService;
+use crate::services::depot_downloader::{
+    acquire_process_permit, unique_login_id, DepotDownloaderService,
+};
 use crate::services::game_version::GameVersionService;
 use crate::services::settings::SettingsService;
 use crate::types::{Environment, Settings, UpdateCheckResult};
-use crate::utils::depot_downloader_detector::detect_depot_downloader;
+use crate::utils::depot_downloader_detector::detect_depot_downloader_with_override;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use regex::Regex;
@@ -14,13 +16,14 @@ use std::time::Duration;
 use tempfile::tempdir_in;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::sync::watch;
+use tokio::sync::{watch, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
 const MANIFEST_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const MANIFEST_PROBE_REAP_TIMEOUT: Duration = Duration::from_secs(3);
 const MANIFEST_PROBE_READER_TIMEOUT: Duration = Duration::from_secs(3);
 const MANIFEST_PROBE_OUTPUT_LIMIT: usize = 128 * 1024;
+const ALL_ENVIRONMENT_CHECK_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 #[derive(Debug, thiserror::Error)]
 enum ManifestProbeError {
@@ -58,6 +61,35 @@ impl CappedProbeOutput {
 struct ManifestProbeOutput {
     stdout: String,
     stderr: String,
+}
+
+struct ManifestProbeTask {
+    cancel: watch::Sender<bool>,
+    handle: JoinHandle<Result<ManifestProbeOutput, ManifestProbeError>>,
+}
+
+impl ManifestProbeTask {
+    fn spawn(mut child: Child, process_permit: OwnedMutexGuard<()>) -> Self {
+        let (cancel, cancellation) = watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let _process_permit = process_permit;
+            run_manifest_probe_child(&mut child, MANIFEST_PROBE_TIMEOUT, Some(cancellation)).await
+        });
+        Self { cancel, handle }
+    }
+
+    async fn finish(mut self) -> Result<ManifestProbeOutput, ManifestProbeError> {
+        let joined = (&mut self.handle).await;
+        joined.map_err(|error| {
+            ManifestProbeError::Io(format!("manifest probe task failed: {error}"))
+        })?
+    }
+}
+
+impl Drop for ManifestProbeTask {
+    fn drop(&mut self) {
+        let _ = self.cancel.send(true);
+    }
 }
 
 async fn read_capped_probe_output<R>(
@@ -511,9 +543,27 @@ impl UpdateCheckService {
     ) -> Result<HashMap<String, UpdateCheckResult>> {
         log::info!("Checking for updates on {} environment(s)", envs.len());
         let mut results = HashMap::new();
+        let deadline = tokio::time::Instant::now() + ALL_ENVIRONMENT_CHECK_TIMEOUT;
 
         for env in envs {
-            match self.check_update_for_environment(env).await {
+            let check_result = if tokio::time::Instant::now() >= deadline {
+                Err(anyhow::anyhow!(
+                    "Update check batch exceeded its {} second deadline",
+                    ALL_ENVIRONMENT_CHECK_TIMEOUT.as_secs()
+                ))
+            } else {
+                match tokio::time::timeout_at(deadline, self.check_update_for_environment(env))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Update check batch exceeded its {} second deadline",
+                        ALL_ENVIRONMENT_CHECK_TIMEOUT.as_secs()
+                    )),
+                }
+            };
+
+            match check_result {
                 Ok(result) => {
                     results.insert(env.id.clone(), result);
                 }
@@ -843,23 +893,48 @@ impl UpdateCheckService {
             .map(|manifest_id| manifest_id.as_str().to_string())
     }
 
+    fn build_manifest_probe_command(
+        executable: &std::path::Path,
+        app_id: &str,
+        branch: &str,
+        username: &str,
+        platform: &crate::types::Platform,
+        depots_dir: &std::path::Path,
+        probe_dir: &std::path::Path,
+        remembered_session: bool,
+    ) -> Command {
+        let mut cmd = Command::new(executable);
+        cmd.arg("-app")
+            .arg(app_id)
+            .arg("-branch")
+            .arg(branch)
+            .arg("-username")
+            .arg(username)
+            .arg("-loginid")
+            .arg(unique_login_id())
+            .arg("-os")
+            .arg(DepotDownloaderService::platform_arg(platform))
+            .arg("-manifest-only")
+            .arg("-dir")
+            .arg(probe_dir)
+            .current_dir(depots_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if remembered_session {
+            cmd.arg("-remember-password");
+        }
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        cmd
+    }
+
     async fn get_manifest_id_from_depot_downloader(
         &self,
         app_id: &str,
         branch: &str,
     ) -> Result<String> {
-        let detector_info = detect_depot_downloader()
-            .await
-            .context("Failed to detect DepotDownloader")?;
-
-        if !detector_info.installed {
-            return Err(anyhow::anyhow!("DepotDownloader is not installed"));
-        }
-
-        let depot_downloader_path = detector_info
-            .path
-            .ok_or_else(|| anyhow::anyhow!("DepotDownloader path not found"))?;
-
         // Get credentials from settings for authentication
         let mut settings_service =
             SettingsService::new(self.pool.clone()).context("Failed to create settings service")?;
@@ -870,6 +945,17 @@ impl UpdateCheckService {
                 .await
                 .context("Failed to load settings")?,
         };
+
+        let detector_info =
+            detect_depot_downloader_with_override(settings.depot_downloader_path.as_deref())
+                .await
+                .context("Failed to detect DepotDownloader")?;
+        if !detector_info.installed {
+            return Err(anyhow::anyhow!("DepotDownloader is not installed"));
+        }
+        let depot_downloader_path = detector_info
+            .path
+            .ok_or_else(|| anyhow::anyhow!("DepotDownloader path not found"))?;
 
         let credentials = settings_service
             .get_credentials()
@@ -897,45 +983,31 @@ impl UpdateCheckService {
         let depots_dir = crate::utils::directory_init::get_depots_dir()
             .context("Failed to get depots directory")?;
 
-        // Use a fresh working directory so DepotDownloader cannot satisfy the
-        // manifest probe from a previously cached depot manifest.
+        // Keep the shared account store as the process CWD so remembered
+        // sessions remain usable, but direct depot/cache output into an empty
+        // probe directory so an old local manifest cannot satisfy this query.
         let manifest_probe_dir = tempdir_in(&depots_dir)
             .context("Failed to create temporary manifest probe directory")?;
 
         // Build command with authentication
-        let mut cmd = Command::new(&depot_downloader_path);
-        cmd.arg("-app")
-            .arg(app_id)
-            .arg("-branch")
-            .arg(branch)
-            .arg("-username")
-            .arg(&username)
-            .arg("-os")
-            .arg(DepotDownloaderService::platform_arg(&depot_platform))
-            .arg("-manifest-only")
-            .current_dir(manifest_probe_dir.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let mut cmd = Self::build_manifest_probe_command(
+            std::path::Path::new(&depot_downloader_path),
+            app_id,
+            branch,
+            &username,
+            &depot_platform,
+            &depots_dir,
+            manifest_probe_dir.path(),
+            settings
+                .depot_downloader_remembered_session
+                .unwrap_or(false),
+        );
 
-        // DepotDownloader's remembered sessions are cross-platform. If SIMM
-        // sends a username without a password, it must opt into the saved token.
-        if settings
-            .depot_downloader_remembered_session
-            .unwrap_or(false)
-        {
-            cmd.arg("-remember-password");
-        }
-
-        // Hide console window on Windows
-        #[cfg(target_os = "windows")]
-        {
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW flag
-        }
-
-        let mut child = cmd.spawn().map_err(ManifestProbeError::Spawn)?;
-        let output = run_manifest_probe_child(&mut child, MANIFEST_PROBE_TIMEOUT, None).await?;
+        let process_permit = acquire_process_permit().await;
+        let child = cmd.spawn().map_err(ManifestProbeError::Spawn)?;
+        let output = ManifestProbeTask::spawn(child, process_permit)
+            .finish()
+            .await?;
 
         let output_str = output.stdout;
         let error_str = output.stderr;
@@ -1017,6 +1089,37 @@ mod tests {
             "Account 123456789012345 authenticated\nBuild 987654321098765 ready\n"
         )
         .is_none());
+    }
+
+    #[test]
+    fn remembered_manifest_probe_uses_shared_account_cwd_and_isolated_output() {
+        let temp = tempdir().expect("temporary root");
+        let depots = temp.path().join("depots");
+        let probe = depots.join("probe");
+        let executable = temp.path().join("DepotDownloader.exe");
+        let command = UpdateCheckService::build_manifest_probe_command(
+            &executable,
+            "3164500",
+            "alternate-beta",
+            "fixture-user",
+            &crate::types::Platform::Windows,
+            &depots,
+            &probe,
+            true,
+        );
+        let std_command = command.as_std();
+        assert_eq!(std_command.get_current_dir(), Some(depots.as_path()));
+        let args = std_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|window| { window[0] == "-dir" && window[1] == probe.to_string_lossy() }));
+        assert!(args.iter().any(|arg| arg == "-remember-password"));
+        assert!(args
+            .windows(2)
+            .any(|window| { window[0] == "-loginid" && window[1].parse::<u32>().is_ok() }));
     }
 
     #[tokio::test]

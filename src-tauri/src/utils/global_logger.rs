@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 const LOG_QUEUE_CAPACITY: usize = 4096;
 static DROPPED_LOG_MESSAGES: AtomicUsize = AtomicUsize::new(0);
+static FALLBACK_CRITICAL_LOG_MESSAGES: AtomicUsize = AtomicUsize::new(0);
 
 struct LogMessage {
     level: LogLevel,
@@ -89,9 +90,17 @@ impl GlobalLogger {
                     Ok(()) => {}
                     Err(TrySendError::Full(log_message)) => {
                         if matches!(log_message.level, LogLevel::Warn | LogLevel::Error) {
-                            // Preserve actionable records even during a burst;
-                            // only low-priority traffic may be shed.
-                            let _ = tx.send(log_message);
+                            // Never block an application thread behind disk logging. The
+                            // synchronous console copy emitted by `log` remains available,
+                            // and this counter makes queue saturation observable.
+                            let fallback =
+                                FALLBACK_CRITICAL_LOG_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
+                            if fallback == 1 || fallback % 100 == 0 {
+                                eprintln!(
+                                    "[GlobalLogger] Log queue saturated; {} warn/error record(s) retained only in the console fallback",
+                                    fallback
+                                );
+                            }
                             return;
                         }
                         let dropped = DROPPED_LOG_MESSAGES.fetch_add(1, Ordering::Relaxed) + 1;
@@ -154,6 +163,30 @@ impl log::Log for GlobalLogger {
 static GLOBAL_LOGGER: once_cell::sync::Lazy<GlobalLogger> =
     once_cell::sync::Lazy::new(|| GlobalLogger::new());
 static LOGGER_SERVICE_STARTED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warn_falls_back_without_waiting_when_queue_is_full() {
+        let logger = GlobalLogger::new();
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.try_send(LogMessage {
+            level: LogLevel::Info,
+            message: "already queued".to_string(),
+        })
+        .unwrap();
+        *logger.sender.lock().unwrap() = Some(tx);
+
+        let before = FALLBACK_CRITICAL_LOG_MESSAGES.load(Ordering::Relaxed);
+        logger.send_to_file(LogLevel::Warn, "fallback".to_string());
+        let after = FALLBACK_CRITICAL_LOG_MESSAGES.load(Ordering::Relaxed);
+
+        assert!(after > before);
+        assert_eq!(rx.try_recv().unwrap().message, "already queued");
+    }
+}
 
 /// Initialize the global logger
 pub fn init_global_logger() {

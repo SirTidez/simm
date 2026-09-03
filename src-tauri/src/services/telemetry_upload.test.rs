@@ -8,7 +8,7 @@ use tokio::time::{timeout, Duration};
 use crate::db::initialize_pool;
 use crate::services::telemetry::TelemetryService;
 use crate::services::telemetry_upload::{
-    normalize_upload_envelope_timestamps, TelemetryUploadService,
+    is_local_path, normalize_upload_envelope_timestamps, TelemetryUploadService,
 };
 use crate::test_helpers::EnvVarGuard;
 use crate::types::{TelemetryPreferencesUpdate, TelemetryUploadEnvelope, TelemetryUploadState};
@@ -193,6 +193,69 @@ async fn rejects_forward_slash_windows_paths_before_they_can_be_queued() -> Resu
         .fetch_one(pool.as_ref())
         .await?;
     assert_eq!(count, 0);
+    Ok(())
+}
+
+#[test]
+fn rejects_unc_and_root_relative_windows_paths_but_allows_normal_slash_text() {
+    assert!(is_local_path(r"\\server\private\Latest.log"));
+    assert!(is_local_path(r"\Users\Alice\AppData\Local\SIMM"));
+    assert!(is_local_path(r"\Windows"));
+    assert!(is_local_path(r"failure at \.\private\Latest.log"));
+    assert!(!is_local_path("processed 1/2 files"));
+    assert!(!is_local_path("mod/category label"));
+}
+
+#[tokio::test]
+#[serial]
+async fn excerpt_consent_is_rechecked_immediately_before_network_send() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = format!("http://{}", listener.local_addr()?);
+    let temp = tempfile::tempdir()?;
+    let _data_dir = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let _telemetry_enabled = EnvVarGuard::set("SIMM_ENABLE_TELEMETRY", "true");
+    let pool = initialize_pool().await?;
+    persist_durably_ended_fixture_session(&pool).await?;
+    let telemetry = TelemetryService::new(pool.clone());
+    telemetry
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(true),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+    let service = TelemetryUploadService::with_base_url(pool.clone(), base_url);
+    let queued = service
+        .queue_reviewed_upload(include_str!(
+            "../../../test-fixtures/live-telemetry-v1.json"
+        ))
+        .await?;
+
+    telemetry
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: None,
+            upload_enabled: None,
+            error_excerpts_enabled: Some(false),
+            retention_days: None,
+            protect_local_mods: None,
+        })
+        .await?;
+    let receipt = service.retry_upload(&queued.id).await?;
+
+    assert_eq!(receipt.state, TelemetryUploadState::Failed);
+    assert_eq!(
+        receipt.last_error_code.as_deref(),
+        Some("diagnostic_text_consent_revoked")
+    );
+    assert_eq!(receipt.attempts, 0);
+    assert!(timeout(Duration::from_millis(150), listener.accept())
+        .await
+        .is_err());
     Ok(())
 }
 

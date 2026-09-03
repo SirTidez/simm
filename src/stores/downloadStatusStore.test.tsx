@@ -69,10 +69,14 @@ function Consumer() {
 
 describe('DownloadStatusStore', () => {
   let progressHandler: ((data: DownloadProgress) => void) | null = null;
+  let completeHandler: ((data: { downloadId: string; operationId: string; manifestId?: string }) => void) | null = null;
+  let errorHandler: ((data: { downloadId: string; operationId: string; error: string }) => void) | null = null;
   let trackedDownloadHandler: ((data: TrackedDownload) => void) | null = null;
 
   beforeEach(() => {
     progressHandler = null;
+    completeHandler = null;
+    errorHandler = null;
     trackedDownloadHandler = null;
 
     environmentStoreMocks.useEnvironmentStore.mockReset();
@@ -94,12 +98,12 @@ describe('DownloadStatusStore', () => {
       progressHandler = handler;
       return () => {};
     });
-    eventMocks.onComplete.mockImplementation(async (handler: (data: { downloadId: string; manifestId?: string }) => void) => {
-      void handler;
+    eventMocks.onComplete.mockImplementation(async (handler: (data: { downloadId: string; operationId: string; manifestId?: string }) => void) => {
+      completeHandler = handler;
       return () => {};
     });
-    eventMocks.onError.mockImplementation(async (handler: (data: { downloadId: string; error: string }) => void) => {
-      void handler;
+    eventMocks.onError.mockImplementation(async (handler: (data: { downloadId: string; operationId: string; error: string }) => void) => {
+      errorHandler = handler;
       return () => {};
     });
     eventMocks.onTrackedDownloadUpdated.mockImplementation(async (handler: (data: TrackedDownload) => void) => {
@@ -135,6 +139,7 @@ describe('DownloadStatusStore', () => {
     await act(async () => {
       progressHandler?.({
         downloadId: 'env-1',
+        operationId: 'operation-1',
         status: 'downloading',
         progress: 35,
         downloadedFiles: 2,
@@ -288,6 +293,7 @@ describe('DownloadStatusStore', () => {
     await act(async () => {
       progressHandler?.({
         downloadId: 'env-1',
+        operationId: 'operation-1',
         status: 'completed',
         progress: 100,
         downloadedFiles: 10,
@@ -296,6 +302,7 @@ describe('DownloadStatusStore', () => {
       });
       progressHandler?.({
         downloadId: 'env-1',
+        operationId: 'operation-1',
         status: 'downloading',
         progress: 50,
         downloadedFiles: 5,
@@ -306,6 +313,37 @@ describe('DownloadStatusStore', () => {
 
     expect(screen.getByTestId('statuses').textContent).toBe('game:env-1:completed');
     expect(screen.getByTestId('summary').textContent).toBe('10/10');
+  });
+
+  it('shows an immediate same-environment retry when the operation generation changes', async () => {
+    render(
+      <DownloadStatusStoreProvider>
+        <Consumer />
+      </DownloadStatusStoreProvider>
+    );
+    await flushListeners();
+
+    await act(async () => {
+      progressHandler?.({
+        downloadId: 'env-1', operationId: 'operation-1', status: 'completed', progress: 100,
+      });
+    });
+    expect(screen.getByTestId('statuses').textContent).toBe('game:env-1:completed');
+
+    await act(async () => {
+      progressHandler?.({
+        downloadId: 'env-1', operationId: 'operation-2', status: 'downloading', progress: 0,
+        message: 'Retry started',
+      });
+    });
+
+    expect(screen.getByTestId('statuses').textContent).toBe('game:env-1:downloading');
+
+    await act(async () => {
+      completeHandler?.({ downloadId: 'env-1', operationId: 'operation-1' });
+      errorHandler?.({ downloadId: 'env-1', operationId: 'operation-1', error: 'Delayed error' });
+    });
+    expect(screen.getByTestId('statuses').textContent).toBe('game:env-1:downloading');
   });
 
   it('keeps a tracked terminal row terminal when a stale active event arrives', async () => {

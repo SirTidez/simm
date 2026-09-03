@@ -1,6 +1,8 @@
+use crate::services::settings::RuntimeSettingsState;
 use crate::types::DepotDownloaderInfo;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
+use tauri::State;
 use tokio::process::Command;
 
 #[cfg(target_os = "windows")]
@@ -247,10 +249,15 @@ async fn install_depot_downloader_linux() -> Result<DepotDownloaderInfo, String>
 }
 
 #[tauri::command]
-pub async fn detect_depot_downloader() -> Result<DepotDownloaderInfo, String> {
-    crate::utils::depot_downloader_detector::detect_depot_downloader()
-        .await
-        .map_err(|e| e.to_string())
+pub async fn detect_depot_downloader(
+    runtime_settings: State<'_, RuntimeSettingsState>,
+) -> Result<DepotDownloaderInfo, String> {
+    let settings = runtime_settings.snapshot().await;
+    crate::utils::depot_downloader_detector::detect_depot_downloader_with_override(
+        settings.depot_downloader_path.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

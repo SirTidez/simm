@@ -1,4 +1,5 @@
 use crate::db;
+use crate::services::fomod::ArchiveBudget;
 use crate::types::{
     SecurityFindingSeverity, SecurityScanDisposition, SecurityScanDispositionClassification,
     SecurityScanFileReport, SecurityScanPolicy, SecurityScanReport, SecurityScanState,
@@ -899,12 +900,16 @@ impl SecurityScannerService {
     async fn extract_zip_to_directory(&self, archive_path: &Path, target_dir: &Path) -> Result<()> {
         let file = File::open(archive_path).context("Failed to open ZIP archive")?;
         let mut archive = ZipArchive::new(file).context("Failed to read ZIP archive")?;
+        let mut budget = ArchiveBudget::default();
 
         for index in 0..archive.len() {
             let mut entry = archive
                 .by_index(index)
                 .context("Failed to read ZIP entry")?;
             let relative_path = entry.name().to_string();
+            budget
+                .account(&relative_path, entry.size())
+                .context("ZIP archive exceeds scanner extraction limits")?;
             let enclosed_path = entry.enclosed_name().ok_or_else(|| {
                 anyhow::anyhow!("ZIP entry contains an unsafe path: {}", relative_path)
             })?;
@@ -922,13 +927,11 @@ impl SecurityScannerService {
                     .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
 
-            let mut buffer = Vec::new();
-            entry
-                .read_to_end(&mut buffer)
-                .context("Failed to read ZIP entry contents")?;
-            std::fs::write(&output_path, buffer).with_context(|| {
-                format!("Failed to write extracted file {}", output_path.display())
-            })?;
+            budget
+                .copy_entry_to_path(&relative_path, &mut entry, &output_path)
+                .with_context(|| {
+                    format!("Failed to write extracted file {}", output_path.display())
+                })?;
         }
 
         Ok(())
@@ -942,10 +945,14 @@ impl SecurityScannerService {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid archive extraction path"))?;
 
+        let mut budget = ArchiveBudget::default();
         while let Some(header) = archive.read_header().context("Failed to read RAR header")? {
             let entry = header.entry();
             let is_directory = entry.is_directory();
             validate_rar_entry_path(&entry.filename)?;
+            budget
+                .account(&entry.filename.to_string_lossy(), entry.unpacked_size)
+                .context("RAR archive exceeds scanner extraction limits")?;
 
             if is_directory {
                 archive = header
@@ -965,6 +972,7 @@ impl SecurityScannerService {
         let archive_path = archive_path.to_path_buf();
         let target_dir = target_dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
+            let mut budget = ArchiveBudget::default();
             sevenz_rust::decompress_file_with_extract_fn(
                 &archive_path,
                 &target_dir,
@@ -972,6 +980,9 @@ impl SecurityScannerService {
                     if entry.name().is_empty() && entry.is_directory() {
                         return Ok(true);
                     }
+                    budget
+                        .account(entry.name(), entry.size())
+                        .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
                     let relative_path = safe_archive_relative_path(entry.name())
                         .map_err(sevenz_rust::Error::other)?;
                     let output_path = target_dir.join(relative_path);
@@ -982,9 +993,9 @@ impl SecurityScannerService {
                         if let Some(parent) = output_path.parent() {
                             std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
                         }
-                        let mut output =
-                            File::create(&output_path).map_err(sevenz_rust::Error::io)?;
-                        std::io::copy(reader, &mut output).map_err(sevenz_rust::Error::io)?;
+                        budget
+                            .copy_entry_to_path(entry.name(), reader, &output_path)
+                            .map_err(|error| sevenz_rust::Error::other(error.to_string()))?;
                     }
 
                     Ok(true)
@@ -1006,11 +1017,19 @@ impl SecurityScannerService {
             let file = File::open(&archive_path).context("Failed to open tar.gz archive")?;
             let decoder = GzDecoder::new(file);
             let mut archive = tar::Archive::new(decoder);
+            let mut budget = ArchiveBudget::default();
 
             for entry in archive.entries().context("Failed to read tar.gz archive")? {
                 let mut entry = entry.context("Failed to read tar.gz entry")?;
                 let entry_path = entry.path().context("Failed to read tar.gz entry path")?;
                 let entry_name = entry_path.to_string_lossy().replace('\\', "/");
+                let expanded_size = entry
+                    .header()
+                    .size()
+                    .context("Failed to read tar.gz entry size")?;
+                budget
+                    .account(&entry_name, expanded_size)
+                    .context("tar.gz archive exceeds scanner extraction limits")?;
                 let relative_path = safe_archive_relative_path(&entry_name)
                     .map_err(|error| anyhow::anyhow!(error))?;
                 let output_path = target_dir.join(relative_path);
@@ -1026,9 +1045,11 @@ impl SecurityScannerService {
                             format!("Failed to create directory {}", parent.display())
                         })?;
                     }
-                    entry.unpack(&output_path).with_context(|| {
-                        format!("Failed to extract tar.gz file {}", output_path.display())
-                    })?;
+                    budget
+                        .copy_entry_to_path(&entry_name, &mut entry, &output_path)
+                        .with_context(|| {
+                            format!("Failed to extract tar.gz file {}", output_path.display())
+                        })?;
                 }
             }
 
@@ -2441,6 +2462,54 @@ mod tests {
 
         assert_eq!(dlls, vec![target_dir.join("RootMod.dll")]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_zip_to_directory_preserves_safe_nested_dll() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("nested-dll.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+        write_zip_with_file(
+            &archive_path,
+            "Runtime/IL2CPP/Mods/Nested.dll",
+            b"fake assembly bytes",
+        )?;
+
+        let service = SecurityScannerService::new();
+        service
+            .extract_zip_to_directory(&archive_path, &target_dir)
+            .await?;
+        let dlls = service.collect_dll_files(&target_dir).await?;
+
+        assert_eq!(
+            dlls,
+            vec![target_dir.join("Runtime/IL2CPP/Mods/Nested.dll")]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extract_zip_to_directory_rejects_excessive_path_depth() -> Result<()> {
+        let temp = tempdir()?;
+        let archive_path = temp.path().join("deep.zip");
+        let target_dir = temp.path().join("extract");
+        std::fs::create_dir_all(&target_dir)?;
+        let deep_name = (0..=crate::services::fomod::MAX_ARCHIVE_PATH_DEPTH)
+            .map(|index| format!("level-{index}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        write_zip_with_file(&archive_path, &deep_name, b"unsafe")?;
+
+        let service = SecurityScannerService::new();
+        let error = service
+            .extract_zip_to_directory(&archive_path, &target_dir)
+            .await
+            .expect_err("deep scanner archive entry must fail closed");
+
+        assert!(error.to_string().contains("scanner extraction limits"));
+        assert!(!target_dir.join(&deep_name).exists());
         Ok(())
     }
 

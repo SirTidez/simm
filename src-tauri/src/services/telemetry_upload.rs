@@ -389,6 +389,30 @@ impl TelemetryUploadService {
             return receipt.into_receipt();
         }
 
+        // Preferences may change after a payload was reviewed and queued. Do
+        // not rely on the queue-time check: this is the last local boundary
+        // before the HTTP request is constructed.
+        let preferences = TelemetryService::new(self.pool.clone())
+            .get_preferences()
+            .await?;
+        if !preferences.collection_enabled || !preferences.upload_enabled {
+            return Err(anyhow!(
+                "Telemetry upload requires collection and upload opt-in before it can be sent"
+            ));
+        }
+        let envelope: TelemetryUploadEnvelope = serde_json::from_str(&receipt.payload)
+            .context("Queued telemetry payload is invalid")?;
+        if envelope.diagnostic_text_consent && !preferences.error_excerpts_enabled {
+            self.update_state(
+                id,
+                TelemetryUploadState::Failed,
+                receipt.attempts,
+                Some("diagnostic_text_consent_revoked".to_string()),
+            )
+            .await?;
+            return self.get_upload(id).await?.into_receipt();
+        }
+
         let base_url = match self.resolve_base_url() {
             Ok(base_url) => base_url,
             Err(_) => {
@@ -551,15 +575,41 @@ fn has_unsafe_upload_value(value: &serde_json::Value) -> bool {
     }
 }
 
-fn is_local_path(value: &str) -> bool {
+pub(super) fn is_local_path(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.contains("file://")
+        || contains_windows_rooted_path(value)
         || contains_absolute_unix_path(value)
         || value.as_bytes().windows(3).any(|window| {
             window[0].is_ascii_alphabetic()
                 && window[1] == b':'
                 && matches!(window[2], b'\\' | b'/')
         })
+}
+
+fn contains_windows_rooted_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (0..bytes.len()).any(|index| {
+        if bytes[index] != b'\\' {
+            return false;
+        }
+
+        let at_boundary = index == 0
+            || matches!(
+                bytes[index - 1],
+                b' ' | b'\t' | b'\r' | b'\n' | b'=' | b'(' | b'[' | b'{' | b'"' | b'\''
+            );
+        if !at_boundary {
+            return false;
+        }
+
+        // UNC/device paths begin with two separators. A single leading
+        // separator is a root-relative Windows path even when it has only one
+        // component (for example \Windows).
+        bytes.get(index + 1).is_some_and(|next| {
+            *next == b'\\' || next.is_ascii_alphanumeric() || matches!(next, b'_' | b'.' | b'-')
+        })
+    })
 }
 
 fn contains_absolute_unix_path(value: &str) -> bool {

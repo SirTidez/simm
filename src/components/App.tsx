@@ -24,7 +24,7 @@ import { DownloadStatusStoreProvider, useDownloadStatusStore } from '../stores/d
 import { SettingsStoreProvider, useSettingsStore } from '../stores/settingsStore';
 import { useEnvironmentStore } from '../stores/environmentStore';
 import { ApiService } from '../services/api';
-import { onRuntimeSwitch } from '../services/events';
+import { createAsyncListenerScope, onRuntimeSwitch } from '../services/events';
 import { logger } from '../services/logger';
 import {
   buildSetupGuideSettings,
@@ -2252,47 +2252,40 @@ function AppContent() {
   }, [handleNexusManualDownloadCallback, handleNexusOAuthCallback]);
 
   useEffect(() => {
-    let unlistenDeepLink: (() => void) | null = null;
-    let unlistenSingleInstance: (() => void) | null = null;
-    let cancelled = false;
+    const reportDeepLinkError = (error: unknown) => {
+      console.error('Failed to initialize deep-link handling:', error);
+      dispatchNexusOAuthResult({
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to initialize deep-link handling',
+      });
+    };
+    const listeners = createAsyncListenerScope(reportDeepLinkError);
 
     const processPendingDeepLinks = async () => {
       const currentUrls = await getCurrentDeepLink();
-      if (!cancelled && currentUrls?.length) {
+      if (listeners.isActive() && currentUrls?.length) {
         for (const url of currentUrls) {
           void handleExternalProtocolUrl(url);
         }
       }
     };
 
-    const initDeepLinkHandling = async () => {
-      try {
-        await processPendingDeepLinks();
-
-        unlistenDeepLink = await onOpenUrl((urls) => {
-          for (const url of urls) {
-            void handleExternalProtocolUrl(url);
-          }
-        });
-
-        unlistenSingleInstance = await listen<{ args?: string[] }>('single-instance-args', (event) => {
-          const args = event.payload?.args || [];
-          for (const arg of args) {
-            if (typeof arg === 'string' && (arg.startsWith('simm://') || arg.startsWith('nxm://'))) {
-              void handleExternalProtocolUrl(arg);
-            }
-          }
-        });
-      } catch (error) {
-        console.error('Failed to initialize deep-link handling:', error);
-        dispatchNexusOAuthResult({
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to initialize deep-link handling',
-        });
+    void processPendingDeepLinks().catch(reportDeepLinkError);
+    listeners.register(() => onOpenUrl((urls) => {
+      if (!listeners.isActive()) return;
+      for (const url of urls) {
+        void handleExternalProtocolUrl(url);
       }
-    };
-
-    void initDeepLinkHandling();
+    }));
+    listeners.register(() => listen<{ args?: string[] }>('single-instance-args', (event) => {
+      if (!listeners.isActive()) return;
+      const args = event.payload?.args || [];
+      for (const arg of args) {
+        if (typeof arg === 'string' && (arg.startsWith('simm://') || arg.startsWith('nxm://'))) {
+          void handleExternalProtocolUrl(arg);
+        }
+      }
+    }));
 
     const handleWindowFocus = () => {
       void processPendingDeepLinks().catch((error) => {
@@ -2302,10 +2295,8 @@ function AppContent() {
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
-      cancelled = true;
       window.removeEventListener('focus', handleWindowFocus);
-      unlistenDeepLink?.();
-      unlistenSingleInstance?.();
+      listeners.dispose();
     };
   }, [dispatchNexusOAuthResult, handleExternalProtocolUrl]);
 

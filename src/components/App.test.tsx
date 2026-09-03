@@ -1541,6 +1541,25 @@ describe('App', () => {
     });
   });
 
+  it('disposes a deep-link listener that finishes registering after unmount', async () => {
+    let resolveDeepLinkListener: ((unlisten: () => void) => void) | null = null;
+    const lateUnlisten = vi.fn();
+    deepLinkMocks.onOpenUrl.mockReturnValueOnce(new Promise((resolve) => {
+      resolveDeepLinkListener = resolve;
+    }));
+
+    const view = render(<App />);
+    await waitFor(() => expect(deepLinkMocks.onOpenUrl).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    await act(async () => {
+      const resolve = resolveDeepLinkListener as ((unlisten: () => void) => void) | null;
+      resolve?.(lateUnlisten);
+    });
+
+    expect(lateUnlisten).toHaveBeenCalledTimes(1);
+  });
+
   it('consumes a replayed successful Nexus OAuth callback when no pending flow remains', async () => {
     const callbackUrl = 'simm://oauth/nexus/callback?code=abc&state=done';
     const oauthResults: Array<{ success: boolean; error?: string }> = [];
