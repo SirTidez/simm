@@ -602,9 +602,36 @@ impl EnvironmentService {
 
     fn paths_equal(left: &Path, right: &Path) -> bool {
         fn comparison_path(path: &Path) -> String {
-            let normalized = EnvironmentService::normalize_path(path.to_string_lossy().as_ref());
             #[cfg(windows)]
             {
+                // Windows can expose the same location through both an 8.3 alias and
+                // its long path. Deletion recovery also compares an original path
+                // after it has been renamed, so resolve the nearest existing ancestor
+                // and then restore any missing suffix before comparing identities.
+                let mut candidate = path;
+                let mut missing_suffix = Vec::new();
+                let resolved = loop {
+                    match std::fs::canonicalize(candidate) {
+                        Ok(mut canonical) => {
+                            for component in missing_suffix.iter().rev() {
+                                canonical.push(component);
+                            }
+                            break canonical;
+                        }
+                        Err(_) => {
+                            let Some(file_name) = candidate.file_name() else {
+                                break path.to_path_buf();
+                            };
+                            missing_suffix.push(file_name.to_os_string());
+                            let Some(parent) = candidate.parent() else {
+                                break path.to_path_buf();
+                            };
+                            candidate = parent;
+                        }
+                    }
+                };
+                let normalized =
+                    EnvironmentService::normalize_path(resolved.to_string_lossy().as_ref());
                 if let Some(unc) = normalized.strip_prefix(r"\\?\unc\") {
                     return format!(r"\\{}", unc);
                 }
@@ -615,7 +642,7 @@ impl EnvironmentService {
             }
             #[cfg(not(windows))]
             {
-                normalized
+                EnvironmentService::normalize_path(path.to_string_lossy().as_ref())
             }
         }
 

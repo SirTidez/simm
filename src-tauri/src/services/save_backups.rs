@@ -1881,7 +1881,7 @@ mod tests {
         std::fs::write(&outside, b"{}").expect("outside data");
         std::os::unix::fs::symlink(&outside, save.join("Game.json")).expect("game link");
 
-        let error = validate_save_directory(&save, "The selected game backup")
+        let error = super::validate_save_directory(&save, "The selected game backup")
             .await
             .expect_err("symlinked Game.json must be rejected");
         assert!(error.to_string().contains("unsafe or invalid Game.json"));

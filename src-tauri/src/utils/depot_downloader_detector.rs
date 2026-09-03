@@ -259,10 +259,9 @@ mod tests {
 
         let result = detect_depot_downloader().await?;
         assert!(result.installed);
-        assert_eq!(
-            result.path.as_deref(),
-            Some(exe_path.to_string_lossy().as_ref())
-        );
+        let detected_path =
+            Path::new(result.path.as_deref().context("missing detected path")?).canonicalize()?;
+        assert_eq!(detected_path, exe_path.canonicalize()?);
         assert!(matches!(result.method, Some(DetectionMethod::Path)));
 
         Ok(())

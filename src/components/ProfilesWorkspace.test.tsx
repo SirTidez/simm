@@ -307,8 +307,12 @@ describe('ProfilesWorkspace', () => {
     render(<ProfilesWorkspace preferredEnvironmentId="mono-env" />);
 
     await screen.findByRole('button', { name: /Default Mono/i });
+    await waitFor(() => {
+      expect(screen.getByLabelText(/target environment/i)).toHaveValue('mono-env');
+    });
     fireEvent.click(screen.getByRole('button', { name: /^Create Profile$/i }));
     await screen.findByRole('checkbox', { name: /Mono Extra/i });
+    expect(apiMocks.exportEnvironmentProfile).toHaveBeenCalledWith('mono-env');
     fireEvent.change(screen.getByPlaceholderText('New profile name'), {
       target: { value: 'Custom Mono' },
     });
