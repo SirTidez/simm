@@ -412,17 +412,36 @@ fn discover_schedule_process_paths() -> Result<Vec<PathBuf>> {
                 .split(|byte| *byte == 0)
                 .filter_map(|value| std::str::from_utf8(value).ok());
             arguments
-                .filter_map(|argument| {
-                    let path = Path::new(argument);
-                    let name = path.file_name()?.to_string_lossy();
-                    (name.eq_ignore_ascii_case("Schedule I.exe")
-                        || name.eq_ignore_ascii_case("Schedule I"))
-                    .then(|| path.parent().map(Path::to_path_buf))
-                    .flatten()
-                })
+                .filter_map(linux_schedule_process_directory)
                 .next()
         })
         .collect())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_schedule_process_directory(argument: &str) -> Option<PathBuf> {
+    let normalized = argument.replace('\\', "/");
+    let normalized = if normalized.len() >= 3
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[2] == b'/'
+    {
+        if normalized.as_bytes()[0].eq_ignore_ascii_case(&b'z') {
+            normalized[2..].to_string()
+        } else {
+            return None;
+        }
+    } else {
+        normalized
+    };
+    let (parent, name) = normalized.rsplit_once('/')?;
+    if !name.eq_ignore_ascii_case("Schedule I.exe") && !name.eq_ignore_ascii_case("Schedule I") {
+        return None;
+    }
+    if parent.is_empty() {
+        return Some(PathBuf::from("/"));
+    }
+    Some(PathBuf::from(parent))
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -467,5 +486,33 @@ mod tests {
             normalize_path_for_platform("/games/Schedule I/", false),
             "/games/Schedule I"
         );
+    }
+
+    #[test]
+    fn converts_proton_z_drive_process_arguments_to_host_directories() {
+        let directory = linux_schedule_process_directory(
+            r"Z:\home\player\.local\share\Steam\steamapps\common\Schedule I\Schedule I.exe",
+        )
+        .expect("Proton Z drive path should identify the game process");
+
+        assert_eq!(
+            normalize_path_for_platform(directory.to_string_lossy().as_ref(), false),
+            "/home/player/.local/share/Steam/steamapps/common/Schedule I"
+        );
+    }
+
+    #[test]
+    fn accepts_native_posix_process_arguments_and_rejects_unmapped_wine_drives() {
+        let directory = linux_schedule_process_directory("/mnt/games/Schedule I/Schedule I.exe")
+            .expect("native Linux path should identify the game process");
+
+        assert_eq!(
+            normalize_path_for_platform(directory.to_string_lossy().as_ref(), false),
+            "/mnt/games/Schedule I"
+        );
+        assert!(linux_schedule_process_directory(
+            r"C:\Program Files\Steam\steamapps\common\Schedule I\Schedule I.exe"
+        )
+        .is_none());
     }
 }

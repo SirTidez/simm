@@ -1221,6 +1221,18 @@ fn plan_item(
         };
     }
 
+    if is_unmanaged_profile_item(&item)
+        && installed_mods.is_some_and(|snapshot| installed_profile_file_present(snapshot, &item))
+    {
+        return ModProfileImportPlanItem {
+            item,
+            status: ModProfileImportStatus::AlreadyInstalled,
+            resolved_storage_id: None,
+            message: "Unmanaged profile item is already present in the target environment."
+                .to_string(),
+        };
+    }
+
     let resolved = resolve_library_storage_id(library, &item);
     if resolved.is_none()
         && matches!(
@@ -1500,6 +1512,15 @@ fn installed_profile_file_present(installed_mods: &Value, item: &ModProfileItem)
                 .map(|file_name| normalize_managed_relative_identity(&file_name) == item_file)
                 .unwrap_or(false)
         })
+}
+
+fn is_unmanaged_profile_item(item: &ModProfileItem) -> bool {
+    item.storage_id.is_none()
+        && item.source_id.is_none()
+        && matches!(
+            item.source,
+            Some(ModSource::Local) | Some(ModSource::Unknown) | None
+        )
 }
 
 fn resolve_library_storage_id(
@@ -2545,6 +2566,37 @@ mod tests {
         let planned = plan_item(item, None, &[], None);
 
         assert_eq!(planned.status, ModProfileImportStatus::ManualRequired);
+    }
+
+    #[test]
+    fn plan_item_preserves_matching_installed_unmanaged_items() {
+        let env = test_environment(Runtime::Mono);
+
+        for (item_type, collection) in [
+            (ModProfileItemType::Mod, "mods"),
+            (ModProfileItemType::Plugin, "plugins"),
+            (ModProfileItemType::Userlib, "userLibs"),
+        ] {
+            let mut item = profile_item();
+            item.item_type = item_type;
+            item.source = Some(ModSource::Local);
+            item.source_id = None;
+            item.storage_id = None;
+            item.file_name = Some("Nested\\Local.dll".to_string());
+            let installed = serde_json::json!({
+                (collection): [{
+                    "name": "Local",
+                    "fileName": "Nested/Local.dll",
+                    "managed": false,
+                    "disabled": false
+                }]
+            });
+
+            let planned = plan_item(item, Some(&env), &[], Some(&installed));
+
+            assert_eq!(planned.status, ModProfileImportStatus::AlreadyInstalled);
+            assert_eq!(planned.resolved_storage_id, None);
+        }
     }
 
     #[tokio::test]

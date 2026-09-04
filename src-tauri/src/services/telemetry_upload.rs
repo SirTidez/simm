@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -93,6 +94,19 @@ impl TelemetryUploadService {
     }
 
     async fn session_is_already_queued(&self, session_id: &str) -> Result<bool> {
+        let claimed = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM telemetry_upload_sessions WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .context("Failed to check telemetry session upload claim")?;
+        if claimed > 0 {
+            return Ok(true);
+        }
+
+        // Keep the payload scan for queues created before upload-scoped IDs and
+        // the session claim table were introduced.
         let payloads =
             sqlx::query_scalar::<_, String>("SELECT payload FROM telemetry_upload_queue")
                 .fetch_all(self.pool.as_ref())
@@ -139,6 +153,7 @@ impl TelemetryUploadService {
             sessions: export.sessions,
         };
         normalize_upload_envelope_timestamps(&mut envelope)?;
+        rekey_upload_envelope_identities(&mut envelope);
         ensure_upload_envelope_is_safe(&envelope)?;
         let payload = serde_json::to_string_pretty(&envelope)
             .context("Failed to serialize the local telemetry upload preview")?;
@@ -242,7 +257,7 @@ impl TelemetryUploadService {
                 "Telemetry upload preview contains a local identifier or path"
             ));
         }
-        let envelope = serde_json::from_value::<TelemetryUploadEnvelope>(raw_payload.clone())
+        let mut envelope = serde_json::from_value::<TelemetryUploadEnvelope>(raw_payload.clone())
             .context("The reviewed telemetry payload is invalid")?;
         if raw_payload != serde_json::to_value(&envelope)? {
             return Err(anyhow!(
@@ -250,7 +265,14 @@ impl TelemetryUploadService {
             ));
         }
         ensure_upload_envelope_is_safe(&envelope)?;
-        self.ensure_sessions_are_durably_ended(&envelope).await?;
+        if self
+            .upload_id_is_already_queued(&envelope.upload_id)
+            .await?
+        {
+            return Ok(None);
+        }
+        let (session_ids, contains_local_identities) =
+            self.resolve_durably_ended_session_ids(&envelope).await?;
 
         let preferences = TelemetryService::new(self.pool.clone())
             .get_preferences()
@@ -266,21 +288,27 @@ impl TelemetryUploadService {
             ));
         }
 
-        let session_ids = envelope
-            .sessions
-            .iter()
-            .map(|session| session.session_id.clone())
-            .collect::<Vec<_>>();
         for session_id in &session_ids {
             if self.session_is_already_queued(session_id).await? {
                 return Ok(None);
             }
         }
 
+        // Older/manual payloads may still contain local database IDs. Rekey
+        // them before persistence; previews produced by this version are
+        // already upload-scoped and remain byte-identical through retries.
+        let queued_payload = if contains_local_identities {
+            rekey_upload_envelope_identities(&mut envelope);
+            serde_json::to_string_pretty(&envelope)
+                .context("Failed to serialize the anonymous telemetry upload")?
+        } else {
+            preview_payload.to_string()
+        };
+
         let upload = UploadRecord {
             id: format!("telemetry-upload-{}", Uuid::new_v4().simple()),
             upload_id: envelope.upload_id,
-            payload: preview_payload.to_string(),
+            payload: queued_payload,
             state: TelemetryUploadState::Pending,
             attempts: 0,
             last_error_code: None,
@@ -296,26 +324,72 @@ impl TelemetryUploadService {
     /// A renderer-supplied review payload is never sufficient proof that a
     /// session ended. Each referenced session must still exist locally with a
     /// committed end timestamp before it becomes queue-eligible.
-    async fn ensure_sessions_are_durably_ended(
+    async fn upload_id_is_already_queued(&self, upload_id: &str) -> Result<bool> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM telemetry_upload_queue WHERE upload_id = ?",
+        )
+        .bind(upload_id)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .context("Failed to check telemetry upload identity")?;
+        Ok(count > 0)
+    }
+
+    async fn resolve_durably_ended_session_ids(
         &self,
         envelope: &TelemetryUploadEnvelope,
-    ) -> Result<()> {
+    ) -> Result<(Vec<String>, bool)> {
+        let ended_session_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM telemetry_sessions WHERE ended_at IS NOT NULL",
+        )
+        .fetch_all(self.pool.as_ref())
+        .await
+        .context("Failed to load completed telemetry sessions")?;
+        let mut resolved = Vec::with_capacity(envelope.sessions.len());
+        let mut contains_local_identities = false;
         for session in &envelope.sessions {
-            let ended = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM telemetry_sessions WHERE id = ? AND ended_at IS NOT NULL",
+            let (local_id, local_session_identity) =
+                if ended_session_ids.iter().any(|id| id == &session.session_id) {
+                    (session.session_id.clone(), true)
+                } else if let Some(local_id) = ended_session_ids.iter().find(|local_id| {
+                    upload_scoped_identity("session", &envelope.upload_id, local_id)
+                        == session.session_id
+                }) {
+                    (local_id.clone(), false)
+                } else {
+                    return Err(anyhow!(
+                        "Telemetry session {} is not durably ended and cannot be queued",
+                        session.session_id
+                    ));
+                };
+            contains_local_identities |= local_session_identity;
+
+            let local_event_ids = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM telemetry_events WHERE session_id = ?",
             )
-            .bind(&session.session_id)
-            .fetch_one(self.pool.as_ref())
+            .bind(&local_id)
+            .fetch_all(self.pool.as_ref())
             .await
-            .context("Failed to verify telemetry upload session completion")?;
-            if ended != 1 {
-                return Err(anyhow!(
-                    "Telemetry session {} is not durably ended and cannot be queued",
-                    session.session_id
-                ));
+            .context("Failed to verify telemetry upload event identities")?;
+            for event in &session.events {
+                if local_event_ids.iter().any(|id| id == &event.event_id) {
+                    contains_local_identities = true;
+                    continue;
+                }
+                if !local_event_ids.iter().any(|local_event_id| {
+                    upload_scoped_identity("event", &envelope.upload_id, local_event_id)
+                        == event.event_id
+                }) {
+                    return Err(anyhow!(
+                        "Telemetry event {} is not part of the reviewed local session",
+                        event.event_id
+                    ));
+                }
             }
+
+            resolved.push(local_id);
         }
-        Ok(())
+        Ok((resolved, contains_local_identities))
     }
 
     pub async fn retry_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {
@@ -601,6 +675,28 @@ fn ensure_upload_envelope_is_safe(envelope: &TelemetryUploadEnvelope) -> Result<
         ));
     }
     Ok(())
+}
+
+pub(super) fn rekey_upload_envelope_identities(envelope: &mut TelemetryUploadEnvelope) {
+    for session in &mut envelope.sessions {
+        session.session_id =
+            upload_scoped_identity("session", &envelope.upload_id, &session.session_id);
+        for event in &mut session.events {
+            event.event_id = upload_scoped_identity("event", &envelope.upload_id, &event.event_id);
+        }
+    }
+}
+
+fn upload_scoped_identity(prefix: &str, upload_id: &str, local_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"simm-telemetry-upload-identity-v1\0");
+    hasher.update(prefix.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(upload_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(local_id.as_bytes());
+    let digest = hasher.finalize();
+    format!("{prefix}-{}", hex::encode(&digest[..16]))
 }
 
 fn has_unsafe_upload_value(value: &serde_json::Value) -> bool {

@@ -8,7 +8,8 @@ use tokio::time::{timeout, Duration};
 use crate::db::initialize_pool;
 use crate::services::telemetry::TelemetryService;
 use crate::services::telemetry_upload::{
-    is_local_path, normalize_upload_envelope_timestamps, TelemetryUploadService,
+    is_local_path, normalize_upload_envelope_timestamps, rekey_upload_envelope_identities,
+    TelemetryUploadService,
 };
 use crate::test_helpers::EnvVarGuard;
 use crate::types::{TelemetryPreferencesUpdate, TelemetryUploadEnvelope, TelemetryUploadState};
@@ -31,6 +32,18 @@ async fn persist_durably_ended_fixture_session(
     .bind(environment_id)
     .bind("2026-07-14T18:00:00.000Z")
     .bind("2026-07-14T18:20:00.000Z")
+    .bind("{}")
+    .execute(pool.as_ref())
+    .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_events (id, session_id, environment_id, occurred_at, severity, fingerprint, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("event-1a2b3c4d5e6f7890a1b2c3d4e5f60708")
+    .bind(session_id)
+    .bind(environment_id)
+    .bind("2026-07-14T18:10:00.000Z")
+    .bind("ERROR")
+    .bind("2f5ed08d6cc08918781a50c95cda51a6a85cb4c70b901b079c3a7cc8ac522a12")
     .bind("{}")
     .execute(pool.as_ref())
     .await?;
@@ -148,6 +161,71 @@ async fn retry_reuses_one_upload_id_and_never_rebuilds_the_payload() -> Result<(
             .fetch_one(pool.as_ref())
             .await?;
     assert_eq!(stored_payload, preview.payload);
+    Ok(())
+}
+
+#[test]
+fn upload_preview_rekeys_session_and_event_ids_per_upload() -> Result<()> {
+    let original: TelemetryUploadEnvelope = serde_json::from_str(include_str!(
+        "../../../test-fixtures/live-telemetry-v1.json"
+    ))?;
+    let mut first = original.clone();
+    let mut second = original.clone();
+    second.upload_id = "4a167917-5221-4519-9f4f-7f585de76445".to_string();
+
+    rekey_upload_envelope_identities(&mut first);
+    rekey_upload_envelope_identities(&mut second);
+
+    assert_ne!(
+        first.sessions[0].session_id,
+        original.sessions[0].session_id
+    );
+    assert_ne!(
+        first.sessions[0].events[0].event_id,
+        original.sessions[0].events[0].event_id
+    );
+    assert_ne!(first.sessions[0].session_id, second.sessions[0].session_id);
+    assert_ne!(
+        first.sessions[0].events[0].event_id,
+        second.sessions[0].events[0].event_id
+    );
+    assert_api_v1_fixture_semantics(&serde_json::to_string(&first)?)?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn queue_rejects_an_event_identity_not_derived_from_the_local_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let _guard = EnvVarGuard::set(
+        "SIMMRUST_DATA_DIR",
+        temp.path().join("simmrust").to_string_lossy().as_ref(),
+    );
+    let pool = initialize_pool().await?;
+    TelemetryService::new(pool.clone())
+        .save_preferences(TelemetryPreferencesUpdate {
+            collection_enabled: Some(true),
+            upload_enabled: Some(true),
+            error_excerpts_enabled: Some(true),
+            retention_days: None,
+            protect_local_mods: Some(false),
+        })
+        .await?;
+    persist_durably_ended_fixture_session(&pool).await?;
+    let mut envelope: TelemetryUploadEnvelope = serde_json::from_str(include_str!(
+        "../../../test-fixtures/live-telemetry-v1.json"
+    ))?;
+    rekey_upload_envelope_identities(&mut envelope);
+    envelope.sessions[0].events[0].event_id = "event-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+
+    let error = TelemetryUploadService::new(pool)
+        .queue_reviewed_upload(&serde_json::to_string(&envelope)?)
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("not part of the reviewed local session"));
     Ok(())
 }
 
@@ -387,6 +465,8 @@ async fn queued_fixture_payload_matches_api_v1_contract_semantics() -> Result<()
             .fetch_one(pool.as_ref())
             .await?;
     assert_api_v1_fixture_semantics(&stored_payload)?;
+    assert!(!stored_payload.contains("session-1a2b3c4d5e6f7890a1b2c3d4e5f60708"));
+    assert!(!stored_payload.contains("event-1a2b3c4d5e6f7890a1b2c3d4e5f60708"));
     Ok(())
 }
 
@@ -790,6 +870,8 @@ async fn a_finished_session_is_queued_then_uploaded_during_a_flush() -> Result<(
             .fetch_one(pool.as_ref())
             .await?;
     assert!(!payload.contains("local-environment-id"));
+    assert!(!payload.contains(session_id));
+    assert!(!payload.contains("captured-event"));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&payload)?["sessions"]
             .as_array()
@@ -978,5 +1060,6 @@ async fn a_finished_session_without_events_queues_its_mod_snapshot() -> Result<(
             .fetch_one(pool.as_ref())
             .await?;
     assert_eq!(queued_session_id, session_id);
+    assert_ne!(payload["sessions"][0]["sessionId"], session_id);
     Ok(())
 }
