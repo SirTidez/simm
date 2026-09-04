@@ -6,8 +6,10 @@ use std::path::PathBuf;
 /// Creates: home/SIMM/{downloads, backups, logs, depots}
 /// Returns: (directory_path, was_just_created)
 pub fn initialize_simm_directory() -> Result<(PathBuf, bool)> {
-    let simm_dir = resolve_data_dir()?;
+    initialize_simm_directory_at(resolve_data_dir()?)
+}
 
+fn initialize_simm_directory_at(simm_dir: PathBuf) -> Result<(PathBuf, bool)> {
     // Check if directory already exists
     let was_just_created = !simm_dir.exists();
 
@@ -93,21 +95,20 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn initialize_simm_directory_creates_structure() -> Result<()> {
         let temp = tempdir()?;
-        let _guard = EnvVarGuard::set("SIMMRUST_HOME_DIR", temp.path().to_string_lossy().as_ref());
+        let expected_dir = temp.path().join("SIMM");
 
-        let (simm_dir, was_created) = initialize_simm_directory()?;
+        let (simm_dir, was_created) = initialize_simm_directory_at(expected_dir.clone())?;
         assert!(was_created);
-        assert!(simm_dir.ends_with("SIMM"));
+        assert_eq!(simm_dir, expected_dir);
         assert!(simm_dir.join("downloads").exists());
         assert!(simm_dir.join("backups").exists());
         assert!(simm_dir.join("logs").exists());
         assert!(simm_dir.join("depots").exists());
         assert!(simm_dir.join("Mods").exists());
 
-        let (_, was_created_again) = initialize_simm_directory()?;
+        let (_, was_created_again) = initialize_simm_directory_at(simm_dir)?;
         assert!(!was_created_again);
 
         Ok(())
