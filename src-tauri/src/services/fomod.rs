@@ -768,10 +768,11 @@ impl FomodService {
             }
         }
 
-        // FOMOD priority applies to *destinations*, not merely duplicate
-        // source/destination tuples. Select exactly one mapping per target;
-        // declared order wins ties so the result is stable regardless of hash
-        // or filesystem enumeration order.
+        // Exact file mappings expose their final target here, so resolve those
+        // conflicts before copying. Folder mappings must all remain in the
+        // plan: two source folders targeting the same destination can contain
+        // disjoint files, and their real conflicts are only known after the
+        // folders are expanded.
         entries.sort_by(|left, right| {
             Self::install_target_key(left)
                 .cmp(&Self::install_target_key(right))
@@ -784,7 +785,19 @@ impl FomodService {
                 })
         });
         let mut resolved_targets = HashSet::new();
-        entries.retain(|entry| resolved_targets.insert(Self::install_target_key(entry)));
+        entries.retain(|entry| {
+            entry.is_folder || resolved_targets.insert(Self::install_target_key(entry))
+        });
+
+        // Copy lower-priority mappings first so a later copy only overwrites an
+        // actual child-file collision with the higher-priority mapping. Reverse
+        // declaration order for ties so the first XML declaration wins by
+        // being copied last, matching exact-file conflict resolution above.
+        entries.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| right.declaration_order.cmp(&left.declaration_order))
+        });
         Ok(entries)
     }
 
@@ -1477,6 +1490,29 @@ mod tests {
         assert!(entries
             .iter()
             .any(|entry| entry.source == "Mono/PackRat.Mono.dll"));
+    }
+
+    #[test]
+    fn build_install_entries_preserves_folder_mappings_that_share_a_destination() {
+        let service = FomodService::new();
+        let config: FomodConfig = from_str(
+            r#"
+<config><installSteps><installStep name="Merged folders"><requiredInstallFiles>
+  <folder source="Core" destination="Mods" priority="10" />
+  <folder source="OptionalAssets" destination="Mods" priority="0" />
+</requiredInstallFiles></installStep></installSteps></config>
+"#,
+        )
+        .expect("expected FOMOD config to parse");
+
+        let entries = service
+            .build_install_entries(&config, None)
+            .expect("shared destination folders should remain installable");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].source, "OptionalAssets");
+        assert_eq!(entries[1].source, "Core");
+        assert!(entries.iter().all(|entry| entry.is_folder));
     }
 
     #[test]

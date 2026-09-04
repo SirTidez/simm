@@ -15307,6 +15307,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn try_extract_fomod_content_merges_folder_mappings_by_child_target_priority(
+    ) -> Result<()> {
+        let temp = tempdir()?;
+        let service = ModsService::new(Arc::new(SqlitePool::connect_lazy("sqlite::memory:")?));
+
+        let content_root = temp.path().join("content");
+        fs::create_dir_all(content_root.join("fomod")).await?;
+        fs::create_dir_all(content_root.join("Core")).await?;
+        fs::create_dir_all(content_root.join("OptionalAssets")).await?;
+        fs::write(content_root.join("Core").join("Core.dll"), b"core").await?;
+        fs::write(
+            content_root.join("Core").join("Shared.dll"),
+            b"higher-priority",
+        )
+        .await?;
+        fs::write(
+            content_root.join("OptionalAssets").join("Optional.dll"),
+            b"optional",
+        )
+        .await?;
+        fs::write(
+            content_root.join("OptionalAssets").join("Shared.dll"),
+            b"lower-priority",
+        )
+        .await?;
+        fs::write(
+            content_root.join("fomod").join("moduleconfig.xml"),
+            r#"
+<config>
+  <moduleName>Merged Folder Test</moduleName>
+  <installSteps order="Explicit">
+    <installStep name="Required">
+      <requiredInstallFiles>
+        <folder source="Core" destination="Mods" priority="10" />
+        <folder source="OptionalAssets" destination="Mods" priority="0" />
+      </requiredInstallFiles>
+    </installStep>
+  </installSteps>
+</config>
+"#,
+        )
+        .await?;
+
+        let mods_dir = temp.path().join("mods");
+        let plugins_dir = temp.path().join("plugins");
+        let userlibs_dir = temp.path().join("userlibs");
+        let userdata_dir = temp.path().join("userdata");
+        for directory in [&mods_dir, &plugins_dir, &userlibs_dir, &userdata_dir] {
+            fs::create_dir_all(directory).await?;
+        }
+
+        service
+            .try_extract_fomod_content(
+                &content_root,
+                &mods_dir,
+                &plugins_dir,
+                &userlibs_dir,
+                &userdata_dir,
+                None,
+            )
+            .await?
+            .expect("folder mappings should materialize files");
+
+        assert_eq!(fs::read(mods_dir.join("Core.dll")).await?, b"core");
+        assert_eq!(fs::read(mods_dir.join("Optional.dll")).await?, b"optional");
+        assert_eq!(
+            fs::read(mods_dir.join("Shared.dll")).await?,
+            b"higher-priority"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     #[serial]
     async fn install_storage_mod_to_envs_installs_nested_mono_storage_files() -> Result<()> {
         let temp = tempdir()?;
