@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use crate::services::fomod::ArchiveBudget;
 use crate::types::{
     GameSaveAccount, GameSaveBackup, GameSaveBackupExportResult, GameSaveBackupResult,
     GameSaveBackupStatus, GameSaveRestorePreview, GameSaveRestoreResult, GameSaveSlot,
@@ -1368,6 +1369,20 @@ fn write_save_slot_zip(source: &Path, destination: &Path) -> Result<()> {
 }
 
 fn extract_save_zip(zip_path: &Path, destination: &Path, slot_number: u8) -> Result<()> {
+    extract_save_zip_with_budget(
+        zip_path,
+        destination,
+        slot_number,
+        &mut ArchiveBudget::default(),
+    )
+}
+
+fn extract_save_zip_with_budget(
+    zip_path: &Path,
+    destination: &Path,
+    slot_number: u8,
+    budget: &mut ArchiveBudget,
+) -> Result<()> {
     let zip_file = File::open(zip_path)
         .with_context(|| format!("Failed to open save ZIP {}", zip_path.display()))?;
     let mut archive = ZipArchive::new(zip_file).context("Failed to read the save ZIP")?;
@@ -1396,6 +1411,7 @@ fn extract_save_zip(zip_path: &Path, destination: &Path, slot_number: u8) -> Res
         if relative_name.is_empty() {
             continue;
         }
+        budget.account(relative_name, entry.size())?;
         let output_path = safe_zip_output_path(destination, relative_name)?;
         if entry.is_dir() {
             std::fs::create_dir_all(&output_path)?;
@@ -1406,9 +1422,9 @@ fn extract_save_zip(zip_path: &Path, destination: &Path, slot_number: u8) -> Res
             .parent()
             .context("Invalid save ZIP entry path")?;
         std::fs::create_dir_all(parent)?;
-        let mut output = File::create(&output_path)
+        budget
+            .copy_entry_to_path(relative_name, &mut entry, &output_path)
             .with_context(|| format!("Failed to restore {} from the save ZIP", relative_name))?;
-        std::io::copy(&mut entry, &mut output)?;
     }
 
     if !destination.join("Game.json").is_file() {
@@ -1496,14 +1512,16 @@ fn format_time(value: SystemTime) -> String {
 mod tests {
     use super::{
         backup_content_fingerprint, cash_balance_from_inventory, create_backup_snapshot,
-        extract_save_zip, extract_steam_display_name, game_backup_from_path, game_date_from_json,
-        issue_backup_restore_token, json_number, json_unsigned, lock_save_slot,
-        organization_name_from_json, prune_game_backups, read_backup, read_valid_game_backups,
-        resolve_backup_restore_token, restore_directory_to_slot, restore_preview,
-        restore_staging_path, safe_zip_output_path, select_game_backup, slot_path,
-        validate_slot_number, validate_steam_id, write_save_slot_zip,
+        extract_save_zip, extract_save_zip_with_budget, extract_steam_display_name,
+        game_backup_from_path, game_date_from_json, issue_backup_restore_token, json_number,
+        json_unsigned, lock_save_slot, organization_name_from_json, prune_game_backups,
+        read_backup, read_valid_game_backups, resolve_backup_restore_token,
+        restore_directory_to_slot, restore_preview, restore_staging_path, safe_zip_output_path,
+        select_game_backup, slot_path, validate_slot_number, validate_steam_id,
+        write_save_slot_zip,
     };
-    use std::io::Read;
+    use crate::services::fomod::ArchiveBudget;
+    use std::io::{Read, Write};
     use std::path::Path;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -1681,6 +1699,27 @@ mod tests {
         assert!(safe_zip_output_path(Path::new("C:/restore"), "../outside").is_err());
         assert!(safe_zip_output_path(Path::new("C:/restore"), "C:/outside").is_err());
         assert!(safe_zip_output_path(Path::new("C:/restore"), "Game.json").is_ok());
+    }
+
+    #[test]
+    fn zip_restore_enforces_archive_resource_limits() {
+        let temporary_directory = tempdir().expect("temporary directory");
+        let archive_path = temporary_directory.path().join("oversized.zip");
+        let destination = temporary_directory.path().join("restored");
+        let file = std::fs::File::create(&archive_path).expect("create ZIP");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("Game.json", zip::write::FileOptions::default())
+            .expect("start Game.json");
+        archive.write_all(b"{}").expect("write Game.json");
+        archive.finish().expect("finish ZIP");
+
+        let mut budget = ArchiveBudget::with_test_limits(10, 1, 10, 8);
+        let error = extract_save_zip_with_budget(&archive_path, &destination, 1, &mut budget)
+            .expect_err("oversized save entry must be rejected");
+
+        assert!(error.to_string().contains("expanded-size limit"));
+        assert!(!destination.join("Game.json").exists());
     }
 
     #[tokio::test]

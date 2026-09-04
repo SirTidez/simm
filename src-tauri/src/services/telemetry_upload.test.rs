@@ -932,11 +932,17 @@ async fn a_finished_session_without_events_queues_its_mod_snapshot() -> Result<(
     .execute(pool.as_ref())
     .await?;
 
-    let service = TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
-    let receipt = service
-        .queue_finished_session(session_id)
-        .await?
-        .expect("an ended session with a mod snapshot should queue without events");
+    let first_service =
+        TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
+    let second_service =
+        TelemetryUploadService::with_base_url(pool.clone(), "not a url".to_string());
+    let (first, second) = tokio::join!(
+        first_service.queue_finished_session(session_id),
+        second_service.queue_finished_session(session_id)
+    );
+    let receipt = first?
+        .or(second?)
+        .expect("exactly one concurrent request should queue the finished session");
 
     assert_eq!(receipt.state, TelemetryUploadState::Pending);
     let payload: serde_json::Value = serde_json::from_str(
@@ -953,10 +959,24 @@ async fn a_finished_session_without_events_queues_its_mod_snapshot() -> Result<(
         payload["sessions"][0]["mods"].as_array().map(Vec::len),
         Some(1)
     );
-    assert!(service.queue_finished_session(session_id).await?.is_none());
+    let manual_duplicate = first_service
+        .queue_reviewed_upload(&payload.to_string())
+        .await
+        .expect_err("manual review must not requeue an automatically claimed session");
+    assert!(manual_duplicate.to_string().contains("already queued"));
+    assert!(first_service
+        .queue_finished_session(session_id)
+        .await?
+        .is_none());
     let queued_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM telemetry_upload_queue")
         .fetch_one(pool.as_ref())
         .await?;
     assert_eq!(queued_count, 1);
+    let queued_session_id: String =
+        sqlx::query_scalar("SELECT session_id FROM telemetry_upload_sessions WHERE queue_id = ?")
+            .bind(&receipt.id)
+            .fetch_one(pool.as_ref())
+            .await?;
+    assert_eq!(queued_session_id, session_id);
     Ok(())
 }

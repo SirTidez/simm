@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,17 +19,19 @@ const SQLITE_SIDE_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 const DEFAULT_DATABASE_BACKUP_COUNT: usize = 10;
 
 fn normalize_path(path: &str) -> String {
-    let trimmed = path.trim_end_matches(['\\', '/']);
-    #[cfg(windows)]
-    {
-        trimmed.replace('/', "\\").to_ascii_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
+    normalize_path_for_platform(path, cfg!(windows))
+}
+
+fn normalize_path_for_platform(path: &str, windows: bool) -> String {
+    if windows {
+        path.trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    } else {
         // POSIX file systems are ordinarily case-sensitive.  Do not collapse
         // `/tmp/Game` and `/tmp/game` merely because a Windows build needs
         // case-insensitive identity.
-        trimmed.to_string()
+        path.trim_end_matches('/').to_string()
     }
 }
 
@@ -80,6 +83,7 @@ pub async fn initialize_pool_with_startup_state() -> Result<(Arc<SqlitePool>, bo
     }
 
     ensure_additive_schema(&pool).await?;
+    reconcile_environment_path_identities(&pool).await?;
     migrate_from_files(&pool).await?;
     set_app_meta_value(&pool, APP_VERSION_KEY, current_app_version()).await?;
 
@@ -546,6 +550,8 @@ async fn migration_schema_invariant(pool: &SqlitePool, version: i64) -> Result<b
         7 => Ok(table_exists(pool, "telemetry_mod_rules").await?),
         8 => Ok(table_exists(pool, "environment_deletion_journal").await?
             && index_exists(pool, "idx_environment_deletion_journal_state").await?),
+        9 => Ok(table_exists(pool, "telemetry_upload_sessions").await?
+            && index_exists(pool, "idx_telemetry_upload_sessions_queue").await?),
         _ => Ok(false),
     }
 }
@@ -641,6 +647,7 @@ pub async fn repair_database(pool: &SqlitePool) -> Result<PathBuf> {
         .run(pool)
         .await
         .context("Failed to complete database migrations during repair")?;
+    reconcile_environment_path_identities(pool).await?;
     sqlx::query("PRAGMA optimize")
         .execute(pool)
         .await
@@ -1140,6 +1147,13 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
         )",
         "CREATE INDEX IF NOT EXISTS idx_telemetry_upload_queue_state_created \
             ON telemetry_upload_queue(state, created_at DESC)",
+        "CREATE TABLE IF NOT EXISTS telemetry_upload_sessions (\
+            session_id TEXT PRIMARY KEY, \
+            queue_id TEXT NOT NULL, \
+            FOREIGN KEY(queue_id) REFERENCES telemetry_upload_queue(id) ON DELETE CASCADE\
+        )",
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_upload_sessions_queue \
+            ON telemetry_upload_sessions(queue_id)",
         "CREATE TABLE IF NOT EXISTS telemetry_mod_rules (\
             id TEXT PRIMARY KEY, \
             mod_key TEXT NOT NULL, \
@@ -1184,6 +1198,7 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
         "telemetry_sessions",
         "telemetry_events",
         "telemetry_upload_queue",
+        "telemetry_upload_sessions",
         "telemetry_mod_rules",
     ] {
         if !table_exists(pool, table).await? {
@@ -1203,6 +1218,227 @@ async fn ensure_additive_schema(pool: &SqlitePool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Rebuilds environment path identities with the semantics of the current OS.
+/// Migration SQL cannot branch on the target platform, so migration 2 stores a
+/// conservative path and this startup pass applies Windows folding or POSIX
+/// case-sensitive identity before services begin reading the table.
+async fn reconcile_environment_path_identities(pool: &SqlitePool) -> Result<()> {
+    reconcile_environment_path_identities_for_platform(pool, cfg!(windows)).await
+}
+
+async fn reconcile_environment_path_identities_for_platform(
+    pool: &SqlitePool,
+    windows: bool,
+) -> Result<()> {
+    let stored_paths: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT output_dir, normalized_output_dir FROM environments")
+            .fetch_all(pool)
+            .await
+            .context("Failed to inspect environment path identities")?;
+    let mut occupied = HashSet::new();
+    let mut reconciliation_needed =
+        !index_exists(pool, "idx_environments_normalized_output_dir_unique").await?;
+    for (output_dir, stored_normalized) in &stored_paths {
+        let expected = normalize_path_for_platform(output_dir, windows);
+        if stored_normalized.as_deref() != Some(expected.as_str())
+            || (!expected.is_empty() && !occupied.insert(expected))
+        {
+            reconciliation_needed = true;
+        }
+    }
+    if !windows && !reconciliation_needed {
+        let quarantined_paths: Vec<String> =
+            sqlx::query_scalar("SELECT output_dir FROM environment_duplicate_quarantine")
+                .fetch_all(pool)
+                .await
+                .context("Failed to inspect quarantined environment path identities")?;
+        reconciliation_needed = quarantined_paths.into_iter().any(|output_dir| {
+            let normalized = normalize_path_for_platform(&output_dir, windows);
+            normalized.is_empty() || !occupied.contains(&normalized)
+        });
+    }
+    if !reconciliation_needed {
+        return Ok(());
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("Failed to begin environment path identity reconciliation")?;
+    sqlx::query("DROP INDEX IF EXISTS idx_environments_normalized_output_dir_unique")
+        .execute(&mut *transaction)
+        .await
+        .context("Failed to prepare environment path identity reconciliation")?;
+
+    // Early 0.8.6 Linux builds may already have applied the former Windows-only
+    // migration semantics. Restore case-distinct rows from its durable
+    // quarantine whenever their POSIX identity is not currently active.
+    if !windows {
+        let active_paths: Vec<String> =
+            sqlx::query_scalar("SELECT output_dir FROM environments ORDER BY id")
+                .fetch_all(&mut *transaction)
+                .await
+                .context("Failed to load active environment paths")?;
+        let mut occupied = active_paths
+            .into_iter()
+            .map(|path| normalize_path_for_platform(&path, windows))
+            .filter(|path| !path.is_empty())
+            .collect::<HashSet<_>>();
+        let quarantined: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, output_dir, data FROM environment_duplicate_quarantine ORDER BY id",
+        )
+        .fetch_all(&mut *transaction)
+        .await
+        .context("Failed to inspect quarantined environment paths")?;
+
+        for (id, output_dir, data) in quarantined {
+            let normalized = normalize_path_for_platform(&output_dir, windows);
+            if !normalized.is_empty() && occupied.contains(&normalized) {
+                continue;
+            }
+            let restored = sqlx::query(
+                "INSERT OR IGNORE INTO environments (id, output_dir, normalized_output_dir, data) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&output_dir)
+            .bind(&normalized)
+            .bind(&data)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Failed to restore quarantined environment {id}"))?;
+            if restored.rows_affected() != 1 {
+                continue;
+            }
+
+            sqlx::query(
+                "INSERT OR REPLACE INTO mod_metadata (environment_id, kind, file_name, data) \
+                 SELECT environment_id, kind, file_name, data \
+                 FROM environment_duplicate_mod_metadata_quarantine WHERE environment_id = ?",
+            )
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| format!("Failed to restore metadata for environment {id}"))?;
+            sqlx::query(
+                "DELETE FROM environment_duplicate_mod_metadata_quarantine WHERE environment_id = ?",
+            )
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("DELETE FROM environment_duplicate_quarantine WHERE id = ?")
+                .bind(&id)
+                .execute(&mut *transaction)
+                .await?;
+            if !normalized.is_empty() {
+                occupied.insert(normalized);
+            }
+        }
+    }
+
+    let environments: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, output_dir, data FROM environments ORDER BY id")
+            .fetch_all(&mut *transaction)
+            .await
+            .context("Failed to load environment path identities")?;
+    let mut keepers = HashMap::<String, String>::new();
+    let mut duplicates = Vec::<(String, String, String, String, String)>::new();
+
+    for (id, output_dir, data) in &environments {
+        let normalized = normalize_path_for_platform(output_dir, windows);
+        if normalized.is_empty() {
+            continue;
+        }
+        if let Some(keeper_id) = keepers.get(&normalized) {
+            duplicates.push((
+                id.clone(),
+                keeper_id.clone(),
+                output_dir.clone(),
+                normalized,
+                data.clone(),
+            ));
+        } else {
+            keepers.insert(normalized, id.clone());
+        }
+    }
+
+    for (id, keeper_id, output_dir, normalized, data) in duplicates {
+        sqlx::query(
+            "INSERT INTO environment_duplicate_quarantine \
+             (id, keeper_environment_id, output_dir, normalized_output_dir, data, reason) \
+             VALUES (?, ?, ?, ?, ?, 'duplicate normalized install path') \
+             ON CONFLICT(id) DO UPDATE SET \
+               keeper_environment_id = excluded.keeper_environment_id, \
+               output_dir = excluded.output_dir, \
+               normalized_output_dir = excluded.normalized_output_dir, \
+               data = excluded.data, reason = excluded.reason",
+        )
+        .bind(&id)
+        .bind(&keeper_id)
+        .bind(&output_dir)
+        .bind(&normalized)
+        .bind(&data)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("Failed to quarantine duplicate environment {id}"))?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO environment_duplicate_mod_metadata_quarantine \
+             (environment_id, keeper_environment_id, kind, file_name, data) \
+             SELECT environment_id, ?, kind, file_name, data FROM mod_metadata \
+             WHERE environment_id = ?",
+        )
+        .bind(&keeper_id)
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO mod_metadata (environment_id, kind, file_name, data) \
+             SELECT ?, kind, file_name, data FROM mod_metadata WHERE environment_id = ?",
+        )
+        .bind(&keeper_id)
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM mod_metadata WHERE environment_id = ?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM environment_profiles WHERE environment_id = ?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM environments WHERE id = ?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+
+    let active_environments: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, output_dir FROM environments")
+            .fetch_all(&mut *transaction)
+            .await?;
+    for (id, output_dir) in active_environments {
+        sqlx::query("UPDATE environments SET normalized_output_dir = ? WHERE id = ?")
+            .bind(normalize_path_for_platform(&output_dir, windows))
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_environments_normalized_output_dir_unique \
+         ON environments(normalized_output_dir) \
+         WHERE normalized_output_dir IS NOT NULL AND normalized_output_dir <> ''",
+    )
+    .execute(&mut *transaction)
+    .await
+    .context("Failed to enforce platform environment path identity")?;
+    transaction
+        .commit()
+        .await
+        .context("Failed to commit environment path identity reconciliation")?;
     Ok(())
 }
 
@@ -1963,7 +2199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normalized_path_migration_quarantines_duplicates_and_merges_metadata() -> Result<()> {
+    async fn normalized_path_migration_preserves_case_sensitive_paths() -> Result<()> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1973,13 +2209,13 @@ mod tests {
             .await?;
         sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
             .bind("a-keeper")
-            .bind(r"C:\Games\Schedule I")
+            .bind("/games/Schedule")
             .bind(r#"{"id":"a-keeper"}"#)
             .execute(&pool)
             .await?;
         sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
             .bind("b-duplicate")
-            .bind("c:/games/schedule i/")
+            .bind("/games/schedule")
             .bind(r#"{"id":"b-duplicate"}"#)
             .execute(&pool)
             .await?;
@@ -2002,22 +2238,122 @@ mod tests {
         let active_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM environments ORDER BY id")
             .fetch_all(&pool)
             .await?;
-        assert_eq!(active_ids, vec!["a-keeper"]);
-        let quarantined_data: String =
-            sqlx::query_scalar("SELECT data FROM environment_duplicate_quarantine WHERE id = ?")
-                .bind("b-duplicate")
+        assert_eq!(active_ids, vec!["a-keeper", "b-duplicate"]);
+        let quarantined_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM environment_duplicate_quarantine")
                 .fetch_one(&pool)
                 .await?;
-        assert_eq!(quarantined_data, r#"{"id":"b-duplicate"}"#);
-        let merged_metadata: String = sqlx::query_scalar(
-            "SELECT data FROM mod_metadata WHERE environment_id = ? AND file_name = ?",
+        assert_eq!(quarantined_count, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_path_reconciliation_folds_windows_path_identity() -> Result<()> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_environments_normalized_output_dir.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        ensure_additive_schema(&pool).await?;
+
+        let paths = [r"C:\Games\Schedule I", "c:/games/schedule i/"];
+        for (index, path) in paths.into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
+            )
+            .bind(format!("env-{index}"))
+            .bind(path)
+            .bind(path)
+            .bind("{}")
+            .execute(&pool)
+            .await?;
+        }
+
+        reconcile_environment_path_identities_for_platform(&pool, true).await?;
+        let active_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM environments")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(active_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn posix_reconciliation_restores_case_distinct_legacy_quarantine() -> Result<()> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_environments_normalized_output_dir.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        ensure_additive_schema(&pool).await?;
+
+        sqlx::query(
+            "INSERT INTO environments (id, output_dir, normalized_output_dir, data) VALUES (?, ?, ?, ?)",
         )
         .bind("a-keeper")
-        .bind("OnlyOnDuplicate.dll")
-        .fetch_one(&pool)
+        .bind("/games/Schedule")
+        .bind(r"\games\schedule")
+        .bind(r#"{"id":"a-keeper"}"#)
+        .execute(&pool)
         .await?;
-        assert_eq!(merged_metadata, r#"{"enabled":true}"#);
+        sqlx::query(
+            "INSERT INTO environment_duplicate_quarantine \
+             (id, keeper_environment_id, output_dir, normalized_output_dir, data, reason) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("b-restored")
+        .bind("a-keeper")
+        .bind("/games/schedule")
+        .bind(r"\games\schedule")
+        .bind(r#"{"id":"b-restored"}"#)
+        .bind("duplicate normalized install path")
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO environment_duplicate_mod_metadata_quarantine \
+             (environment_id, keeper_environment_id, kind, file_name, data) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("b-restored")
+        .bind("a-keeper")
+        .bind("mods")
+        .bind("Restored.dll")
+        .bind("{}")
+        .execute(&pool)
+        .await?;
 
+        reconcile_environment_path_identities_for_platform(&pool, false).await?;
+
+        let active_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM environments ORDER BY id")
+            .fetch_all(&pool)
+            .await?;
+        assert_eq!(active_ids, vec!["a-keeper", "b-restored"]);
+        let restored_normalized: String =
+            sqlx::query_scalar("SELECT normalized_output_dir FROM environments WHERE id = ?")
+                .bind("b-restored")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(restored_normalized, "/games/schedule");
+        let restored_metadata: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mod_metadata WHERE environment_id = ?")
+                .bind("b-restored")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(restored_metadata, 1);
         Ok(())
     }
 

@@ -160,7 +160,7 @@ impl ArchiveBudget {
     }
 
     #[cfg(test)]
-    fn with_test_limits(
+    pub(crate) fn with_test_limits(
         max_entries: usize,
         max_entry_bytes: u64,
         max_expanded_bytes: u64,

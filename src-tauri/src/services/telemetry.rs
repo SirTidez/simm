@@ -350,13 +350,18 @@ impl TelemetryService {
         &self,
         session_id: &str,
         reason: crate::types::TelemetrySessionEndReason,
-    ) -> Result<()> {
-        let data =
+    ) -> Result<bool> {
+        let Some(data) =
             sqlx::query_scalar::<_, String>("SELECT data FROM telemetry_sessions WHERE id = ?")
                 .bind(session_id)
                 .fetch_optional(self.pool.as_ref())
                 .await?
-                .ok_or_else(|| anyhow!("Telemetry session not found"))?;
+        else {
+            // Environment deletion cascades its durable telemetry rows. Treat
+            // that state as already ended so the in-memory monitor can still
+            // discard its session and filesystem watcher.
+            return Ok(false);
+        };
         let mut session: LiveTelemetrySession = serde_json::from_str(&data)?;
         if session.ended_at.is_none() {
             session.ended_at = Some(Utc::now().to_rfc3339());
@@ -369,7 +374,7 @@ impl TelemetryService {
                 .execute(self.pool.as_ref())
                 .await?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// A process that outlives SIMM cannot safely be treated as a continuation
@@ -1380,6 +1385,26 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn ending_a_cascaded_session_is_idempotent() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _guard = EnvVarGuard::set(
+            "SIMMRUST_DATA_DIR",
+            temp.path().join("simmrust").to_string_lossy().as_ref(),
+        );
+        let pool = initialize_pool().await?;
+        let ended = TelemetryService::new(pool)
+            .end_live_session(
+                "session-removed-with-environment",
+                crate::types::TelemetrySessionEndReason::EnvironmentRemoved,
+            )
+            .await?;
+
+        assert!(!ended);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn disabling_collection_also_disables_upload() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let _guard = EnvVarGuard::set(
@@ -1491,9 +1516,18 @@ mod tests {
             mods: Vec::new(),
             monitoring: true,
         };
+        #[cfg(windows)]
+        let output_dir = "C:\\Games\\Schedule I";
+        #[cfg(windows)]
+        let running_dir = "c:\\games\\schedule i";
+        #[cfg(not(windows))]
+        let output_dir = "/games/Schedule I";
+        #[cfg(not(windows))]
+        let running_dir = "/games/Schedule I";
+
         sqlx::query("INSERT INTO environments (id, output_dir, data) VALUES (?, ?, ?)")
             .bind(&session.environment_id)
-            .bind("C:\\Games\\Schedule I")
+            .bind(output_dir)
             .bind("{}")
             .execute(pool.as_ref())
             .await?;
@@ -1508,7 +1542,7 @@ mod tests {
         .await?;
 
         let ended = service
-            .reconcile_unfinished_sessions(&HashSet::from(["c:\\games\\schedule i".to_string()]))
+            .reconcile_unfinished_sessions(&HashSet::from([running_dir.to_string()]))
             .await?;
         assert_eq!(ended, vec![session.session_id.clone()]);
         let persisted: LiveTelemetrySession = serde_json::from_str(
@@ -1820,7 +1854,15 @@ fn error_identity(sanitized: &str) -> (String, Option<String>) {
 }
 
 fn normalize_telemetry_path(path: &str) -> String {
-    path.trim_end_matches(['\\', '/'])
-        .replace('/', "\\")
-        .to_ascii_lowercase()
+    normalize_telemetry_path_for_platform(path, cfg!(windows))
+}
+
+fn normalize_telemetry_path_for_platform(path: &str, windows: bool) -> String {
+    if windows {
+        path.trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    } else {
+        path.trim_end_matches('/').to_string()
+    }
 }

@@ -67,10 +67,6 @@ impl TelemetryUploadService {
         if !preferences.collection_enabled || !preferences.upload_enabled {
             return Ok(None);
         }
-        if self.session_is_already_queued(session_id).await? {
-            return Ok(None);
-        }
-
         let export = TelemetryService::new(self.pool.clone())
             .export_shareable_live_session(session_id)
             .await?;
@@ -79,7 +75,7 @@ impl TelemetryUploadService {
             return Ok(None);
         }
 
-        self.queue_reviewed_upload(&preview.payload).await.map(Some)
+        self.queue_reviewed_upload_internal(&preview.payload).await
     }
 
     async fn queue_unqueued_finished_sessions(&self) -> Result<()> {
@@ -230,6 +226,15 @@ impl TelemetryUploadService {
         &self,
         preview_payload: &str,
     ) -> Result<TelemetryUploadReceipt> {
+        self.queue_reviewed_upload_internal(preview_payload)
+            .await?
+            .ok_or_else(|| anyhow!("One or more telemetry sessions are already queued"))
+    }
+
+    async fn queue_reviewed_upload_internal(
+        &self,
+        preview_payload: &str,
+    ) -> Result<Option<TelemetryUploadReceipt>> {
         let raw_payload = serde_json::from_str::<serde_json::Value>(preview_payload)
             .context("The reviewed telemetry payload is invalid")?;
         if has_unsafe_upload_value(&raw_payload) {
@@ -261,6 +266,17 @@ impl TelemetryUploadService {
             ));
         }
 
+        let session_ids = envelope
+            .sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect::<Vec<_>>();
+        for session_id in &session_ids {
+            if self.session_is_already_queued(session_id).await? {
+                return Ok(None);
+            }
+        }
+
         let upload = UploadRecord {
             id: format!("telemetry-upload-{}", Uuid::new_v4().simple()),
             upload_id: envelope.upload_id,
@@ -271,8 +287,10 @@ impl TelemetryUploadService {
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         };
-        self.insert_upload(&upload).await?;
-        upload.into_receipt()
+        if !self.insert_upload(&upload, &session_ids).await? {
+            return Ok(None);
+        }
+        upload.into_receipt().map(Some)
     }
 
     /// A renderer-supplied review payload is never sufficient proof that a
@@ -359,7 +377,12 @@ impl TelemetryUploadService {
             .collect()
     }
 
-    async fn insert_upload(&self, upload: &UploadRecord) -> Result<()> {
+    async fn insert_upload(&self, upload: &UploadRecord, session_ids: &[String]) -> Result<bool> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("Failed to begin telemetry upload queue transaction")?;
         sqlx::query(
             "INSERT INTO telemetry_upload_queue \
              (id, upload_id, payload, state, attempts, last_error_code, created_at, updated_at) \
@@ -373,10 +396,29 @@ impl TelemetryUploadService {
         .bind(&upload.last_error_code)
         .bind(&upload.created_at)
         .bind(&upload.updated_at)
-        .execute(self.pool.as_ref())
+        .execute(&mut *transaction)
         .await
         .context("Failed to queue telemetry upload")?;
-        Ok(())
+
+        for session_id in session_ids {
+            let claimed = sqlx::query(
+                "INSERT OR IGNORE INTO telemetry_upload_sessions (session_id, queue_id) VALUES (?, ?)",
+            )
+            .bind(session_id)
+            .bind(&upload.id)
+            .execute(&mut *transaction)
+            .await
+            .context("Failed to claim telemetry session for upload")?;
+            if claimed.rows_affected() != 1 {
+                transaction.rollback().await?;
+                return Ok(false);
+            }
+        }
+        transaction
+            .commit()
+            .await
+            .context("Failed to commit telemetry upload queue transaction")?;
+        Ok(true)
     }
 
     async fn send_upload(&self, id: &str) -> Result<TelemetryUploadReceipt> {

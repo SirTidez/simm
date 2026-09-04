@@ -295,7 +295,7 @@ impl GameSessionMonitor {
         reason: TelemetrySessionEndReason,
     ) -> Result<()> {
         if let Some(active_session) = active.get(environment_id) {
-            TelemetryService::new(self.pool.clone())
+            let durable_session_existed = TelemetryService::new(self.pool.clone())
                 .end_live_session(&active_session.session.session_id, reason)
                 .await?;
             // Keep the in-memory session and watcher intact until the durable
@@ -304,18 +304,20 @@ impl GameSessionMonitor {
             let active_session = active
                 .remove(environment_id)
                 .expect("active telemetry session must still exist after durable end");
-            match TelemetryUploadService::new(self.pool.clone())
-                .queue_finished_session(&active_session.session.session_id)
-                .await
-            {
-                Ok(Some(receipt)) => {
-                    let _ = self.app.emit("live_telemetry_upload", &receipt);
+            if durable_session_existed {
+                match TelemetryUploadService::new(self.pool.clone())
+                    .queue_finished_session(&active_session.session.session_id)
+                    .await
+                {
+                    Ok(Some(receipt)) => {
+                        let _ = self.app.emit("live_telemetry_upload", &receipt);
+                    }
+                    Ok(None) => {}
+                    Err(error) => log::warn!(
+                        "Failed to automatically upload finished telemetry session: {}",
+                        error
+                    ),
                 }
-                Ok(None) => {}
-                Err(error) => log::warn!(
-                    "Failed to automatically upload finished telemetry session: {}",
-                    error
-                ),
             }
             watchers.remove(environment_id);
             self.emit_status(environment_id, false, None);
@@ -429,10 +431,18 @@ fn discover_schedule_process_paths() -> Result<Vec<PathBuf>> {
 }
 
 fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .trim_end_matches(['\\', '/'])
-        .replace('/', "\\")
-        .to_ascii_lowercase()
+    let path = path.to_string_lossy();
+    normalize_path_for_platform(&path, cfg!(windows))
+}
+
+fn normalize_path_for_platform(path: &str, windows: bool) -> String {
+    if windows {
+        path.trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    } else {
+        path.trim_end_matches('/').to_string()
+    }
 }
 
 #[cfg(test)]
@@ -440,10 +450,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_environment_paths_for_matching() {
+    fn normalizes_windows_environment_paths_for_matching() {
         assert_eq!(
-            normalize_path(Path::new("C:/Games/Schedule I/")),
-            normalize_path(Path::new("c:\\games\\schedule i"))
+            normalize_path_for_platform("C:/Games/Schedule I/", true),
+            normalize_path_for_platform("c:\\games\\schedule i", true)
+        );
+    }
+
+    #[test]
+    fn preserves_posix_case_sensitive_environment_paths_for_matching() {
+        assert_ne!(
+            normalize_path_for_platform("/games/Schedule I/", false),
+            normalize_path_for_platform("/games/schedule i", false)
+        );
+        assert_eq!(
+            normalize_path_for_platform("/games/Schedule I/", false),
+            "/games/Schedule I"
         );
     }
 }

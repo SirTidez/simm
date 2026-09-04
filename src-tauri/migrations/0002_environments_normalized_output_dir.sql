@@ -1,7 +1,10 @@
 ALTER TABLE environments ADD COLUMN normalized_output_dir TEXT;
 
 UPDATE environments
-SET normalized_output_dir = LOWER(RTRIM(REPLACE(output_dir, '/', CHAR(92)), CHAR(92)))
+-- Keep the migration itself platform-neutral. Startup reconciliation applies
+-- Windows case/separator folding only in Windows builds; POSIX builds retain
+-- case-sensitive path identity.
+SET normalized_output_dir = RTRIM(output_dir, '/')
 WHERE output_dir IS NOT NULL;
 
 -- Preserve every displaced row and its metadata before merging duplicate

@@ -589,14 +589,12 @@ impl EnvironmentService {
     }
 
     fn normalize_path(path: &str) -> String {
-        let trimmed = path.trim_end_matches(['\\', '/']);
-        #[cfg(windows)]
-        {
-            trimmed.replace('/', "\\").to_ascii_lowercase()
-        }
-        #[cfg(not(windows))]
-        {
-            trimmed.to_string()
+        if cfg!(windows) {
+            path.trim_end_matches(['\\', '/'])
+                .replace('/', "\\")
+                .to_ascii_lowercase()
+        } else {
+            path.trim_end_matches('/').to_string()
         }
     }
 
