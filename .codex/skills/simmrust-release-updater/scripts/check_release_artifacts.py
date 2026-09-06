@@ -172,13 +172,13 @@ def check_workflow(repo: Path, workflow: Path) -> list[str]:
     ) < 0 or not (
         draft_index
         < manifest_index
-        < commit_index
-        < remote_verify_index
         < final_verify_index
         < publish_index
+        < commit_index
+        < remote_verify_index
     ):
         issues.append(
-            f"{workflow} does not keep the release draft until its updater manifest and final release assets are validated."
+            f"{workflow} does not validate and publish the release before exposing its updater feed."
         )
     return issues
 

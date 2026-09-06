@@ -801,12 +801,12 @@ impl ModProfilesService {
                 item.status == ModProfileImportStatus::AlreadyInstalled
                     || item.status == ModProfileImportStatus::ReadyToInstall
             })
-            .map(|item| (profile_item_identity(&item.item), item.item.enabled))
+            .map(|item| (planned_profile_item_identity(item), item.item.enabled))
             .collect();
 
         let mut errors = Vec::new();
         for item in &plan.items {
-            if desired.contains_key(&profile_item_identity(&item.item)) {
+            if desired.contains_key(&planned_profile_item_identity(item)) {
                 if let Err(error) = toggle_profile_item(
                     self.pool.clone(),
                     environment,
@@ -1352,6 +1352,14 @@ fn profile_item_identity(item: &ModProfileItem) -> String {
         .trim()
         .to_ascii_lowercase();
     format!("{:?}:{runtime}:{storage}:{path}", item.item_type)
+}
+
+fn planned_profile_item_identity(item: &ModProfileImportPlanItem) -> String {
+    let mut resolved_item = item.item.clone();
+    if let Some(storage_id) = item.resolved_storage_id.as_ref() {
+        resolved_item.storage_id = Some(storage_id.clone());
+    }
+    profile_item_identity(&resolved_item)
 }
 
 fn profile_item_error_label(item: &ModProfileItem) -> String {
@@ -2095,6 +2103,29 @@ mod tests {
         assert_eq!(
             normalize_managed_relative_identity("Mono\\Shared.dll.disabled"),
             "mono/shared.dll"
+        );
+    }
+
+    #[test]
+    fn planned_profile_identity_uses_the_resolved_local_storage_id() {
+        let mut imported = profile_item();
+        imported.storage_id = Some("shared-profile-storage".to_string());
+        let plan_item = ModProfileImportPlanItem {
+            item: imported.clone(),
+            status: ModProfileImportStatus::AlreadyInstalled,
+            resolved_storage_id: Some("local-library-storage".to_string()),
+            message: "fixture".to_string(),
+        };
+        let mut installed = imported;
+        installed.storage_id = Some("local-library-storage".to_string());
+
+        assert_ne!(
+            profile_item_identity(&plan_item.item),
+            profile_item_identity(&installed)
+        );
+        assert_eq!(
+            planned_profile_item_identity(&plan_item),
+            profile_item_identity(&installed)
         );
     }
 

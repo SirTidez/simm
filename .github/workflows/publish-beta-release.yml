@@ -478,40 +478,6 @@ jobs:
           $tag = '${{ needs.build-windows.outputs.tag }}'
           gh release upload $tag "updater/beta/latest-beta.json#latest-beta.json" --clobber
 
-      - name: Commit beta updater manifest
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add updater/beta/latest-beta.json
-          if (git diff --cached --quiet) {
-            Write-Host 'No manifest changes to commit.'
-            exit 0
-          }
-
-          git commit -m "chore(release): update beta updater manifest for ${{ needs.build-windows.outputs.version }}"
-          $branch = '${{ github.event.repository.default_branch }}'
-          git fetch origin $branch
-          git rebase "origin/$branch"
-          git push origin HEAD:$branch
-
-      - name: Verify committed beta updater feed
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: |
-          $branch = '${{ github.event.repository.default_branch }}'
-          $version = '${{ needs.build-windows.outputs.version }}'
-          $encoded = gh api "repos/$env:GITHUB_REPOSITORY/contents/updater/beta/latest-beta.json?ref=$branch" --jq .content
-          if ($LASTEXITCODE -ne 0 -or -not $encoded) {
-            throw 'The committed Beta updater feed is not readable from the default branch.'
-          }
-          $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($encoded -replace '\s', '')))
-          $manifest = $json | ConvertFrom-Json
-          if ($manifest.version -cne $version -or -not $manifest.platforms.'windows-x86_64' -or -not $manifest.platforms.'linux-x86_64') {
-            throw "The default-branch Beta updater feed is stale or incomplete for '$version'."
-          }
-
       - name: Verify final beta draft assets and publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -567,6 +533,40 @@ jobs:
 
           $release = gh release view $tag --json isDraft | ConvertFrom-Json
           if (-not $release.isDraft) {
-            throw "Release '$tag' became public before the updater manifest was committed."
+            throw "Release '$tag' became public before final publication."
           }
           gh release edit $tag --draft=false --prerelease
+
+      - name: Commit beta updater manifest
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add updater/beta/latest-beta.json
+          if (git diff --cached --quiet) {
+            Write-Host 'No manifest changes to commit.'
+            exit 0
+          }
+
+          git commit -m "chore(release): update beta updater manifest for ${{ needs.build-windows.outputs.version }}"
+          $branch = '${{ github.event.repository.default_branch }}'
+          git fetch origin $branch
+          git rebase "origin/$branch"
+          git push origin HEAD:$branch
+
+      - name: Verify committed beta updater feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $branch = '${{ github.event.repository.default_branch }}'
+          $version = '${{ needs.build-windows.outputs.version }}'
+          $encoded = gh api "repos/$env:GITHUB_REPOSITORY/contents/updater/beta/latest-beta.json?ref=$branch" --jq .content
+          if ($LASTEXITCODE -ne 0 -or -not $encoded) {
+            throw 'The committed Beta updater feed is not readable from the default branch.'
+          }
+          $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($encoded -replace '\s', '')))
+          $manifest = $json | ConvertFrom-Json
+          if ($manifest.version -cne $version -or -not $manifest.platforms.'windows-x86_64' -or -not $manifest.platforms.'linux-x86_64') {
+            throw "The default-branch Beta updater feed is stale or incomplete for '$version'."
+          }
